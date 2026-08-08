@@ -127,3 +127,23 @@ At Seal 2:
 - No live model API request was performed.
 - The current Codex login state and `~/.codex` were not inspected or changed.
 - M0-S1 remained `READY_NOT_AUTHORIZED`.
+
+## Seal 3
+
+- Seal ID: `documentation-baseline-published-20260809`
+- Date: `2026-08-09`
+- Architecture status: `FROZEN ADDITIVE BASELINE` (`1.1.0`)
+- Implementation status: `NOT_STARTED`
+- Root Git status: `INITIALIZED`
+- Baseline commit: `55ff3be` (`docs(governance): publish design baseline`)
+- GitHub repository: `F0und-icu/cyber-agent` private; baseline pushed to `main`
+- Upstream Codex commit: `3aae5d885bac39c1262491aa3fd100dfd8b3919f`
+- No Cargo package, Rust source, Workflow, live Provider request or research data was added.
+
+### Verification Boundary
+
+At Seal 3:
+
+- Staged and published files were limited to governance, architecture, ADR, development-plan and reference-design documents plus the root `.gitignore`.
+- `codex/`, `deepseek`, `.cyber-agent/`, build output, logs, credentials and target data were excluded from Git.
+- M0-S1 remained `READY_NOT_AUTHORIZED`.

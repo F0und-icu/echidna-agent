@@ -22,8 +22,8 @@
 
 - 阶段：Architecture v1.1 Sealed / Development Governance Ready
 - 未创建代码骨架。
-- 未初始化本地 Git。
-- 未提交、未推送、未创建 Workflow。
+- 已初始化本地 Git 并发布治理/架构文档基线。
+- 未创建 GitHub Workflow，未开始 M0-S1 实现。
 
 ## 1. 产品定义
 
@@ -1841,7 +1841,7 @@ M1 总完成标准：M1a、M1b、M1c 分别有可运行集成测试，任一后�
 - [x] CLI 优先，Web 可选。
 - [x] 不实现多 Agent、团队、云 Server 和插件市场。
 - [x] 不上报日志、telemetry 和 feedback。
-- [x] 当前不创建代码、不提交、不推送。
+- [x] 当前不创建代码、不实现 M0-S1；先完成文档基线发布。
 
 ## 24. 待实现时确定
 

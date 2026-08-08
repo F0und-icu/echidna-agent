@@ -72,9 +72,9 @@ Codex Luna xhigh 或其他高推理 Codex 执行开发任务时，必须按顺�
 当前仅完成设计和开发治理文档：
 
 - 未创建 Rust package。
-- 未初始化本地 Git。
-- 未提交或推送文件。
+- 已初始化本地 Git 并发布文档基线到私有 `main`。
 - 未创建 GitHub Workflow。
+- 未开始 M0-S1 实现。
 - `codex/` 仍是只读参考。
 
 实现入口以 `docs/development/STATUS.md` 为准。

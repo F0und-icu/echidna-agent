@@ -8,8 +8,9 @@
 - Current milestone: `M0`
 - Current slice: `M0-S1`
 - Slice state: `READY_NOT_AUTHORIZED`
-- Local Git initialized: `no`
-- Remote repository: `F0und-icu/cyber-agent` private and intentionally empty
+- Local Git initialized: `yes` (`main`)
+- Remote repository: `F0und-icu/cyber-agent` private; documentation baseline published
+- Documentation baseline commit: `55ff3be`
 - Upstream Codex baseline: `3aae5d885bac39c1262491aa3fd100dfd8b3919f`
 
 ## Current Authority
@@ -32,14 +33,15 @@
 - Provider credential isolation and Mock/Live/CI test-channel design.
 - Architecture v1.1 capability-driven Primary + optional Vision Provider composition.
 - Parameterized Luna single-Slice implementation prompt and remote/bootstrap authorization protocol.
+- Initial governance and architecture documentation baseline published to the private remote.
 
 ## Not Started
 
 - Cargo package.
 - Rust source code.
-- Local Git initialization.
 - GitHub Workflow.
-- Any commit, push, PR, tag or release.
+- Cargo package and Rust source code.
+- M0-S1 implementation.
 
 ## Next Authorized Action
 
@@ -63,9 +65,10 @@ Expected M0-S1 outputs:
 ## Last Verification
 
 - `task.md` architecture-content seal SHA-256: `31b1cca7205ccce86cc30be263648966c008515b3cb26aee8645cb06bb28a2a5`
-- Current `task.md` SHA-256: `b34a213928ed978732cf064f397a0c89b42e3a9c59ef3dbe2c644dea27001f8d`
+- Current `task.md` SHA-256: `dc85b6fe5cd268a7232392c0c042f483e5136042c7620e769190a7af702ae5c2`
 - `codex/` worktree: clean at `3aae5d885bac39c1262491aa3fd100dfd8b3919f`
-- Root Git repository: absent
+- Root Git repository: initialized on `main`; documentation baseline at `55ff3be`
+- Remote: verified as `https://github.com/F0und-icu/cyber-agent`
 - Rust/Cargo project: absent
 
 ## Update Protocol
