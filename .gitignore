@@ -1,0 +1,12 @@
+/codex/
+/target/
+**/.cyber-agent/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+/deepseek
+.DS_Store
+.idea/
+.vscode/
