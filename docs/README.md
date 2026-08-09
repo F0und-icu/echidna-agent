@@ -69,12 +69,13 @@ Codex Luna xhigh 或其他高推理 Codex 执行开发任务时，必须按顺�
 
 ## 6. 当前状态
 
-当前已完成设计基线和第一个实现 Slice：
+当前已完成设计基线和 M0 的两个实现 Slice：
 
 - M0-S1 单 Rust package、默认 CLI 二进制和离线 smoke tests 已完成。
+- M0-S2 provider-neutral EventEnvelope、identity Upcaster、纯 Reducer 和最小 Event Ports 已完成。
 - 已初始化本地 Git 并发布文档基线到私有 `main`。
 - GitHub Actions 使用固定 Rust `1.93.1` 运行 fmt、clippy、test 和 build Gate。
-- M0-S1 通过 PR `#1` 交付；M0-S2 为 `READY_NOT_AUTHORIZED`。
+- M0-S1/M0-S2 分别通过 PR `#1`/`#2` 交付；M1a-S1 为 `READY_NOT_AUTHORIZED`。
 - `codex/` 仍是只读参考。
 
 实现入口以 `docs/development/STATUS.md` 为准。

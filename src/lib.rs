@@ -5,6 +5,9 @@ use clap::{CommandFactory, Parser, Subcommand};
 use serde::Serialize;
 use thiserror::Error;
 
+pub mod domain;
+pub mod ports;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "cyber-agent",

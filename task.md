@@ -20,10 +20,10 @@
 
 当前状态：
 
-- 阶段：Implementation / M0
-- M0-S1 单 Package CLI 骨架已经完成，并由固定 Rust `1.93.1` 的 GitHub Actions Gate 验证。
+- 阶段：Implementation / M1a Ready
+- M0-S1 CLI 骨架和 M0-S2 Domain/Event/Port 最小契约已经完成，并由固定 Rust `1.93.1` 的 GitHub Actions Gate 验证。
 - 已初始化本地 Git 并发布治理/架构文档基线。
-- M0-S1 交付 PR：`#1`；M0-S2 尚未开始且未获授权。
+- M0-S1/M0-S2 分别通过 PR `#1`/`#2` 交付；M1a-S1 尚未开始且未获授权。
 
 ## 1. 产品定义
 
@@ -1607,10 +1607,10 @@ MVP 不包含：
 
 - [x] 创建 `Cargo.toml`、`src/lib.rs` 和 `src/main.rs`。
 - [x] 创建 `init`、`chat` 和 `doctor` 命令空壳。
-- [ ] 定义最小配置和 Project 发现。
-- [ ] 建立 `domain ← ports ← app` 和 `domain/ports ← adapters` 的内部模块边界。
-- [ ] 定义带 Schema Family/Version 的 EventEnvelope、Upcaster 契约和纯 Reducer 最小类型。
-- [ ] 本地 `cargo fmt`、`cargo clippy` 和 `cargo test` 通过。
+- [ ] 定义最小配置和 Project 发现（按可执行计划在 M2-S1 落地，不阻塞无配置的 M1a Mock 路径）。
+- [x] 建立 `domain ← ports ← app` 和 `domain/ports ← adapters` 的内部模块边界。
+- [x] 定义带 Schema Family/Version 的 EventEnvelope、Upcaster 契约和纯 Reducer 最小类型。
+- [x] 固定工具链 GitHub Actions 的 `cargo fmt`、`cargo clippy`、`cargo test` 和 `cargo build --locked` 通过。
 
 完成标准：单一二进制文件可运行，没有 workspace 和额外 crate。
 
@@ -1863,13 +1863,13 @@ M1 总完成标准：M1a、M1b、M1c 分别有可运行集成测试，任一后�
 
 ## 25. 下一步
 
-下一具体动作是 M0-S2：
+下一具体动作是 M1a-S1：
 
-1. 读取 `AGENTS.md`、`docs/development/STATUS.md` 和开发计划中的 `M0-S2`。
-2. 获得当前 Slice 的明确实现授权后，将 M0-S2 标记为 `IN_PROGRESS`。
-3. 建立最小 Domain/Event/Context/Tool 类型与 Ports 边界。
-4. 实现当前 Event 版本的 identity Upcaster 和空 State 纯 Reducer。
-5. 验证 Domain 无 I/O、依赖方向正确，并运行全部既有 Gate。
-6. 更新 STATUS 后停止，不自动进入 M1a-S1。
+1. 读取 `AGENTS.md`、`docs/development/STATUS.md` 和开发计划中的 `M1a-S1`。
+2. 获得当前 Slice 的明确实现授权后，将 M1a-S1 标记为 `IN_PROGRESS`。
+3. 定义 provider-neutral `ModelInputIR`、`ContentItem`、`ModelEvent` 和显式版本化 `ModelCapabilities`。
+4. 定义 `ModelProvider` Port 和无网络 `MockModelProvider`。
+5. 实现最小 Streaming 消费/取消 App Service，并验证事件顺序和能力错误。
+6. 更新 STATUS 后停止，不自动进入 M1a-S2。
 
-M0-S2 当前为 `READY_NOT_AUTHORIZED`；M0-S1 的完成不自动授权下一 Slice。
+M1a-S1 当前为 `READY_NOT_AUTHORIZED`；M0-S2 的完成不自动授权下一 Slice。

@@ -5,8 +5,8 @@
 - Architecture version: `1.1.0`
 - Phase: `IMPLEMENTATION`
 - Implementation: `STARTED`
-- Current milestone: `M0`
-- Current slice: `M0-S2`
+- Current milestone: `M1a`
+- Current slice: `M1a-S1`
 - Slice state: `READY_NOT_AUTHORIZED`
 - Local Git initialized: `yes` (`main`)
 - Remote repository: `F0und-icu/cyber-agent` private; documentation baseline published
@@ -15,16 +15,16 @@
 
 ## Last Completed Slice
 
-- Slice: `M0-S1`
-- Branch: `agent/m0-s1-bootstrap`
-- Base commit: `c674e152816bb12f116ba916f8ed87ca504cda87`
-- Scope: single Cargo package, one default CLI binary, `init`/`chat`/`doctor` shells, and smoke tests.
-- Forbidden in this Slice: M0-S2 Domain/Event/Port modules, Provider adapters, live API calls, and changes under `codex/`.
-- Result: `COMPLETE`; M0-S2 was not started.
-- Implementation commit: `5cb1093` (`feat(cli): add M0-S1 bootstrap`)
-- CI commit: `e73497f` (`ci(gate): verify M0-S1 on pinned Rust`)
-- GitHub Actions: run `31303599346` passed on `macos-15-arm64` with Rust `1.93.1`.
-- Pull request: `#1` (`https://github.com/F0und-icu/cyber-agent/pull/1`)
+- Slice: `M0-S2`
+- Branch: `agent/m0-s2-domain-contract`
+- Base commit: `d03f28ba1e49f20aca4458246b4674f9e5582763`
+- Scope: provider-neutral Domain boundaries, typed/versioned EventEnvelope, current-schema identity Upcaster, metadata-only pure Reducer, borrowed Event sink and stream-scoped Event source Ports.
+- Forbidden in this Slice: Provider adapters, AgentLoop, live API calls, M1a capability/streaming implementation, new services or fact stores, Codex ports, and changes under `codex/`.
+- Result: `COMPLETE`; M1a-S1 was not started.
+- Implementation commit: `3cc8c74` (`feat(domain): add M0-S2 event contracts`)
+- Final verified head: `700d734`
+- GitHub Actions: run `31306388050` passed on `macos-15-arm64` with Rust `1.93.1`.
+- Pull request: `#2` (`https://github.com/F0und-icu/cyber-agent/pull/2`)
 
 ## Current Authority
 
@@ -48,26 +48,26 @@
 - Parameterized Luna single-Slice implementation prompt and remote/bootstrap authorization protocol.
 - Initial governance and architecture documentation baseline published to the private remote.
 - M0-S1 single-package CLI skeleton, offline smoke tests and pinned-toolchain GitHub Actions Gate.
+- M0-S2 provider-neutral Event contract, identity Upcaster, deterministic deduplicating Reducer, minimum Event Ports and dependency-boundary tests.
 
 ## Not Started
 
-- M0-S2 and later implementation.
+- M1a-S1 and later implementation.
 
 ## Next Authorized Action
 
-When the user explicitly requests implementation, begin only `M0-S2` from `IMPLEMENTATION_PLAN.md`.
+When the user explicitly requests implementation, begin only `M1a-S1` from `IMPLEMENTATION_PLAN.md`.
 
-Expected M0-S2 outputs:
+Expected M1a-S1 outputs:
 
-- `domain/events.rs`
-- `domain/model.rs`
-- `domain/tools.rs`
-- `domain/context.rs`
-- `ports/` minimum traits
+- provider-neutral `ModelInputIR`, `ContentItem`, `ModelEvent`, and explicit versioned `ModelCapabilities`
+- `ModelProvider` Port
+- `MockModelProvider`
+- minimum Streaming consumption and cancellation App Service
 
 ## Blockers
 
-- None for the M0-S1 implementation scope.
+- None for the completed M0-S2 implementation scope.
 - M0-S1 Rust version and initial dependency choices were recorded in `Cargo.toml` and `rust-toolchain.toml`.
 - The earlier mixed local-toolchain caveat is superseded for Slice acceptance by the successful GitHub Actions Gate on exact Rust `1.93.1`.
 - Live Primary/Vision tests will later require only the explicitly selected `CYBER_AGENT_*_API_KEY` references; missing credentials do not block Mock/Fixture/Replay development and never use current Codex login state.
@@ -75,13 +75,14 @@ Expected M0-S2 outputs:
 ## Last Verification
 
 - `task.md` architecture-content seal SHA-256: `31b1cca7205ccce86cc30be263648966c008515b3cb26aee8645cb06bb28a2a5`
-- Current `task.md` SHA-256: `cd81aa782a1a24415b0d87982687785fe0b2f926167aafadc148d7effe6237ee`
+- Current `task.md` SHA-256: `a00f181d0558d1f53e7f29c25f4b39af2a63c4227d89491d04994539b60ad389`
 - `codex/` worktree: clean at `3aae5d885bac39c1262491aa3fd100dfd8b3919f`
-- GitHub Actions run `31303599346`: `cargo fmt --all -- --check`, `cargo clippy --locked --all-targets --all-features -- -D warnings`, `cargo test --locked --all-targets --all-features`, and `cargo build --locked` all PASS on `macos-15-arm64` with Rust `1.93.1`.
-- CLI smoke within the remote test Gate: `--help` and no-configuration `doctor` PASS.
-- Root Git repository: branch `agent/m0-s1-bootstrap`; implementation commit `5cb1093`; CI commit `e73497f`; documentation baseline at `55ff3be`.
+- GitHub Actions PR run `31306388050`: `cargo fmt --all -- --check`, `cargo clippy --locked --all-targets --all-features -- -D warnings`, `cargo test --locked --all-targets --all-features`, and `cargo build --locked` all PASS on `macos-15-arm64` with Rust `1.93.1`.
+- M0-S2 tests: Event JSON shape, identity/unknown-schema Upcast, deterministic reduction, cross-stream duplicate-ID suppression, non-increasing sequence rejection, in-memory Port contract, Stream isolation and dependency direction PASS.
+- M0-S1 CLI smoke regressions remain PASS within the remote test Gate.
+- Root Git repository: `main` at M0-S1 merge commit `d03f28b`; current M0-S2 branch head `700d734` before status handoff.
 - Remote: verified as `https://github.com/F0und-icu/cyber-agent`
-- Rust/Cargo project: M0-S1 skeleton present; no Provider or Domain/Event implementation.
+- Rust/Cargo project: M0-S2 Domain/Event/Port contract present; no Provider Adapter, ModelProvider, AgentLoop or live Provider path.
 
 ## Update Protocol
 
