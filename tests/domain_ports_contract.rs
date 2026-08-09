@@ -81,9 +81,7 @@ fn ports_support_an_in_memory_event_store_without_an_adapter() {
 #[test]
 fn domain_and_ports_keep_the_required_dependency_direction() {
     let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let source_roots = ["src/domain", "src/ports"];
-    let forbidden_references = [
-        "provider",
+    let common_forbidden_references = [
         "std::fs",
         "std::net",
         "std::process",
@@ -101,14 +99,59 @@ fn domain_and_ports_keep_the_required_dependency_direction() {
         "super::ui",
         "reqwest",
         "openai",
+        "deepseek",
+        "responses",
+        "previous_response_id",
+        "http",
+        "sse::",
+        "sse_",
+        "ssestream",
+        "text/event-stream",
     ];
+    assert_sources_do_not_contain(
+        &repository_root.join("src/domain"),
+        &[&["provider", "wire"], &common_forbidden_references],
+    );
+    assert_sources_do_not_contain(
+        &repository_root.join("src/app"),
+        &[
+            &["crate::adapters", "super::adapters", "wire"],
+            &common_forbidden_references,
+        ],
+    );
+    assert_sources_do_not_contain(
+        &repository_root.join("src/adapters"),
+        &[&[
+            "crate::app",
+            "super::app",
+            "std::fs",
+            "std::net",
+            "std::process",
+            "std::io",
+            "reqwest",
+            "openai",
+            "deepseek",
+            "responses",
+            "http",
+            "sse::",
+            "sse_",
+            "ssestream",
+            "text/event-stream",
+        ]],
+    );
+    assert_sources_do_not_contain(
+        &repository_root.join("src/ports"),
+        &[&common_forbidden_references],
+    );
+}
 
-    for source_root in source_roots {
-        for file in rust_sources_under(&repository_root.join(source_root)) {
-            let source = source_without_comments(&fs::read_to_string(&file).unwrap());
-            let lowercase_source = source.to_ascii_lowercase();
+fn assert_sources_do_not_contain(directory: &Path, forbidden_groups: &[&[&str]]) {
+    for file in rust_sources_under(directory) {
+        let source = source_without_comments(&fs::read_to_string(&file).unwrap());
+        let lowercase_source = source.to_ascii_lowercase();
 
-            for forbidden in forbidden_references {
+        for forbidden_references in forbidden_groups {
+            for &forbidden in *forbidden_references {
                 assert!(
                     !lowercase_source.contains(forbidden),
                     "{} must not depend on {forbidden}",

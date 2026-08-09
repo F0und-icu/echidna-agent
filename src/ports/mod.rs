@@ -6,6 +6,8 @@
 use crate::domain::events::EventEnvelope;
 use crate::domain::events::StreamId;
 
+pub mod model;
+
 /// Reads one stream in strictly increasing sequence order.
 ///
 /// Implementations return only Events whose `stream_id` matches the requested

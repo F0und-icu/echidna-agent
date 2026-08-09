@@ -5,6 +5,8 @@ use clap::{CommandFactory, Parser, Subcommand};
 use serde::Serialize;
 use thiserror::Error;
 
+pub mod adapters;
+pub mod app;
 pub mod domain;
 pub mod ports;
 
