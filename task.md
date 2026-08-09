@@ -20,10 +20,10 @@
 
 当前状态：
 
-- 阶段：Architecture v1.1 Sealed / Development Governance Ready
-- 未创建代码骨架。
+- 阶段：Implementation / M0
+- M0-S1 单 Package CLI 骨架已经完成，并由固定 Rust `1.93.1` 的 GitHub Actions Gate 验证。
 - 已初始化本地 Git 并发布治理/架构文档基线。
-- 未创建 GitHub Workflow，未开始 M0-S1 实现。
+- M0-S1 交付 PR：`#1`；M0-S2 尚未开始且未获授权。
 
 ## 1. 产品定义
 
@@ -1605,8 +1605,8 @@ MVP 不包含：
 
 ### M0：单 package 骨架
 
-- [ ] 创建 `Cargo.toml`、`src/lib.rs` 和 `src/main.rs`。
-- [ ] 创建 `init`、`chat` 和 `doctor` 命令空壳。
+- [x] 创建 `Cargo.toml`、`src/lib.rs` 和 `src/main.rs`。
+- [x] 创建 `init`、`chat` 和 `doctor` 命令空壳。
 - [ ] 定义最小配置和 Project 发现。
 - [ ] 建立 `domain ← ports ← app` 和 `domain/ports ← adapters` 的内部模块边界。
 - [ ] 定义带 Schema Family/Version 的 EventEnvelope、Upcaster 契约和纯 Reducer 最小类型。
@@ -1863,13 +1863,13 @@ M1 总完成标准：M1a、M1b、M1c 分别有可运行集成测试，任一后�
 
 ## 25. 下一步
 
-下一具体动作是 M0：
+下一具体动作是 M0-S2：
 
-1. 读取 `AGENTS.md`、`docs/development/STATUS.md` 和开发计划中的 `M0-S1`。
-2. 用户明确授权后创建单一 Cargo package。
-3. 创建 `src/lib.rs` 和精简 `src/main.rs`。
-4. 实现 `cyber-agent init`、`chat` 和 `doctor` 空壳。
-5. 只引入 CLI、序列化、错误类型和异步运行所必需的依赖。
-6. 本地编译和测试通过，更新 STATUS 后停止，不自动进入 M0-S2。
+1. 读取 `AGENTS.md`、`docs/development/STATUS.md` 和开发计划中的 `M0-S2`。
+2. 获得当前 Slice 的明确实现授权后，将 M0-S2 标记为 `IN_PROGRESS`。
+3. 建立最小 Domain/Event/Context/Tool 类型与 Ports 边界。
+4. 实现当前 Event 版本的 identity Upcaster 和空 State 纯 Reducer。
+5. 验证 Domain 无 I/O、依赖方向正确，并运行全部既有 Gate。
+6. 更新 STATUS 后停止，不自动进入 M1a-S1。
 
-执行 M0-S1 前需要用户明确授权开始创建代码和是否初始化 Git；本文档与治理文档的完成不代表 M0 已经开始。
+M0-S2 当前为 `READY_NOT_AUTHORIZED`；M0-S1 的完成不自动授权下一 Slice。

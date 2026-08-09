@@ -30,7 +30,7 @@ M0-S1 创建 `rust-toolchain.toml`：
 
 ```toml
 [toolchain]
-channel = "<exact-stable-version>"
+channel = "1.93.1"
 profile = "minimal"
 components = ["rustfmt", "clippy"]
 targets = ["aarch64-apple-darwin"]
