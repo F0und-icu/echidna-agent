@@ -1,72 +1,17 @@
 //! Minimal streaming consumption with cancellation that wakes pending polls.
 
 use std::future::poll_fn;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::task::{Poll, Waker};
+use std::task::Poll;
 
 use thiserror::Error;
 
 use crate::domain::model::{ModelEvent, ModelInputIR};
 use crate::ports::model::{ModelProvider, ModelProviderError};
 
-/// Cancels a pending model stream by waking the consumer's registered Waker.
-#[derive(Clone)]
-pub struct ModelStreamCancellation {
-    state: Arc<CancellationState>,
-}
+use super::cancellation::AgentCancellation;
 
-struct CancellationState {
-    cancelled: AtomicBool,
-    waiting_waker: Mutex<Option<Waker>>,
-}
-
-impl ModelStreamCancellation {
-    /// Creates a cancellation signal in the active state.
-    pub fn new() -> Self {
-        Self {
-            state: Arc::new(CancellationState {
-                cancelled: AtomicBool::new(false),
-                waiting_waker: Mutex::new(None),
-            }),
-        }
-    }
-
-    /// Requests cancellation and wakes a consumer blocked on a pending stream.
-    pub fn cancel(&self) {
-        if !self.state.cancelled.swap(true, Ordering::AcqRel) {
-            let waker = self
-                .state
-                .waiting_waker
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .take();
-
-            if let Some(waker) = waker {
-                waker.wake();
-            }
-        }
-    }
-
-    fn is_cancelled(&self) -> bool {
-        self.state.cancelled.load(Ordering::Acquire)
-    }
-
-    fn register(&self, waker: &Waker) {
-        let mut waiting_waker = self
-            .state
-            .waiting_waker
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *waiting_waker = Some(waker.clone());
-    }
-}
-
-impl Default for ModelStreamCancellation {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+/// Backward-compatible name for the shared Agent cancellation authority.
+pub type ModelStreamCancellation = AgentCancellation;
 
 /// The complete or cancelled sequence observed by the streaming service.
 #[derive(Clone, Debug, Eq, PartialEq)]

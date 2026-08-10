@@ -1,0 +1,22 @@
+{
+  "model": "fixture-model",
+  "instructions": "Keep evidence and hypotheses separate.",
+  "input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "Inspect the target manifest."
+        },
+        {
+          "type": "input_text",
+          "text": "Report only reproducible impact."
+        }
+      ]
+    }
+  ],
+  "store": false,
+  "stream": true
+}

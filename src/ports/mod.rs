@@ -7,6 +7,7 @@ use crate::domain::events::EventEnvelope;
 use crate::domain::events::StreamId;
 
 pub mod model;
+pub mod tool;
 
 /// Reads one stream in strictly increasing sequence order.
 ///

@@ -1,0 +1,9 @@
+data: {"type":"response.created","response":{"id":"resp_fixture"}}
+
+data: {"type":"response.output_text.delta","delta":"possible finding"}
+
+data: {"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_fixture","name":"inspect_manifest","arguments":"{\"path\":\"AndroidManifest.xml\"}"}}
+
+data: {"type":"response.completed","response":{"id":"resp_fixture","usage":{"input_tokens":21,"output_tokens":34}}}
+
+: end-of-fixture

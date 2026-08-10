@@ -13,9 +13,10 @@ use cyber_agent::app::model_streaming::{
 };
 use cyber_agent::domain::artifacts::ArtifactId;
 use cyber_agent::domain::model::{
-    CapabilityMappingVersion, ContentItem, ModelCapabilities, ModelCapabilityError, ModelEvent,
-    ModelInputIR, ModelRequestRequirements, ModelToolCallId, ModelUsage,
+    CapabilityMappingVersion, ContentItem, MessageRole, ModelCapabilities, ModelCapabilityError,
+    ModelEvent, ModelInputIR, ModelRequestRequirements, ModelUsage,
 };
+use cyber_agent::domain::tools::{ToolCall, ToolCallId, ToolName};
 use cyber_agent::ports::model::{ModelEventStream, ModelProvider, ModelProviderError};
 
 fn all_capabilities() -> ModelCapabilities {
@@ -35,9 +36,7 @@ fn all_capabilities() -> ModelCapabilities {
 fn text_input(requirements: ModelRequestRequirements) -> ModelInputIR {
     ModelInputIR::current(
         "test instructions",
-        vec![ContentItem::Text {
-            text: "inspect this target".into(),
-        }],
+        vec![ContentItem::user_text("inspect this target")],
         requirements,
     )
 }
@@ -67,12 +66,14 @@ fn mock_fixture_preserves_text_tool_usage_and_completion_order() {
             text: "first finding".into(),
         },
         ModelEvent::ToolCall {
-            call_id: ModelToolCallId::new("tool-call-1"),
-            name: "inspect_manifest".into(),
-            arguments: json!({
-                "path": "AndroidManifest.xml",
-                "include_permissions": true,
-            }),
+            call: ToolCall::new(
+                ToolCallId::new("tool-call-1"),
+                ToolName::new("inspect_manifest"),
+                json!({
+                    "path": "AndroidManifest.xml",
+                    "include_permissions": true,
+                }),
+            ),
         },
         ModelEvent::Usage {
             usage: ModelUsage {
@@ -129,6 +130,7 @@ fn mock_provider_uses_only_the_explicit_versioned_capability_fixture() {
     let image_input = ModelInputIR::current(
         "test instructions",
         vec![ContentItem::ImageArtifact {
+            role: MessageRole::User,
             artifact_id: ArtifactId::new("artifact-1"),
         }],
         ModelRequestRequirements::default(),

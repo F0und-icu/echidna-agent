@@ -23,6 +23,28 @@ pub trait ModelProvider: Send + Sync {
 pub enum ModelProviderError {
     #[error(transparent)]
     Capability(#[from] ModelCapabilityError),
+    #[error("model credential `{credential_ref}` is not configured")]
+    CredentialUnavailable { credential_ref: String },
+    #[error("model credential source `{credential_ref}` failed: {message}")]
+    CredentialSourceFailure {
+        credential_ref: String,
+        message: String,
+    },
+    #[error("model credential `{credential_ref}` is invalid")]
+    CredentialInvalid { credential_ref: String },
+    #[error("model request encoding failed: {message}")]
+    RequestEncodingFailure { message: String },
+    #[error("model transport failed: {message}")]
+    TransportFailure { message: String },
+    #[error("model HTTP request failed with status {status}")]
+    HttpFailure { status: u16 },
+    #[error("model stream protocol failed: {message}")]
+    ProtocolFailure { message: String },
+    #[error("model Provider failed ({code:?}): {message}")]
+    ProviderFailure {
+        code: Option<String>,
+        message: String,
+    },
     #[error("model stream failed: {message}")]
     StreamFailure { message: String },
 }

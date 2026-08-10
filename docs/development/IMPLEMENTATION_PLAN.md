@@ -10,7 +10,7 @@
 
 - 执行器标签：`Codex Luna xhigh`，按用户指定名称记录。
 - 不依赖该标签的未公开能力；所有要求必须能由普通仓库 Agent 按文件、命令和测试完成。
-- 单 Agent 执行，不使用多 Agent 编排换取吞吐。
+- 默认由单 Agent 执行；只有当前用户明确授权开发委派时才能使用子 Agent，并且所有子 Agent 共享同一 Slice/Gate。产品运行时仍保持单 AgentLoop。
 - 默认可以在授权后的开发会话中运行本地命令和修改仓库文件。
 - 开发 Agent 必须服从根目录 `AGENTS.md`。
 
@@ -21,11 +21,12 @@
 1. 阅读 `AGENTS.md` 全文。
 2. 阅读 `docs/development/STATUS.md` 全文。
 3. 阅读本文件中当前 Slice 全文。
-4. 阅读 `task.md` 相关章节、测试红线和维护规则。
-5. 阅读冻结架构对应接口章节。
-6. 检查当前工作树、分支、最近提交和已有测试。
-7. 确认没有修改 `codex/`，没有覆盖用户未提交内容。
-8. 将 STATUS 的当前 Slice 标为 `IN_PROGRESS` 后才开始代码修改。
+4. 阅读 `docs/development/LEAN_CODE_GOVERNANCE.md` 全文。
+5. 阅读 `task.md` 相关章节、测试红线和维护规则。
+6. 阅读冻结架构对应接口章节。
+7. 检查当前工作树、分支、最近提交和已有测试。
+8. 确认没有修改 `codex/`，没有覆盖用户未提交内容。
+9. 将 STATUS 的当前 Slice 标为 `IN_PROGRESS` 后才开始代码修改。
 
 如果 STATUS 与代码事实冲突，以代码和测试为事实，先修正 STATUS，不重复已完成工作。
 
@@ -35,6 +36,7 @@
 
 1. Scope Lock
    - 明确 Slice ID、目标、允许修改的模块和禁止事项。
+   - 声明新语义的唯一所有者、新 `pub` 契约、长期依赖、Codex 复用分类和预期删除项。
    - 不顺手实现下一 Slice。
 
 2. Contract First
@@ -48,10 +50,10 @@
 4. Verification
    - 运行当前 Slice 命令。
    - 运行此前全部 Slice 的回归测试。
-   - 检查禁止依赖和文档漂移。
+   - 运行 Lean Gate，检查就地测试、重复语义、公共 API、依赖、消费者、删除项、禁止依赖和文档漂移。
 
 5. Handoff
-   - 更新 STATUS：完成项、测试结果、剩余风险、下一 Slice。
+   - 更新 STATUS：完成项、测试结果、Lean Review、剩余风险、下一 Slice。
    - 如果授权 Git 提交，按 Git 方案提交；否则保留工作树并报告。
    - 停止，不自动进入下一 Slice。
 
@@ -67,12 +69,22 @@
 - 没有修改 `codex/`。
 - 没有直接依赖禁用 Codex crate。
 - 没有未解释的新长期依赖。
+- 每个语义只有一个所有者，没有复制 Capability、错误映射、Tool Pairing、截断、排序、Fingerprint 或取消逻辑。
+- 新 `pub` 契约有真实跨边界消费者；测试访问不是扩大公共 API 的理由。
+- 没有为未来 Slice、测试访问或绕过失败而创建的抽象、Feature、配置或 TODO 框架。
 - 没有把 Cache/Summary/Replay 结果变成事实源。
 - 新事件、Schema、配置和 Prompt 有消费者与测试。
+- `src/` 不含就地 `#[cfg(test)] mod tests`，永久回归测试保留在顶层 `tests/`。
+- 无消费者代码、重复 Fixture 和无收益优化已删除或明确 Deferred。
+- STATUS 记录本 Slice Lean Review。
 - STATUS 与实际代码状态一致。
 - 如果修改架构契约，已有 ADR 和新架构版本计划。
 
 ## 5. 测试层次
+
+所有永久测试位于顶层 `tests/`。`src/` 只保存生产代码；临时就地测试只能存在于未提交探索过程，Gate 前必须迁移或删除。发现缺陷或不变量时，先转成永久回归测试再删除临时版本。测试共享构造器放在 `tests/support/`，稳定样本放在 `tests/fixtures/`，不得复制生产逻辑或同一 Fixture。
+
+测试布局、迁移和 inline-test 静态检查以 `docs/development/LEAN_CODE_GOVERNANCE.md` 为准。
 
 ### 5.1 Domain Unit
 
@@ -176,6 +188,14 @@ Gate：没有 I/O 进入 Domain。
 ### M1a-S2：OpenAI Responses 全量 Streaming
 
 目标：实现一个最小 OpenAI Responses HTTP Streaming Adapter，只发送 Full Request。
+
+依赖和 Transport 决策遵循 `docs/adr/ADR-0003-minimal-openai-http-sse-stack.md`。
+
+当前治理迁移前置条件：
+
+- 在本 Slice Gate 前，将 `src/lib.rs`、`src/domain/model.rs` 和 `src/domain/events.rs` 中现有就地测试迁移到顶层 `tests/`，保留原行为断言。
+- 测试迁移不得扩大生产公共 API，不得删除已验证不变量，也不得开始 M1a-S3。
+- 运行 `LEAN_CODE_GOVERNANCE.md` 定义的 inline-test 静态检查。
 
 交付：
 
@@ -578,13 +598,13 @@ Gate：差分每项都能回到 Tool Call、Artifact 和 Snapshot。
 
 ```text
 阅读仓库根目录 AGENTS.md、docs/README.md、docs/development/STATUS.md，
-然后阅读 IMPLEMENTATION_PLAN.md 中 <SLICE_ID> 的完整章节以及 task.md 相关架构和测试红线。
+然后阅读 IMPLEMENTATION_PLAN.md 中 <SLICE_ID> 的完整章节、LEAN_CODE_GOVERNANCE.md 以及 task.md 相关架构和测试红线。
 
 只实现 <SLICE_ID>，不要开始下一 Slice，不修改 codex/，不引入被禁止依赖。
 先检查当前工作树和已有实现，避免重复或覆盖用户改动。
 实现最小 Vertical Path，再补失败路径与测试。
-运行该 Slice 要求的 fmt、clippy、test、build --locked 和回归测试。
-完成后更新 STATUS.md，列出改动、测试、剩余风险和下一 Slice，然后停止。
+运行该 Slice 要求的 fmt、clippy、test、build --locked、回归测试和 Lean Gate。
+完成后更新 STATUS.md，列出改动、测试、Lean Review、剩余风险和下一 Slice，然后停止。
 除非本次明确授权，不提交、不推送、不创建 PR 或 Release。
 ```
 

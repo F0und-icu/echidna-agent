@@ -122,6 +122,7 @@ PR Body 必须包含：
 - Schema/配置兼容性。
 - 新依赖与理由。
 - 从 Codex PORT 的来源记录。
+- Lean Review：语义所有者、复用点、新 `pub`/依赖、测试布局、删除/Deferred 项和治理债务。
 - 风险与回滚方法。
 
 合并条件：
@@ -129,6 +130,9 @@ PR Body 必须包含：
 - Slice Gate 全部通过。
 - GitHub Actions 必需 Job 通过。
 - STATUS 已更新。
+- `docs/development/LEAN_CODE_GOVERNANCE.md` 的 Slice Lean Gate 已通过。
+- `src/` 没有就地测试，永久回归测试保留在顶层 `tests/`。
+- 没有无消费者抽象、重复语义实现或未解释的公共 API/依赖增长。
 - 没有未解决的架构冲突。
 - 没有 `codex/`、密钥、目标数据或本地 Artifact 被加入。
 
@@ -296,6 +300,7 @@ Live Smoke 失败只表示 Provider 兼容路径需要诊断，不得通过导�
 - 二进制项目提交 Cargo.lock。
 - 日常构建和 CI 使用 `--locked`。
 - 新依赖必须记录解决的问题、feature、替代方案和编译成本。
+- 同一职责只保留一套 HTTP、SSE、异步、图片、缓存或序列化技术栈。
 - 关闭不需要的 default features。
 - 依赖更新使用独立分支/PR，不与功能混合。
 - Major update 必须运行全部 Trace/Fixture 和迁移测试。

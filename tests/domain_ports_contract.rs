@@ -81,7 +81,7 @@ fn ports_support_an_in_memory_event_store_without_an_adapter() {
 #[test]
 fn domain_and_ports_keep_the_required_dependency_direction() {
     let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let common_forbidden_references = [
+    let domain_io_references = [
         "std::fs",
         "std::net",
         "std::process",
@@ -97,6 +97,8 @@ fn domain_and_ports_keep_the_required_dependency_direction() {
         "super::app",
         "super::adapters",
         "super::ui",
+    ];
+    let provider_wire_references = [
         "reqwest",
         "openai",
         "deepseek",
@@ -110,38 +112,42 @@ fn domain_and_ports_keep_the_required_dependency_direction() {
     ];
     assert_sources_do_not_contain(
         &repository_root.join("src/domain"),
-        &[&["provider", "wire"], &common_forbidden_references],
+        &[
+            &["provider", "wire"],
+            &domain_io_references,
+            &provider_wire_references,
+        ],
     );
     assert_sources_do_not_contain(
         &repository_root.join("src/app"),
         &[
             &["crate::adapters", "super::adapters", "wire"],
-            &common_forbidden_references,
+            &provider_wire_references,
         ],
     );
     assert_sources_do_not_contain(
         &repository_root.join("src/adapters"),
+        &[&["crate::app", "super::app"]],
+    );
+    assert_sources_do_not_contain(
+        &repository_root.join("src/ports"),
         &[&[
-            "crate::app",
-            "super::app",
             "std::fs",
             "std::net",
             "std::process",
+            "std::time",
             "std::io",
+            "tokio::",
             "reqwest",
             "openai",
             "deepseek",
             "responses",
-            "http",
-            "sse::",
-            "sse_",
-            "ssestream",
+            "previous_response_id",
             "text/event-stream",
+            "crate::app",
+            "crate::adapters",
+            "crate::ui",
         ]],
-    );
-    assert_sources_do_not_contain(
-        &repository_root.join("src/ports"),
-        &[&common_forbidden_references],
     );
 }
 

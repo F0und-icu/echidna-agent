@@ -6,6 +6,8 @@ This ledger is the authoritative record for code copied or mechanically ported f
 
 Architecture inspiration, interface similarity and independent reimplementation do not count as PORT, but should still be named in design documentation when material.
 
+All reuse also follows `docs/development/LEAN_CODE_GOVERNANCE.md`. The default progression is `REFERENCE -> REIMPLEMENT -> PORT SUBSET`; copying a whole crate or large module and deleting unwanted parts is forbidden.
+
 ## 1. Locked Upstream Baseline
 
 - Repository path: `codex/`
@@ -58,6 +60,8 @@ A PORT entry can become ACTIVE only when:
 - Compile-time and dependency impact are recorded.
 - A maintainer can explain how to update or remove the port.
 
+Before any code is copied, create a `PROPOSED` entry. If the candidate exceeds about 200 production lines, spans more than two upstream implementation files, introduces a new dependency closure, lacks one local semantic owner or has no removal trigger, an ADR is required; otherwise use REIMPLEMENT.
+
 ## 5. Expected Candidate Areas
 
 Candidates that may qualify after inspection:
@@ -70,6 +74,16 @@ Candidates that may qualify after inspection:
 - previous_response_id comparison fixtures.
 
 These are candidates, not approved PORT entries.
+
+Current inspected routing at the locked commit:
+
+- `codex-rs/codex-api/src/endpoint/responses.rs`: REFERENCE; reimplement the minimal HTTP Adapter.
+- `codex-rs/codex-api/src/sse/responses.rs`: REIMPLEMENT the minimum event decoder; reuse completion and interruption invariants.
+- `codex-rs/codex-api/tests/sse_end_to_end.rs`: REFERENCE fixtures and boundary cases.
+- `codex-rs/core/src/context_manager/normalize.rs`: M1a-S3 REFERENCE; strict local Tool Call/Result pairing was REIMPLEMENTED without source copy. Broader History repair/normalization remains a later candidate only if M3 evidence requires it.
+- `codex-rs/tools/src/response_history.rs`: M1a-S3 REFERENCE; simple bounded Tool output was REIMPLEMENTED locally. Tail-preserving shared-budget truncation remains a later candidate only if Context measurements justify it.
+- `codex-rs/utils/image/src/lib.rs` and tests: later PORT SUBSET candidate for validation, size budgets and resizing.
+- `codex-rs/core/src/image_preparation.rs` and `thread_rollout_truncation.rs`: REFERENCE because of product-type coupling.
 
 ## 6. Reimplementation Areas
 

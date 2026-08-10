@@ -117,19 +117,3 @@ where
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::doctor_report;
-
-    #[test]
-    fn doctor_report_is_structured_without_configuration() {
-        let report = doctor_report();
-
-        assert_eq!(report.command, "doctor");
-        assert_eq!(report.status, "not_ready");
-        assert_eq!(report.diagnostics.len(), 2);
-        assert_eq!(report.diagnostics[0].code, "PROJECT_NOT_INITIALIZED");
-        assert_eq!(report.diagnostics[1].code, "PROVIDER_NOT_CONFIGURED");
-    }
-}

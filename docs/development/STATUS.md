@@ -5,29 +5,30 @@
 - Architecture version: `1.1.0`
 - Phase: `IMPLEMENTATION`
 - Implementation: `STARTED`
-- Current milestone: `M1a`
-- Current slice: `M1a-S2`
+- Current milestone: `M1b`
+- Current slice: `M1b-S1`
 - Slice state: `READY_NOT_AUTHORIZED`
-- Local Git initialized: `yes` (`agent/m1a-s1-model-ir-mock`; based on `main`)
-- Remote repository: `F0und-icu/cyber-agent` private; documentation baseline published
+- Lean governance: `ACTIVE`; governance and completed M1a-S2/M1a-S3 changes are being delivered together as one reviewable M1a PR
+- Local Git initialized: `yes`; current branch `agent/m1a-model-tool-loop` is based on `origin/main`
+- Remote repository: `F0und-icu/cyber-agent` private; delivery branch is pushed and ready-for-review PR `#4` is open
 - Documentation baseline commit: `55ff3be`
+- Current local code base: verified implementation commit `8a18cc9`, CI portability fix `528c443` and status-only handoff commits on `agent/m1a-model-tool-loop`
 - Upstream Codex baseline: `3aae5d885bac39c1262491aa3fd100dfd8b3919f`
 
 ## Last Completed Slice
 
-- Slice: `M1a-S1`
-- Branch: `agent/m1a-s1-model-ir-mock`
-- Base commit: `2756c711523a08779bcc01060105905cd1e14f27`
-- Scope: versioned provider-neutral `ModelInputIR`, text/artifact-linked image `ContentItem`, ordered `ModelEvent`, explicit `ModelCapabilities`, object-safe `ModelProvider` Port, no-network `MockModelProvider`, and Waker-backed Streaming consumption/cancellation App Service.
-- Forbidden in this Slice: OpenAI/DeepSeek Adapters, HTTP/SSE, real API or credential resolution, `previous_response_id`, AgentLoop, real tool execution, Vision routing, M1a-S2 work, Codex ports, and changes under `codex/`.
-- Result: `COMPLETE`; M1a-S2 was not started.
-- Status start commit: `e929234` (`docs(status): start M1a-S1 model contracts`)
-- Implementation commit: `129235e` (`feat(model): add M1a-S1 streaming contracts`)
-- Final verified code head: `68acb2f`
-- Dependency: added only `futures-core 0.3.32` to expose a standard asynchronous Stream Port without adding Tokio, an executor, HTTP client, Provider SDK or native dependency.
-- GitHub Actions: run `31310301955` passed on `macos-15-arm64` with Rust `1.93.1`; fmt, Clippy, 25 tests and locked build all passed.
-- Pull request: `#3` (`https://github.com/F0und-icu/cyber-agent/pull/3`)
-- Live Test: `OFF`; no Provider credential, Codex login state or network model path was read or used.
+- Slice: `M1a-S3`
+- Delivery branch: `agent/m1a-model-tool-loop`
+- Base commit: `0c413c9` plus the preceding uncommitted M1a-S2 worktree
+- Scope: provider-neutral Tool contracts and stable BLAKE3 fingerprints; strict in-memory Tool Call/Result pairing; ToolExecutor Port; one bounded AgentLoop; fixed `read_file`/`list_files`/`search_files`/`run_command` Registry; argv-only process execution; bounded output, timeout and shared cancellation; OpenAI Tool Schema, Function Call and Function Call Output full-request encoding.
+- Agent behavior: one primary ModelProvider and one AgentLoop perform Tool Call -> Tool Result -> full resample; a Turn is limited to 32 model requests and multiple Tool Calls in one response fail atomically rather than committing partial History.
+- Test path: a Scripted Mock Provider requests `search_files` against a real temporary vulnerability fixture, receives the local Tool Result in the second complete ModelInputIR and returns a final candidate analysis. File/list/search/argv/nonzero/truncation, plan/status, pairing, cancellation and OpenAI wire paths remain permanent top-level regressions.
+- Forbidden work preserved: no ProviderSession, `previous_response_id`, batching, scheduler, PTY/Job, Vision route/service, DeepSeek Adapter, Sandbox/approval/policy, Hook/Plugin Registry, real Provider request, Codex credential/login access, Codex source modification or Codex code port.
+- Result: `COMPLETE`; all local Cargo and Lean Gates pass.
+- Dependencies: added direct `blake3 1.8.2`; promoted the existing Tokio stack to production with only `fs`, `process`, `rt` and `time` features needed by local Tool adapters. No Tool SDK or Codex crate was added.
+- Git: implementation commit `8a18cc9`, CI portability fix `528c443` and status-only handoffs are pushed on `agent/m1a-model-tool-loop`; ready-for-review PR `#4` is open. Squash Merge remains gated on the final PR head being green and the final diff review passing.
+- GitHub Actions: PR `#4` run `31387944243` passed on `macos-15-arm64` with Rust `1.93.1`; formatting, production test-layout scan, Clippy, 44 tests plus one ignored Live Smoke, and locked build all passed.
+- Live Test: `OFF`; the existing synthetic smoke remains ignored and no real credential or public Provider request was used.
 
 ## Current Authority
 
@@ -35,57 +36,117 @@
 2. This file
 3. `task.md`
 4. `docs/development/IMPLEMENTATION_PLAN.md`
-5. `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_1.md`
-6. `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1.md`
-7. `docs/adr/ADR-0002-capability-driven-primary-vision-models.md`
+5. `docs/development/LEAN_CODE_GOVERNANCE.md`
+6. `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_1.md`
+7. `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1.md`
+8. `docs/adr/ADR-0002-capability-driven-primary-vision-models.md`
+9. `docs/adr/ADR-0003-minimal-openai-http-sse-stack.md`
 
 ## Completed
 
-- Codex local architecture and prompt flow assessment.
-- Dedicated single-user vulnerability research Agent architecture.
-- P0/P1/P2 future design classification.
-- Architecture v1 frozen documentation.
-- Development, Git, version, release and environment planning.
-- Provider credential isolation and Mock/Live/CI test-channel design.
-- Architecture v1.1 capability-driven Primary + optional Vision Provider composition.
-- Parameterized Luna single-Slice implementation prompt and remote/bootstrap authorization protocol.
-- Initial governance and architecture documentation baseline published to the private remote.
-- M0-S1 single-package CLI skeleton, offline smoke tests and pinned-toolchain GitHub Actions Gate.
-- M0-S2 provider-neutral Event contract, identity Upcaster, deterministic deduplicating Reducer, minimum Event Ports and dependency-boundary tests.
-- M1a-S1 provider-neutral model IR/event/capability contracts, ModelProvider Port, Mock Provider and cancellable Streaming App Service.
+- Codex local architecture and prompt-flow assessment.
+- Dedicated single-user vulnerability research Agent architecture and P0/P1/P2 classification.
+- Architecture v1 frozen baseline and v1.1 capability-driven Primary plus optional Vision composition.
+- Development, Git/version/release, environment, credential isolation and Mock/Live/CI plans.
+- Parameterized Luna single-Slice implementation prompt and private documentation baseline.
+- M0-S1 single-package CLI skeleton and pinned-toolchain CI Gate.
+- M0-S2 provider-neutral Event/Upcaster/Reducer/Port contracts.
+- M1a-S1 provider-neutral ModelInputIR/ModelEvent/Capabilities, ModelProvider Port, Mock Provider and cancellable Streaming App Service.
+- M1a-S2 minimum OpenAI Responses full-request Adapter, injected dedicated credential source, local-loopback contract tests, external permanent test layout and Lean Gate.
+- M1a-S3 Tool contracts, strict in-memory History, fixed FullAccess Tool Registry, bounded AgentLoop, OpenAI Tool history encoding and real temporary-project full-resample Gate.
 
 ## Not Started
 
-- M1a-S2 and later implementation.
+- M1b-S1 and later implementation; no ProviderSession or incremental baseline code has started.
 
-## Next Authorized Action
+## Current Authorization
 
-When the user explicitly requests the next implementation Slice, begin only `M1a-S2` from `IMPLEMENTATION_PLAN.md`.
+No implementation authorization exists for `M1b-S1`. The current authorization is limited to publishing and merging the already completed governance/M1a-S2/M1a-S3 worktree.
 
-Expected M1a-S2 outputs:
+- Run mode: `REVIEW_ONLY` for `M1b-S1`; no new implementation Slice is active
+- Slice ID: `M1b-S1`
+- Git mode: create `agent/m1a-model-tool-loop`, commit the complete M1a delivery, push it, open a ready-for-review PR and Squash Merge only after the required GitHub Actions Gate is green and the final diff review passes
+- Live test mode: `OFF`; no real Provider credential or public model request is authorized
+- Authorized delivery: the completed local M1a-S2/M1a-S3 implementation and its lean-governance/documentation changes
+- Stop condition: do not implement ProviderSession, Canonical Baseline or any M1b behavior; do not run a Live Test; do not merge if CI or the final diff review fails
 
-- minimum `OpenAIResponsesAdapter` for full HTTP Streaming requests
-- stable `ModelInputIR` encoding and Provider Event decoding
-- transport error/cancellation/Usage handling and injected Cyber Agent credential resolution
-- offline encoding/Streaming fixtures; live tests remain separately opt-in
+## Slice Lean Review
+
+### Semantic Owners
+
+- `src/domain/tools.rs`: Tool identity, Spec, Effect/Retry/Determinism/Cache metadata, plan/input fingerprints, ExecutionReceipt and ToolResult status invariants.
+- `src/domain/history.rs`: the only Tool Call/Result pairing owner; missing, duplicate and mismatched pairs are rejected without Adapter repair.
+- `src/ports/tool.rs`: provider-neutral planning/execution boundary and Tool error vocabulary.
+- `src/app/cancellation.rs`: one cancellation authority shared by Model Streaming and Tool execution.
+- `src/app/agent_loop.rs`: the bounded single-Agent Tool Call -> Result -> full-resample state machine and atomic model-sample commit.
+- `src/adapters/tools/mod.rs`: fixed Tool Registry, canonical argument decoding, plan construction, timeout and invalid-plan mapping.
+- `src/adapters/tools/filesystem.rs`, `process.rs` and `output.rs`: file/list behavior, argv-only rg/process execution and the sole output truncation implementation.
+- `src/adapters/openai/request.rs` and `response.rs`: private OpenAI full-request encoding and stream-event decoding, split because they have independent change reasons.
+
+### Reuse and Duplication
+
+- Reused the existing `ModelInputIR`, explicit `ModelCapabilities`, `ModelEventStream`, `ModelProvider` and `ModelStreamingService`; Tool history extends the same provider-neutral IR rather than adding a Provider-specific loop.
+- All built-ins call one argument decoder, one invalid-plan mapper and one bounded-output function. AgentLoop calls the Domain pairing owner and the shared cancellation owner instead of copying either rule.
+- Fixed Tool specs are generated from one Registry; no Hook Registry, plugin ABI, dynamic Tool loader or second Agent runtime was introduced.
+- Request, Tool request and SSE Fixtures each have one stable source under `tests/fixtures/openai/`.
+
+### Public API and Dependencies
+
+- New cross-boundary contracts are limited to Tool Domain types, `ToolExecutor`, `AgentLoop` outcomes/errors, shared `AgentCancellation` and the fixed `ToolRegistry`; private helpers were not widened for tests.
+- `ModelInputIR` schema advanced from 1 to 2 before persisted runtime data exists, adding message roles, Tool Specs and Tool Call/Result items. No Event, Project or Research schema changed.
+- `blake3` has one current responsibility: stable Tool input/plan fingerprints. Tokio production features have one current responsibility: local file/process Tool execution and timeout.
+- OpenAI request/response DTOs remain private; no Provider wire type, HTTP type or Codex dependency entered Domain/App/Ports.
+
+### Test Layout and Codex Classification
+
+- Production `src/` contains no inline `#[cfg(test)]` module; 44 offline/local-loopback tests pass and one synthetic Live Smoke is ignored.
+- Permanent Domain, pairing, Tool/AgentLoop and OpenAI wire regressions live under top-level `tests/`; the temporary vulnerability project is created under ignored `target/` and removed by its test guard.
+- Credential tests use an injected fake source and never mutate the real process environment.
+- Codex History normalization and Tool execution were used as `REFERENCE`; the local pairing, argv execution, cancellation and truncation code is `REIMPLEMENT`. No source was copied, so no ACTIVE Port Ledger entry exists.
+
+### Removed and Deferred
+
+- Removed a duplicate AgentLoop Tool Call append found by the end-to-end Gate, so one model sample now commits atomically exactly once.
+- Consolidated duplicated filesystem/process argument decoding and invalid-plan mapping; split the oversized OpenAI wire file by request/response ownership without adding an abstraction layer.
+- Kept `domain/tools.rs` as one approximately 300-line Tool-contract owner after review; mechanical splitting would scatter one invariant family. No production module now mixes two independent change reasons above the review threshold.
+- Deferred exactly as scoped: ProviderSession, `previous_response_id`, batching, Resource scheduler, retries, Tool cache, PTY/Job, structured output, Artifact-to-image resolution, Vision routing and CLI composition.
+- No unused feature flag, generic Hook/Router, Provider SDK, test-only production API, copied Codex code or unconsumed persistent Schema was retained.
+- Remaining governance debt: none inside M1a-S3; remote CI evidence is pending the currently authorized PR delivery.
 
 ## Blockers
 
-- None for the completed M1a-S1 implementation scope.
-- M1a-S2 is intentionally `READY_NOT_AUTHORIZED`; completion of M1a-S1 does not authorize it.
-- Future live Primary/Vision tests require only the explicitly selected `CYBER_AGENT_*_API_KEY` references; missing credentials do not block Mock/Fixture/Replay development and never use current Codex login state.
+- None for the completed M1a-S3 local implementation and Gate.
+- M1b-S1 is intentionally stopped at `READY_NOT_AUTHORIZED`.
+- Live Provider compatibility remains unverified by design; missing live credentials do not block offline development and no Codex credential is an allowed substitute.
 
 ## Last Verification
 
-- `task.md` architecture-content seal SHA-256: `31b1cca7205ccce86cc30be263648966c008515b3cb26aee8645cb06bb28a2a5`
-- Current `task.md` SHA-256: `a00f181d0558d1f53e7f29c25f4b39af2a63c4227d89491d04994539b60ad389`
-- `codex/` worktree: clean at `3aae5d885bac39c1262491aa3fd100dfd8b3919f`
-- GitHub Actions PR run `31310301955`: `cargo fmt --all -- --check`, `cargo clippy --locked --all-targets --all-features -- -D warnings`, `cargo test --locked --all-targets --all-features`, and `cargo build --locked` all PASS on `macos-15-arm64` with Rust `1.93.1`.
-- M1a-S1 tests: explicit capability fixture and IR JSON shape; Text/Image/Streaming/Tool/Structured/Incremental/Usage capability errors; Text -> Tool Call with JSON arguments -> Usage -> Completed order; dynamic `ModelProvider`; Pending-stream wake/cancel; incomplete-stream error; Provider-neutral dependency boundaries PASS.
-- M0 Event/Port and CLI smoke regressions remain PASS within the same remote Gate; 25 tests passed in total.
-- Root Git repository: clean `main`/`origin/main` baseline at M0-S2 merge commit `2756c711523a08779bcc01060105905cd1e14f27`; current Slice branch is `agent/m1a-s1-model-ir-mock`.
-- Remote: verified as `https://github.com/F0und-icu/cyber-agent`
-- Rust/Cargo project: M1a-S1 Model Domain/Port/Mock/Streaming contracts present; no live Provider Adapter, HTTP/SSE, credential resolver, AgentLoop or live Provider path.
+- Pinned toolchain: Rust `1.93.1`; all final commands exited `0`.
+- `cargo fmt --all -- --check`: PASS.
+- `cargo clippy --locked --all-targets --all-features -- -D warnings`: PASS.
+- `cargo test --locked --all-targets --all-features`: PASS; 44 passed, 0 failed, 1 ignored.
+- `cargo build --locked`: PASS.
+- `cargo build --locked --release`: PASS on local `x86_64-apple-darwin` with Rust `1.93.1`.
+- `cargo build --locked --release --target aarch64-apple-darwin`: PASS; the resulting arm64 Mach-O SHA-256 is `d7e5ce5152d1f404aebb7cd6786d9d46059f82dcc2736a3081b7b284def0fdd0`.
+- GitHub Actions first PR run `31387701048`: FAILED because the clean macOS runner did not contain the external `rg` binary required by the real `search_files` integration tests; the earlier shell guard also treated a missing command as a negative scan.
+- CI portability fix `528c443`: PASS locally for the complete Tool-loop integration test; the Workflow now installs and verifies ripgrep before both the source-layout scan and Rust tests.
+- GitHub Actions corrected run `31387944243`: PASS; all Gate steps completed on the clean macOS runner.
+- M1a-S3 vertical Gate: PASS; a Scripted Mock Provider called real `search_files` against a temporary source fixture, received a paired Tool Result in a complete second ModelInputIR and returned the final vulnerability-candidate analysis.
+- Tool coverage: PASS; fixed four-Spec Registry, read/list/search/no-match, argv-only command, nonzero exit, UTF-8-safe bounded output, stable fingerprints, Receipt/Result status, plan failure, cancellation and atomic multi-call rejection.
+- OpenAI local-loopback coverage: stable text and Tool full-request JSON; User/Assistant Message, Function Call and Function Call Output order; split SSE Text -> Function Call -> Usage -> Completed; HTTP 401; `response.failed`; malformed/unknown events; missing completion; pending HTTP cancellation.
+- Inline-test scan: PASS; no `#[cfg(test)]` or test module remains under `src/`.
+- Dependency-boundary contract: PASS; Domain/App/Ports contain no OpenAI wire/HTTP client dependency and Adapters do not depend on App.
+- Credential-pattern and production fallback scans: PASS; no real key pattern, generic `OPENAI_API_KEY` production fallback, `CODEX_HOME`, Codex CLI login or `.codex` path exists in production code.
+- Forbidden-scope and Codex dependency scans: PASS; no ProviderSession, `previous_response_id`, Vision service, DeepSeek, Hook/Plugin Registry or forbidden Codex crate exists in production.
+- `codex/` worktree: clean at `3aae5d885bac39c1262491aa3fd100dfd8b3919f`; root diff contains no `codex/` path.
+- Frozen Architecture v1/v1.1: unchanged.
+- Root ignore rules for `/codex/`, `/target/` and `**/.cyber-agent/`: present.
+- `git diff --check`: PASS.
+- `task.md` architecture-content seal SHA-256: `31b1cca7205ccce86cc30be263648966c008515b3cb26aee8645cb06bb28a2a5`.
+- Current `task.md` SHA-256: `2718be4c8172b49cab00788f37ec210848ed255a09a9d8a840f0533c4bdbdf9f`.
+- Git state: delivery branch `agent/m1a-model-tool-loop` is pushed; verified implementation commit `8a18cc9`, CI fix `528c443` and status handoffs are under review in PR `#4` targeting `main`.
+- Remote CI: PASS for PR `#4` run `31387944243`; the final status-only head must also remain green before merge.
+- Live Test: not run; no real Provider credential, public model request or Codex login state was read or used.
 
 ## Update Protocol
 
@@ -97,10 +158,9 @@ At Slice start:
 
 At Slice completion:
 
-- Set Slice state to `COMPLETE`.
+- Set Slice state to `COMPLETE` for the completed Slice, then point Current Slice to the next `READY_NOT_AUTHORIZED` Slice.
 - Record exact commands and results.
 - Record commit/PR only if created with authorization.
-- Advance Current Slice to the next `READY` Slice.
 - Stop execution.
 
 If blocked:

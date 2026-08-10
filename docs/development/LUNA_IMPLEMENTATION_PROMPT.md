@@ -63,24 +63,24 @@ EXPECTED_REMOTE = https://github.com/F0und-icu/cyber-agent
 【第一原则】
 1. 一次运行只完成一个 Vertical Slice。通过 Gate 后更新 STATUS 并停止，不开始下一 Slice。
 2. 本地仓库文件和测试是事实。聊天记录、模型记忆、远程空仓库和你自己的推测不是架构事实。
-3. 不使用子 Agent、多 Agent、云任务或并行 Agent 编排。
+3. 默认不使用子 Agent、多 Agent、云任务或并行 Agent 编排。只有当前用户明确授权开发委派时才能使用子 Agent；每个子 Agent 必须亲自阅读治理链并服从同一 Slice/Gate。产品运行时始终只有一个 AgentLoop。
 4. 不修改只读上游 codex/，不把它纳入 Cyber Agent Git 历史。
 5. 不读取或修改 Luna/Codex 登录、~/.codex、~/.codex/models.json、CODEX_HOME 或宿主模型凭据。
-6. 当需要使用deepseek进行live Test的时候，你可以使用位于本目录下的deepseek文件来将key取出使用
 
 【仓库与启动检查】
 1. 确认工作目录是 Cyber Agent 项目根目录。
-2. 必须存在 AGENTS.md、task.md、docs/README.md、docs/development/STATUS.md、docs/development/IMPLEMENTATION_PLAN.md、Architecture v1/v1.1 和相关 ADR。
+2. 必须存在 AGENTS.md、task.md、docs/README.md、docs/development/STATUS.md、docs/development/IMPLEMENTATION_PLAN.md、docs/development/LEAN_CODE_GOVERNANCE.md、Architecture v1/v1.1 和相关 ADR。
 3. 如果这些权威文件缺失，立即停止并报告 GOVERNANCE_BASELINE_MISSING；不要根据本提示词重新生成架构。
 4. 阅读顺序必须是：
    a. AGENTS.md 全文；
    b. docs/development/STATUS.md 全文；
    c. docs/README.md 的权威顺序；
    d. IMPLEMENTATION_PLAN.md 当前 Slice 全文；
-   e. task.md 相关章节、测试红线和维护规则；
-   f. Architecture v1、v1.1 相关契约；
-   g. 相关 ACCEPTED ADR；
-   h. 已有源码、测试、工作树和依赖事实。
+   e. LEAN_CODE_GOVERNANCE.md 全文；
+   f. task.md 相关章节、测试红线和维护规则；
+   g. Architecture v1、v1.1 相关契约；
+   h. 相关 ACCEPTED ADR；
+   i. 已有源码、测试、工作树和依赖事实。
 5. 检查 STATUS 的 Current Slice 与 SLICE_ID。冲突时停止并报告 SLICE_AUTHORITY_MISMATCH。
 6. 检查现有用户改动并保留。不要 reset、checkout、clean、force push 或删除未知文件。
 7. 如果存在 Git，核对 remote URL；EXPECTED_REMOTE 只用于核对，不能覆盖已有冲突 remote。
@@ -106,6 +106,17 @@ IMPLEMENT_ONE_SLICE：
 - Contract First：先确认 Domain Type、Port、错误语义、事件版本和测试不变量。
 - Thin Vertical Path：先实现最短端到端路径，再补失败、取消、恢复、审计和边界测试。
 - 只实现当前 Slice 需要的配置、依赖和抽象。不为未来 Slice创建无消费者的类型、模块、Feature 或 TODO 框架。
+- Scope Lock 同时列出新语义的唯一所有者、新 `pub` 契约、长期依赖、Codex 复用分类和计划删除项。
+
+【精简代码治理】
+1. 同一语义只有一个所有者。允许多处调用统一实现，禁止复制 Capability、错误映射、Tool Pairing、截断、排序、Fingerprint、取消或失效规则。
+2. 第一次直接实现、第二次比较差异、第三个真实消费者出现后再提取通用抽象；唯一性和规范化不变量从第一次实现起只有一个所有者。
+3. 默认 `pub(crate)`；测试访问不是新增 `pub` 的理由。
+4. 不创建 `common.rs`、`utils.rs`、`helpers.rs`、`base.rs` 或通用 `manager.rs` 杂物模块。
+5. 不创建通用 Hook Registry、动态插件运行时、未来 Feature 或无消费者 Trait。
+6. 同一职责只选择一套 HTTP、SSE、异步、图片、缓存或序列化技术栈。
+7. Slice 完成前删除无运行时/测试消费者代码、重复 Fixture 和无测量收益优化；在 STATUS 的 Lean Review 记录删除与 Deferred 项。
+8. 生产代码超过约 300 行或有两个独立变化原因时触发拆分审查，不按行数机械拆分。
 
 【长期架构不变量】
 1. 一个 Rust package、一个默认二进制、一个 AgentLoop。
@@ -130,6 +141,8 @@ IMPLEMENT_ONE_SLICE：
 - PORT 前必须证明重写成本更高，定位精确上游 commit/file/test，替换 Codex 类型和 workspace 依赖，记录 License/Notice、依赖成本、同步策略和本地测试。
 - 每次 PORT 更新 docs/development/UPSTREAM_PORT_LEDGER.md。
 - 禁止复制整个 crate 或大模块后再删除功能。
+- PORT 预计超过约 200 行生产代码、涉及超过两个上游实现文件或引入新依赖闭包时，先写 ADR 或退回 REIMPLEMENT。
+- 具体候选分类和 Lean Gate 以 docs/development/LEAN_CODE_GOVERNANCE.md 为准。
 
 【Provider 与凭据】
 1. Luna 自身的执行模型配置与 Cyber Agent Provider 配置完全分离。
@@ -142,7 +155,7 @@ IMPLEMENT_ONE_SLICE：
 
 【测试协议】
 1. 默认 Gate 使用 Mock/Fixture/Replay，禁止公网和真实 Provider。
-2. Domain 纯逻辑先做 unit/property/table test；跨 Port 行为增加 integration test。
+2. Domain 纯逻辑使用顶层 `tests/` 中的 unit/property/table test；跨 Port 行为增加 integration test。
 3. Provider Adapter 必须有编码、Streaming、取消、错误、Usage、Tool Call 和能力错误 Fixture。
 4. 凭据测试使用 Fake Credential Source，不改变真实进程环境。
 5. Vision Route Resolver 穷举 Capability 矩阵；证明图片不会在 Primary/Vision 两条路径都遗漏或重复发送。
@@ -151,6 +164,9 @@ IMPLEMENT_ONE_SLICE：
 8. Live Test 保持 ignored/opt-in，只使用固定合成 Prompt/图片，不加载真实漏洞目标、Project Memory、Session 或 Artifact。
 9. 缺少 Live Key 时记录 LIVE_TEST_NOT_RUN_CREDENTIAL_MISSING，继续完成所有离线 Gate；不得读取 Luna/Codex 登录解除阻塞。
 10. Live Test 失败不得通过切换到 Luna 自身 API Key、修改 ~/.codex 或静默换 Provider 绕过。
+11. `src/` 只保存生产代码；Slice Gate 前迁移或删除临时就地测试。发现的缺陷和不变量必须先转为 `tests/` 中永久回归测试，不能因测试已通过而删除。
+12. `tests/support/` 只复用构造器和断言，`tests/fixtures/` 中一个稳定样本只保存一份；不得复制生产逻辑。
+13. 不扩大生产公共 API 来迁移或直接访问测试 helper。
 
 【验证与完成标准】
 - 运行当前 Slice 指定测试以及所有已完成 Slice 的回归测试。
@@ -160,8 +176,9 @@ IMPLEMENT_ONE_SLICE：
   cargo test --locked --all-targets --all-features
   cargo build --locked
 - M0 创建 Cargo.lock 后始终使用 --locked。
+- 运行 LEAN_CODE_GOVERNANCE.md 定义的 inline-test 扫描，并完成八项 Slice Lean Gate。
 - 如果某命令因当前 Slice 尚未创建对应对象而不适用，说明精确原因；不能伪造 PASS。
-- 一个 Slice 只有行为测试、Gate、架构边界和 STATUS 同时一致时才可标记 COMPLETE。
+- 一个 Slice 只有行为测试、Gate、Lean Review、架构边界和 STATUS 同时一致时才可标记 COMPLETE。
 - 失败测试、未完成 TODO、缺失消费者、架构矛盾或必要 Gate 未运行时，不得声明完成。
 
 【Git 与远程写入】
@@ -187,9 +204,10 @@ IMPLEMENT_ONE_SLICE：
 3. Changed：实际修改文件及关键契约。
 4. Tests：逐条列出命令、退出码/结果；Live 未运行要说明原因。
 5. Architecture：确认禁止依赖、单 Agent、Provider/Vision、Event/Artifact 边界。
-6. Git：分支、提交、push、PR 的真实状态；未授权则明确 NONE。
-7. Risks：剩余风险和下一次启动所需输入。
-8. STATUS：说明 STATUS 如何更新，然后停止，不开始下一 Slice。
+6. Lean Review：语义所有者、复用点、新 `pub`/依赖、测试布局、Codex 分类、删除/Deferred 项和治理债务。
+7. Git：分支、提交、push、PR 的真实状态；未授权则明确 NONE。
+8. Risks：剩余风险和下一次启动所需输入。
+9. STATUS：说明 STATUS 如何更新，然后停止，不开始下一 Slice。
 ```
 
 ## 4. 推荐调用头

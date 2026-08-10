@@ -23,8 +23,20 @@ jobs:
       - name: Install pinned Rust toolchain
         run: rustup toolchain install --no-self-update
 
+      - name: Install external test tools
+        run: |
+          brew install ripgrep
+          rg --version
+
       - name: Check formatting
         run: cargo fmt --all -- --check
+
+      - name: Check production test layout
+        run: |
+          if rg -n '#\[cfg\(test\)\]|^[[:space:]]*mod[[:space:]]+tests[[:space:]]*[;{]' src; then
+            echo 'inline tests are forbidden under src/' >&2
+            exit 1
+          fi
 
       - name: Lint
         run: cargo clippy --locked --all-targets --all-features -- -D warnings

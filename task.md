@@ -12,6 +12,7 @@
 - 冻结架构：`docs/architecture/CYBER_AGENT_ARCHITECTURE_V1.md` + `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_1.md`
 - 模型组合决策：`docs/adr/ADR-0002-capability-driven-primary-vision-models.md`
 - 开发计划：`docs/development/IMPLEMENTATION_PLAN.md`
+- 精简代码治理：`docs/development/LEAN_CODE_GOVERNANCE.md`
 - 当前状态：`docs/development/STATUS.md`
 - Git/版本/发布：`docs/development/GIT_VERSION_RELEASE.md`
 - 开发环境：`docs/development/DEVELOPMENT_ENVIRONMENT.md`
@@ -20,10 +21,10 @@
 
 当前状态：
 
-- 阶段：Implementation / M1a Ready
-- M0-S1 CLI 骨架和 M0-S2 Domain/Event/Port 最小契约已经完成，并由固定 Rust `1.93.1` 的 GitHub Actions Gate 验证。
+- 阶段：Implementation / M1b-S1 Ready Not Authorized
+- M0-S1 CLI 骨架、M0-S2 Domain/Event/Port 最小契约和完整 M1a 已完成；M1a-S2 OpenAI Responses Adapter 与 M1a-S3 单工具 AgentLoop 均已通过固定 Rust `1.93.1` 的本地 Gate，尚未提交或运行远程 CI。
 - 已初始化本地 Git 并发布治理/架构文档基线。
-- M0-S1/M0-S2 分别通过 PR `#1`/`#2` 交付；M1a-S1 尚未开始且未获授权。
+- M0-S1/M0-S2/M1a-S1 分别通过 PR `#1`/`#2`/`#3` 交付；M1a-S2/M1a-S3 按 `NO_COMMIT` 保留在本地，M1b-S1 未获授权。
 
 ## 1. 产品定义
 
@@ -1549,6 +1550,8 @@ Cyber Agent 首期 Cargo.toml 不直接依赖：
 - 本地需求只占上游功能的一小部分时，优先重实现而不是复制整个模块。
 - 引入后必须记录代码行数、新增依赖、编译时间变化和上游同步成本。
 
+默认使用 `REFERENCE -> REIMPLEMENT -> PORT SUBSET` 的升级顺序。预计超过约 200 行生产代码、涉及超过两个上游实现文件、引入新的依赖闭包、没有唯一的本地所有者或无法说明删除条件时，必须先写 ADR 或退回 REIMPLEMENT。
+
 任何 PORT 代码必须记录：
 
 - 上游提交。
@@ -1620,16 +1623,17 @@ M1 分为三个必须独立编译、独立测试、独立交付的 Vertical Slic
 
 #### M1a：全量请求和单工具闭环
 
-- [ ] ModelProvider 和 ToolExecutor port。
-- [ ] Mock Provider。
-- [ ] OpenAI Responses HTTP Streaming 全量请求。
-- [ ] Provider-neutral ModelInputIR 和 OpenAIResponsesAdapter 编解码边界。
-- [ ] Message / ToolCall / ToolResult。
-- [ ] ToolSpec Effect 元数据、ToolExecutionPlan 和 ExecutionReceipt 最小类型。
-- [ ] 内存 History 和 Tool Call/Result 配对。
-- [ ] 最小 Tool Registry。
-- [ ] `read_file`、`list_files`、`search_files`、`run_command`。
-- [ ] Tool Call → Tool Result → 全量再采样集成测试。
+- [x] ModelProvider port。
+- [x] ToolExecutor port。
+- [x] Mock Provider。
+- [x] OpenAI Responses HTTP Streaming 全量请求。
+- [x] Provider-neutral ModelInputIR 和 OpenAIResponsesAdapter 编解码边界。
+- [x] Message / ToolCall / ToolResult。
+- [x] ToolSpec Effect 元数据、ToolExecutionPlan 和 ExecutionReceipt 最小类型。
+- [x] 内存 History 和 Tool Call/Result 配对。
+- [x] 最小 Tool Registry。
+- [x] `read_file`、`list_files`、`search_files`、`run_command`。
+- [x] Tool Call → Tool Result → 全量再采样集成测试。
 
 M1a 完成标准：在 FullAccess 下完成一次真实文件分析和工具回传；无 Provider Session、批量、PTY 也可单独运行。
 
@@ -1789,7 +1793,12 @@ M1 总完成标准：M1a、M1b、M1c 分别有可运行集成测试，任一后�
 
 ## 22. 维护规则
 
+- 详细强制规则见 `docs/development/LEAN_CODE_GOVERNANCE.md`，所有实现 Agent 和经明确授权的开发子 Agent 都必须亲自阅读。
 - 新功能先用内部 module 实现。
+- 同一语义只有一个所有者；多个调用方复用统一实现，不复制 Capability、错误映射、Tool Pairing、截断、排序、Fingerprint、取消或失效逻辑。
+- 通用抽象遵循三次重复规则；唯一性和规范化不变量从第一次实现起只有一个所有者。
+- 默认使用 `pub(crate)`；测试访问不是扩大公共 API 的理由。
+- 不创建 `common.rs`、`utils.rs`、`helpers.rs`、`base.rs`、通用 `manager.rs` 或 Hook Registry 杂物抽象。
 - 能通过 Prompt、Markdown 模板或外部脚本解决的问题，不新增 Core 抽象。
 - 能通过 `run_command` 调用的漏洞研究工具，不重写客户端。
 - 每增加一个长期依赖，都记录它解决的具体问题。
@@ -1800,6 +1809,8 @@ M1 总完成标准：M1a、M1b、M1c 分别有可运行集成测试，任一后�
 - Replay、Observation 和 TargetDelta 优先使用现有 Event/Artifact，不新增权威数据库。
 - 每个性能缓存必须有稳定 Key、明确失效条件、Hit/Miss 指标和删除重建路径。
 - 优化功能必须通过对照 Eval 证明减少模型往返、重复 Token、重复 I/O 或工具等待，否则不保留。
+- `src/` 只保存生产代码；永久回归测试保留在顶层 `tests/`，临时就地测试必须在 Gate 前迁移或删除，发现的回归不得因测试已通过而删除。
+- 每个 Slice 在 STATUS/PR 中记录 Lean Review：语义所有者、复用点、新 `pub`/依赖、测试布局、Codex 分类、删除/Deferred 项和治理债务。
 - 每个里程碑结束后删除未被真实工作流使用的代码。
 - 保持一条命令可运行：`cargo test`。
 - 保持一个默认二进制文件，不发布一组必须协同部署的服务。
@@ -1841,13 +1852,13 @@ M1 总完成标准：M1a、M1b、M1c 分别有可运行集成测试，任一后�
 - [x] CLI 优先，Web 可选。
 - [x] 不实现多 Agent、团队、云 Server 和插件市场。
 - [x] 不上报日志、telemetry 和 feedback。
-- [x] 当前不创建代码、不实现 M0-S1；先完成文档基线发布。
+- [x] 文档基线先于代码 Slice 发布；实现阶段继续按单 Slice 授权和 Gate 推进。
 
 ## 24. 待实现时确定
 
-- [ ] Rust MSRV。
+- [x] Rust MSRV 固定为 `1.93`，工具链固定为 `1.93.1`。
 - [ ] CLI 行编辑库。
-- [ ] OpenAI Responses 使用精简自建 HTTP Client 还是可控的轻量 SDK。
+- [x] OpenAI Responses 使用精简自建 Adapter：`reqwest` + `eventsource-stream`，不依赖 Codex/Provider SDK；见 ADR-0003。
 - [ ] Token 估算库。
 - [ ] WebSocket 连接复用是否能显著降低延迟。
 - [ ] Deferred Tool Exposure 的 Schema Token/工具数量启用阈值。
@@ -1863,13 +1874,12 @@ M1 总完成标准：M1a、M1b、M1c 分别有可运行集成测试，任一后�
 
 ## 25. 下一步
 
-下一具体动作是 M1a-S1：
+下一具体动作是 M1b-S1：
 
-1. 读取 `AGENTS.md`、`docs/development/STATUS.md` 和开发计划中的 `M1a-S1`。
-2. 获得当前 Slice 的明确实现授权后，将 M1a-S1 标记为 `IN_PROGRESS`。
-3. 定义 provider-neutral `ModelInputIR`、`ContentItem`、`ModelEvent` 和显式版本化 `ModelCapabilities`。
-4. 定义 `ModelProvider` Port 和无网络 `MockModelProvider`。
-5. 实现最小 Streaming 消费/取消 App Service，并验证事件顺序和能力错误。
-6. 更新 STATUS 后停止，不自动进入 M1a-S2。
+1. 读取 `AGENTS.md`、`docs/development/STATUS.md` 和开发计划中的 `M1b-S1`。
+2. 获得当前 Slice 的明确实现授权后，将 M1b-S1 标记为 `IN_PROGRESS`。
+3. 定义 TurnContext、StepSnapshot、ProviderSession、IncrementalBaseline 和稳定 Canonical Request 比较；本 Slice仍只发送全量请求。
+4. 覆盖 Model/Profile/Prompt/Tool/Output/IR/Capability 变化、内部 metadata 和非 append-only History 的失效矩阵。
+5. 通过 Gate 并更新 STATUS 后停止，不自动进入 M1b-S2 或发送 `previous_response_id`。
 
-M1a-S1 当前为 `READY_NOT_AUTHORIZED`；M0-S2 的完成不自动授权下一 Slice。
+M1b-S1 当前为 `READY_NOT_AUTHORIZED`；M1a 的完成不自动授权下一 Slice。
