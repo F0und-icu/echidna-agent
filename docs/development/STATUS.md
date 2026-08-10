@@ -8,11 +8,11 @@
 - Current milestone: `M1b`
 - Current slice: `M1b-S1`
 - Slice state: `READY_NOT_AUTHORIZED`
-- Lean governance: `ACTIVE`; governance and completed M1a-S2/M1a-S3 changes are being delivered together as one reviewable M1a PR
-- Local Git initialized: `yes`; current branch `agent/m1a-model-tool-loop` is based on `origin/main`
-- Remote repository: `F0und-icu/cyber-agent` private; delivery branch is pushed and ready-for-review PR `#4` is open
+- Lean governance: `ACTIVE`; governance and completed M1a-S2/M1a-S3 changes are merged on `main`
+- Local Git initialized: `yes`; merged M1a code baseline is `main` commit `9988b98`
+- Remote repository: `F0und-icu/cyber-agent` private; PR `#4` was Squash Merged
 - Documentation baseline commit: `55ff3be`
-- Current local code base: verified implementation commit `8a18cc9`, CI portability fix `528c443` and status-only handoff commits on `agent/m1a-model-tool-loop`
+- Current code base: `main`/`origin/main` merge commit `9988b98`
 - Upstream Codex baseline: `3aae5d885bac39c1262491aa3fd100dfd8b3919f`
 
 ## Last Completed Slice
@@ -26,8 +26,8 @@
 - Forbidden work preserved: no ProviderSession, `previous_response_id`, batching, scheduler, PTY/Job, Vision route/service, DeepSeek Adapter, Sandbox/approval/policy, Hook/Plugin Registry, real Provider request, Codex credential/login access, Codex source modification or Codex code port.
 - Result: `COMPLETE`; all local Cargo and Lean Gates pass.
 - Dependencies: added direct `blake3 1.8.2`; promoted the existing Tokio stack to production with only `fs`, `process`, `rt` and `time` features needed by local Tool adapters. No Tool SDK or Codex crate was added.
-- Git: implementation commit `8a18cc9`, CI portability fix `528c443` and status-only handoffs are pushed on `agent/m1a-model-tool-loop`; ready-for-review PR `#4` is open. Squash Merge remains gated on the final PR head being green and the final diff review passing.
-- GitHub Actions: PR `#4` run `31387944243` passed on `macos-15-arm64` with Rust `1.93.1`; formatting, production test-layout scan, Clippy, 44 tests plus one ignored Live Smoke, and locked build all passed.
+- Git: PR `#4` was Squash Merged as `9988b98` (`M1a: complete OpenAI streaming and single-tool agent loop`).
+- GitHub Actions: final PR-head run `31388093658` and post-merge `main` run `31388314842` passed on `macos-15-arm64` with Rust `1.93.1`; formatting, production test-layout scan, Clippy, 44 tests plus one ignored Live Smoke, and locked build all passed.
 - Live Test: `OFF`; the existing synthetic smoke remains ignored and no real credential or public Provider request was used.
 
 ## Current Authority
@@ -61,14 +61,14 @@
 
 ## Current Authorization
 
-No implementation authorization exists for `M1b-S1`. The current authorization is limited to publishing and merging the already completed governance/M1a-S2/M1a-S3 worktree.
+No implementation authorization exists for `M1b-S1`. The governance/M1a-S2/M1a-S3 delivery authorization has been consumed by merged PR `#4`.
 
 - Run mode: `REVIEW_ONLY` for `M1b-S1`; no new implementation Slice is active
 - Slice ID: `M1b-S1`
-- Git mode: create `agent/m1a-model-tool-loop`, commit the complete M1a delivery, push it, open a ready-for-review PR and Squash Merge only after the required GitHub Actions Gate is green and the final diff review passes
+- Git mode: `NO_COMMIT` after the authorized merge-status handoff; no further branch, commit, push, PR, tag or release is authorized
 - Live test mode: `OFF`; no real Provider credential or public model request is authorized
-- Authorized delivery: the completed local M1a-S2/M1a-S3 implementation and its lean-governance/documentation changes
-- Stop condition: do not implement ProviderSession, Canonical Baseline or any M1b behavior; do not run a Live Test; do not merge if CI or the final diff review fails
+- Completed delivery: governance plus M1a-S2/M1a-S3 through PR `#4` and merge commit `9988b98`
+- Stop condition: do not implement ProviderSession, Canonical Baseline or any M1b behavior; do not run a Live Test or perform further Git writes without new authorization
 
 ## Slice Lean Review
 
@@ -131,6 +131,8 @@ No implementation authorization exists for `M1b-S1`. The current authorization i
 - GitHub Actions first PR run `31387701048`: FAILED because the clean macOS runner did not contain the external `rg` binary required by the real `search_files` integration tests; the earlier shell guard also treated a missing command as a negative scan.
 - CI portability fix `528c443`: PASS locally for the complete Tool-loop integration test; the Workflow now installs and verifies ripgrep before both the source-layout scan and Rust tests.
 - GitHub Actions corrected run `31387944243`: PASS; all Gate steps completed on the clean macOS runner.
+- GitHub Actions final PR-head run `31388093658`: PASS with merge state `CLEAN` and no unresolved reviews or comments.
+- GitHub Actions post-merge `main` run `31388314842`: PASS for merge commit `9988b98`.
 - M1a-S3 vertical Gate: PASS; a Scripted Mock Provider called real `search_files` against a temporary source fixture, received a paired Tool Result in a complete second ModelInputIR and returned the final vulnerability-candidate analysis.
 - Tool coverage: PASS; fixed four-Spec Registry, read/list/search/no-match, argv-only command, nonzero exit, UTF-8-safe bounded output, stable fingerprints, Receipt/Result status, plan failure, cancellation and atomic multi-call rejection.
 - OpenAI local-loopback coverage: stable text and Tool full-request JSON; User/Assistant Message, Function Call and Function Call Output order; split SSE Text -> Function Call -> Usage -> Completed; HTTP 401; `response.failed`; malformed/unknown events; missing completion; pending HTTP cancellation.
@@ -144,8 +146,8 @@ No implementation authorization exists for `M1b-S1`. The current authorization i
 - `git diff --check`: PASS.
 - `task.md` architecture-content seal SHA-256: `31b1cca7205ccce86cc30be263648966c008515b3cb26aee8645cb06bb28a2a5`.
 - Current `task.md` SHA-256: `2718be4c8172b49cab00788f37ec210848ed255a09a9d8a840f0533c4bdbdf9f`.
-- Git state: delivery branch `agent/m1a-model-tool-loop` is pushed; verified implementation commit `8a18cc9`, CI fix `528c443` and status handoffs are under review in PR `#4` targeting `main`.
-- Remote CI: PASS for PR `#4` run `31387944243`; the final status-only head must also remain green before merge.
+- Git state: PR `#4` is `MERGED`; `main` and `origin/main` contain Squash Merge commit `9988b98`.
+- Remote CI: PASS for final PR head (`31388093658`) and post-merge `main` (`31388314842`).
 - Live Test: not run; no real Provider credential, public model request or Codex login state was read or used.
 
 ## Update Protocol
