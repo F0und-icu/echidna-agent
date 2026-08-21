@@ -1,4 +1,10 @@
-//! Context-domain namespace.
-//!
-//! Context planning contracts begin in a later Slice. Keeping this namespace
-//! explicit prevents those contracts from being coupled to Provider adapters.
+//! Provider-neutral request context and Baseline semantics.
+
+mod baseline;
+mod canonical;
+
+pub use baseline::{BaselineAssessment, BaselineInvalidationReason, ProviderSession};
+pub use canonical::{
+    ContextError, InternalRequestMetadata, ModelIdentity, ModelProfile, ProviderSessionId,
+    ProviderSessionRef, ProviderSessionRole, RequestHash, StepSnapshot, TurnContext, TurnId,
+};

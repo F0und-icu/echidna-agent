@@ -7,6 +7,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use cyber_agent::adapters::tools::ToolRegistry;
 use cyber_agent::app::agent_loop::{AgentLoop, AgentLoopError, AgentTurnOutcome};
 use cyber_agent::app::cancellation::AgentCancellation;
+use cyber_agent::domain::context::{
+    BaselineAssessment, BaselineInvalidationReason, ModelIdentity, ModelProfile, ProviderSession,
+    ProviderSessionId, ProviderSessionRole,
+};
 use cyber_agent::domain::model::{
     CapabilityMappingVersion, ContentItem, ModelCapabilities, ModelEvent, ModelInputIR,
 };
@@ -254,7 +258,7 @@ impl ModelProvider for ScriptedProvider {
 }
 
 #[tokio::test]
-async fn agent_loop_analyzes_a_real_temporary_project_with_full_resampling() {
+async fn agent_loop_keeps_full_resampling_after_local_baseline_comparison() {
     let project = TestProject::new("agent-loop");
     project.write(
         "src/parser.rs",
@@ -286,11 +290,19 @@ async fn agent_loop_analyzes_a_real_temporary_project_with_full_resampling() {
         ],
     ]);
     let tools = ToolRegistry::for_project(&project.root);
-    let mut agent = AgentLoop::new(
+    let mut agent = AgentLoop::with_primary_context(
         &provider,
         &tools,
         "Use local tools and keep candidates distinct from verified findings.",
-    );
+        ModelIdentity::new("fixture-primary", "fixture-model-v1"),
+        ModelProfile::new("fixture-research", 1),
+        ProviderSession::new(
+            ProviderSessionId::new("fixture-primary-session"),
+            ProviderSessionRole::Primary,
+            1,
+        ),
+    )
+    .unwrap();
 
     let outcome = agent
         .run_turn(
@@ -342,6 +354,71 @@ async fn agent_loop_analyzes_a_real_temporary_project_with_full_resampling() {
             if result.status == ToolResultStatus::Succeeded
                 && result.output["matches"].as_str().unwrap().contains("path traversal")
     ));
+}
+
+#[tokio::test]
+async fn agent_loop_audits_baseline_candidates_while_sending_complete_history() {
+    let provider = ScriptedProvider::new([
+        vec![
+            ModelEvent::TextDelta {
+                text: "first response".to_owned(),
+            },
+            ModelEvent::Completed,
+        ],
+        vec![
+            ModelEvent::TextDelta {
+                text: "second response".to_owned(),
+            },
+            ModelEvent::Completed,
+        ],
+    ]);
+    let tools = ToolRegistry::for_project(env!("CARGO_MANIFEST_DIR"));
+    let mut agent = AgentLoop::with_primary_context(
+        &provider,
+        &tools,
+        "fixture",
+        ModelIdentity::new("fixture-primary", "fixture-model-v1"),
+        ModelProfile::new("fixture-research", 1),
+        ProviderSession::new(
+            ProviderSessionId::new("fixture-primary-session"),
+            ProviderSessionRole::Primary,
+            1,
+        ),
+    )
+    .unwrap();
+
+    agent
+        .run_turn("first user input", AgentCancellation::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        agent.last_baseline_assessment(),
+        Some(&BaselineAssessment::FullRequest {
+            reason: BaselineInvalidationReason::NoBaseline,
+        })
+    );
+
+    agent
+        .run_turn("second user input", AgentCancellation::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        agent.last_baseline_assessment(),
+        Some(&BaselineAssessment::AppendOnlyCandidate {
+            delta_items: vec![ContentItem::user_text("second user input")],
+        })
+    );
+
+    let inputs = provider.inputs();
+    assert_eq!(inputs.len(), 2);
+    assert_eq!(
+        inputs[1].content_items,
+        vec![
+            ContentItem::user_text("first user input"),
+            ContentItem::assistant_text("first response"),
+            ContentItem::user_text("second user input"),
+        ]
+    );
 }
 
 struct PendingToolExecutor {

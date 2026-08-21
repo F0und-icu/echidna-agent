@@ -112,11 +112,7 @@ fn domain_and_ports_keep_the_required_dependency_direction() {
     ];
     assert_sources_do_not_contain(
         &repository_root.join("src/domain"),
-        &[
-            &["provider", "wire"],
-            &domain_io_references,
-            &provider_wire_references,
-        ],
+        &[&["wire"], &domain_io_references, &provider_wire_references],
     );
     assert_sources_do_not_contain(
         &repository_root.join("src/app"),

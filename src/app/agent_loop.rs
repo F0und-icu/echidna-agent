@@ -2,6 +2,10 @@
 
 use thiserror::Error;
 
+use crate::domain::context::{
+    BaselineAssessment, ContextError, InternalRequestMetadata, ModelIdentity, ModelProfile,
+    ProviderSession, ProviderSessionId, ProviderSessionRole, StepSnapshot, TurnContext, TurnId,
+};
 use crate::domain::history::{ConversationHistory, HistoryError};
 use crate::domain::model::{ModelEvent, ModelInputIR, ModelRequestRequirements};
 use crate::domain::tools::{ExecutionId, ToolCall, ToolExecutionOutcome, ToolExposure, ToolResult};
@@ -18,6 +22,11 @@ pub struct AgentLoop<'provider, 'tools, Provider: ?Sized, Tools: ?Sized> {
     tools: &'tools Tools,
     instructions: String,
     history: ConversationHistory,
+    model: ModelIdentity,
+    profile: ModelProfile,
+    provider_session: ProviderSession,
+    next_turn_sequence: u64,
+    last_baseline_assessment: Option<BaselineAssessment>,
 }
 
 impl<'provider, 'tools, Provider, Tools> AgentLoop<'provider, 'tools, Provider, Tools>
@@ -30,16 +39,56 @@ where
         tools: &'tools Tools,
         instructions: impl Into<String>,
     ) -> Self {
-        Self {
+        Self::with_primary_context(
+            provider,
+            tools,
+            instructions,
+            ModelIdentity::new("primary", "default"),
+            ModelProfile::new("default", 0),
+            ProviderSession::new(
+                ProviderSessionId::new("primary:0"),
+                ProviderSessionRole::Primary,
+                0,
+            ),
+        )
+        .expect("the built-in AgentLoop context must be primary")
+    }
+
+    /// Builds the one primary AgentLoop from an explicitly selected model,
+    /// profile and session. The legacy [`Self::new`] constructor retains the
+    /// existing M1a fixture context until CLI profile composition exists.
+    pub fn with_primary_context(
+        provider: &'provider Provider,
+        tools: &'tools Tools,
+        instructions: impl Into<String>,
+        model: ModelIdentity,
+        profile: ModelProfile,
+        provider_session: ProviderSession,
+    ) -> Result<Self, AgentLoopConfigurationError> {
+        if provider_session.reference().role != ProviderSessionRole::Primary {
+            return Err(AgentLoopConfigurationError::PrimarySessionRequired);
+        }
+        Ok(Self {
             provider,
             tools,
             instructions: instructions.into(),
             history: ConversationHistory::default(),
-        }
+            model,
+            profile,
+            provider_session,
+            next_turn_sequence: 0,
+            last_baseline_assessment: None,
+        })
     }
 
     pub fn history(&self) -> &ConversationHistory {
         &self.history
+    }
+
+    /// Returns the local compatibility decision for the most recent actual
+    /// model request. M1b-S1 still sends that request in full.
+    pub fn last_baseline_assessment(&self) -> Option<&BaselineAssessment> {
+        self.last_baseline_assessment.as_ref()
     }
 
     pub async fn run_turn(
@@ -60,6 +109,16 @@ where
             .into_iter()
             .filter(|spec| spec.exposure == ToolExposure::Direct)
             .collect::<Vec<_>>();
+        let capabilities = self.provider.capabilities();
+        self.next_turn_sequence += 1;
+        let turn = TurnContext::new(
+            TurnId::new(format!("turn:{}", self.next_turn_sequence)),
+            self.model.clone(),
+            self.profile.clone(),
+            self.provider_session.reference().clone(),
+            capabilities.context_window,
+            &tool_specs,
+        )?;
         let mut executions = Vec::new();
 
         for request_index in 0..MAX_MODEL_REQUESTS_PER_TURN {
@@ -70,6 +129,15 @@ where
                 ModelRequestRequirements::default(),
             )
             .with_tool_specs(tool_specs.clone());
+            let snapshot = StepSnapshot::capture(
+                &turn,
+                request_index,
+                &input,
+                &capabilities,
+                InternalRequestMetadata::default(),
+            )?;
+            self.last_baseline_assessment =
+                Some(self.provider_session.assess_full_request(&snapshot));
             let stream = ModelStreamingService::new(self.provider)
                 .consume(input, cancellation.clone())
                 .await?;
@@ -84,13 +152,16 @@ where
             };
             let sample = ModelSample::from_events(events);
             let tool_call = sample.single_tool_call()?;
+            let assistant_text = sample.assistant_text();
+            if tool_call.is_none() && assistant_text.is_empty() {
+                return Err(AgentLoopError::EmptyModelResponse);
+            }
+            let server_output_items = sample.content_items();
             sample.commit(&mut self.history)?;
+            self.provider_session
+                .record_full_response(&snapshot, server_output_items)?;
 
             let Some(call) = tool_call else {
-                let assistant_text = sample.assistant_text();
-                if assistant_text.is_empty() {
-                    return Err(AgentLoopError::EmptyModelResponse);
-                }
                 return Ok(AgentTurnOutcome::Completed {
                     assistant_text,
                     model_requests: request_index + 1,
@@ -132,6 +203,12 @@ where
     }
 }
 
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+pub enum AgentLoopConfigurationError {
+    #[error("the AgentLoop requires a primary ProviderSession")]
+    PrimarySessionRequired,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AgentTurnOutcome {
     Completed {
@@ -151,6 +228,8 @@ pub enum AgentLoopError {
     Model(#[from] ModelStreamingError),
     #[error(transparent)]
     History(#[from] HistoryError),
+    #[error(transparent)]
+    Context(#[from] ContextError),
     #[error("one model response requested {count} Tools; M1a supports exactly one at a time")]
     MultipleToolCalls { count: usize },
     #[error("the model completed without text or a Tool Call")]
@@ -224,6 +303,20 @@ impl ModelSample {
             .filter_map(|item| match item {
                 SampleItem::AssistantText(text) => Some(text.as_str()),
                 SampleItem::ToolCall(_) => None,
+            })
+            .collect()
+    }
+
+    fn content_items(&self) -> Vec<crate::domain::model::ContentItem> {
+        self.items
+            .iter()
+            .map(|item| match item {
+                SampleItem::AssistantText(text) => {
+                    crate::domain::model::ContentItem::assistant_text(text.clone())
+                }
+                SampleItem::ToolCall(call) => {
+                    crate::domain::model::ContentItem::ToolCall { call: call.clone() }
+                }
             })
             .collect()
     }
