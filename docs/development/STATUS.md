@@ -8,11 +8,11 @@
 - Current milestone: `M1b`
 - Current slice: `M1b-S2`
 - Slice state: `READY_NOT_AUTHORIZED`
-- Lean governance: `ACTIVE`; M1b-S1 is complete locally and awaiting its authorized remote delivery
-- Local Git initialized: `yes`; completed M1b-S1 branch is `agent/m1b-s1-provider-baseline` from `main` commit `04da25b`
-- Remote repository: `F0und-icu/cyber-agent` private; PR `#4` was Squash Merged
+- Lean governance: `ACTIVE`; M1b-S1 implementation and remote delivery are complete
+- Local Git initialized: `yes`; M1b-S1 code was delivered from `agent/m1b-s1-provider-baseline`
+- Remote repository: `F0und-icu/cyber-agent` private; PR `#6` was Squash Merged
 - Documentation baseline commit: `55ff3be`
-- Current code base: completed M1b-S1 worktree on `agent/m1b-s1-provider-baseline`; delivery commit/PR pending
+- Current code base: `main`/`origin/main` M1b-S1 code merge commit `a334415` before this status handoff
 - Upstream Codex baseline: `3aae5d885bac39c1262491aa3fd100dfd8b3919f`
 
 ## Last Completed Slice
@@ -25,8 +25,10 @@
 - Canonical behavior: model and profile change independently; Tool contracts sort deterministically and canonicalize JSON recursively; ContentItem order and Tool Call/Result IDs remain semantic; internal request metadata and local Tool execution policy do not alter request equivalence.
 - Test path: a Scripted Mock Provider completes two Turns and proves the second request is locally append-only while the Provider still receives complete History; the domain matrix covers Model/Profile/Prompt/Tool/Output/IR/Capability changes, stable priority, reset persistence, session isolation and modified/deleted/reordered History.
 - Forbidden work preserved: no `previous_response_id`, incremental HTTP encoding, Provider-reject fallback, Batch/Scheduler/PTY/Job, Vision service, DeepSeek Adapter, Live Provider request, Codex credential/login access, Codex source modification or Codex code port.
-- Result: `COMPLETE` locally; all Cargo and Lean Gates pass. Remote commit/PR/CI delivery remains in progress under the current authorization.
+- Result: `COMPLETE`; all local and remote Cargo/Lean Gates pass.
 - Dependencies and schemas: no dependency, Cargo, ModelInputIR/Event/Project/Research schema or frozen architecture change.
+- Git: PR `#6` was Squash Merged as `a334415` (`M1b-S1: canonical ProviderSession baselines`).
+- GitHub Actions: PR-head run `32517704380` and post-merge `main` run `32517919489` passed on macOS with Rust `1.93.1`; formatting, production test-layout scan, Clippy, 50 tests plus one ignored Live Smoke, and locked build all passed.
 - Live Test: `OFF`; the existing synthetic smoke remains ignored and no real credential or public Provider request was used.
 
 ## Current Authority
@@ -61,16 +63,14 @@
 
 ## Current Authorization
 
-The current user request authorizes the remaining normal remote delivery of completed `M1b-S1`. It does not authorize implementation of `M1b-S2` or a Live Test.
+The M1b-S1 implementation and delivery authorization has been consumed by merged PR `#6`. No implementation, Git or Live Test authorization exists for `M1b-S2` after this status handoff.
 
-- Run mode: `DELIVER_COMPLETED_SLICE`
-- Completed Slice ID: `M1b-S1`
-- Next Slice ID: `M1b-S2`; state `READY_NOT_AUTHORIZED`
-- Git mode: intentional commit, push, PR, CI review and merge for the completed M1b-S1 branch; a status-only remote handoff may record final merge evidence
-- Delivery branch: `agent/m1b-s1-provider-baseline`; base commit `04da25b`
+- Run mode: `REVIEW_ONLY`
+- Slice ID: `M1b-S2`; state `READY_NOT_AUTHORIZED`
+- Git mode: `NO_COMMIT` after this authorized status-only handoff is merged
 - Live test mode: `OFF`; no real Provider credential or public model request is authorized
-- Forbidden continuation: do not implement `previous_response_id`, incremental HTTP encoding, Provider fallback or any later-Slice behavior during delivery
-- Stop condition: after remote CI/merge and accurate status handoff, stop with M1b-S2 still `READY_NOT_AUTHORIZED`
+- Forbidden continuation: do not implement `previous_response_id`, incremental HTTP encoding, Provider fallback or any later-Slice behavior without new authorization
+- Stop condition: stop with M1b-S2 `READY_NOT_AUTHORIZED`
 
 ## Slice Lean Review
 
@@ -113,12 +113,11 @@ The current user request authorizes the remaining normal remote delivery of comp
 - Deferred exactly as scoped: response IDs, `previous_response_id`, incremental wire requests, Provider rejection fallback, Resume/Compaction runtime wiring, actual output schema/reasoning/include contracts, Batch/Scheduler/PTY/Job, Vision and CLI composition.
 - Stable reset reason codes exist for audit vocabulary, but no Provider rejection/fallback behavior was implemented.
 - No unused feature flag, generic Hook/Router, Provider SDK, persistent Schema, copied Codex code or unconsumed adapter path was retained.
-- Remaining governance debt: none inside M1b-S1; remote CI/merge evidence is pending the authorized delivery.
+- Remaining governance debt: none inside M1b-S1; remote delivery evidence is complete.
 
 ## Blockers
 
 - None for the completed M1b-S1 local implementation and Gate.
-- Remote delivery evidence is pending the authorized commit/PR/CI/merge workflow.
 - M1b-S2 is intentionally stopped at `READY_NOT_AUTHORIZED`.
 - Live Provider compatibility remains unverified by design; missing live credentials do not block offline development and no Codex credential is an allowed substitute.
 
@@ -141,8 +140,8 @@ The current user request authorizes the remaining normal remote delivery of comp
 - Frozen Architecture v1/v1.1: unchanged.
 - Root ignore rules for `/codex/`, `/target/` and `**/.cyber-agent/`: present.
 - `git diff --check`: PASS.
-- Git state: completed M1b-S1 changes are uncommitted on `agent/m1b-s1-provider-baseline`; base `main == origin/main == 04da25b` before delivery.
-- Remote CI: pending M1b-S1 PR delivery.
+- Git state: PR `#6` is `MERGED`; `main` and `origin/main` contain M1b-S1 Squash Merge commit `a334415` before this status-only handoff.
+- Remote CI: PASS for PR head run `32517704380` and post-merge `main` run `32517919489`.
 - Live Test: not run; no real Provider credential, public model request or Codex login state was read or used.
 
 ## Update Protocol
