@@ -5,31 +5,31 @@
 - Architecture version: `1.1.0`
 - Phase: `IMPLEMENTATION`
 - Implementation: `STARTED`
-- Current milestone: `M1c`
-- Current slice: `M1c-S3`
-- Slice state: `IN_PROGRESS`
-- Lean governance: `ACTIVE`; M1c-S3 is scope-locked to the minimum current-platform PTY Adapter
-- Local Git initialized: `yes`; M1c-S3 is being developed on `agent/m1c-s3-minimal-pty`
-- Remote repository: `F0und-icu/cyber-agent` private; M1c-S2 status PR `#13` was Squash Merged
+- Current milestone: `M2`
+- Current slice: `M2-S1`
+- Slice state: `READY_AUTHORIZED`; implementation starts only after this M1c-S3 status seal is remotely merged
+- Lean governance: `ACTIVE`; M1c-S3 is complete and M2-S1 remains scope-locked to project isolation and the minimum Event Store
+- Local Git initialized: `yes`; M1c-S3 is being sealed on `agent/m1c-s3-merge-status`
+- Remote repository: `F0und-icu/cyber-agent` private; PR `#14` was Squash Merged
 - Documentation baseline commit: `55ff3be`
-- Current code base: `main`/`origin/main` M1c-S2 status-seal commit `ef95268` before this Slice branch
+- Current code base: `main`/`origin/main` M1c-S3 merge commit `4fb42da`
 - Upstream Codex baseline: `3aae5d885bac39c1262491aa3fd100dfd8b3919f`
 
 ## Last Completed Slice
 
-- Slice: `M1c-S2`
-- Delivery branch: `agent/m1c-s2-background-jobs`
-- Base commit: `03efa43`
-- Scope: argv-only non-PTY background Jobs with typed lifecycle state, caller-offset stdout/stderr polling, stdin/close, stop, timeout and stable terminal completion linked to the launch identity.
-- Agent behavior: `start_job` returns one successful launch Receipt and is deduplicated across Turns; `poll_job`, `input_job` and `stop_job` operate on the same process-local Job without creating another AgentLoop or conflicting Receipt identity.
-- Resource behavior: each active Job retains its resolved Resource Key lease until terminal publication; same-Job controls remain serialized while unrelated explicit resources can proceed.
-- Process behavior: timeout/stop/natural completion converge through one supervisor, the direct child is killed when required and reaped before terminal publication, reader drain is bounded when a descendant retains inherited pipes, and UTF-8/binary byte-offset semantics are explicit.
-- Test path: permanent external regressions cover lifecycle races, stable completion linkage, resource leases, input close, incremental offsets, valid partial UTF-8, arbitrary binary bytes, bounded descendant-held pipes and cross-Turn launch dedupe.
-- Forbidden work preserved: no PTY runtime, descendant process-group portability claim, persistence, Artifact/Event store, Vision service, DeepSeek Adapter, CLI profile composition, Live Provider request, Codex credential/login access, Codex source modification or Codex code port.
+- Slice: `M1c-S3`
+- Delivery branch: `agent/m1c-s3-minimal-pty`
+- Base commit: `ef95268`
+- Scope: current-platform interactive PTY Sessions with typed lifecycle state, input, resize, caller-offset poll, stop and stable terminal completion linked to the launch identity.
+- Agent behavior: five fixed Direct PTY Tools extend the existing Registry and one AgentLoop; `start_pty` deduplicates only successful launch, while controls operate on the same process-local Session without another runtime or Receipt identity.
+- Resource behavior: Job and PTY processes share one atomic pre-spawn RAII Resource lease owner, preserve Device/PTY/Output conflicts and release only after stable terminal publication.
+- Process behavior: blocking setup/read/wait/write/resize/kill stay off Tokio workers; direct children are reaped, output is bounded and sealed before terminal publication, and abandoned setup results kill plus wait their child.
+- Test path: permanent external regressions cover interactive echo, resize, UTF-8/binary offsets, stop/natural-completion races, stable completion, terminal output sealing, spawn-before-side-effect cross-process lease conflicts, same-session scheduling keys and exact input schemas.
+- Forbidden work preserved: no Codex PTY runtime, broad compatibility layer, process-group claim, persistence, Artifact/Event store, Vision, Provider/Profile/CLI composition, Live request, Codex credential/login access, Codex source modification or Codex code port.
 - Result: `COMPLETE`; all local and remote Cargo/Lean Gates pass.
-- Dependencies and schemas: no new crate, Port, Event, Project/Research schema or frozen architecture change; the existing Tokio dependency adds only the selected `io-util`, `macros` and `sync` features.
-- Git: PR `#12` was Squash Merged as `f305d68` (`feat(tools): add background jobs`).
-- GitHub Actions: final PR-head run `32572323825` and post-merge `main` run `32572471229` passed on macOS with Rust `1.93.1`; formatting, production test-layout scan, Clippy, 81 tests plus one ignored Live Smoke, and locked build all passed. Earlier PR runs `32567988333` and `32568122905` exposed two invalid timing assumptions in the descendant-pipe Fixture; the test was made observation-driven without changing production behavior.
+- Dependencies and schemas: adds only `portable-pty 0.9.0` with default features disabled and provider-neutral PTY Domain types; no new Port, Event, Project/Research schema or frozen architecture change.
+- Git: PR `#14` was Squash Merged as `4fb42da` (`feat(tools): add minimal PTY sessions`).
+- GitHub Actions: PR-head run `32574343739` and post-merge `main` run `32574436821` passed on macOS with Rust `1.93.1`; formatting, production test-layout scan, Clippy, 88 tests plus one ignored Live Smoke, and locked build all passed.
 - Live Test: `OFF`; the existing synthetic smoke remains ignored and no real credential or public Provider request was used.
 
 ## Current Authority
@@ -60,29 +60,28 @@
 - M1b-S2 Provider-neutral continuation, strict OpenAI Responses delta delivery, atomic Baseline/response identity advancement and bounded typed-rejection Full fallback.
 - M1c-S1 Batch tools, typed Resource Key scheduling, ordered multi-Tool pairing and in-process completed Receipt dedupe with explicit rerun audit.
 - M1c-S2 ordinary background Jobs, lifecycle Resource leases, stable launch/completion linkage and byte-offset output polling.
+- M1c-S3 current-platform PTY Sessions, shared live-process leases, stable terminal output and interactive controls.
 
-## In Progress
+## Next Authorized Slice
 
-- Slice: `M1c-S3`
-- Delivery branch: `agent/m1c-s3-minimal-pty`
-- Base commit: `ef95268`
-- Scope lock: add one current-platform minimum PTY Adapter based on `portable-pty`, with typed Session ID/state and input, resize, caller-offset poll and stop operations.
-- Required behavior: debuggers, Frida and ADB shells can exchange interactive input/output; PTY Resource Keys serialize same-session controls; stop and cancellation reap the direct PTY child and publish one stable terminal state.
-- Intended production touch points: one narrowly configured `portable-pty` dependency, typed PTY lifecycle contracts in Tool Domain, fixed PTY Tools in the existing Registry and one Adapter module split only by real lifecycle/output responsibilities.
-- Intended permanent tests: interactive echo/input, resize, caller-offset output, stop/natural completion race, Resource lease/release, same-session scheduling, direct-child reap and exact model-facing Tool schemas on the current macOS/Unix Gate.
-- Forbidden continuation: Codex PTY runtime port, cross-platform compatibility matrix, project persistence, Artifact/Event stores, Vision, DeepSeek Adapter, CLI profile composition, general Workflow/Hook/Router/Plugin abstractions, Live Provider requests and Codex credential/login access.
+- Slice: `M2-S1`
+- Planned delivery branch: `agent/m2-s1-project-event-store`
+- Base commit: the M1c-S3 status-seal merge commit, to be recorded at Slice start
+- Scope lock: add `.cyber-agent/` project initialization, Session/Research JSONL Writers, one project advisory writer lock, corrupt-tail recovery Artifact, chained Upcaster Registry and export/migrate skeleton.
+- Required behavior: two project roots remain isolated; a second Writer is rejected; a corrupt final record is preserved and recoverable while non-tail corruption fails read-only; historical fixtures traverse every Upcaster version.
+- Forbidden continuation: M2-S2 Research records and TargetSnapshot/Capsule, Blob/Lineage, Memory/Snapshot/Cache, Context Planner, Vision, Provider/Profile/CLI composition, general Workflow/Hook/Router/Plugin abstractions, Live Provider requests and Codex credential/login access.
 
 ## Current Authorization
 
 The current user instruction explicitly authorizes continued implementation with delegated Terra/Luna development and normal version-controlled remote delivery until the first prototype reaches the separately authorized Live Provider validation boundary.
 
 - Run mode: `IMPLEMENT_TO_LIVE_BOUNDARY`
-- Slice ID: `M1c-S3`; state `IN_PROGRESS`
+- Slice ID: `M2-S1`; state `READY_AUTHORIZED` pending the separate status-seal merge
 - Git mode: `BRANCH_PR_REVIEW_MERGE`; commit, push, PR, CI review and merge are authorized when the Slice Gate passes
 - Delegation mode: `AUTHORIZED`; delegated implementation Agents must independently read the repository authority chain and stay inside the current Slice
 - Live test mode: `OFF`; no real Provider credential or public model request is authorized
-- Forbidden continuation inside M1c-S3: Codex PTY runtime, broad cross-platform work, Vision service, DeepSeek Adapter, CLI profile composition, Web, persistence, Artifact/Event stores, general Router/Hook/Plugin work, Codex source modification or Codex credentials/login access
-- Stop condition: complete and remotely seal M1c-S3 before starting M2-S1; do not run a Live Test
+- Forbidden continuation inside M2-S1: M2-S2 Research/Target/Capsule, Blob/Lineage, Memory/Snapshot/Cache, Context Planner, Vision, Provider/Profile/CLI composition, Web, general Router/Hook/Plugin work, Codex source modification or Codex credentials/login access
+- Stop condition: remotely merge this M1c-S3 status seal before starting M2-S1; do not run a Live Test
 
 ## Slice Lean Review
 
@@ -194,7 +193,7 @@ The current user instruction explicitly authorizes continued implementation with
 - No production inline tests, Job cache, persistent Job/Event/Artifact state, Project recovery, PTY session, terminal resize, Web/CLI composition, Provider change or Live request is introduced. The direct child is reaped before terminal Job state is published; descendant process-group management remains outside this ordinary non-PTY Slice. Terminal Job entries currently remain in the process-local table without a retention cap; retention/eviction semantics are explicit P2 governance debt for M2-S1, where persisted lifecycle facts can make eviction auditable, rather than an unsafe cache added before persistence exists.
 - Codex classification is `REIMPLEMENT`: no source was copied and no Port Ledger entry is required. Final Cargo/Lean Gate evidence is recorded only after the full local verification pass.
 
-### M1c-S3 Draft Lean Review
+### M1c-S3 Lean Review
 
 #### Semantic Owners
 
@@ -215,15 +214,15 @@ The current user instruction explicitly authorizes continued implementation with
 #### Test Layout, Removal and Deferred Work
 
 - `tests/pty_sessions.rs` permanently covers interactive echo, real terminal resize, caller byte offsets, partial UTF-8/continuation offsets, arbitrary binary bytes, stop/natural-completion race, direct-child terminal completion, terminal output sealing against attempted descendant late writes, spawn-before-side-effect Job-to-PTY and PTY-to-Job conflict/release, same-session `pty:<session>` scheduling keys, empty IDs and exact model-facing schemas. `tests/tool_loop_integration.rs` now asserts the expanded fixed Tool set and schema count. No production inline tests exist.
-- Draft local Gate: PASS on Rust `1.93.1`; `cargo fmt --all -- --check`, `cargo clippy --locked --all-targets --all-features -- -D warnings`, `cargo test --locked --all-targets --all-features` (88 passed, 0 failed, 1 ignored synthetic Live Smoke) and `cargo build --locked` all exited `0`. The seven PTY regressions also passed 100 consecutive runs after final lifecycle review. M1c-S3 remains `IN_PROGRESS`; no commit, remote action or Live Test was performed.
+- Final local Gate: PASS on Rust `1.93.1`; `cargo fmt --all -- --check`, `cargo clippy --locked --all-targets --all-features -- -D warnings`, `cargo test --locked --all-targets --all-features` (88 passed, 0 failed, 1 ignored synthetic Live Smoke) and `cargo build --locked` all exited `0`. The seven PTY regressions also passed 100 consecutive runs after final lifecycle review.
 - Removed the Job-only lease conflict table and Job-only output owner; all retained Job regressions pass through the shared implementations. No generic manager, Hook, Trait, router, plugin or future configuration was retained.
 - Deferred: PTY persistence/recovery, terminal retention/eviction policy, process-group/descendant management, broad Windows/Linux compatibility claims, terminal emulation/history/search, CLI profiles, Artifacts/Events, Vision, Provider changes and Live validation. Current Unix PTY EOF treats the native master `EIO` close condition as terminal EOF; any broader portability work needs a measured future Slice.
 - Remaining governance debt: terminal Job and PTY entries remain process-local without retention/eviction because no persistent lifecycle fact exists yet; a PTY reader that survives the bounded post-reap drain is sealed, explicitly marked incomplete and detached rather than blocking terminal publication. Rare standard-thread creation failure and already-running `spawn_blocking` control cancellation remain P2 lifecycle debt; neither changes the stable completion or lease rules on the verified path.
 
 ## Blockers
 
-- None for the completed M1c-S2 local and remote delivery Gates or the authorized M1c-S3 start.
-- M1c-S3 remains scope-locked to a current-platform minimum PTY path; broader portability or Codex PTY behavior requires a later measured need.
+- None for the completed M1c-S3 local and remote delivery Gates or the authorized M2-S1 start after this status seal.
+- M2-S1 remains scope-locked to project isolation and the minimum Event Store; Research domain expansion starts only in M2-S2.
 - Live Provider compatibility remains unverified by design; missing live credentials do not block offline development and no Codex credential is an allowed substitute.
 
 ## Last Verification
@@ -231,6 +230,7 @@ The current user instruction explicitly authorizes continued implementation with
 - M1c-S3 local Gate: PASS on Rust `1.93.1`; formatting, Clippy with denied warnings, 88 offline/local-loopback tests plus one ignored synthetic Live Smoke, locked build, inline-test scan, forbidden Codex dependency scan, dependency-tree review, `git diff --check` and `codex/` unchanged check passed. The seven PTY regressions passed 100 consecutive runs.
 - M1c-S3 review: independent Luna xhigh first returned `REQUEST_CHANGES` for post-terminal mutable output, post-spawn lease admission, synchronous PTY setup on Tokio and partial-setup child cleanup. The final diff adds a shared terminal seal, pre-spawn RAII lease, blocking setup isolation and abandoned-child kill-plus-wait; Luna's second review returned `APPROVE` with no unresolved P0/P1.
 - M1c-S3 Live Test: `OFF`; no credential, external model request, Codex login state, `~/.codex` or `CODEX_HOME` was read or modified.
+- M1c-S3 remote Gate: PASS; PR `#14` was Squash Merged as `4fb42da`, PR-head run `32574343739` passed, and post-merge `main` run `32574436821` passed the same Rust Gate.
 
 - M1b-S2 local Gate: PASS on Rust `1.93.1`; `cargo fmt --all -- --check`, `cargo clippy --locked --all-targets --all-features -- -D warnings`, `cargo test --locked --all-targets --all-features` (64 passed, 0 failed, 1 ignored), `cargo build --locked`, inline-test scan, Domain/App/Ports Provider-wire scan and `git diff --check` all exited `0`.
 - M1b-S2 loopback verification: PASS; Full requests retain `store:false`, incremental requests contain only delta input plus the opaque previous response identity, exact HTTP/SSE rejection makes one Full fallback, and fallback does not persist partial stream output or re-execute a completed Tool.
