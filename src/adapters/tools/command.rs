@@ -58,7 +58,7 @@ pub(super) fn resource_schema() -> Value {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[serde(deny_unknown_fields)]
-enum CommandResource {
+pub(super) enum CommandResource {
     Device { serial: String },
     Pty { session: String },
     Output { path: String },
@@ -66,12 +66,12 @@ enum CommandResource {
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct RunCommandArgs {
-    argv: Vec<String>,
+pub(super) struct RunCommandArgs {
+    pub(super) argv: Vec<String>,
     #[serde(default)]
-    cwd: Option<String>,
+    pub(super) cwd: Option<String>,
     #[serde(default)]
-    resources: Vec<CommandResource>,
+    pub(super) resources: Vec<CommandResource>,
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
@@ -169,7 +169,10 @@ pub(super) async fn execute_batch(
     )
 }
 
-fn validate_command(arguments: &RunCommandArgs, tool_name: &str) -> Result<(), ToolExecutorError> {
+pub(super) fn validate_command(
+    arguments: &RunCommandArgs,
+    tool_name: &str,
+) -> Result<(), ToolExecutorError> {
     if arguments.argv.is_empty() || arguments.argv[0].is_empty() {
         return Err(invalid_arguments(
             tool_name,
@@ -224,7 +227,10 @@ fn command_resource_sets(
         .collect()
 }
 
-fn command_resource_keys(project_root: &Path, arguments: &RunCommandArgs) -> Vec<ResourceKey> {
+pub(super) fn command_resource_keys(
+    project_root: &Path,
+    arguments: &RunCommandArgs,
+) -> Vec<ResourceKey> {
     if arguments.resources.is_empty() {
         return vec![ResourceKey::GlobalSerial];
     }

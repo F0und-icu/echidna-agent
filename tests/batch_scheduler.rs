@@ -126,6 +126,7 @@ impl ProbeExecutor {
             .map(ResourceKey::file)
             .or_else(|| resource.strip_prefix("device:").map(ResourceKey::device))
             .or_else(|| resource.strip_prefix("pty:").map(ResourceKey::pty))
+            .or_else(|| resource.strip_prefix("job:").map(ResourceKey::job))
             .or_else(|| resource.strip_prefix("output:").map(ResourceKey::output))
             .ok_or_else(|| ToolExecutorError::InvalidArguments {
                 tool_name: "probe".to_owned(),
@@ -219,6 +220,12 @@ async fn resource_scheduler_parallelizes_distinct_resources_and_serializes_confl
         (
             "pty:shared",
             "pty:shared",
+            ToolParallelism::ResourceLocked,
+            1,
+        ),
+        (
+            "job:shared",
+            "job:shared",
             ToolParallelism::ResourceLocked,
             1,
         ),

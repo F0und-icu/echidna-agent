@@ -2,6 +2,7 @@
 
 mod command;
 mod filesystem;
+mod job;
 mod output;
 mod resources;
 mod search;
@@ -31,11 +32,16 @@ enum BuiltinTool {
     SearchFiles,
     RunCommand,
     RunCommands,
+    StartJob,
+    PollJob,
+    InputJob,
+    StopJob,
 }
 
 pub struct ToolRegistry {
     project_root: PathBuf,
     tools: BTreeMap<ToolName, BuiltinTool>,
+    jobs: job::BackgroundJobs,
 }
 
 impl ToolRegistry {
@@ -47,12 +53,17 @@ impl ToolRegistry {
             (ToolName::new("search_files"), BuiltinTool::SearchFiles),
             (ToolName::new("run_command"), BuiltinTool::RunCommand),
             (ToolName::new("run_commands"), BuiltinTool::RunCommands),
+            (ToolName::new("start_job"), BuiltinTool::StartJob),
+            (ToolName::new("poll_job"), BuiltinTool::PollJob),
+            (ToolName::new("input_job"), BuiltinTool::InputJob),
+            (ToolName::new("stop_job"), BuiltinTool::StopJob),
         ]
         .into_iter()
         .collect();
         Self {
             project_root: project_root.into(),
             tools,
+            jobs: job::BackgroundJobs::new(),
         }
     }
 }
@@ -107,10 +118,22 @@ impl ToolExecutor for ToolRegistry {
                     json!({"error": "execution plan names an unregistered Tool"}),
                 );
             };
+            if !is_job_control(plan.call.name.as_str())
+                && let Some(conflict) = self.jobs.conflicting_job(&plan)
+            {
+                return ToolExecutionOutcome::failed(
+                    plan,
+                    "job_resource_busy",
+                    json!({
+                        "error": "Tool resources conflict with an active background Job",
+                        "conflicting_job_id": conflict,
+                    }),
+                );
+            }
             let timeout_plan = plan.clone();
             match tokio::time::timeout(
                 Duration::from_millis(plan.timeout_ms),
-                tool.execute(&self.project_root, plan),
+                tool.execute(&self.project_root, &self.jobs, plan),
             )
             .await
             {
@@ -119,6 +142,10 @@ impl ToolExecutor for ToolRegistry {
             }
         })
     }
+}
+
+fn is_job_control(tool_name: &str) -> bool {
+    matches!(tool_name, "poll_job" | "input_job" | "stop_job")
 }
 
 impl BuiltinTool {
@@ -134,10 +161,19 @@ impl BuiltinTool {
             Self::SearchFiles => search::normalize(project_root, arguments),
             Self::RunCommand => command::normalize_one(project_root, arguments),
             Self::RunCommands => command::normalize_batch(project_root, arguments),
+            Self::StartJob => job::normalize_start(project_root, arguments),
+            Self::PollJob => job::normalize_poll(arguments),
+            Self::InputJob => job::normalize_input(arguments),
+            Self::StopJob => job::normalize_stop(arguments),
         }
     }
 
-    async fn execute(self, project_root: &Path, plan: ToolExecutionPlan) -> ToolExecutionOutcome {
+    async fn execute(
+        self,
+        project_root: &Path,
+        jobs: &job::BackgroundJobs,
+        plan: ToolExecutionPlan,
+    ) -> ToolExecutionOutcome {
         match self {
             Self::ReadFile => filesystem::execute_read_file(project_root, plan).await,
             Self::ReadFiles => filesystem::execute_read_files(project_root, plan).await,
@@ -145,6 +181,10 @@ impl BuiltinTool {
             Self::SearchFiles => search::execute(project_root, plan).await,
             Self::RunCommand => command::execute_one(project_root, plan).await,
             Self::RunCommands => command::execute_batch(project_root, plan).await,
+            Self::StartJob => job::execute_start(project_root, jobs, plan).await,
+            Self::PollJob => job::execute_poll(jobs, plan).await,
+            Self::InputJob => job::execute_input(jobs, plan).await,
+            Self::StopJob => job::execute_stop(jobs, plan).await,
         }
     }
 
@@ -299,6 +339,89 @@ impl BuiltinTool {
                 ToolRetryPolicy::NeverAutoRetry,
                 ToolDeterminism::Nondeterministic,
                 120_000,
+            ),
+            Self::StartJob => spec(
+                "start_job",
+                "Start one ordinary non-PTY argv process in the background and return its Job ID.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                        "cwd": {"type": "string"},
+                        "resources": {"type": "array", "items": command::resource_schema()},
+                        "timeout_ms": {"type": "integer", "minimum": 1}
+                    },
+                    "required": ["argv"],
+                    "additionalProperties": false
+                }),
+                common_output,
+                ToolParallelism::ResourceLocked,
+                Some("resource:{resources}"),
+                ToolEffect::Interactive,
+                ToolRetryPolicy::DedupeByKey,
+                ToolDeterminism::Nondeterministic,
+                10_000,
+            ),
+            Self::PollJob => spec(
+                "poll_job",
+                "Read only new stdout and stderr bytes after caller-supplied offsets from one non-PTY Job.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "job_id": {"type": "string", "minLength": 1},
+                        "stdout_offset": {"type": "integer", "minimum": 0},
+                        "stderr_offset": {"type": "integer", "minimum": 0}
+                    },
+                    "required": ["job_id"],
+                    "additionalProperties": false
+                }),
+                common_output,
+                ToolParallelism::ResourceLocked,
+                Some("job:{job_id}"),
+                ToolEffect::ReadOnly,
+                ToolRetryPolicy::ReplaySafe,
+                ToolDeterminism::EnvironmentDependent,
+                10_000,
+            ),
+            Self::InputJob => spec(
+                "input_job",
+                "Write input to one running non-PTY Job; set close to close its stdin after writing.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "job_id": {"type": "string", "minLength": 1},
+                        "input": {"type": "string"},
+                        "close": {"type": "boolean"}
+                    },
+                    "required": ["job_id", "input"],
+                    "additionalProperties": false
+                }),
+                common_output,
+                ToolParallelism::ResourceLocked,
+                Some("job:{job_id}"),
+                ToolEffect::Interactive,
+                ToolRetryPolicy::NeverAutoRetry,
+                ToolDeterminism::Nondeterministic,
+                10_000,
+            ),
+            Self::StopJob => spec(
+                "stop_job",
+                "Stop and reap one running non-PTY Job, then return its stable terminal completion Receipt.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "job_id": {"type": "string", "minLength": 1}
+                    },
+                    "required": ["job_id"],
+                    "additionalProperties": false
+                }),
+                common_output,
+                ToolParallelism::ResourceLocked,
+                Some("job:{job_id}"),
+                ToolEffect::Interactive,
+                ToolRetryPolicy::NeverAutoRetry,
+                ToolDeterminism::Nondeterministic,
+                10_000,
             ),
         }
     }

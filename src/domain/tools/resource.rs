@@ -13,6 +13,7 @@ pub enum ResourceKey {
     File(String),
     Device(String),
     Pty(String),
+    Job(String),
     Output(String),
     GlobalSerial,
 }
@@ -28,6 +29,10 @@ impl ResourceKey {
 
     pub fn pty(session: impl Into<String>) -> Self {
         Self::Pty(session.into())
+    }
+
+    pub fn job(id: impl Into<String>) -> Self {
+        Self::Job(id.into())
     }
 
     pub fn output(path: impl Into<String>) -> Self {
@@ -67,7 +72,10 @@ pub(crate) fn scheduling_conflicts(
 
 impl ResourceKey {
     fn is_exclusive_external_resource(&self) -> bool {
-        matches!(self, Self::Device(_) | Self::Pty(_) | Self::Output(_))
+        matches!(
+            self,
+            Self::Device(_) | Self::Pty(_) | Self::Job(_) | Self::Output(_)
+        )
     }
 }
 

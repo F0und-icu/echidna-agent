@@ -90,12 +90,16 @@ async fn builtin_tools_cover_files_search_argv_failures_and_bounded_output() {
             .map(|spec| spec.name.as_str())
             .collect::<Vec<_>>(),
         vec![
+            "input_job",
             "list_files",
+            "poll_job",
             "read_file",
             "read_files",
             "run_command",
             "run_commands",
             "search_files",
+            "start_job",
+            "stop_job",
         ]
     );
     let run_spec = specs
@@ -653,7 +657,7 @@ async fn agent_loop_keeps_full_resampling_after_local_baseline_comparison() {
 
     let inputs = provider.inputs();
     assert_eq!(inputs.len(), 2);
-    assert_eq!(inputs[0].tool_specs.len(), 6);
+    assert_eq!(inputs[0].tool_specs.len(), 10);
     assert_eq!(inputs[0].content_items.len(), 1);
     assert_eq!(
         inputs[1].content_items[1],
@@ -673,6 +677,70 @@ async fn agent_loop_keeps_full_resampling_after_local_baseline_comparison() {
             if result.status == ToolResultStatus::Succeeded
                 && result.output["matches"].as_str().unwrap().contains("path traversal")
     ));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn completed_start_job_receipt_prevents_a_duplicate_background_launch_across_turns() {
+    let project = TestProject::new("start-job-dedupe");
+    let launch_log = project.root.join("launches.txt");
+    let start_arguments = json!({
+        "argv": [
+            "sh",
+            "-c",
+            "printf x >> \"$1\"",
+            "cyber-agent-job-dedupe",
+            launch_log.display().to_string(),
+        ]
+    });
+    let provider = ScriptedProvider::new([
+        vec![ModelEvent::ToolCall {
+            call: tool_call("start-first", "start_job", start_arguments.clone()),
+        }],
+        vec![ModelEvent::TextDelta {
+            text: "first start recorded".to_owned(),
+        }],
+        vec![ModelEvent::ToolCall {
+            call: tool_call("start-duplicate", "start_job", start_arguments),
+        }],
+        vec![ModelEvent::TextDelta {
+            text: "duplicate start was not relaunched".to_owned(),
+        }],
+    ]);
+    let tools = ToolRegistry::for_project(&project.root);
+    let mut agent = AgentLoop::new(&provider, &tools, "fixture");
+
+    let first = agent
+        .run_turn("start a background job", AgentCancellation::new())
+        .await
+        .unwrap();
+    let duplicate = agent
+        .run_turn("repeat the same background job", AgentCancellation::new())
+        .await
+        .unwrap();
+
+    let AgentTurnOutcome::Completed {
+        executions: first_executions,
+        ..
+    } = first
+    else {
+        panic!("the first Job start should complete")
+    };
+    let AgentTurnOutcome::Completed {
+        executions: duplicate_executions,
+        ..
+    } = duplicate
+    else {
+        panic!("the duplicate Job start should complete")
+    };
+    assert_eq!(first_executions.len(), 1);
+    assert_eq!(duplicate_executions.len(), 1);
+    assert_eq!(
+        duplicate_executions[0].receipt.execution_id,
+        first_executions[0].receipt.execution_id
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    assert_eq!(fs::read_to_string(launch_log).unwrap(), "x");
 }
 
 #[tokio::test]

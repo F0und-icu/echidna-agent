@@ -42,6 +42,7 @@ string_id!(ToolCallId);
 string_id!(ExecutionId);
 string_id!(IdempotencyKey);
 string_id!(RerunReason);
+string_id!(JobId);
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -313,6 +314,23 @@ pub enum ToolResultStatus {
     Cancelled,
 }
 
+/// Stable lifecycle states for an in-process ordinary background Job.
+///
+/// Job state is deliberately provider- and process-implementation-neutral.
+/// The process adapter owns the live child and output buffers; a later
+/// persistence slice can record this contract without importing process I/O
+/// into the Domain.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobStatus {
+    Running,
+    Stopping,
+    Completed,
+    Failed,
+    Cancelled,
+    TimedOut,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ToolResult {
     pub call_id: ToolCallId,
@@ -342,6 +360,22 @@ pub struct ExecutionReceipt {
     pub environment_change: Option<String>,
     #[serde(default)]
     pub rerun_reason: Option<RerunReason>,
+}
+
+/// The terminal state of the process launched by a background Job.
+///
+/// Completion is deliberately not a second `ExecutionReceipt`: the start
+/// Tool owns that receipt and its successful launch status, while this value
+/// records the terminal observation and links it back to the start execution
+/// and plan fingerprint.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct JobCompletion {
+    pub job_id: JobId,
+    pub status: JobStatus,
+    pub exit_code: Option<i32>,
+    pub start_execution_id: ExecutionId,
+    pub start_plan_fingerprint: String,
+    pub exit_reason: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

@@ -7,12 +7,12 @@
 - Implementation: `STARTED`
 - Current milestone: `M1c`
 - Current slice: `M1c-S2`
-- Slice state: `READY_AUTHORIZED`; implementation starts only after this M1c-S1 status seal is remotely merged
-- Lean governance: `ACTIVE`; M1c-S1 is complete and M1c-S2 remains scope-locked to ordinary background Jobs
-- Local Git initialized: `yes`; M1c-S1 is being sealed on `agent/m1c-s1-merge-status`
-- Remote repository: `F0und-icu/cyber-agent` private; PR `#10` was Squash Merged
+- Slice state: `IN_PROGRESS`
+- Lean governance: `ACTIVE`; M1c-S2 is scope-locked to ordinary background Jobs
+- Local Git initialized: `yes`; M1c-S2 is being developed on `agent/m1c-s2-background-jobs`
+- Remote repository: `F0und-icu/cyber-agent` private; M1c-S1 status PR `#11` was Squash Merged
 - Documentation baseline commit: `55ff3be`
-- Current code base: `main`/`origin/main` M1c-S1 merge commit `59fc30f`
+- Current code base: `main`/`origin/main` M1c-S1 status-seal commit `03efa43` before this Slice branch
 - Upstream Codex baseline: `3aae5d885bac39c1262491aa3fd100dfd8b3919f`
 
 ## Last Completed Slice
@@ -60,11 +60,11 @@
 - M1b-S2 Provider-neutral continuation, strict OpenAI Responses delta delivery, atomic Baseline/response identity advancement and bounded typed-rejection Full fallback.
 - M1c-S1 Batch tools, typed Resource Key scheduling, ordered multi-Tool pairing and in-process completed Receipt dedupe with explicit rerun audit.
 
-## Next Authorized Slice
+## In Progress
 
 - Slice: `M1c-S2`
-- Planned delivery branch: `agent/m1c-s2-background-jobs`
-- Base commit: the M1c-S1 status-seal merge commit, to be recorded at Slice start
+- Delivery branch: `agent/m1c-s2-background-jobs`
+- Base commit: `03efa43`
 - Scope lock: add ordinary non-PTY background process Jobs with typed Job ID/status, bounded stdout/stderr offset polling, input/stop operations, timeout/cancellation and completed Receipt integration.
 - Required behavior: polling returns only bytes after the caller's offset, process completion is stable, stop/cancel leaves no orphaned process or corrupt Job state, and completed dedupe does not relaunch the same execution.
 - Forbidden continuation: M1c-S3 PTY sessions, project persistence, Artifact/Event stores, Vision, DeepSeek Adapter, CLI profile composition, general Workflow/Hook/Router/Plugin abstractions, Live Provider requests and Codex credential/login access.
@@ -74,12 +74,12 @@
 The current user instruction explicitly authorizes continued implementation with delegated Terra/Luna development and normal version-controlled remote delivery until the first prototype reaches the separately authorized Live Provider validation boundary.
 
 - Run mode: `IMPLEMENT_TO_LIVE_BOUNDARY`
-- Slice ID: `M1c-S2`; state `READY_AUTHORIZED` pending the separate status-seal merge
+- Slice ID: `M1c-S2`; state `IN_PROGRESS`
 - Git mode: `BRANCH_PR_REVIEW_MERGE`; commit, push, PR, CI review and merge are authorized when the Slice Gate passes
 - Delegation mode: `AUTHORIZED`; delegated implementation Agents must independently read the repository authority chain and stay inside the current Slice
 - Live test mode: `OFF`; no real Provider credential or public model request is authorized
 - Forbidden continuation inside M1c-S2: PTY sessions, Vision service, DeepSeek Adapter, CLI profile composition, Web, persistence, Artifact/Event stores, general Router/Hook/Plugin work, Codex source modification or Codex credentials/login access
-- Stop condition: remotely merge this M1c-S1 status seal before starting M1c-S2; do not run a Live Test
+- Stop condition: complete and remotely seal M1c-S2 before starting M1c-S3; do not run a Live Test
 
 ## Slice Lean Review
 
@@ -168,10 +168,33 @@ The current user instruction explicitly authorizes continued implementation with
 - Split the former mixed `process.rs` by distinct change reason into `command.rs` and `search.rs`; removed its duplicate responsibility. The command batch uses the Domain predicate rather than a second conflict implementation. Final review also preserved the pre-existing exact bounded-text behavior of un-ranged `read_file`, including trailing newlines, while range selection stays limited to `read_files`. No unused generic scheduler, schema-builder, cache or future feature was retained.
 - Deferred exactly as scoped: persistent ExecutionReceipts/Events, Tool cache, background Jobs, PTY sessions, Artifact storage, Project/Research updates, Vision/DeepSeek Adapter, CLI profile composition and real Provider validation. `parallel_tool_calls` remains unchanged in the OpenAI wire Adapter; AgentLoop support for multiple calls is local and protocol-neutral.
 
+### M1c-S2 Draft Lean Review (local Gate passed; remote seal pending)
+
+#### Semantic Owners
+
+- `src/domain/tools.rs` owns the provider-neutral `JobId`, lifecycle `JobStatus` and terminal `JobCompletion` contract. Completion is a terminal observation explicitly linked to the original start execution and plan fingerprint; it is deliberately not a second, conflicting `ExecutionReceipt`.
+- `src/domain/tools/resource.rs` extends the existing sole Resource conflict predicate with exclusive `Job` keys. The App scheduler serializes same-Job calls, while the process-local Job table reuses that same predicate to retain a running Job's resolved resource lease until terminal publication.
+- `src/adapters/tools/job/` is the only in-process ordinary-Job owner: `launch.rs` owns argv spawn, `control.rs` owns poll/input/stop contracts, `output.rs` owns bounded caller-offset views and UTF-8-safe resume boundaries, and `supervisor.rs` owns timeout/stop race resolution, direct-child reaping and terminal-state publication. `JobEntry` owns the named Running-to-Stopping and terminal transitions; its table is intentionally process-local and has no persistence or recovery claim.
+- `src/adapters/tools/command.rs` remains the sole argv validation and command Resource resolution owner. The Job adapter reuses its typed arguments and validation instead of creating a second shell/Resource parser.
+- `src/adapters/tools/mod.rs` only exposes four fixed Direct Tools: `start_job`, `poll_job`, `input_job` and `stop_job`. It does not add a Hook, Job Manager Port, polling cursor or general background-runtime abstraction.
+
+#### Reuse, API and Dependencies
+
+- `start_job` is explicitly `dedupe_by_key`; its immediate Receipt records only successful launch and prevents duplicate launch in the current AgentLoop. `poll_job` and `stop_job` return the stable terminal completion linked to that start identity. `input_job` and `stop_job` remain `never_auto_retry`.
+- Reused existing `ToolExecutionPlan`, Receipt, output policy, Resource scheduler, FullAccess argv execution and Tokio process stack. The existing Tokio dependency's selected features extend only with `io-util`, `sync` and `macros` for piped I/O, one-shot stop signalling, watch-based terminal notification and the small supervisor; no crate, project-level Cargo feature, Provider dependency, Port or Codex code was added.
+- The output buffer retains only the first bounded bytes of each stream and reports `truncated`; poll offsets are explicit byte offsets supplied by the caller, never a hidden global cursor. For whole valid UTF-8 or a valid prefix with only an incomplete tail, a trailing code point is withheld and continuation-byte offsets are rejected; arbitrary invalid bytes permit every byte offset and remain explicitly lossy only at the display boundary.
+- The small new public Domain types have concrete consumers in the Tool Adapter and external regressions. Existing `RunCommandArgs`/Resource validation visibility is `pub(super)` only, not public API expansion.
+
+#### Test Layout, Removal and Deferred Work
+
+- Permanent external regressions cover argv-only planning, empty Job IDs, input close, stdout/stderr incremental offset reads, valid UTF-8 partial/continuation boundaries, arbitrary-binary offsets, repeated poll stability, out-of-range offsets, timeout, stop, natural-completion/stop race, descendant-held pipes, stable start-completion linkage, active resource leases and their terminal release, same-Job scheduling and cross-Turn start dedupe.
+- No production inline tests, Job cache, persistent Job/Event/Artifact state, Project recovery, PTY session, terminal resize, Web/CLI composition, Provider change or Live request is introduced. The direct child is reaped before terminal Job state is published; descendant process-group management remains outside this ordinary non-PTY Slice. Terminal Job entries currently remain in the process-local table without a retention cap; retention/eviction semantics are explicit P2 governance debt for M2-S1, where persisted lifecycle facts can make eviction auditable, rather than an unsafe cache added before persistence exists.
+- Codex classification is `REIMPLEMENT`: no source was copied and no Port Ledger entry is required. Final Cargo/Lean Gate evidence is recorded only after the full local verification pass.
+
 ## Blockers
 
-- None for the completed M1c-S1 local and remote delivery Gates.
-- M1c-S2 can start after this status-only seal is remotely merged under the current user authorization.
+- None for the M1c-S2 local Gate.
+- M1c-S2 remains `IN_PROGRESS` until its authorized commit, PR/CI review and remote seal finish; M1c-S3 must not start before then.
 - Live Provider compatibility remains unverified by design; missing live credentials do not block offline development and no Codex credential is an allowed substitute.
 
 ## Last Verification
@@ -183,6 +206,9 @@ The current user instruction explicitly authorizes continued implementation with
 - M1c-S1 local Gate: PASS on Rust `1.93.1`; `cargo fmt --all -- --check`, `cargo clippy --locked --all-targets --all-features -- -D warnings`, `cargo test --locked --all-targets --all-features` (73 passed, 0 failed, 1 ignored synthetic Live Smoke) and `cargo build --locked` all exited `0`. Inline-test, forbidden Codex dependency, dedicated-credential, Provider-wire boundary, `git diff --check` and `codex/`-unchanged scans also passed.
 - M1c-S1 Live Test: OFF; no credential, external model request, Codex login state, `~/.codex` or `CODEX_HOME` was read or modified.
 - M1c-S1 remote Gate: PASS; PR `#10` head run `32564693085` and post-merge `main` run `32564797656` passed, and independent Luna xhigh review returned APPROVE with no P0/P1 issue before the final Domain exclusivity fix and full Gate rerun.
+- M1c-S2 local Gate: PASS on Rust `1.93.1`; `cargo fmt --all -- --check`, `cargo clippy --locked --all-targets --all-features -- -D warnings`, `cargo test --locked --all-targets --all-features` (81 passed, 0 failed, 1 ignored synthetic Live Smoke) and `cargo build --locked` all exited `0`. The seven Job regressions passed 20 consecutive runs after the binary-offset fix; after remote feedback replaced a fixed sleep with an observed descendant-start marker, that pipe-drain race regression passed another 100 consecutive local runs. Inline-test, forbidden Codex dependency, dedicated-credential, Provider-wire boundary, dependency-tree, `git diff --check` and `codex/`-unchanged scans passed.
+- M1c-S2 review: independent Luna xhigh returned `APPROVE_WITH_FIX`; its binary-offset P1 was fixed with a permanent regression, the documentation wording was corrected and the full local Gate was rerun successfully. No unresolved P0/P1 issue remains; unbounded process-local terminal retention and transient resource-busy dedupe remain explicit P2 debt.
+- M1c-S2 Live Test: OFF; no credential, external model request, Codex login state, `~/.codex` or `CODEX_HOME` was read or modified.
 
 ### Retained M1b-S1 verification evidence
 
