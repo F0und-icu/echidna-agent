@@ -247,7 +247,7 @@ fn reduce_project_research(
     reducer.reduce(events).map_err(|error| error.to_string())
 }
 
-fn reduce_store(
+pub(super) fn reduce_store(
     store: &crate::adapters::project_event_store::JsonlEventStore<'_>,
     reducer: &ResearchReducer,
 ) -> Result<ResearchState, String> {

@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+use crate::domain::artifacts::{ArtifactEvent, ArtifactEventError, ArtifactState};
 use crate::domain::canonical_json::canonical_json;
 use crate::domain::events::{EventEnvelope, EventId, OccurredAt};
 
@@ -49,6 +50,8 @@ pub enum ResearchError {
     EventIdConflict { event_id: String },
     #[error("failed to encode a deterministic Research fingerprint: {message}")]
     Fingerprint { message: String },
+    #[error(transparent)]
+    Artifact(#[from] ArtifactEventError),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -63,6 +66,8 @@ pub enum ResearchEventType {
     NextActionRecorded,
     NextActionUpdated,
     RecordsMerged,
+    ArtifactCreated,
+    ArtifactDerived,
 }
 
 impl ResearchEventType {
@@ -78,6 +83,8 @@ impl ResearchEventType {
             Self::NextActionRecorded => "research.next_action_recorded",
             Self::NextActionUpdated => "research.next_action_updated",
             Self::RecordsMerged => "research.records_merged",
+            Self::ArtifactCreated => "artifact.created",
+            Self::ArtifactDerived => "artifact.derived",
         }
     }
 
@@ -93,6 +100,8 @@ impl ResearchEventType {
             "research.next_action_recorded" => Ok(Self::NextActionRecorded),
             "research.next_action_updated" => Ok(Self::NextActionUpdated),
             "research.records_merged" => Ok(Self::RecordsMerged),
+            "artifact.created" => Ok(Self::ArtifactCreated),
+            "artifact.derived" => Ok(Self::ArtifactDerived),
             _ => Err(ResearchError::UnknownEventType {
                 event_type: value.to_owned(),
             }),
@@ -126,6 +135,7 @@ pub enum ResearchEvent {
         into: MergeRecordRef,
         reason: String,
     },
+    Artifact(ArtifactEvent),
 }
 
 impl ResearchEvent {
@@ -141,10 +151,23 @@ impl ResearchEvent {
             Self::NextActionRecorded(_) => ResearchEventType::NextActionRecorded,
             Self::NextActionUpdated(_) => ResearchEventType::NextActionUpdated,
             Self::RecordsMerged { .. } => ResearchEventType::RecordsMerged,
+            Self::Artifact(event) => match event {
+                ArtifactEvent::Created(_) => ResearchEventType::ArtifactCreated,
+                ArtifactEvent::Derived(_) => ResearchEventType::ArtifactDerived,
+            },
         }
     }
 
     pub fn encode_payload(&self) -> Result<Value, ResearchError> {
+        if let Self::Artifact(event) = self {
+            return serde_json::to_value(VersionedPayload {
+                research_schema_version: RESEARCH_SCHEMA_VERSION,
+                data: event.encode_payload()?,
+            })
+            .map_err(|error| ResearchError::MalformedPayload {
+                message: error.to_string(),
+            });
+        }
         let data = match self {
             Self::TargetSnapshotRecorded(record) => serde_json::to_value(record),
             Self::HypothesisRecorded {
@@ -182,6 +205,7 @@ impl ResearchEvent {
                     reason: reason.clone(),
                 })
             }
+            Self::Artifact(_) => unreachable!("Artifact Events return before Research encoding"),
         }
         .map_err(|error| ResearchError::MalformedPayload {
             message: error.to_string(),
@@ -259,6 +283,10 @@ impl ResearchEvent {
                     }
                 })
             }
+            ResearchEventType::ArtifactCreated | ResearchEventType::ArtifactDerived => {
+                Ok(ArtifactEvent::decode(event_type.as_str(), versioned.data)
+                    .map(Self::Artifact)?)
+            }
         }
     }
 
@@ -297,6 +325,7 @@ impl ResearchEvent {
                 }
                 Ok(())
             }
+            Self::Artifact(event) => event.validate().map_err(ResearchError::from),
         }
     }
 }
@@ -311,6 +340,7 @@ pub struct ResearchState {
     capsules: BTreeMap<super::records::CapsuleId, ExperimentCapsuleRecord>,
     findings: BTreeMap<FindingId, FindingRecord>,
     next_actions: BTreeMap<NextActionId, NextActionRecord>,
+    artifacts: ArtifactState,
 }
 
 impl ResearchState {
@@ -450,6 +480,7 @@ impl ResearchReducer {
         }
         let event = ResearchEvent::decode(envelope.event_type.as_str(), envelope.payload)?;
         event.validate_intrinsic()?;
+        validate_created_by_event_id(&event, &envelope.event_id)?;
         let payload = event.encode_payload()?;
         let digest = semantic_event_digest(
             &envelope.occurred_at,
@@ -533,6 +564,10 @@ impl ResearchReducer {
                 validate_records_merged(state, &from, &into)?;
                 state.apply_merge(&from, &into);
             }
+            ResearchEvent::Artifact(event) => {
+                validate_artifact_event(state, &event)?;
+                state.artifacts.insert(event.record().clone());
+            }
         }
         Ok(())
     }
@@ -583,8 +618,47 @@ impl ResearchReducer {
                 into,
                 reason: _,
             } => validate_records_merged(state, from, into),
+            ResearchEvent::Artifact(event) => validate_artifact_event(state, event),
         }
     }
+}
+
+fn validate_created_by_event_id(
+    event: &ResearchEvent,
+    envelope_event_id: &EventId,
+) -> Result<(), ResearchError> {
+    let ResearchEvent::Artifact(event) = event else {
+        return Ok(());
+    };
+    if event.record().created_by_event_id == *envelope_event_id {
+        Ok(())
+    } else {
+        Err(ResearchError::InvalidRecord {
+            message: format!(
+                "Artifact created_by_event_id `{}` does not match Event ID `{envelope_event_id}`",
+                event.record().created_by_event_id
+            ),
+        })
+    }
+}
+
+fn validate_artifact_event(
+    state: &ResearchState,
+    event: &ArtifactEvent,
+) -> Result<(), ResearchError> {
+    event.validate()?;
+    let record = event.record();
+    state
+        .artifacts
+        .validate_record(record)
+        .map_err(|error| ResearchError::InvalidRecord {
+            message: error.to_string(),
+        })?;
+    ensure_reference(
+        state.target_snapshot(&record.target_snapshot_id).is_some(),
+        record.target_snapshot_id.as_str(),
+    )?;
+    Ok(())
 }
 
 fn validate_target_snapshot_recorded(

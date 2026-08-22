@@ -10,6 +10,7 @@ use cyber_agent::adapters::project_event_store::Project;
 use cyber_agent::adapters::tools::ToolRegistry;
 use cyber_agent::app::agent_loop::{AgentLoop, AgentLoopError, AgentTurnOutcome};
 use cyber_agent::app::cancellation::AgentCancellation;
+use cyber_agent::domain::artifacts::ArtifactId;
 use cyber_agent::domain::context::{
     BaselineAssessment, BaselineInvalidationReason, ModelIdentity, ModelProfile, ProviderSession,
     ProviderSessionId, ProviderSessionRole,
@@ -91,6 +92,7 @@ async fn builtin_tools_cover_files_search_argv_failures_and_bounded_output() {
             .map(|spec| spec.name.as_str())
             .collect::<Vec<_>>(),
         vec![
+            "artifact_store",
             "input_job",
             "input_pty",
             "list_files",
@@ -665,7 +667,7 @@ async fn agent_loop_keeps_full_resampling_after_local_baseline_comparison() {
 
     let inputs = provider.inputs();
     assert_eq!(inputs.len(), 2);
-    assert_eq!(inputs[0].tool_specs.len(), 17);
+    assert_eq!(inputs[0].tool_specs.len(), 18);
     assert_eq!(inputs[0].content_items.len(), 1);
     assert_eq!(
         inputs[1].content_items[1],
@@ -741,6 +743,87 @@ async fn agent_loop_executes_research_update_through_the_fixed_registry() {
     let persisted = fs::read_to_string(project.root.join(".cyber-agent/research.jsonl")).unwrap();
     assert!(persisted.contains("research.target_snapshot_recorded"));
     assert!(persisted.contains("snapshot-agent-loop"));
+    assert_eq!(agent.history().ensure_all_tool_calls_paired(), Ok(()));
+}
+
+#[tokio::test]
+async fn agent_loop_executes_artifact_store_through_the_fixed_registry() {
+    let project = TestProject::new("agent-loop-artifact-store");
+    Project::initialize(&project.root).unwrap();
+    project.write("fixture.bin", b"fixture Artifact bytes");
+    let tools = ToolRegistry::for_project(&project.root);
+    let snapshot = tools
+        .execute(plan(
+            &tools,
+            "artifact-snapshot",
+            "research_update",
+            json!({
+                "event_id": "event-agent-loop-artifact-snapshot",
+                "occurred_at": "2026-08-23T12:00:00Z",
+                "operation": {
+                    "kind": "record_target_snapshot",
+                    "record": {
+                        "id": "snapshot-agent-loop-artifact",
+                        "target_id": "fixture.target",
+                        "kind": "source",
+                        "locator": "fixture/src",
+                        "version": "1.0.0",
+                        "build_id": "fixture-build",
+                        "target_artifact_ids": ["artifact-agent-loop"],
+                        "environment_fingerprint": "fixture-environment",
+                        "device_fingerprint": "unknown",
+                        "captured_at": "2026-08-23T11:59:00Z"
+                    }
+                }
+            }),
+        ))
+        .await;
+    assert_eq!(snapshot.result.status, ToolResultStatus::Succeeded);
+
+    let requested_call = tool_call(
+        "call-artifact-store",
+        "artifact_store",
+        json!({
+            "event_id": "event-agent-loop-artifact",
+            "occurred_at": "2026-08-23T12:01:00Z",
+            "artifact_id": "artifact-agent-loop",
+            "source_path": project.root.join("fixture.bin").display().to_string(),
+            "media_type": "application/octet-stream",
+            "target_snapshot_id": "snapshot-agent-loop-artifact",
+            "toolchain_fingerprint": "fixture-toolchain-v1"
+        }),
+    );
+    let provider = ScriptedProvider::new([
+        vec![ModelEvent::ToolCall {
+            call: requested_call.clone(),
+        }],
+        vec![ModelEvent::TextDelta {
+            text: "Artifact was stored.".to_owned(),
+        }],
+    ]);
+    let mut agent = AgentLoop::new(&provider, &tools, "fixture");
+
+    let outcome = agent
+        .run_turn("Store the fixture Artifact.", AgentCancellation::new())
+        .await
+        .unwrap();
+
+    let AgentTurnOutcome::Completed { executions, .. } = outcome else {
+        panic!("the fixture turn should complete")
+    };
+    assert_eq!(executions.len(), 1);
+    assert_eq!(executions[0].result.status, ToolResultStatus::Succeeded);
+    assert_eq!(
+        executions[0].receipt.output_artifact_ids,
+        vec![ArtifactId::new("artifact-agent-loop")]
+    );
+    assert_eq!(
+        executions[0].result.output["event_type"],
+        "artifact.created"
+    );
+    let persisted = fs::read_to_string(project.root.join(".cyber-agent/research.jsonl")).unwrap();
+    assert!(persisted.contains("artifact.created"));
+    assert!(persisted.contains("artifact-agent-loop"));
     assert_eq!(agent.history().ensure_all_tool_calls_paired(), Ok(()));
 }
 

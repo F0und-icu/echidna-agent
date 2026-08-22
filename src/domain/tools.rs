@@ -419,6 +419,18 @@ impl ToolExecutionOutcome {
         Self::from_plan(plan, ToolResultStatus::Succeeded, None, output)
     }
 
+    /// Records durable Artifact outputs on the authoritative execution
+    /// Receipt while preserving the ordinary paired Tool Result.
+    pub(crate) fn succeeded_with_artifacts(
+        plan: ToolExecutionPlan,
+        output: Value,
+        output_artifact_ids: Vec<ArtifactId>,
+    ) -> Self {
+        let mut outcome = Self::succeeded(plan, output);
+        outcome.receipt.output_artifact_ids = output_artifact_ids;
+        outcome
+    }
+
     pub fn failed(plan: ToolExecutionPlan, reason: impl Into<String>, output: Value) -> Self {
         Self::from_plan(plan, ToolResultStatus::Failed, Some(reason.into()), output)
     }

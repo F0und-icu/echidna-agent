@@ -1,6 +1,7 @@
 //! Minimal FullAccess Tool Registry for the M1a single-Agent loop.
 
 mod active;
+mod artifact;
 mod command;
 mod filesystem;
 mod job;
@@ -46,6 +47,7 @@ enum BuiltinTool {
     InputPty,
     ResizePty,
     StopPty,
+    ArtifactStore,
     ResearchGet,
     ResearchUpdate,
 }
@@ -76,6 +78,7 @@ impl ToolRegistry {
             (ToolName::new("input_pty"), BuiltinTool::InputPty),
             (ToolName::new("resize_pty"), BuiltinTool::ResizePty),
             (ToolName::new("stop_pty"), BuiltinTool::StopPty),
+            (ToolName::new("artifact_store"), BuiltinTool::ArtifactStore),
             (ToolName::new("research_get"), BuiltinTool::ResearchGet),
             (
                 ToolName::new("research_update"),
@@ -230,6 +233,7 @@ impl BuiltinTool {
             Self::InputPty => pty::normalize_input(arguments),
             Self::ResizePty => pty::normalize_resize(arguments),
             Self::StopPty => pty::normalize_stop(arguments),
+            Self::ArtifactStore => artifact::normalize(project_root, arguments),
             Self::ResearchGet => research::normalize_get(project_root, arguments),
             Self::ResearchUpdate => research::normalize_update(project_root, arguments),
         }
@@ -259,6 +263,7 @@ impl BuiltinTool {
             Self::InputPty => pty::execute_input(ptys, plan).await,
             Self::ResizePty => pty::execute_resize(ptys, plan).await,
             Self::StopPty => pty::execute_stop(ptys, plan).await,
+            Self::ArtifactStore => artifact::execute(project_root, plan).await,
             Self::ResearchGet => research::execute_get(project_root, plan).await,
             Self::ResearchUpdate => research::execute_update(project_root, plan).await,
         }
@@ -601,6 +606,18 @@ impl BuiltinTool {
                 ToolRetryPolicy::NeverAutoRetry,
                 ToolDeterminism::Nondeterministic,
                 10_000,
+            ),
+            Self::ArtifactStore => spec(
+                "artifact_store",
+                "Store one local regular file as a SHA-256 Blob and append a provenance-preserving Artifact fact.",
+                artifact::input_schema(),
+                artifact::output_schema(),
+                ToolParallelism::ResourceLocked,
+                Some("file:{source_path},file:.cyber-agent/research.jsonl"),
+                ToolEffect::LocalMutation,
+                ToolRetryPolicy::NeverAutoRetry,
+                ToolDeterminism::EnvironmentDependent,
+                120_000,
             ),
             Self::ResearchGet => spec(
                 "research_get",

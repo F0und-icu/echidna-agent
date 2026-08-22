@@ -7,12 +7,12 @@
 - Implementation: `STARTED`
 - Current milestone: `M2`
 - Current slice: `M2-S3`
-- Slice state: `READY_AUTHORIZED`; implementation starts only after this M2-S2 status seal is remotely merged
+- Slice state: `IN_PROGRESS`; started on `agent/m2-s3-artifact-lineage` from M2-S2 status-seal base `6705acd`
 - Lean governance: `ACTIVE`; M2-S2 is complete and M2-S3 remains scope-locked to Blob storage, Artifact facts and Lineage
-- Local Git initialized: `yes`; M2-S2 is being sealed on `agent/m2-s2-merge-status`
-- Remote repository: `F0und-icu/cyber-agent` private; M2-S2 implementation PR `#18` was Squash Merged
+- Local Git initialized: `yes`; M2-S3 implementation is in progress on `agent/m2-s3-artifact-lineage`
+- Remote repository: `F0und-icu/cyber-agent` private; M2-S2 status PR `#19` was Squash Merged
 - Documentation baseline commit: `55ff3be`
-- Current code base: `main`/`origin/main` M2-S2 merge commit `ba8d880`
+- Current code base: M2-S2 status seal `6705acd`; M2-S3 branch `agent/m2-s3-artifact-lineage`
 - Upstream Codex baseline: `3aae5d885bac39c1262491aa3fd100dfd8b3919f`
 
 ## Last Completed Slice
@@ -42,6 +42,7 @@
 7. `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1.md`
 8. `docs/adr/ADR-0002-capability-driven-primary-vision-models.md`
 9. `docs/adr/ADR-0003-minimal-openai-http-sse-stack.md`
+10. `docs/adr/ADR-0004-sha256-artifact-blob-identity.md`
 
 ## Completed
 
@@ -67,7 +68,7 @@
 
 - Slice: `M2-S3`
 - Planned delivery branch: `agent/m2-s3-artifact-lineage`
-- Base commit: the M2-S2 status-seal merge commit, to be recorded at Slice start
+- Base commit: `6705acd` (M2-S2 status-seal merge)
 - Scope lock: add the minimum SHA-256 Blob Store, versioned Artifact facts, provenance-preserving ArtifactRecord/Lineage projection and one fixed `artifact_store` tool.
 - Required behavior: identical bytes deduplicate only Blob content; distinct research origins retain distinct Artifact IDs and provenance; parent/transform/producer/TargetSnapshot links remain auditable; deleting derived Cache cannot break Artifact or Research references.
 - Intended production touch points: pure Artifact Domain contracts/reducer, an ArtifactStore Port, a local content-addressed filesystem Adapter, versioned Research/Session Artifact events only where required, and one fixed Tool adapter.
@@ -79,12 +80,19 @@
 The current user instruction explicitly authorizes continued implementation with delegated Terra/Luna development and normal version-controlled remote delivery until the first prototype reaches the separately authorized Live Provider validation boundary.
 
 - Run mode: `IMPLEMENT_TO_LIVE_BOUNDARY`
-- Slice ID: `M2-S3`; state `READY_AUTHORIZED` pending the separate M2-S2 status-seal merge
+- Slice ID: `M2-S3`; state `IN_PROGRESS` on `agent/m2-s3-artifact-lineage` from `6705acd`
 - Git mode: `BRANCH_PR_REVIEW_MERGE`; commit, push, PR, CI review and merge are authorized when the Slice Gate passes
 - Delegation mode: `AUTHORIZED`; delegated implementation Agents must independently read the repository authority chain and stay inside the current Slice
 - Live test mode: `OFF`; no real Provider credential or public model request is authorized
 - Forbidden continuation inside M2-S3: Memory/Project Snapshot/Cache, file writes/Tool Cache, Context Planner, Vision, Provider/Profile/Web composition, destructive Blob GC, general graph/router/hook/plugin work, Codex source modification or Codex credentials/login access
-- Stop condition: remotely merge this M2-S2 status seal before starting M2-S3; do not run a Live Test
+- Stop condition: remotely seal M2-S3 before starting M2-S4; do not run a Live Test
+
+### M2-S3 Start Record
+
+- Branch/base: `agent/m2-s3-artifact-lineage` from `6705acd`.
+- Intended production touch points: pure Artifact facts/reducer, a narrow Artifact Store Port, local SHA-256 Blob adapter, existing Project/Event access points and the fixed `artifact_store` Tool wiring.
+- Intended permanent regressions: content deduplication separate from Artifact provenance, lineage/reference rejection, no-overwrite Blob durability, project isolation, cache independence and one-AgentLoop Tool execution.
+- Intended offline Gate: `cargo fmt --all -- --check`; `cargo clippy --locked --all-targets --all-features -- -D warnings`; `cargo test --locked --all-targets --all-features`; `cargo build --locked`; then inline-test, forbidden-dependency, credential/Codex and diff scans. Live Test remains `OFF`.
 
 ## Slice Lean Review
 
@@ -280,18 +288,51 @@ The current user instruction explicitly authorizes continued implementation with
 - P2 debt: the synchronous JSONL scan and `sync_data` append run inside the asynchronous fixed-Tool future. A future offload must preserve the current atomic visibility boundary: a timeout or cancellation may not return while a write can later complete. M2-S4 Snapshot work is the scoped way to reduce the full-stream replay cost. M2-S1 JSONL durability/portability debt remains unchanged and is not broadened here.
 - Split review: `research/reducer.rs` and `research/records.rs` exceed the 300-line review signal, but a mechanical family split was rejected because it would expose or duplicate the single reference, provenance, fingerprint and staged-update invariants. Their next split trigger is an independently changing schema/upcaster or Snapshot-hydration path with a real consumer; that work must move cohesive ownership rather than add a Manager or Registry.
 
+### M2-S3 Draft Lean Review
+
+#### Semantic Owners
+
+- `src/domain/artifacts/{records,event,reducer}.rs` owns the provider-neutral Artifact contract: strict lowercase SHA-256 `BlobId` syntax, provenance-preserving `ArtifactRecord`, root-versus-derived parent/transform rules, the independent `artifact_schema_version: 1` payload and the pure ordered Lineage projection. One Blob can support several Artifact records; duplicate Artifact IDs, duplicate/self/missing parents and malformed/unknown Artifact Event types reject.
+- `src/domain/research/reducer.rs` remains the single Research stream/replay owner. It decodes `artifact.created` and `artifact.derived` inside the existing `research_schema_version: 1` envelope, requires `created_by_event_id` to equal the outer Event ID, preserves validated Event-ID idempotence/conflict behavior, and checks Artifact TargetSnapshot references before applying lineage state. Existing typed future Artifact references remain backward-compatible and gain no retroactive validation.
+- `src/adapters/artifact_store.rs` is the sole local-byte owner. It streams a regular source once into same-directory durable staging while hashing SHA-256, creates every Blob ancestry component only after rejecting symlinks/non-directories and syncs each new parent entry before Event append, hard-link-publishes without overwrite, and rehashes an existing regular destination before reporting deduplication. `artifact_store/error.rs` is split only for its separate typed error mapping; the Adapter remains below the 300-line review signal.
+- `src/adapters/tools/artifact.rs` owns the fixed Tool's ordering: take the project Writer, replay and preflight every Event/Artifact/TargetSnapshot/parent reference, publish the Blob, append the Event, then apply the same envelope in memory. An append failure cannot create an Event that references a missing Blob; an unreachable Blob may remain after an append or late publication failure, with no GC in this Slice.
+
+#### Public API, Dependencies and Cancellation
+
+- `ports/artifact.rs` adds only `ArtifactStore` and `StoredBlob`; the local Adapter is intentionally direct rather than a second Event, cache, transaction, graph or workflow Port. The fixed `artifact_store` Tool is `ResourceLocked`, `LocalMutation`, `NeverAutoRetry`, `EnvironmentDependent` and cache `None`, with source and Research-stream resource keys.
+- Added direct `sha2 0.10.9` with `default-features = false`, recorded in ADR-0004. Its sole responsibility is streamed cryptographic SHA-256 Blob identity; its locked closure is `block-buffer`, `cpufeatures`, `crypto-common`, `digest`, `generic-array`, `sha2`, `typenum` and `version_check`. Handwritten crypto, system `shasum` and accidental transitive use were rejected. No Codex source, crate or port was used; classification is REIMPLEMENT.
+- `source_path` is a caller-supplied local provenance label, not content identity or storage location; it can be absolute and is never telemetry. `created_by_event_id`, the Research Artifact Event, producer Tool Call and TargetSnapshot form the audited provenance chain without an invented duplicate research-event field.
+- The existing `ExecutionReceipt.output_artifact_ids` remains the sole receipt-to-Artifact link. A narrow crate-private success constructor populates it for `artifact_store`; no second Receipt shape or Adapter-side Receipt construction was introduced. Unused public Artifact projection lookups/counts were removed and `ArtifactState` was returned to crate-private visibility.
+- Artifact publication and Event append run synchronously inside the fixed Tool future: no `spawn`, `spawn_blocking` or detached task is introduced. A cancellation/timeout cannot return while a later Artifact write is still running; as with M2-S2, this direct blocking path remains explicit P2 responsiveness debt rather than a new unsafe offload abstraction.
+
+#### Test Layout and Verification
+
+- `tests/artifact_store.rs` adds seven permanent external regressions for exact Tool schema/effect/retry/resource policy; same Blob with distinct provenance plus derived lineage and receipt linkage; conflicting Event/Artifact IDs with no new Blob; exact outer/inner Event identity and version rejection; root/derived transform, TargetSnapshot and parent failures before publication; wrong/nonregular existing Blobs and sources; Unix source/destination/ancestor symlink plus non-directory rejection; project isolation; and Cache-independent fact replay. `tests/tool_loop_integration.rs` adds the fixed one-AgentLoop vertical path and verifies the paired Receipt carries the Artifact ID. Production `src/` retains no inline test modules.
+- Final local Gate: PASS on Rust `1.93.1`; `cargo fmt --all -- --check`, `cargo clippy --locked --all-targets --all-features -- -D warnings`, `cargo test --locked --all-targets --all-features` (138 passed, 0 failed, 1 ignored existing synthetic Live Smoke) and `cargo build --locked` all exited `0`.
+- Lean scans: PASS; inline-test, forbidden Codex-dependency, credential-isolation, `git diff --check` and `codex/`-unchanged scans passed. The credential scan matched only the established `CYBER_AGENT_OPENAI_API_KEY` constant, not a generic fallback. Live Test remains `OFF`; no credential, public Provider request, Codex login state, `~/.codex` or `CODEX_HOME` was read or modified.
+
+#### Removed and Deferred
+
+- The oversized Artifact Store draft was split by typed error mapping. No generic Artifact manager, graph API, Hook, router, plugin, Blob cache, detached worker or unused configuration remains.
+- Deferred exactly as scope-locked: destructive Blob GC/retention, remote/object Blob storage, Memory/Project Snapshot/Cache, file-write Tool cache, Context Planner, Vision, Provider/Profile/Web composition and Live Provider validation. Orphan-Blob reclamation and non-Unix directory-sync behavior remain persistence work for a separately authorized Slice.
+- Deterministic fault injection for a post-Blob Event append failure and a scheduler cancellation racing the synchronous commit remain P2 test-harness debt. The production ordering already publishes and syncs the Blob before append, never detaches commit work, and therefore cannot leave an Event that references a missing Blob or perform a late write after Tool return. Adversarial local filesystem TOCTOU hardening is also deferred under the trusted single-user threat model.
+- `research/reducer.rs` exceeds the 300-line review signal but retains the cohesive Research Event decode/idempotence/reference/apply invariant. A mechanical Artifact split would duplicate or expose that invariant; the split trigger is a separately consumed Research replay/upcaster family, not a generic coordinator.
+
 ## Blockers
 
 - None for the completed M2-S2 local and remote delivery Gates or the authorized M2-S3 start after this status seal.
+- None for the M2-S3 local implementation Gate; the Slice remains `IN_PROGRESS` pending authorized delivery review and must not begin M2-S4.
 - M2-S3 remains scope-locked to Blob storage, Artifact facts, provenance and its fixed tool; Memory/Snapshot/Cache implementation starts only in M2-S4.
 - Live Provider compatibility remains unverified by design; missing live credentials do not block offline development and no Codex credential is an allowed substitute.
 
 ## Last Verification
 
+- M2-S3 local Gate: PASS on Rust `1.93.1`; formatting, denied-warning Clippy, 138 offline/local tests plus one ignored existing synthetic Live Smoke, locked build, inline-test scan, forbidden Codex dependency scan, credential-pattern scan, `git diff --check` and `codex/`-unchanged check all passed. No Live Test was run.
 - M2-S2 local Gate: PASS on Rust `1.93.1`; formatting, denied-warning Clippy, 130 offline/local tests plus one ignored existing synthetic Live Smoke, locked build, inline-test scan, forbidden Codex dependency scan, credential-pattern scan, no-whole-ResearchState-clone scan, `git diff --check` and `codex/`-unchanged check all passed.
 - M2-S2 review: independent Luna xhigh returned `APPROVE` with no unresolved P0/P1 after exact validated Event-ID idempotence, merge provenance, strict missing-stream behavior, failure-atomic updates and initial Hypothesis evidence integrity were verified.
 - M2-S2 Live Test: `OFF`; no credential, external model request, Codex login state, `~/.codex` or `CODEX_HOME` was read or modified.
 - M2-S2 remote Gate: PASS; PR `#18` was Squash Merged as `ba8d880`, PR-head run `32583858745` passed, and post-merge `main` run `32583981820` passed the same Rust Gate.
+- M2-S2 status seal: PASS; PR `#19` was Squash Merged as `6705acd`, PR-head run `32584183819` passed, and post-merge `main` run `32584270821` passed the same Rust Gate before M2-S3 started.
 
 - M2-S1 local Gate: PASS on Rust `1.93.1`; formatting, denied-warning Clippy, 114 offline/local tests plus one ignored existing synthetic Live Smoke, locked build, inline-test scan, forbidden Codex dependency scan, credential-pattern scan, `git diff --check` and `codex/`-unchanged check all passed.
 - M2-S1 review: independent Luna xhigh returned `APPROVE` with no P0/P1 after the final durability, canonical Project identity, Session namespace and migration-integrity fixes.

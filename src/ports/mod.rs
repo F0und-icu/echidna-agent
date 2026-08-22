@@ -6,6 +6,7 @@
 use crate::domain::events::EventEnvelope;
 use crate::domain::events::StreamId;
 
+pub mod artifact;
 pub mod model;
 pub mod tool;
 

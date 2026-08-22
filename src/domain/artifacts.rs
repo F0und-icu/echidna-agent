@@ -1,28 +1,14 @@
-//! Minimal provider-neutral Artifact identity contract.
+//! Provider-neutral Artifact facts and their pure Lineage projection.
+//!
+//! Blob identity is content-addressed. Artifact identity records one durable
+//! research use of that content and deliberately remains distinct even when
+//! several records refer to the same Blob.
 
-use std::fmt;
+mod event;
+mod records;
+mod reducer;
 
-use serde::{Deserialize, Serialize};
-
-/// A stable Artifact identifier shared by model, research, and storage slices.
-#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
-#[serde(transparent)]
-pub struct ArtifactId(String);
-
-impl ArtifactId {
-    /// Constructs an artifact reference without loading its content.
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
-    }
-
-    /// Returns the artifact identifier as persisted.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for ArtifactId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(formatter)
-    }
-}
+pub use event::{ARTIFACT_SCHEMA_VERSION, ArtifactEvent, ArtifactEventError};
+pub use records::{ArtifactId, ArtifactRecord, BlobId};
+pub use reducer::ArtifactError;
+pub(crate) use reducer::ArtifactState;
