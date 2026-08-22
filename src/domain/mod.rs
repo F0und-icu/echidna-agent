@@ -5,11 +5,13 @@
 //! clock I/O.
 
 pub mod artifacts;
+pub(crate) mod canonical_json;
 pub mod context;
 pub mod events;
 pub mod history;
 pub mod model;
 pub mod project;
+pub mod research;
 pub mod tools;
 
 pub use artifacts::ArtifactId;

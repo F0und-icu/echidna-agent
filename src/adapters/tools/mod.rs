@@ -6,6 +6,7 @@ mod filesystem;
 mod job;
 mod output;
 mod pty;
+mod research;
 mod resources;
 mod search;
 
@@ -45,6 +46,8 @@ enum BuiltinTool {
     InputPty,
     ResizePty,
     StopPty,
+    ResearchGet,
+    ResearchUpdate,
 }
 
 pub struct ToolRegistry {
@@ -73,6 +76,11 @@ impl ToolRegistry {
             (ToolName::new("input_pty"), BuiltinTool::InputPty),
             (ToolName::new("resize_pty"), BuiltinTool::ResizePty),
             (ToolName::new("stop_pty"), BuiltinTool::StopPty),
+            (ToolName::new("research_get"), BuiltinTool::ResearchGet),
+            (
+                ToolName::new("research_update"),
+                BuiltinTool::ResearchUpdate,
+            ),
         ]
         .into_iter()
         .collect();
@@ -222,6 +230,8 @@ impl BuiltinTool {
             Self::InputPty => pty::normalize_input(arguments),
             Self::ResizePty => pty::normalize_resize(arguments),
             Self::StopPty => pty::normalize_stop(arguments),
+            Self::ResearchGet => research::normalize_get(project_root, arguments),
+            Self::ResearchUpdate => research::normalize_update(project_root, arguments),
         }
     }
 
@@ -249,6 +259,8 @@ impl BuiltinTool {
             Self::InputPty => pty::execute_input(ptys, plan).await,
             Self::ResizePty => pty::execute_resize(ptys, plan).await,
             Self::StopPty => pty::execute_stop(ptys, plan).await,
+            Self::ResearchGet => research::execute_get(project_root, plan).await,
+            Self::ResearchUpdate => research::execute_update(project_root, plan).await,
         }
     }
 
@@ -588,6 +600,30 @@ impl BuiltinTool {
                 ToolEffect::Interactive,
                 ToolRetryPolicy::NeverAutoRetry,
                 ToolDeterminism::Nondeterministic,
+                10_000,
+            ),
+            Self::ResearchGet => spec(
+                "research_get",
+                "Read and strictly reduce the current project Research Event stream.",
+                research::get_input_schema(),
+                research::output_schema(),
+                ToolParallelism::Parallel,
+                Some("file:.cyber-agent/research.jsonl"),
+                ToolEffect::ReadOnly,
+                ToolRetryPolicy::ReplaySafe,
+                ToolDeterminism::EnvironmentDependent,
+                10_000,
+            ),
+            Self::ResearchUpdate => spec(
+                "research_update",
+                "Append one versioned Research record, update, or explicit merge after strict replay validation.",
+                research::update_input_schema(),
+                research::output_schema(),
+                ToolParallelism::ResourceLocked,
+                Some("file:.cyber-agent/research.jsonl"),
+                ToolEffect::LocalMutation,
+                ToolRetryPolicy::NeverAutoRetry,
+                ToolDeterminism::EnvironmentDependent,
                 10_000,
             ),
         }

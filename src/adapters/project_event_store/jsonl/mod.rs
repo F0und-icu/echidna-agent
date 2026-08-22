@@ -18,11 +18,24 @@ use crate::domain::events::{
 use crate::ports::{EventSink, EventSource};
 
 use super::ProjectEventStoreError;
-use super::project::{ProjectEventStream, ProjectWriter, create_directory};
+use super::project::{Project, ProjectEventStream, ProjectWriter, create_directory};
 use recovery::{RecoveryArtifact, persist_recovery_artifact, replace_stream_atomically};
 use scan::{StreamScan, next_sequence, scan_stream};
 
 pub(crate) use scan::scan_stream_bytes;
+
+/// Reads the initialized Research stream without taking the writer lock or
+/// opening a file for append. The shared scanner remains the only source of
+/// JSONL validation and Event upcasting.
+pub(crate) fn read_existing_research_events(
+    project: &Project,
+) -> Result<Vec<EventEnvelope<Value>>, ProjectEventStoreError> {
+    let stream = ProjectEventStream::Research;
+    let path = project.research_stream_path_existing()?;
+    let stream_id = stream.stream_id();
+    let registry = EventUpcasterRegistry::current();
+    scan_stream(&path, &stream_id, &registry)?.into_complete(&path)
+}
 
 /// Explicit caller-provided facts for a possible `StreamRecovered` Event.
 ///
@@ -52,7 +65,9 @@ impl ProjectWriter {
         &mut self,
         recovery: Option<RecoveryMetadata>,
     ) -> Result<JsonlEventStore<'_>, ProjectEventStoreError> {
-        self.open_stream(ProjectEventStream::Research, recovery)
+        let stream = ProjectEventStream::Research;
+        let path = self.project.research_stream_path_existing()?;
+        self.open_existing_stream(stream, path, recovery)
     }
 
     /// Opens one project Session JSONL Writer.
@@ -77,6 +92,15 @@ impl ProjectWriter {
             create_empty_stream(&path)?;
         }
 
+        self.open_existing_stream(stream, path, recovery)
+    }
+
+    fn open_existing_stream(
+        &mut self,
+        stream: ProjectEventStream,
+        path: PathBuf,
+        recovery: Option<RecoveryMetadata>,
+    ) -> Result<JsonlEventStore<'_>, ProjectEventStoreError> {
         let stream_id = stream.stream_id();
         let registry = EventUpcasterRegistry::current();
         let scan = scan_stream(&path, &stream_id, &registry)?;

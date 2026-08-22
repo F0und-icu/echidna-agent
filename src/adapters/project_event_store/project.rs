@@ -181,6 +181,25 @@ impl Project {
         self.root.join(CONTROL_DIRECTORY)
     }
 
+    /// Resolves the initialized Research stream without creating a file or
+    /// directory. Readers and M2-S2 updates both require this immutable fact
+    /// stream to have been created by project initialization.
+    pub(crate) fn research_stream_path_existing(&self) -> Result<PathBuf, ProjectEventStoreError> {
+        let path = self.control_directory().join(RESEARCH_FILE);
+        match fs::metadata(&path) {
+            Ok(metadata) if metadata.is_file() => Ok(path),
+            Ok(_) => Err(ProjectEventStoreError::InvalidResearchStream { path }),
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                Err(ProjectEventStoreError::MissingResearchStream { path })
+            }
+            Err(source) => Err(ProjectEventStoreError::Io {
+                operation: "inspect initialized Research Event stream",
+                path,
+                source,
+            }),
+        }
+    }
+
     pub(crate) fn stream_path(
         &self,
         stream: &ProjectEventStream,
@@ -203,10 +222,10 @@ struct ProjectToml {
     canonical_root: PathBuf,
 }
 
-/// The only M2-S1 persisted Event stream families.
+/// The persisted Event stream families used by the local project runtime.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProjectEventStream {
-    /// The project-wide Research JSONL stream, without M2-S2 Research types.
+    /// The project-wide versioned Research JSONL stream.
     Research,
     /// One isolated Session audit JSONL stream.
     Session(StreamId),

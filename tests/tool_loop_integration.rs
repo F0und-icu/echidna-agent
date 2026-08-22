@@ -6,6 +6,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 
+use cyber_agent::adapters::project_event_store::Project;
 use cyber_agent::adapters::tools::ToolRegistry;
 use cyber_agent::app::agent_loop::{AgentLoop, AgentLoopError, AgentTurnOutcome};
 use cyber_agent::app::cancellation::AgentCancellation;
@@ -97,6 +98,8 @@ async fn builtin_tools_cover_files_search_argv_failures_and_bounded_output() {
             "poll_pty",
             "read_file",
             "read_files",
+            "research_get",
+            "research_update",
             "resize_pty",
             "run_command",
             "run_commands",
@@ -662,7 +665,7 @@ async fn agent_loop_keeps_full_resampling_after_local_baseline_comparison() {
 
     let inputs = provider.inputs();
     assert_eq!(inputs.len(), 2);
-    assert_eq!(inputs[0].tool_specs.len(), 15);
+    assert_eq!(inputs[0].tool_specs.len(), 17);
     assert_eq!(inputs[0].content_items.len(), 1);
     assert_eq!(
         inputs[1].content_items[1],
@@ -682,6 +685,63 @@ async fn agent_loop_keeps_full_resampling_after_local_baseline_comparison() {
             if result.status == ToolResultStatus::Succeeded
                 && result.output["matches"].as_str().unwrap().contains("path traversal")
     ));
+}
+
+#[tokio::test]
+async fn agent_loop_executes_research_update_through_the_fixed_registry() {
+    let project = TestProject::new("agent-loop-research-update");
+    Project::initialize(&project.root).unwrap();
+    let requested_call = tool_call(
+        "call-research-update",
+        "research_update",
+        json!({
+            "event_id": "event-agent-loop-target",
+            "occurred_at": "2026-08-22T12:00:00Z",
+            "operation": {
+                "kind": "record_target_snapshot",
+                "record": {
+                    "id": "snapshot-agent-loop",
+                    "target_id": "fixture.target",
+                    "kind": "source",
+                    "locator": "fixture/src",
+                    "version": "1.0.0",
+                    "build_id": "fixture-build",
+                    "environment_fingerprint": "fixture-environment",
+                    "device_fingerprint": "unknown",
+                    "captured_at": "2026-08-22T11:59:00Z"
+                }
+            }
+        }),
+    );
+    let provider = ScriptedProvider::new([
+        vec![ModelEvent::ToolCall {
+            call: requested_call.clone(),
+        }],
+        vec![ModelEvent::TextDelta {
+            text: "Research snapshot was recorded.".to_owned(),
+        }],
+    ]);
+    let tools = ToolRegistry::for_project(&project.root);
+    let mut agent = AgentLoop::new(&provider, &tools, "fixture");
+
+    let outcome = agent
+        .run_turn("Record the fixture target.", AgentCancellation::new())
+        .await
+        .unwrap();
+
+    let AgentTurnOutcome::Completed { executions, .. } = outcome else {
+        panic!("the fixture turn should complete")
+    };
+    assert_eq!(executions.len(), 1);
+    assert_eq!(executions[0].result.status, ToolResultStatus::Succeeded);
+    assert_eq!(
+        executions[0].result.output["event_type"],
+        "research.target_snapshot_recorded"
+    );
+    let persisted = fs::read_to_string(project.root.join(".cyber-agent/research.jsonl")).unwrap();
+    assert!(persisted.contains("research.target_snapshot_recorded"));
+    assert!(persisted.contains("snapshot-agent-loop"));
+    assert_eq!(agent.history().ensure_all_tool_calls_paired(), Ok(()));
 }
 
 #[cfg(unix)]

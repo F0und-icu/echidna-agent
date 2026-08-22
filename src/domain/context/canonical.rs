@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+use crate::domain::canonical_json::canonical_json;
 use crate::domain::model::{ContentItem, ModelCapabilities, ModelInputIR};
 use crate::domain::tools::ToolSpec;
 
@@ -329,19 +330,4 @@ fn hash_value(value: &impl Serialize) -> Result<RequestHash, ContextError> {
         }
     })?;
     Ok(RequestHash(blake3::hash(&bytes).to_hex().to_string()))
-}
-
-fn canonical_json(value: &Value) -> Value {
-    match value {
-        Value::Array(values) => Value::Array(values.iter().map(canonical_json).collect()),
-        Value::Object(values) => {
-            let mut entries = values
-                .iter()
-                .map(|(key, value)| (key.clone(), canonical_json(value)))
-                .collect::<Vec<_>>();
-            entries.sort_by(|left, right| left.0.cmp(&right.0));
-            Value::Object(entries.into_iter().collect())
-        }
-        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => value.clone(),
-    }
 }

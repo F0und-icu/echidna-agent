@@ -12,6 +12,7 @@ mod migration;
 mod project;
 
 pub use error::ProjectEventStoreError;
+pub(crate) use jsonl::read_existing_research_events;
 pub use jsonl::{JsonlEventStore, RecoveryMetadata};
 pub use migration::ExportMigrationManifest;
 pub use project::{Project, ProjectEventStream, ProjectWriter};

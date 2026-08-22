@@ -47,6 +47,10 @@ pub enum ProjectEventStoreError {
         #[source]
         source: io::Error,
     },
+    #[error("initialized project Research Event stream `{path}` is missing")]
+    MissingResearchStream { path: PathBuf },
+    #[error("initialized project Research Event stream `{path}` is not a regular file")]
+    InvalidResearchStream { path: PathBuf },
     #[error("Session stream ID `{session_id}` is not a safe directory name")]
     InvalidSessionId { session_id: StreamId },
     #[error("Event stream mismatch: expected `{expected}`, received `{received}`")]
