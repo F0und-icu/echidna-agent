@@ -24,8 +24,8 @@ If the user explicitly authorizes development sub-agents, every delegated agent 
 ## Current Phase
 
 - Architecture v1.1 is sealed as an additive extension over the immutable v1 baseline.
-- M0-S1, M0-S2, M1a-S1, M1a-S2 and M1a-S3 are complete.
-- M1b-S1 is the current Slice and remains `READY_NOT_AUTHORIZED` until explicitly authorized.
+- M0-S1, M0-S2, M1a-S1, M1a-S2, M1a-S3, M1b-S1 and M1b-S2 are complete.
+- M1b-S2 is complete and remotely merged. M1c-S1 is the current Slice; the current user request authorizes its implementation only after the M1b-S2 status seal is merged on its own branch.
 - Local Git is initialized and `main` tracks the private remote.
 - `codex/` is a clean, read-only upstream reference repository.
 

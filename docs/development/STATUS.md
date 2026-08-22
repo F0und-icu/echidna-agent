@@ -5,30 +5,30 @@
 - Architecture version: `1.1.0`
 - Phase: `IMPLEMENTATION`
 - Implementation: `STARTED`
-- Current milestone: `M1b`
-- Current slice: `M1b-S2`
-- Slice state: `IN_PROGRESS`
-- Lean governance: `ACTIVE`; M1b-S2 is scope-locked to incremental Responses delivery and one bounded Full fallback
-- Local Git initialized: `yes`; M1b-S2 is being developed on `agent/m1b-s2-incremental-responses`
-- Remote repository: `F0und-icu/cyber-agent` private; PR `#6` was Squash Merged
+- Current milestone: `M1c`
+- Current slice: `M1c-S1`
+- Slice state: `READY_AUTHORIZED`; implementation starts only after this M1b-S2 status seal is remotely merged
+- Lean governance: `ACTIVE`; M1b-S2 is complete and M1c-S1 remains scope-locked to Batch plus Resource Scheduler
+- Local Git initialized: `yes`; M1b-S2 is being sealed on `agent/m1b-s2-merge-status`
+- Remote repository: `F0und-icu/cyber-agent` private; PR `#8` was Squash Merged
 - Documentation baseline commit: `55ff3be`
-- Current code base: `main`/`origin/main` M1b-S1 status-seal commit `045862e` before this Slice branch
+- Current code base: `main`/`origin/main` M1b-S2 merge commit `216e800`
 - Upstream Codex baseline: `3aae5d885bac39c1262491aa3fd100dfd8b3919f`
 
 ## Last Completed Slice
 
-- Slice: `M1b-S1`
-- Delivery branch: `agent/m1b-s1-provider-baseline`
-- Base commit: `04da25b`
-- Scope: TurnContext, StepSnapshot, Primary/Vision ProviderSession identity, stable Canonical Input and request-component hashes, non-destructive IncrementalBaseline comparison, complete stable invalidation reasons and AgentLoop-local assessment audit.
-- Agent behavior: one primary AgentLoop captures a Turn-stable context and per-request StepSnapshot, evaluates compatibility before each model request, records a Baseline only after a completed sample commits to History, and still sends the complete ModelInputIR for every request.
-- Canonical behavior: model and profile change independently; Tool contracts sort deterministically and canonicalize JSON recursively; ContentItem order and Tool Call/Result IDs remain semantic; internal request metadata and local Tool execution policy do not alter request equivalence.
-- Test path: a Scripted Mock Provider completes two Turns and proves the second request is locally append-only while the Provider still receives complete History; the domain matrix covers Model/Profile/Prompt/Tool/Output/IR/Capability changes, stable priority, reset persistence, session isolation and modified/deleted/reordered History.
-- Forbidden work preserved: no `previous_response_id`, incremental HTTP encoding, Provider-reject fallback, Batch/Scheduler/PTY/Job, Vision service, DeepSeek Adapter, Live Provider request, Codex credential/login access, Codex source modification or Codex code port.
+- Slice: `M1b-S2`
+- Delivery branch: `agent/m1b-s2-incremental-responses`
+- Base commit: `045862e`
+- Scope: Provider-neutral request delivery and opaque completion identity, OpenAI-private `previous_response_id` mapping, strict append-only deltas and exactly one typed continuation-rejection Full fallback.
+- Agent behavior: the one AgentLoop commits History, Canonical Baseline and continuation identity atomically after a valid completed sample; failed, cancelled, empty, multiple-Tool and partial-stream samples do not advance them.
+- Retry behavior: only exact `previous_response_not_found` on an incremental request triggers one Full fallback; the fallback counts toward the 32-request Turn bound and never replays a completed local Tool.
+- Test path: local HTTP/SSE loopback and permanent AgentLoop regressions cover same-Turn and next-Turn delta, session isolation, capability-disabled Full delivery, typed fallback, generic-error no-fallback and all non-commit paths.
+- Forbidden work preserved: no Batch/Scheduler/PTY/Job, Vision service, DeepSeek Adapter, CLI profile composition, persistence, Live Provider request, Codex credential/login access, Codex source modification or Codex code port.
 - Result: `COMPLETE`; all local and remote Cargo/Lean Gates pass.
 - Dependencies and schemas: no dependency, Cargo, ModelInputIR/Event/Project/Research schema or frozen architecture change.
-- Git: PR `#6` was Squash Merged as `a334415` (`M1b-S1: canonical ProviderSession baselines`).
-- GitHub Actions: PR-head run `32517704380` and post-merge `main` run `32517919489` passed on macOS with Rust `1.93.1`; formatting, production test-layout scan, Clippy, 50 tests plus one ignored Live Smoke, and locked build all passed.
+- Git: PR `#8` was Squash Merged as `216e800` (`feat(model): add incremental Responses continuation`).
+- GitHub Actions: PR-head run `32561668586` and post-merge `main` run `32561848176` passed on macOS with Rust `1.93.1`; formatting, production test-layout scan, Clippy, 64 tests plus one ignored Live Smoke, and locked build all passed.
 - Live Test: `OFF`; the existing synthetic smoke remains ignored and no real credential or public Provider request was used.
 
 ## Current Authority
@@ -56,30 +56,28 @@
 - M1a-S2 minimum OpenAI Responses full-request Adapter, injected dedicated credential source, local-loopback contract tests, external permanent test layout and Lean Gate.
 - M1a-S3 Tool contracts, strict in-memory History, fixed FullAccess Tool Registry, bounded AgentLoop, OpenAI Tool history encoding and real temporary-project full-resample Gate.
 - M1b-S1 Turn/Step capture, Canonical Request hashing, non-destructive ProviderSession Baseline comparison and full-request AgentLoop audit.
+- M1b-S2 Provider-neutral continuation, strict OpenAI Responses delta delivery, atomic Baseline/response identity advancement and bounded typed-rejection Full fallback.
 
-## In Progress
+## Next Authorized Slice
 
-- Slice: `M1b-S2`
-- Delivery branch: `agent/m1b-s2-incremental-responses`
-- Base commit: `045862e`
-- Scope lock: add a Provider-neutral request/response continuation boundary, keep the opaque Provider response identity outside Domain/Research/Context, map OpenAI `previous_response_id` plus strict append-only delta, and allow exactly one Full retry only after a typed continuation rejection.
-- Intended production touch points: `ports/model`, `app/model_streaming`, `app/agent_loop`, `domain/context/baseline`, `adapters/mock_model` and `adapters/openai/{request,response,mod}`. A smaller final set is preferred; no new dependency is planned.
-- Intended permanent tests: Port/stream contracts, OpenAI loopback request snapshots, Baseline reset behavior and the single-Agent Tool loop across same-Turn, next-Turn, rejection fallback and fresh-session/compaction reset paths.
-- Atomicity constraint: a response ID and Incremental Baseline advance only after one complete model sample passes local validation and commits to History; failed/cancelled/invalid samples retain the last committed pair.
-- Retry constraint: fallback retries the same logical model sample, never re-enters or replays a completed local Tool execution, and never applies to generic transport, HTTP, protocol or Provider failures.
-- Live compatibility constraint: no public Provider request is part of this Slice Gate. The `store: false` plus `previous_response_id` behavior remains explicitly unverified until a separately authorized Live Test.
+- Slice: `M1c-S1`
+- Planned delivery branch: `agent/m1c-s1-batch-scheduler`
+- Base commit: the M1b-S2 status-seal merge commit, to be recorded at Slice start
+- Scope lock: add `read_files`, multi-pattern `search_files`, `run_commands`, deterministic Resource Key resolution and conflict-aware scheduling from existing Tool Effect/Retry/Idempotency metadata.
+- Required behavior: independent file/device/output resources may run concurrently; the same Device, PTY or Output resource remains serialized; a partial Batch failure preserves every other result and Tool Call/Result pairing.
+- Forbidden continuation: M1c-S2 background Job state, M1c-S3 PTY sessions, project persistence, Vision, DeepSeek Adapter, general Workflow/Hook/Router/Plugin abstractions, Live Provider requests and Codex credential/login access.
 
 ## Current Authorization
 
 The current user instruction explicitly authorizes continued implementation with delegated Terra/Luna development and normal version-controlled remote delivery until the first prototype reaches the separately authorized Live Provider validation boundary.
 
 - Run mode: `IMPLEMENT_TO_LIVE_BOUNDARY`
-- Slice ID: `M1b-S2`; state `IN_PROGRESS`
+- Slice ID: `M1c-S1`; state `READY_AUTHORIZED` pending the separate status-seal merge
 - Git mode: `BRANCH_PR_REVIEW_MERGE`; commit, push, PR, CI review and merge are authorized when the Slice Gate passes
 - Delegation mode: `AUTHORIZED`; delegated implementation Agents must independently read the repository authority chain and stay inside the current Slice
 - Live test mode: `OFF`; no real Provider credential or public model request is authorized
-- Forbidden continuation inside this Slice: M1c Batch/Scheduler/PTY/Job, Vision service, DeepSeek Adapter, CLI profile composition, Web, persistence, general Router/Hook/Plugin work, Codex source modification or Codex credentials/login access
-- Stop condition: complete and remotely seal M1b-S2 before starting the next Slice; do not run a Live Test
+- Forbidden continuation inside M1c-S1: background Job state, PTY sessions, Vision service, DeepSeek Adapter, CLI profile composition, Web, persistence, general Router/Hook/Plugin work, Codex source modification or Codex credentials/login access
+- Stop condition: remotely merge this M1b-S2 status seal before starting M1c-S1; do not run a Live Test
 
 ## Slice Lean Review
 
@@ -96,7 +94,7 @@ The current user instruction explicitly authorizes continued implementation with
 - Reused the existing provider-neutral `ModelInputIR`, explicit `ModelCapabilities`, `ToolSpec`, History, BLAKE3 and Serde stack; no second request representation, hash crate or Provider SDK was added.
 - Canonical Tool hashing includes model-facing name/version/description/input schema/output schema/exposure and deliberately excludes local execution scheduling, retry, cache, timeout and output policy.
 - One canonical JSON routine owns nested object-key ordering for Tool schemas, Tool Call arguments and Tool Result output; ContentItem sequence is never sorted.
-- ProviderSession assessment is non-destructive. A failed/cancelled request retains the old Baseline and reset reason; only successful `record_full_response` replaces it.
+- ProviderSession assessment is non-destructive. A failed/cancelled request retains the old Baseline and reset reason; only successful `record_completed_sample` advances it.
 - The oversized first draft was split by change reason into Canonical and Baseline modules while retaining one semantic facade; no duplicate hash or invalidation implementation remains.
 
 ### Public API and Dependencies
@@ -105,7 +103,7 @@ The current user instruction explicitly authorizes continued implementation with
 - New App API is limited to explicit `AgentLoop::with_primary_context`, `last_baseline_assessment` and the typed primary-session configuration error; no test-only canonical helper is public.
 - No dependency or Cargo feature changed. Existing BLAKE3 now also owns stable request-component fingerprints; existing Serde owns canonical serialization.
 - ModelInputIR schema remains version 2. Output/Request hashes cover only semantics the current IR already expresses; actual output schema, reasoning/include properties and wire support remain deferred rather than silently ignored.
-- No OpenAI DTO, response ID, HTTP/SSE type or Codex dependency entered Domain/App/Ports.
+- No OpenAI DTO or HTTP/SSE type entered Domain/App/Ports. Provider response identity is opaque at the Port/App boundary and remains absent from Domain/Context/Research; no Codex dependency was added.
 
 ### Test Layout and Codex Classification
 
@@ -124,7 +122,7 @@ The current user instruction explicitly authorizes continued implementation with
 - No unused feature flag, generic Hook/Router, Provider SDK, persistent Schema, copied Codex code or unconsumed adapter path was retained.
 - Remaining governance debt: none inside M1b-S1; remote delivery evidence is complete.
 
-### M1b-S2 Draft Lean Review (awaiting parent review and Git delivery)
+### M1b-S2 Lean Review
 
 #### Semantic Owners
 
@@ -149,15 +147,16 @@ The current user instruction explicitly authorizes continued implementation with
 
 ## Blockers
 
-- None for the completed M1b-S1 local implementation and Gate.
-- M1b-S2 implementation passed parent architecture/Lean review and the local Gate; authorized commit/PR/CI delivery remains pending and is not a Live-Provider compatibility proof.
+- None for the completed M1b-S2 local and remote delivery Gates.
+- M1c-S1 can start after this status-only seal is remotely merged under the current user authorization.
 - Live Provider compatibility remains unverified by design; missing live credentials do not block offline development and no Codex credential is an allowed substitute.
 
 ## Last Verification
 
-- M1b-S2 draft local Gate: PASS on Rust `1.93.1`; `cargo fmt --all -- --check`, `cargo clippy --locked --all-targets --all-features -- -D warnings`, `cargo test --locked --all-targets --all-features` (64 passed, 0 failed, 1 ignored), `cargo build --locked`, inline-test scan, Domain/App/Ports Provider-wire scan and `git diff --check` all exited `0`.
+- M1b-S2 local Gate: PASS on Rust `1.93.1`; `cargo fmt --all -- --check`, `cargo clippy --locked --all-targets --all-features -- -D warnings`, `cargo test --locked --all-targets --all-features` (64 passed, 0 failed, 1 ignored), `cargo build --locked`, inline-test scan, Domain/App/Ports Provider-wire scan and `git diff --check` all exited `0`.
 - M1b-S2 loopback verification: PASS; Full requests retain `store:false`, incremental requests contain only delta input plus the opaque previous response identity, exact HTTP/SSE rejection makes one Full fallback, and fallback does not persist partial stream output or re-execute a completed Tool.
 - M1b-S2 Live Test: OFF; no Provider credential, public network request, Codex login state, `~/.codex` or `CODEX_HOME` was read or modified.
+- M1b-S2 remote Gate: PASS; PR `#8` head run `32561668586` and post-merge `main` run `32561848176` passed, and independent Terra xhigh review returned APPROVE with no medium-or-higher issue.
 
 ### Retained M1b-S1 verification evidence
 
