@@ -1,11 +1,11 @@
-//! Private OpenAI Responses full-request wire encoding.
+//! Private OpenAI Responses request wire encoding.
 
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::domain::model::{ContentItem, MODEL_INPUT_IR_SCHEMA_VERSION, MessageRole, ModelInputIR};
+use crate::domain::model::{ContentItem, MODEL_INPUT_IR_SCHEMA_VERSION, MessageRole};
 use crate::domain::tools::{ToolCall, ToolResult, ToolResultStatus, ToolSpec};
-use crate::ports::model::ModelProviderError;
+use crate::ports::model::{ModelProviderError, ModelRequest, ModelRequestDelivery};
 
 #[derive(Debug, Serialize)]
 pub(super) struct ResponsesRequest {
@@ -18,6 +18,8 @@ pub(super) struct ResponsesRequest {
     tool_choice: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     parallel_tool_calls: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    previous_response_id: Option<String>,
     store: bool,
     stream: bool,
 }
@@ -73,20 +75,16 @@ struct FunctionCallOutputBody<'output> {
     output: &'output Value,
 }
 
-pub(super) fn encode_full_request(
-    input: ModelInputIR,
+pub(super) fn encode_request(
+    request: ModelRequest,
     model: String,
 ) -> Result<ResponsesRequest, ModelProviderError> {
+    let (input, delivery) = request.into_parts();
     if input.schema_version.get() != MODEL_INPUT_IR_SCHEMA_VERSION {
         return Err(request_encoding_error(format!(
             "unsupported ModelInputIR schema version {}",
             input.schema_version.get()
         )));
-    }
-    if input.requirements.incremental_input {
-        return Err(request_encoding_error(
-            "incremental model input is not implemented by the full-request Adapter",
-        ));
     }
     if input.requirements.structured_output {
         return Err(request_encoding_error(
@@ -120,6 +118,13 @@ pub(super) fn encode_full_request(
         .collect::<Vec<_>>();
     let exposes_tools = !tools.is_empty();
 
+    let previous_response_id = match delivery {
+        ModelRequestDelivery::Full => None,
+        ModelRequestDelivery::Incremental { continuation } => {
+            Some(continuation.as_str().to_owned())
+        }
+    };
+
     Ok(ResponsesRequest {
         model,
         instructions: input.instructions,
@@ -127,6 +132,7 @@ pub(super) fn encode_full_request(
         tools,
         tool_choice: exposes_tools.then_some("auto"),
         parallel_tool_calls: exposes_tools.then_some(false),
+        previous_response_id,
         store: false,
         stream: true,
     })

@@ -1,4 +1,4 @@
-//! Minimal OpenAI Responses full-request HTTP Streaming Adapter.
+//! Minimal OpenAI Responses HTTP Streaming Adapter.
 
 mod credentials;
 mod request;
@@ -16,8 +16,10 @@ pub use credentials::{
     ProcessEnvironmentCredentialSource,
 };
 
-use crate::domain::model::{ModelCapabilities, ModelInputIR};
-use crate::ports::model::{ModelEventStream, ModelProvider, ModelProviderError};
+use crate::domain::model::ModelCapabilities;
+use crate::ports::model::{
+    ModelEventStream, ModelProvider, ModelProviderError, ModelRequest, ModelStreamEvent,
+};
 
 /// Configuration explicitly selected for one OpenAI Responses Provider.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -28,7 +30,7 @@ pub struct OpenAiResponsesConfig {
 }
 
 impl OpenAiResponsesConfig {
-    /// Creates a full-request OpenAI Responses configuration.
+    /// Creates an OpenAI Responses configuration.
     pub fn new(
         base_url: impl Into<String>,
         model: impl Into<String>,
@@ -73,8 +75,8 @@ impl ModelProvider for OpenAiResponsesAdapter {
         self.config.capabilities.clone()
     }
 
-    fn stream(&self, input: ModelInputIR) -> Result<ModelEventStream, ModelProviderError> {
-        self.config.capabilities.validate_input(&input)?;
+    fn stream(&self, request: ModelRequest) -> Result<ModelEventStream, ModelProviderError> {
+        request.validate_capabilities(&self.config.capabilities)?;
 
         let api_key = self
             .credential_source
@@ -93,8 +95,10 @@ impl ModelProvider for OpenAiResponsesAdapter {
             }
         })?;
 
-        let usage_required = input.requirements.usage_reporting;
-        let request = request::encode_full_request(input, self.config.model.clone())?;
+        let usage_required = request.input().requirements.usage_reporting;
+        let continuation_required = self.config.capabilities.incremental_input;
+        let continuation_requested = request.is_incremental();
+        let request = request::encode_request(request, self.config.model.clone())?;
         let endpoint = self.config.endpoint();
         let client = self.client.clone();
 
@@ -111,13 +115,22 @@ impl ModelProvider for OpenAiResponsesAdapter {
                 })?;
 
             let status = response.status();
-            if !status.is_success() {
+            let mut response_events = if status.is_success() {
+                response.bytes_stream().eventsource()
+            } else {
+                if continuation_requested {
+                    let body = response.text().await.unwrap_or_default();
+                    if response::continuation_rejected_http_body(&body) {
+                        Err(ModelProviderError::ContinuationRejected {
+                            code: "previous_response_not_found".to_owned(),
+                        })?;
+                    }
+                }
                 Err(ModelProviderError::HttpFailure {
                     status: status.as_u16(),
                 })?;
-            }
-
-            let mut response_events = response.bytes_stream().eventsource();
+                unreachable!("an HTTP failure is returned through the stream")
+            };
             loop {
                 let event = response_events
                     .next()
@@ -133,11 +146,17 @@ impl ModelProvider for OpenAiResponsesAdapter {
                     continue;
                 }
 
-                let decoded = response::decode_stream_event(&event.data, usage_required)?;
+                let decoded = response::decode_stream_event(
+                    &event.data,
+                    usage_required,
+                    continuation_required,
+                    continuation_requested,
+                )?;
                 for model_event in decoded.events {
-                    yield model_event;
+                    yield ModelStreamEvent::Event(model_event);
                 }
-                if decoded.completed {
+                if let Some(completion) = decoded.completion {
+                    yield ModelStreamEvent::Completed(completion);
                     break;
                 }
             }

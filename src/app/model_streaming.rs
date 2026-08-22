@@ -5,8 +5,10 @@ use std::task::Poll;
 
 use thiserror::Error;
 
-use crate::domain::model::{ModelEvent, ModelInputIR};
-use crate::ports::model::{ModelProvider, ModelProviderError};
+use crate::domain::model::ModelEvent;
+use crate::ports::model::{
+    ModelProvider, ModelProviderError, ModelRequest, ModelResponseCompletion, ModelStreamEvent,
+};
 
 use super::cancellation::AgentCancellation;
 
@@ -16,8 +18,13 @@ pub type ModelStreamCancellation = AgentCancellation;
 /// The complete or cancelled sequence observed by the streaming service.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ModelStreamOutcome {
-    Completed { events: Vec<ModelEvent> },
-    Cancelled { events: Vec<ModelEvent> },
+    Completed {
+        events: Vec<ModelEvent>,
+        completion: ModelResponseCompletion,
+    },
+    Cancelled {
+        events: Vec<ModelEvent>,
+    },
 }
 
 /// Errors from consuming a Model Port stream.
@@ -43,14 +50,14 @@ impl<'provider, Provider: ModelProvider + ?Sized> ModelStreamingService<'provide
     /// Consumes one stream, preserving event order or ending pending work on cancellation.
     pub async fn consume(
         &self,
-        input: ModelInputIR,
+        request: ModelRequest,
         cancellation: ModelStreamCancellation,
     ) -> Result<ModelStreamOutcome, ModelStreamingError> {
         if cancellation.is_cancelled() {
             return Ok(ModelStreamOutcome::Cancelled { events: Vec::new() });
         }
 
-        let mut stream = self.provider.stream(input)?;
+        let mut stream = self.provider.stream(request)?;
         let mut events = Vec::new();
 
         loop {
@@ -76,13 +83,11 @@ impl<'provider, Provider: ModelProvider + ?Sized> ModelStreamingService<'provide
 
             match next {
                 NextStreamItem::Cancelled => return Ok(ModelStreamOutcome::Cancelled { events }),
-                NextStreamItem::Item(Some(Ok(event))) => {
-                    let completed = matches!(event, ModelEvent::Completed);
+                NextStreamItem::Item(Some(Ok(ModelStreamEvent::Event(event)))) => {
                     events.push(event);
-
-                    if completed {
-                        return Ok(ModelStreamOutcome::Completed { events });
-                    }
+                }
+                NextStreamItem::Item(Some(Ok(ModelStreamEvent::Completed(completion)))) => {
+                    return Ok(ModelStreamOutcome::Completed { events, completion });
                 }
                 NextStreamItem::Item(Some(Err(error))) => return Err(error.into()),
                 NextStreamItem::Item(None) => {
@@ -94,6 +99,6 @@ impl<'provider, Provider: ModelProvider + ?Sized> ModelStreamingService<'provide
 }
 
 enum NextStreamItem {
-    Item(Option<Result<ModelEvent, ModelProviderError>>),
+    Item(Option<Result<ModelStreamEvent, ModelProviderError>>),
     Cancelled,
 }

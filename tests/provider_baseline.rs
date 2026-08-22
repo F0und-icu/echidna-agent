@@ -112,13 +112,13 @@ fn establish(
     server_output: Vec<ContentItem>,
 ) {
     assert_eq!(
-        session.assess_full_request(snapshot),
+        session.assess_delivery(snapshot, true),
         BaselineAssessment::FullRequest {
             reason: BaselineInvalidationReason::NoBaseline
         }
     );
     session
-        .record_full_response(snapshot, server_output)
+        .record_completed_sample(snapshot, server_output)
         .unwrap();
 }
 
@@ -232,7 +232,7 @@ fn invalidation_matrix_separates_model_profile_and_uses_stable_priority() {
             InternalRequestMetadata::default(),
         );
         assert_eq!(
-            session.assess_full_request(&candidate),
+            session.assess_delivery(&candidate, true),
             BaselineAssessment::FullRequest {
                 reason: expected_reason
             }
@@ -285,7 +285,7 @@ fn invalidation_matrix_separates_model_profile_and_uses_stable_priority() {
             InternalRequestMetadata::default(),
         );
         assert_eq!(
-            session.assess_full_request(&candidate),
+            session.assess_delivery(&candidate, true),
             BaselineAssessment::FullRequest { reason }
         );
         if step < 8 {
@@ -386,7 +386,7 @@ fn canonical_tool_semantics_are_stable_and_exclude_local_execution_metadata() {
         InternalRequestMetadata::default(),
     );
     assert!(matches!(
-        session.assess_full_request(&candidate),
+        session.assess_delivery(&candidate, true),
         BaselineAssessment::AppendOnlyCandidate { .. }
     ));
 
@@ -420,7 +420,7 @@ fn canonical_tool_semantics_are_stable_and_exclude_local_execution_metadata() {
             InternalRequestMetadata::default(),
         );
         assert_eq!(
-            session.assess_full_request(&candidate),
+            session.assess_delivery(&candidate, true),
             BaselineAssessment::FullRequest {
                 reason: BaselineInvalidationReason::ToolsChanged
             }
@@ -481,7 +481,7 @@ fn metadata_is_excluded_but_history_order_pair_identity_and_captured_turn_state_
         .request
     );
     assert_eq!(
-        session.assess_full_request(&second),
+        session.assess_delivery(&second, true),
         BaselineAssessment::AppendOnlyCandidate {
             delta_items: vec![ContentItem::user_text("continue")]
         }
@@ -555,7 +555,7 @@ fn metadata_is_excluded_but_history_order_pair_identity_and_captured_turn_state_
         InternalRequestMetadata::default(),
     );
     assert!(matches!(
-        paired_session.assess_full_request(&equivalent),
+        paired_session.assess_delivery(&equivalent, true),
         BaselineAssessment::AppendOnlyCandidate { .. }
     ));
 
@@ -591,7 +591,7 @@ fn metadata_is_excluded_but_history_order_pair_identity_and_captured_turn_state_
         InternalRequestMetadata::default(),
     );
     assert_eq!(
-        paired_session.assess_full_request(&changed_id),
+        paired_session.assess_delivery(&changed_id, true),
         BaselineAssessment::FullRequest {
             reason: BaselineInvalidationReason::InputNotAppendOnly
         }
@@ -678,7 +678,7 @@ fn modified_deleted_or_reordered_history_is_not_append_only() {
             InternalRequestMetadata::default(),
         );
         assert_eq!(
-            session.assess_full_request(&candidate),
+            session.assess_delivery(&candidate, true),
             BaselineAssessment::FullRequest {
                 reason: BaselineInvalidationReason::InputNotAppendOnly
             }
@@ -713,14 +713,14 @@ fn reset_assessment_is_repeatable_until_success_and_session_identity_cannot_cros
     session.reset(BaselineInvalidationReason::CompactionReset);
     for _ in 0..2 {
         assert_eq!(
-            session.assess_full_request(&candidate),
+            session.assess_delivery(&candidate, true),
             BaselineAssessment::FullRequest {
                 reason: BaselineInvalidationReason::CompactionReset
             }
         );
     }
     session
-        .record_full_response(
+        .record_completed_sample(
             &candidate,
             vec![ContentItem::assistant_text("full replacement")],
         )
@@ -747,7 +747,7 @@ fn reset_assessment_is_repeatable_until_success_and_session_identity_cannot_cros
         InternalRequestMetadata::default(),
     );
     assert!(matches!(
-        session.assess_full_request(&next),
+        session.assess_delivery(&next, true),
         BaselineAssessment::AppendOnlyCandidate { .. }
     ));
 
@@ -761,7 +761,7 @@ fn reset_assessment_is_repeatable_until_success_and_session_identity_cannot_cros
         InternalRequestMetadata::default(),
     );
     assert_eq!(
-        session.record_full_response(&vision, output),
+        session.record_completed_sample(&vision, output),
         Err(ContextError::ProviderSessionMismatch {
             expected: ProviderSessionRef {
                 id: ProviderSessionId::new("primary-1"),
@@ -821,4 +821,45 @@ fn reset_assessment_is_repeatable_until_success_and_session_identity_cannot_cros
     for (reason, expected_code) in stable_codes {
         assert_eq!(serde_json::to_value(reason).unwrap(), json!(expected_code));
     }
+}
+
+#[test]
+fn append_only_history_stays_full_when_incremental_delivery_is_not_declared() {
+    let (baseline_request, server_output) = baseline_input();
+    let baseline_snapshot = snapshot(
+        ModelIdentity::new("primary", "model-v1"),
+        ModelProfile::new("research", 1),
+        "primary-1",
+        ProviderSessionRole::Primary,
+        &baseline_request,
+        &capabilities(),
+        InternalRequestMetadata::default(),
+    );
+    let candidate_request = append_input(&baseline_request, &server_output);
+    let candidate = snapshot(
+        ModelIdentity::new("primary", "model-v1"),
+        ModelProfile::new("research", 1),
+        "primary-1",
+        ProviderSessionRole::Primary,
+        &candidate_request,
+        &capabilities(),
+        InternalRequestMetadata::default(),
+    );
+    let mut session = primary_session();
+    establish(&mut session, &baseline_snapshot, server_output);
+
+    assert_eq!(
+        session.assess_delivery(&candidate, false),
+        BaselineAssessment::FullRequest {
+            reason: BaselineInvalidationReason::IncrementalInputUnsupported,
+        }
+    );
+    assert!(matches!(
+        session.assess_delivery(&candidate, true),
+        BaselineAssessment::AppendOnlyCandidate { .. }
+    ));
+    assert_eq!(
+        serde_json::to_value(BaselineInvalidationReason::IncrementalInputUnsupported).unwrap(),
+        json!("INCREMENTAL_INPUT_UNSUPPORTED")
+    );
 }

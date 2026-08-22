@@ -241,5 +241,4 @@ pub enum ModelEvent {
     TextDelta { text: String },
     ToolCall { call: ToolCall },
     Usage { usage: ModelUsage },
-    Completed,
 }

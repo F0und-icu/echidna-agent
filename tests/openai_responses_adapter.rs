@@ -7,6 +7,8 @@ use cyber_agent::adapters::openai::{
     OpenAiResponsesAdapter, OpenAiResponsesConfig, ProcessEnvironmentCredentialSource,
 };
 use cyber_agent::adapters::tools::ToolRegistry;
+use cyber_agent::app::agent_loop::{AgentLoop, AgentTurnOutcome};
+use cyber_agent::app::cancellation::AgentCancellation;
 use cyber_agent::app::model_streaming::{
     ModelStreamCancellation, ModelStreamOutcome, ModelStreamingError, ModelStreamingService,
 };
@@ -16,12 +18,14 @@ use cyber_agent::domain::model::{
     ModelInputIR, ModelRequestRequirements, ModelUsage,
 };
 use cyber_agent::domain::tools::{ToolCall, ToolCallId, ToolName, ToolResult, ToolResultStatus};
-use cyber_agent::ports::model::{ModelProvider, ModelProviderError};
+use cyber_agent::ports::model::{
+    ModelProvider, ModelProviderError, ModelRequest, ModelResponseCompletion, ProviderResponseId,
+};
 use cyber_agent::ports::tool::ToolExecutor;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
@@ -116,6 +120,10 @@ fn fixture_input(requirements: ModelRequestRequirements) -> ModelInputIR {
     )
 }
 
+fn full(input: ModelInputIR) -> ModelRequest {
+    ModelRequest::full(input)
+}
+
 fn adapter(
     base_url: impl Into<String>,
     credential_source: Arc<dyn OpenAiCredentialSource>,
@@ -141,7 +149,7 @@ fn credential_source_uses_only_the_dedicated_reference() {
     let source = FakeCredentialSource::value(Some(FIXTURE_SECRET));
     let provider = adapter("http://127.0.0.1:1/v1", source.clone());
 
-    match provider.stream(fixture_input(ModelRequestRequirements::default())) {
+    match provider.stream(full(fixture_input(ModelRequestRequirements::default()))) {
         Ok(_) => {}
         Err(error) => panic!("fixture credential should be accepted: {error}"),
     }
@@ -152,7 +160,7 @@ fn credential_source_uses_only_the_dedicated_reference() {
 fn credential_source_reports_missing_and_source_failure_without_network() {
     let missing = adapter("http://127.0.0.1:1/v1", FakeCredentialSource::value(None));
     assert_stream_error(
-        missing.stream(fixture_input(ModelRequestRequirements::default())),
+        missing.stream(full(fixture_input(ModelRequestRequirements::default()))),
         ModelProviderError::CredentialUnavailable {
             credential_ref: OPENAI_API_KEY_REFERENCE.to_owned(),
         },
@@ -163,7 +171,7 @@ fn credential_source_reports_missing_and_source_failure_without_network() {
         FakeCredentialSource::failure("fixture source unavailable"),
     );
     assert_stream_error(
-        failed.stream(fixture_input(ModelRequestRequirements::default())),
+        failed.stream(full(fixture_input(ModelRequestRequirements::default()))),
         ModelProviderError::CredentialSourceFailure {
             credential_ref: OPENAI_API_KEY_REFERENCE.to_owned(),
             message: "credential source failed: fixture source unavailable".to_owned(),
@@ -177,7 +185,7 @@ fn generic_openai_key_is_not_a_credential_fallback() {
     let provider = adapter("http://127.0.0.1:1/v1", source.clone());
 
     assert_stream_error(
-        provider.stream(fixture_input(ModelRequestRequirements::default())),
+        provider.stream(full(fixture_input(ModelRequestRequirements::default()))),
         ModelProviderError::CredentialUnavailable {
             credential_ref: OPENAI_API_KEY_REFERENCE.to_owned(),
         },
@@ -193,7 +201,7 @@ fn invalid_authorization_header_is_rejected_before_network() {
     );
 
     assert_stream_error(
-        provider.stream(fixture_input(ModelRequestRequirements::default())),
+        provider.stream(full(fixture_input(ModelRequestRequirements::default()))),
         ModelProviderError::CredentialInvalid {
             credential_ref: OPENAI_API_KEY_REFERENCE.to_owned(),
         },
@@ -209,13 +217,6 @@ fn deferred_request_features_fail_explicitly() {
                 ..ModelRequestRequirements::default()
             }),
             "output contract",
-        ),
-        (
-            fixture_input(ModelRequestRequirements {
-                incremental_input: true,
-                ..ModelRequestRequirements::default()
-            }),
-            "incremental model input",
         ),
         (
             ModelInputIR::current(
@@ -235,7 +236,7 @@ fn deferred_request_features_fail_explicitly() {
             "http://127.0.0.1:1/v1",
             FakeCredentialSource::value(Some(FIXTURE_SECRET)),
         );
-        match provider.stream(input) {
+        match provider.stream(full(input)) {
             Err(ModelProviderError::RequestEncodingFailure { message }) => {
                 assert!(message.contains(message_fragment));
             }
@@ -270,12 +271,16 @@ async fn spawn_sse_server(
             "HTTP/1.1 {status} {reason}\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             response_body.len()
         );
-        socket.write_all(headers.as_bytes()).await.unwrap();
+        if socket.write_all(headers.as_bytes()).await.is_err() {
+            return;
+        }
         for chunk in response_body.chunks(17) {
-            socket.write_all(chunk).await.unwrap();
+            if socket.write_all(chunk).await.is_err() {
+                return;
+            }
             tokio::task::yield_now().await;
         }
-        socket.shutdown().await.unwrap();
+        let _ = socket.shutdown().await;
     });
 
     (format!("http://{address}/v1"), request_receiver, task)
@@ -306,6 +311,35 @@ async fn spawn_pending_server() -> (
         release_sender,
         task,
     )
+}
+
+async fn spawn_sse_sequence_server(
+    bodies: Vec<String>,
+) -> (String, mpsc::Receiver<CapturedRequest>, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (request_sender, request_receiver) = mpsc::channel(bodies.len());
+
+    let task = tokio::spawn(async move {
+        for body in bodies {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            request_sender.send(request).await.unwrap();
+            let response_body = body.into_bytes();
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                response_body.len()
+            );
+            socket.write_all(headers.as_bytes()).await.unwrap();
+            for chunk in response_body.chunks(17) {
+                socket.write_all(chunk).await.unwrap();
+                tokio::task::yield_now().await;
+            }
+            socket.shutdown().await.unwrap();
+        }
+    });
+
+    (format!("http://{address}/v1"), request_receiver, task)
 }
 
 async fn read_http_request(socket: &mut TcpStream) -> CapturedRequest {
@@ -361,10 +395,10 @@ async fn full_request_and_chunked_sse_decode_to_ordered_model_events() {
 
     let outcome = service
         .consume(
-            fixture_input(ModelRequestRequirements {
+            full(fixture_input(ModelRequestRequirements {
                 usage_reporting: true,
                 ..ModelRequestRequirements::default()
-            }),
+            })),
             ModelStreamCancellation::new(),
         )
         .await
@@ -390,8 +424,8 @@ async fn full_request_and_chunked_sse_decode_to_ordered_model_events() {
                         output_tokens: 34,
                     },
                 },
-                ModelEvent::Completed,
             ],
+            completion: ModelResponseCompletion::new(ProviderResponseId::new("resp_fixture")),
         }
     );
 
@@ -451,7 +485,7 @@ async fn tool_schema_call_and_result_encode_in_full_history_order() {
 
     assert!(matches!(
         service
-            .consume(input, ModelStreamCancellation::new())
+            .consume(full(input), ModelStreamCancellation::new())
             .await
             .unwrap(),
         ModelStreamOutcome::Completed { .. }
@@ -473,7 +507,7 @@ async fn http_rejection_is_a_typed_provider_error() {
     assert_eq!(
         service
             .consume(
-                fixture_input(ModelRequestRequirements::default()),
+                full(fixture_input(ModelRequestRequirements::default())),
                 ModelStreamCancellation::new(),
             )
             .await,
@@ -498,7 +532,7 @@ async fn provider_failure_preserves_code_and_message() {
     assert_eq!(
         service
             .consume(
-                fixture_input(ModelRequestRequirements::default()),
+                full(fixture_input(ModelRequestRequirements::default())),
                 ModelStreamCancellation::new(),
             )
             .await,
@@ -511,6 +545,242 @@ async fn provider_failure_preserves_code_and_message() {
     );
     let _ = request_receiver.await.unwrap();
     server.await.unwrap();
+}
+
+#[tokio::test]
+async fn incremental_request_encodes_only_delta_and_the_opaque_continuation() {
+    let body = concat!(
+        "data: {\"type\":\"response.completed\",\"response\":{",
+        "\"id\":\"resp-after-delta\"}}\n\n"
+    );
+    let (base_url, request_receiver, server) = spawn_sse_server(200, body).await;
+    let provider = adapter(base_url, FakeCredentialSource::value(Some(FIXTURE_SECRET)));
+    let service = ModelStreamingService::new(&provider);
+    let delta = ModelInputIR::current(
+        "Keep evidence and hypotheses separate.",
+        vec![ContentItem::user_text("Only this new input is sent.")],
+        ModelRequestRequirements::default(),
+    );
+
+    let outcome = service
+        .consume(
+            ModelRequest::incremental(delta, ProviderResponseId::new("resp-before-delta")),
+            ModelStreamCancellation::new(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        ModelStreamOutcome::Completed { completion, .. }
+            if completion.response_id().is_some_and(|id| id.as_str() == "resp-after-delta")
+    ));
+
+    let request = request_receiver.await.unwrap();
+    server.await.unwrap();
+    let actual: Value = serde_json::from_str(&request.body).unwrap();
+    assert_eq!(actual["previous_response_id"], json!("resp-before-delta"));
+    assert_eq!(actual["store"], json!(false));
+    assert_eq!(
+        actual["input"],
+        json!([{
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "Only this new input is sent."}],
+        }])
+    );
+}
+
+#[tokio::test]
+async fn only_exact_incremental_previous_response_rejections_are_typed_for_fallback() {
+    let cases = [
+        (
+            "previous_response_not_found",
+            true,
+            ModelRequest::incremental(
+                fixture_input(ModelRequestRequirements::default()),
+                ProviderResponseId::new("resp-old"),
+            ),
+        ),
+        (
+            "previous_response_not_found",
+            false,
+            full(fixture_input(ModelRequestRequirements::default())),
+        ),
+        (
+            "rate_limit_exceeded",
+            false,
+            ModelRequest::incremental(
+                fixture_input(ModelRequestRequirements::default()),
+                ProviderResponseId::new("resp-old"),
+            ),
+        ),
+    ];
+
+    for (code, is_continuation_rejection, request) in cases {
+        let body = format!(
+            "data: {{\"type\":\"response.failed\",\"response\":{{\"error\":{{\"code\":\"{code}\",\"message\":\"fixture\"}}}}}}\n\n"
+        );
+        let (base_url, request_receiver, server) = spawn_sse_server(200, &body).await;
+        let provider = adapter(base_url, FakeCredentialSource::value(Some(FIXTURE_SECRET)));
+        let service = ModelStreamingService::new(&provider);
+        let result = service
+            .consume(request, ModelStreamCancellation::new())
+            .await;
+
+        if is_continuation_rejection {
+            assert_eq!(
+                result,
+                Err(ModelStreamingError::Provider(
+                    ModelProviderError::ContinuationRejected {
+                        code: "previous_response_not_found".to_owned(),
+                    }
+                ))
+            );
+        } else {
+            assert!(matches!(
+                result,
+                Err(ModelStreamingError::Provider(
+                    ModelProviderError::ProviderFailure { .. }
+                ))
+            ));
+        }
+        let _ = request_receiver.await.unwrap();
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn http_previous_response_rejection_is_typed_only_for_incremental_delivery() {
+    for incremental in [true, false] {
+        let body = r#"{"error":{"code":"previous_response_not_found","message":"fixture"}}"#;
+        let (base_url, request_receiver, server) = spawn_sse_server(400, body).await;
+        let provider = adapter(base_url, FakeCredentialSource::value(Some(FIXTURE_SECRET)));
+        let request = if incremental {
+            ModelRequest::incremental(
+                fixture_input(ModelRequestRequirements::default()),
+                ProviderResponseId::new("resp-old"),
+            )
+        } else {
+            full(fixture_input(ModelRequestRequirements::default()))
+        };
+        let result = ModelStreamingService::new(&provider)
+            .consume(request, ModelStreamCancellation::new())
+            .await;
+
+        if incremental {
+            assert!(matches!(
+                result,
+                Err(ModelStreamingError::Provider(
+                    ModelProviderError::ContinuationRejected { .. }
+                ))
+            ));
+        } else {
+            assert_eq!(
+                result,
+                Err(ModelStreamingError::Provider(
+                    ModelProviderError::HttpFailure { status: 400 }
+                ))
+            );
+        }
+        let _ = request_receiver.await.unwrap();
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn missing_completed_response_identity_is_a_protocol_failure_for_incremental_capability() {
+    let body = "data: {\"type\":\"response.completed\",\"response\":{}}\n\n";
+    let (base_url, request_receiver, server) = spawn_sse_server(200, body).await;
+    let provider = adapter(base_url, FakeCredentialSource::value(Some(FIXTURE_SECRET)));
+    let result = ModelStreamingService::new(&provider)
+        .consume(
+            full(fixture_input(ModelRequestRequirements::default())),
+            ModelStreamCancellation::new(),
+        )
+        .await;
+    assert!(matches!(
+        result,
+        Err(ModelStreamingError::Provider(ModelProviderError::ProtocolFailure { message }))
+            if message.contains("response identity")
+    ));
+    let _ = request_receiver.await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn loopback_rejection_fallback_sends_full_history_and_never_commits_partial_output() {
+    let first = concat!(
+        "data: {\"type\":\"response.output_item.done\",\"item\":{",
+        "\"type\":\"function_call\",\"call_id\":\"call-search\",",
+        "\"name\":\"search_files\",\"arguments\":\"{\\\"pattern\\\":\\\"Cargo\\\",\\\"paths\\\":[\\\"Cargo.toml\\\"]}\"}}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-before-fallback\"}}\n\n",
+    );
+    let rejection = concat!(
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"discard partial\"}\n\n",
+        "data: {\"type\":\"response.failed\",\"response\":{\"error\":{",
+        "\"code\":\"previous_response_not_found\",\"message\":\"fixture\"}}}\n\n",
+    );
+    let fallback = concat!(
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"fallback answer\"}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-after-fallback\"}}\n\n",
+    );
+    let (base_url, mut requests, server) = spawn_sse_sequence_server(vec![
+        first.to_owned(),
+        rejection.to_owned(),
+        fallback.to_owned(),
+    ])
+    .await;
+    let provider = adapter(base_url, FakeCredentialSource::value(Some(FIXTURE_SECRET)));
+    let tools = ToolRegistry::for_project(env!("CARGO_MANIFEST_DIR"));
+    let mut agent = AgentLoop::new(&provider, &tools, "fixture instructions");
+
+    let outcome = agent
+        .run_turn("inspect Cargo", AgentCancellation::new())
+        .await
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        AgentTurnOutcome::Completed {
+            assistant_text,
+            model_requests: 3,
+            executions,
+        } if assistant_text == "fallback answer" && executions.len() == 1
+    ));
+    assert!(
+        agent
+            .history()
+            .items()
+            .iter()
+            .all(|item| item != &ContentItem::assistant_text("discard partial"))
+    );
+
+    let first_request = requests.recv().await.unwrap();
+    let delta_request = requests.recv().await.unwrap();
+    let fallback_request = requests.recv().await.unwrap();
+    server.await.unwrap();
+    let first_body: Value = serde_json::from_str(&first_request.body).unwrap();
+    let delta_body: Value = serde_json::from_str(&delta_request.body).unwrap();
+    let fallback_body: Value = serde_json::from_str(&fallback_request.body).unwrap();
+    assert_eq!(first_body["store"], json!(false));
+    assert!(first_body.get("previous_response_id").is_none());
+    assert_eq!(
+        delta_body["previous_response_id"],
+        json!("resp-before-fallback")
+    );
+    assert_eq!(delta_body["store"], json!(false));
+    assert_eq!(delta_body["input"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        delta_body["input"][0]["type"],
+        json!("function_call_output")
+    );
+    assert!(fallback_body.get("previous_response_id").is_none());
+    assert_eq!(fallback_body["store"], json!(false));
+    assert_eq!(fallback_body["input"].as_array().unwrap().len(), 3);
+    assert_eq!(fallback_body["input"][1]["type"], json!("function_call"));
+    assert_eq!(
+        fallback_body["input"][2]["type"],
+        json!("function_call_output")
+    );
 }
 
 #[tokio::test]
@@ -533,7 +803,7 @@ async fn malformed_unknown_and_uncompleted_streams_are_protocol_errors() {
         let service = ModelStreamingService::new(&provider);
         let result = service
             .consume(
-                fixture_input(ModelRequestRequirements::default()),
+                full(fixture_input(ModelRequestRequirements::default())),
                 ModelStreamCancellation::new(),
             )
             .await;
@@ -556,7 +826,7 @@ async fn cancelling_a_pending_http_request_drops_the_adapter_stream() {
     let service = ModelStreamingService::new(&provider);
     let cancellation = ModelStreamCancellation::new();
     let consume = service.consume(
-        fixture_input(ModelRequestRequirements::default()),
+        full(fixture_input(ModelRequestRequirements::default())),
         cancellation.clone(),
     );
     tokio::pin!(consume);
@@ -609,7 +879,7 @@ async fn synthetic_openai_live_smoke() {
     let service = ModelStreamingService::new(&provider);
     let outcome = service
         .consume(
-            ModelInputIR::current(
+            full(ModelInputIR::current(
                 "Answer the fixed synthetic test without external data.",
                 vec![ContentItem::user_text(
                     "Reply with a short acknowledgement.",
@@ -618,14 +888,14 @@ async fn synthetic_openai_live_smoke() {
                     usage_reporting: true,
                     ..ModelRequestRequirements::default()
                 },
-            ),
+            )),
             ModelStreamCancellation::new(),
         )
         .await
         .expect("authorized synthetic live request should complete");
 
     match outcome {
-        ModelStreamOutcome::Completed { events } => {
+        ModelStreamOutcome::Completed { events, completion } => {
             assert!(
                 events
                     .iter()
@@ -636,7 +906,7 @@ async fn synthetic_openai_live_smoke() {
                     .iter()
                     .any(|event| matches!(event, ModelEvent::Usage { .. }))
             );
-            assert_eq!(events.last(), Some(&ModelEvent::Completed));
+            assert!(completion.response_id().is_some());
         }
         ModelStreamOutcome::Cancelled { .. } => panic!("live smoke was unexpectedly cancelled"),
     }

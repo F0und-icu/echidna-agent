@@ -23,13 +23,13 @@ pub enum BaselineInvalidationReason {
     OutputContractChanged,
     RequestPropertiesChanged,
     InputNotAppendOnly,
+    IncrementalInputUnsupported,
     CompactionReset,
     SessionResumed,
     ProviderRejected,
 }
 
-/// The local comparison result for one request. This does not select a wire
-/// delivery mode; M1b-S1 always sends a full `ModelInputIR`.
+/// The local delivery decision for one semantic request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BaselineAssessment {
     FullRequest { reason: BaselineInvalidationReason },
@@ -104,7 +104,7 @@ impl IncrementalBaseline {
 }
 
 /// In-process state for one Provider role. The Baseline remains unchanged by
-/// assessment; only a completed full response replaces it.
+/// assessment; only a completed and locally committed sample replaces it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderSession {
     reference: ProviderSessionRef,
@@ -135,9 +135,15 @@ impl ProviderSession {
         self.pending_reset = Some(reason);
     }
 
-    /// Evaluates the next complete request without consuming reset state or
-    /// replacing the prior Baseline.
-    pub fn assess_full_request(&self, snapshot: &StepSnapshot) -> BaselineAssessment {
+    /// Evaluates the next complete semantic request without consuming reset
+    /// state or replacing the prior Baseline. A Provider that cannot deliver
+    /// incremental input keeps the semantic Baseline for audit but receives a
+    /// complete request.
+    pub fn assess_delivery(
+        &self,
+        snapshot: &StepSnapshot,
+        incremental_input_supported: bool,
+    ) -> BaselineAssessment {
         if self.reference != snapshot.provider_session {
             return BaselineAssessment::FullRequest {
                 reason: BaselineInvalidationReason::ProviderSessionChanged,
@@ -146,17 +152,26 @@ impl ProviderSession {
         if let Some(reason) = self.pending_reset {
             return BaselineAssessment::FullRequest { reason };
         }
-        self.baseline.as_ref().map_or(
+        let assessment = self.baseline.as_ref().map_or(
             BaselineAssessment::FullRequest {
                 reason: BaselineInvalidationReason::NoBaseline,
             },
             |baseline| baseline.assess(snapshot),
-        )
+        );
+        match assessment {
+            BaselineAssessment::AppendOnlyCandidate { .. } if !incremental_input_supported => {
+                BaselineAssessment::FullRequest {
+                    reason: BaselineInvalidationReason::IncrementalInputUnsupported,
+                }
+            }
+            assessment => assessment,
+        }
     }
 
-    /// Replaces the Baseline after a completed Provider sample has committed
-    /// its local History output, then clears any reset reason.
-    pub fn record_full_response(
+    /// Replaces the Baseline after any completed Provider sample has committed
+    /// its local History output, then clears any reset reason. The captured
+    /// snapshot is always the full logical request, independent of delivery.
+    pub fn record_completed_sample(
         &mut self,
         snapshot: &StepSnapshot,
         server_output_items: Vec<ContentItem>,

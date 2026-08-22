@@ -5,12 +5,14 @@ use serde_json::Value;
 
 use crate::domain::model::{ModelEvent, ModelUsage};
 use crate::domain::tools::{ToolCall, ToolCallId, ToolName};
-use crate::ports::model::ModelProviderError;
+use crate::ports::model::{ModelProviderError, ModelResponseCompletion, ProviderResponseId};
+
+const PREVIOUS_RESPONSE_NOT_FOUND_CODE: &str = "previous_response_not_found";
 
 #[derive(Debug)]
 pub(super) struct DecodedResponsesEvent {
     pub events: Vec<ModelEvent>,
-    pub completed: bool,
+    pub completion: Option<ModelResponseCompletion>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -28,6 +30,8 @@ struct ResponsesStreamEvent {
 pub(super) fn decode_stream_event(
     data: &str,
     usage_required: bool,
+    continuation_required: bool,
+    continuation_requested: bool,
 ) -> Result<DecodedResponsesEvent, ModelProviderError> {
     let event: ResponsesStreamEvent = serde_json::from_str(data).map_err(|error| {
         protocol_error(format!(
@@ -42,7 +46,7 @@ pub(super) fn decode_stream_event(
             let text = event
                 .delta
                 .ok_or_else(|| protocol_error("text delta event omitted `delta`"))?;
-            Ok(decoded(vec![ModelEvent::TextDelta { text }], false))
+            Ok(decoded(vec![ModelEvent::TextDelta { text }]))
         }
         "response.output_item.done" => {
             let item = event
@@ -50,8 +54,13 @@ pub(super) fn decode_stream_event(
                 .ok_or_else(|| protocol_error("output item event omitted `item`"))?;
             decode_output_item(item)
         }
-        "response.completed" => decode_completed(event.response, usage_required),
-        "response.failed" => Err(decode_provider_failure(event.response)),
+        "response.completed" => {
+            decode_completed(event.response, usage_required, continuation_required)
+        }
+        "response.failed" => Err(decode_provider_failure(
+            event.response,
+            continuation_requested,
+        )),
         "response.incomplete" => Err(decode_incomplete(event.response)),
         "response.created"
         | "response.in_progress"
@@ -64,7 +73,7 @@ pub(super) fn decode_stream_event(
         | "response.reasoning_summary_part.added"
         | "response.reasoning_summary_part.done"
         | "response.reasoning_summary_text.delta"
-        | "response.reasoning_summary_text.done" => Ok(decoded(Vec::new(), false)),
+        | "response.reasoning_summary_text.done" => Ok(decoded(Vec::new())),
         unknown => Err(protocol_error(format!(
             "unsupported Responses event `{unknown}`"
         ))),
@@ -94,18 +103,15 @@ fn decode_output_item(item: Value) -> Result<DecodedResponsesEvent, ModelProvide
                 ))
             })?;
 
-            Ok(decoded(
-                vec![ModelEvent::ToolCall {
-                    call: ToolCall::new(
-                        ToolCallId::new(function_call.call_id),
-                        ToolName::new(function_call.name),
-                        arguments,
-                    ),
-                }],
-                false,
-            ))
+            Ok(decoded(vec![ModelEvent::ToolCall {
+                call: ToolCall::new(
+                    ToolCallId::new(function_call.call_id),
+                    ToolName::new(function_call.name),
+                    arguments,
+                ),
+            }]))
         }
-        "message" | "reasoning" => Ok(decoded(Vec::new(), false)),
+        "message" | "reasoning" => Ok(decoded(Vec::new())),
         unknown => Err(protocol_error(format!(
             "unsupported completed output item `{unknown}`"
         ))),
@@ -115,6 +121,7 @@ fn decode_output_item(item: Value) -> Result<DecodedResponsesEvent, ModelProvide
 fn decode_completed(
     response: Option<Value>,
     usage_required: bool,
+    continuation_required: bool,
 ) -> Result<DecodedResponsesEvent, ModelProviderError> {
     let response: CompletedResponse = serde_json::from_value(
         response.ok_or_else(|| protocol_error("completed event omitted `response`"))?,
@@ -136,20 +143,51 @@ fn decode_completed(
         }
         None => {}
     }
-    events.push(ModelEvent::Completed);
+    let completion = if response.id.trim().is_empty() {
+        if continuation_required {
+            return Err(protocol_error(
+                "completed response omitted a non-empty response identity required for incremental input",
+            ));
+        }
+        ModelResponseCompletion::without_response_id()
+    } else {
+        ModelResponseCompletion::new(ProviderResponseId::new(response.id))
+    };
 
-    Ok(decoded(events, true))
+    Ok(DecodedResponsesEvent {
+        events,
+        completion: Some(completion),
+    })
 }
 
-fn decode_provider_failure(response: Option<Value>) -> ModelProviderError {
+pub(super) fn continuation_rejected_http_body(body: &str) -> bool {
+    serde_json::from_str::<HttpErrorEnvelope>(body)
+        .ok()
+        .and_then(|envelope| envelope.error)
+        .and_then(|error| error.code)
+        .as_deref()
+        == Some(PREVIOUS_RESPONSE_NOT_FOUND_CODE)
+}
+
+fn decode_provider_failure(
+    response: Option<Value>,
+    continuation_requested: bool,
+) -> ModelProviderError {
     let error = response
         .as_ref()
         .and_then(|value| value.get("error"))
         .cloned()
         .and_then(|value| serde_json::from_value::<ProviderErrorBody>(value).ok());
 
+    let code = error.as_ref().and_then(|error| error.code.clone());
+    if continuation_requested && code.as_deref() == Some(PREVIOUS_RESPONSE_NOT_FOUND_CODE) {
+        return ModelProviderError::ContinuationRejected {
+            code: PREVIOUS_RESPONSE_NOT_FOUND_CODE.to_owned(),
+        };
+    }
+
     ModelProviderError::ProviderFailure {
-        code: error.as_ref().and_then(|error| error.code.clone()),
+        code,
         message: error
             .and_then(|error| error.message)
             .filter(|message| !message.trim().is_empty())
@@ -171,8 +209,11 @@ fn decode_incomplete(response: Option<Value>) -> ModelProviderError {
     }
 }
 
-fn decoded(events: Vec<ModelEvent>, completed: bool) -> DecodedResponsesEvent {
-    DecodedResponsesEvent { events, completed }
+fn decoded(events: Vec<ModelEvent>) -> DecodedResponsesEvent {
+    DecodedResponsesEvent {
+        events,
+        completion: None,
+    }
 }
 
 fn protocol_error(message: impl Into<String>) -> ModelProviderError {
@@ -191,7 +232,8 @@ struct FunctionCallItem {
 #[derive(Debug, Deserialize)]
 struct CompletedResponse {
     #[serde(rename = "id")]
-    _id: String,
+    #[serde(default)]
+    id: String,
     #[serde(default)]
     usage: Option<ResponseUsage>,
 }
@@ -208,4 +250,10 @@ struct ProviderErrorBody {
     code: Option<String>,
     #[serde(default)]
     message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HttpErrorEnvelope {
+    #[serde(default)]
+    error: Option<ProviderErrorBody>,
 }

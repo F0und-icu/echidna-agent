@@ -3,16 +3,20 @@
 use thiserror::Error;
 
 use crate::domain::context::{
-    BaselineAssessment, ContextError, InternalRequestMetadata, ModelIdentity, ModelProfile,
-    ProviderSession, ProviderSessionId, ProviderSessionRole, StepSnapshot, TurnContext, TurnId,
+    BaselineAssessment, BaselineInvalidationReason, ContextError, InternalRequestMetadata,
+    ModelIdentity, ModelProfile, ProviderSession, ProviderSessionId, ProviderSessionRole,
+    StepSnapshot, TurnContext, TurnId,
 };
 use crate::domain::history::{ConversationHistory, HistoryError};
-use crate::domain::model::{ModelEvent, ModelInputIR, ModelRequestRequirements};
-use crate::domain::tools::{ExecutionId, ToolCall, ToolExecutionOutcome, ToolExposure, ToolResult};
-use crate::ports::model::ModelProvider;
+use crate::domain::model::{ModelInputIR, ModelRequestRequirements};
+use crate::domain::tools::{ExecutionId, ToolExecutionOutcome, ToolExposure, ToolResult};
+use crate::ports::model::{
+    ModelProvider, ModelProviderError, ModelRequest, ModelResponseCompletion, ProviderResponseId,
+};
 use crate::ports::tool::ToolExecutor;
 
 use super::cancellation::{AgentCancellation, run_until_cancelled};
+use super::model_sample::ModelSample;
 use super::model_streaming::{ModelStreamOutcome, ModelStreamingError, ModelStreamingService};
 
 const MAX_MODEL_REQUESTS_PER_TURN: usize = 32;
@@ -25,6 +29,7 @@ pub struct AgentLoop<'provider, 'tools, Provider: ?Sized, Tools: ?Sized> {
     model: ModelIdentity,
     profile: ModelProfile,
     provider_session: ProviderSession,
+    continuation: Option<CommittedContinuation>,
     next_turn_sequence: u64,
     last_baseline_assessment: Option<BaselineAssessment>,
 }
@@ -76,6 +81,7 @@ where
             model,
             profile,
             provider_session,
+            continuation: None,
             next_turn_sequence: 0,
             last_baseline_assessment: None,
         })
@@ -85,8 +91,8 @@ where
         &self.history
     }
 
-    /// Returns the local compatibility decision for the most recent actual
-    /// model request. M1b-S1 still sends that request in full.
+    /// Returns the local delivery decision for the most recent actual model
+    /// request.
     pub fn last_baseline_assessment(&self) -> Option<&BaselineAssessment> {
         self.last_baseline_assessment.as_ref()
     }
@@ -120,6 +126,7 @@ where
             &tool_specs,
         )?;
         let mut executions = Vec::new();
+        let mut provider_requests = 0;
 
         for request_index in 0..MAX_MODEL_REQUESTS_PER_TURN {
             self.history.ensure_all_tool_calls_paired()?;
@@ -136,35 +143,60 @@ where
                 &capabilities,
                 InternalRequestMetadata::default(),
             )?;
-            self.last_baseline_assessment =
-                Some(self.provider_session.assess_full_request(&snapshot));
-            let stream = ModelStreamingService::new(self.provider)
-                .consume(input, cancellation.clone())
-                .await?;
-            let events = match stream {
-                ModelStreamOutcome::Completed { events } => events,
+            let assessment = self
+                .provider_session
+                .assess_delivery(&snapshot, capabilities.incremental_input);
+            self.last_baseline_assessment = Some(assessment.clone());
+            let request = self.request_for_assessment(&input, &assessment)?;
+            reserve_provider_request(&mut provider_requests)?;
+            let stream = match ModelStreamingService::new(self.provider)
+                .consume(request.clone(), cancellation.clone())
+                .await
+            {
+                Ok(outcome) => Ok(outcome),
+                Err(ModelStreamingError::Provider(ModelProviderError::ContinuationRejected {
+                    ..
+                })) if request.is_incremental() => {
+                    self.provider_session
+                        .reset(BaselineInvalidationReason::ProviderRejected);
+                    self.last_baseline_assessment = Some(BaselineAssessment::FullRequest {
+                        reason: BaselineInvalidationReason::ProviderRejected,
+                    });
+                    reserve_provider_request(&mut provider_requests)?;
+                    ModelStreamingService::new(self.provider)
+                        .consume(ModelRequest::full(input.clone()), cancellation.clone())
+                        .await
+                }
+                Err(error) => Err(error),
+            }?;
+            let (events, completion) = match stream {
+                ModelStreamOutcome::Completed { events, completion } => (events, completion),
                 ModelStreamOutcome::Cancelled { .. } => {
                     return Ok(AgentTurnOutcome::Cancelled {
-                        model_requests: request_index + 1,
+                        model_requests: provider_requests,
                         executions,
                     });
                 }
             };
             let sample = ModelSample::from_events(events);
-            let tool_call = sample.single_tool_call()?;
+            let tool_call = sample
+                .single_tool_call()
+                .map_err(|count| AgentLoopError::MultipleToolCalls { count })?;
             let assistant_text = sample.assistant_text();
             if tool_call.is_none() && assistant_text.is_empty() {
                 return Err(AgentLoopError::EmptyModelResponse);
             }
+            self.require_continuation_identity(&completion, capabilities.incremental_input)?;
             let server_output_items = sample.content_items();
             sample.commit(&mut self.history)?;
             self.provider_session
-                .record_full_response(&snapshot, server_output_items)?;
+                .record_completed_sample(&snapshot, server_output_items)?;
+            self.commit_continuation(&completion);
 
             let Some(call) = tool_call else {
                 return Ok(AgentTurnOutcome::Completed {
                     assistant_text,
-                    model_requests: request_index + 1,
+                    model_requests: provider_requests,
                     executions,
                 });
             };
@@ -190,7 +222,7 @@ where
                     self.history.append_tool_result(outcome.result.clone())?;
                     executions.push(outcome);
                     return Ok(AgentTurnOutcome::Cancelled {
-                        model_requests: request_index + 1,
+                        model_requests: provider_requests,
                         executions,
                     });
                 }
@@ -201,6 +233,65 @@ where
             limit: MAX_MODEL_REQUESTS_PER_TURN,
         })
     }
+
+    fn request_for_assessment(
+        &self,
+        full_input: &ModelInputIR,
+        assessment: &BaselineAssessment,
+    ) -> Result<ModelRequest, AgentLoopError> {
+        Ok(match assessment {
+            BaselineAssessment::FullRequest { .. } => ModelRequest::full(full_input.clone()),
+            BaselineAssessment::AppendOnlyCandidate { delta_items } => {
+                let continuation = self
+                    .continuation
+                    .as_ref()
+                    .filter(|stored| stored.session == *self.provider_session.reference())
+                    .map(|stored| stored.response_id.clone())
+                    .ok_or(AgentLoopError::ContinuationIdentityMissing)?;
+                let mut delta = full_input.clone();
+                delta.content_items = delta_items.clone();
+                ModelRequest::incremental(delta, continuation)
+            }
+        })
+    }
+
+    fn require_continuation_identity(
+        &self,
+        completion: &ModelResponseCompletion,
+        incremental_input_supported: bool,
+    ) -> Result<(), AgentLoopError> {
+        if incremental_input_supported && completion.response_id().is_none() {
+            return Err(AgentLoopError::ContinuationIdentityMissing);
+        }
+        Ok(())
+    }
+
+    fn commit_continuation(&mut self, completion: &ModelResponseCompletion) {
+        self.continuation =
+            completion
+                .response_id()
+                .cloned()
+                .map(|response_id| CommittedContinuation {
+                    session: self.provider_session.reference().clone(),
+                    response_id,
+                });
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CommittedContinuation {
+    session: crate::domain::context::ProviderSessionRef,
+    response_id: ProviderResponseId,
+}
+
+fn reserve_provider_request(provider_requests: &mut usize) -> Result<(), AgentLoopError> {
+    if *provider_requests == MAX_MODEL_REQUESTS_PER_TURN {
+        return Err(AgentLoopError::ModelRequestLimit {
+            limit: MAX_MODEL_REQUESTS_PER_TURN,
+        });
+    }
+    *provider_requests += 1;
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
@@ -234,90 +325,8 @@ pub enum AgentLoopError {
     MultipleToolCalls { count: usize },
     #[error("the model completed without text or a Tool Call")]
     EmptyModelResponse,
+    #[error("an incremental-capable Provider completed without a continuation identity")]
+    ContinuationIdentityMissing,
     #[error("the Agent reached the per-Turn model-request limit of {limit}")]
     ModelRequestLimit { limit: usize },
-}
-
-enum SampleItem {
-    AssistantText(String),
-    ToolCall(ToolCall),
-}
-
-struct ModelSample {
-    items: Vec<SampleItem>,
-}
-
-impl ModelSample {
-    fn from_events(events: Vec<ModelEvent>) -> Self {
-        let mut items = Vec::new();
-        let mut text = String::new();
-        for event in events {
-            match event {
-                ModelEvent::TextDelta { text: delta } => text.push_str(&delta),
-                ModelEvent::ToolCall { call } => {
-                    if !text.is_empty() {
-                        items.push(SampleItem::AssistantText(std::mem::take(&mut text)));
-                    }
-                    items.push(SampleItem::ToolCall(call));
-                }
-                ModelEvent::Usage { .. } | ModelEvent::Completed => {}
-            }
-        }
-        if !text.is_empty() {
-            items.push(SampleItem::AssistantText(text));
-        }
-        Self { items }
-    }
-
-    fn single_tool_call(&self) -> Result<Option<ToolCall>, AgentLoopError> {
-        let calls = self
-            .items
-            .iter()
-            .filter_map(|item| match item {
-                SampleItem::ToolCall(call) => Some(call),
-                SampleItem::AssistantText(_) => None,
-            })
-            .collect::<Vec<_>>();
-        match calls.as_slice() {
-            [] => Ok(None),
-            [call] => Ok(Some((*call).clone())),
-            _ => Err(AgentLoopError::MultipleToolCalls { count: calls.len() }),
-        }
-    }
-
-    fn commit(&self, history: &mut ConversationHistory) -> Result<(), HistoryError> {
-        let mut staged = history.clone();
-        for item in &self.items {
-            match item {
-                SampleItem::AssistantText(text) => staged.append_assistant_text(text.clone()),
-                SampleItem::ToolCall(call) => staged.append_tool_call(call.clone())?,
-            }
-        }
-        *history = staged;
-        Ok(())
-    }
-
-    fn assistant_text(&self) -> String {
-        self.items
-            .iter()
-            .filter_map(|item| match item {
-                SampleItem::AssistantText(text) => Some(text.as_str()),
-                SampleItem::ToolCall(_) => None,
-            })
-            .collect()
-    }
-
-    fn content_items(&self) -> Vec<crate::domain::model::ContentItem> {
-        self.items
-            .iter()
-            .map(|item| match item {
-                SampleItem::AssistantText(text) => {
-                    crate::domain::model::ContentItem::assistant_text(text.clone())
-                }
-                SampleItem::ToolCall(call) => {
-                    crate::domain::model::ContentItem::ToolCall { call: call.clone() }
-                }
-            })
-            .collect()
-    }
 }

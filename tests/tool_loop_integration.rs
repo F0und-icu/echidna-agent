@@ -1,8 +1,10 @@
 use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::task::{Context, Poll};
 
 use cyber_agent::adapters::tools::ToolRegistry;
 use cyber_agent::app::agent_loop::{AgentLoop, AgentLoopError, AgentTurnOutcome};
@@ -18,8 +20,12 @@ use cyber_agent::domain::tools::{
     ExecutionId, ToolCall, ToolCallId, ToolExecutionOutcome, ToolExecutionPlan, ToolName,
     ToolResultStatus, ToolSpec,
 };
-use cyber_agent::ports::model::{ModelEventStream, ModelProvider, ModelProviderError};
+use cyber_agent::ports::model::{
+    ModelEventStream, ModelProvider, ModelProviderError, ModelRequest, ModelResponseCompletion,
+    ModelStreamEvent,
+};
 use cyber_agent::ports::tool::{ToolExecutionFuture, ToolExecutor, ToolExecutorError};
+use futures_core::Stream;
 use futures_util::stream;
 use serde_json::{Value, json};
 
@@ -221,39 +227,136 @@ fn capabilities() -> ModelCapabilities {
     }
 }
 
+fn incremental_capabilities() -> ModelCapabilities {
+    ModelCapabilities {
+        incremental_input: true,
+        ..capabilities()
+    }
+}
+
 struct ScriptedProvider {
-    responses: Mutex<VecDeque<Vec<ModelEvent>>>,
-    inputs: Mutex<Vec<ModelInputIR>>,
+    capabilities: ModelCapabilities,
+    responses: Mutex<VecDeque<ScriptedResponse>>,
+    requests: Mutex<Vec<ModelRequest>>,
+}
+
+struct ScriptedResponse {
+    stream: Vec<Result<ModelStreamEvent, ModelProviderError>>,
+    pending: bool,
 }
 
 impl ScriptedProvider {
     fn new(responses: impl IntoIterator<Item = Vec<ModelEvent>>) -> Self {
+        Self::with_capabilities(
+            capabilities(),
+            responses
+                .into_iter()
+                .map(|events| completed_response(events, None)),
+        )
+    }
+
+    fn with_capabilities(
+        capabilities: ModelCapabilities,
+        responses: impl IntoIterator<Item = ScriptedResponse>,
+    ) -> Self {
         Self {
+            capabilities,
             responses: Mutex::new(responses.into_iter().collect()),
-            inputs: Mutex::new(Vec::new()),
+            requests: Mutex::new(Vec::new()),
         }
     }
 
     fn inputs(&self) -> Vec<ModelInputIR> {
-        self.inputs.lock().unwrap().clone()
+        self.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|request| request.input().clone())
+            .collect()
+    }
+
+    fn requests(&self) -> Vec<ModelRequest> {
+        self.requests.lock().unwrap().clone()
     }
 }
 
 impl ModelProvider for ScriptedProvider {
     fn capabilities(&self) -> ModelCapabilities {
-        capabilities()
+        self.capabilities.clone()
     }
 
-    fn stream(&self, input: ModelInputIR) -> Result<ModelEventStream, ModelProviderError> {
-        self.capabilities().validate_input(&input)?;
-        self.inputs.lock().unwrap().push(input);
+    fn stream(&self, request: ModelRequest) -> Result<ModelEventStream, ModelProviderError> {
+        request.validate_capabilities(&self.capabilities())?;
+        self.requests.lock().unwrap().push(request);
         let response = self.responses.lock().unwrap().pop_front().ok_or_else(|| {
             ModelProviderError::ProviderFailure {
                 code: Some("fixture_exhausted".to_owned()),
                 message: "the scripted Provider has no response left".to_owned(),
             }
         })?;
-        Ok(Box::pin(stream::iter(response.into_iter().map(Ok))))
+        if response.pending {
+            Ok(Box::pin(PendingScriptedStream))
+        } else {
+            Ok(Box::pin(stream::iter(response.stream)))
+        }
+    }
+}
+
+fn completed_response(events: Vec<ModelEvent>, response_id: Option<&str>) -> ScriptedResponse {
+    let completion = response_id.map_or_else(
+        ModelResponseCompletion::without_response_id,
+        |response_id| {
+            ModelResponseCompletion::new(cyber_agent::ports::model::ProviderResponseId::new(
+                response_id,
+            ))
+        },
+    );
+    ScriptedResponse {
+        stream: events
+            .into_iter()
+            .map(|event| Ok(ModelStreamEvent::Event(event)))
+            .chain(std::iter::once(Ok(ModelStreamEvent::Completed(completion))))
+            .collect(),
+        pending: false,
+    }
+}
+
+fn rejected_response(prefix: Vec<ModelEvent>) -> ScriptedResponse {
+    ScriptedResponse {
+        stream: prefix
+            .into_iter()
+            .map(|event| Ok(ModelStreamEvent::Event(event)))
+            .chain(std::iter::once(Err(
+                ModelProviderError::ContinuationRejected {
+                    code: "previous_response_not_found".to_owned(),
+                },
+            )))
+            .collect(),
+        pending: false,
+    }
+}
+
+fn failed_response(error: ModelProviderError) -> ScriptedResponse {
+    ScriptedResponse {
+        stream: vec![Err(error)],
+        pending: false,
+    }
+}
+
+fn pending_response() -> ScriptedResponse {
+    ScriptedResponse {
+        stream: Vec::new(),
+        pending: true,
+    }
+}
+
+struct PendingScriptedStream;
+
+impl Stream for PendingScriptedStream {
+    type Item = Result<ModelStreamEvent, ModelProviderError>;
+
+    fn poll_next(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Poll::Pending
     }
 }
 
@@ -280,14 +383,10 @@ async fn agent_loop_keeps_full_resampling_after_local_baseline_comparison() {
             ModelEvent::TextDelta {
                 text: "The search result will drive the next sample.".to_owned(),
             },
-            ModelEvent::Completed,
         ],
-        vec![
-            ModelEvent::TextDelta {
-                text: "Candidate identified: path traversal marker in src/parser.rs.".to_owned(),
-            },
-            ModelEvent::Completed,
-        ],
+        vec![ModelEvent::TextDelta {
+            text: "Candidate identified: path traversal marker in src/parser.rs.".to_owned(),
+        }],
     ]);
     let tools = ToolRegistry::for_project(&project.root);
     let mut agent = AgentLoop::with_primary_context(
@@ -359,18 +458,12 @@ async fn agent_loop_keeps_full_resampling_after_local_baseline_comparison() {
 #[tokio::test]
 async fn agent_loop_audits_baseline_candidates_while_sending_complete_history() {
     let provider = ScriptedProvider::new([
-        vec![
-            ModelEvent::TextDelta {
-                text: "first response".to_owned(),
-            },
-            ModelEvent::Completed,
-        ],
-        vec![
-            ModelEvent::TextDelta {
-                text: "second response".to_owned(),
-            },
-            ModelEvent::Completed,
-        ],
+        vec![ModelEvent::TextDelta {
+            text: "first response".to_owned(),
+        }],
+        vec![ModelEvent::TextDelta {
+            text: "second response".to_owned(),
+        }],
     ]);
     let tools = ToolRegistry::for_project(env!("CARGO_MANIFEST_DIR"));
     let mut agent = AgentLoop::with_primary_context(
@@ -404,8 +497,8 @@ async fn agent_loop_audits_baseline_candidates_while_sending_complete_history() 
         .unwrap();
     assert_eq!(
         agent.last_baseline_assessment(),
-        Some(&BaselineAssessment::AppendOnlyCandidate {
-            delta_items: vec![ContentItem::user_text("second user input")],
+        Some(&BaselineAssessment::FullRequest {
+            reason: BaselineInvalidationReason::IncrementalInputUnsupported,
         })
     );
 
@@ -419,6 +512,502 @@ async fn agent_loop_audits_baseline_candidates_while_sending_complete_history() 
             ContentItem::user_text("second user input"),
         ]
     );
+}
+
+#[tokio::test]
+async fn incremental_delivery_uses_tool_result_then_next_user_as_strict_deltas() {
+    let project = TestProject::new("incremental-tool-loop");
+    project.write("src/target.rs", "// fixture vulnerability marker\n");
+    let call = tool_call(
+        "call-search",
+        "search_files",
+        json!({"pattern": "fixture vulnerability", "paths": ["src"]}),
+    );
+    let provider = ScriptedProvider::with_capabilities(
+        incremental_capabilities(),
+        [
+            completed_response(
+                vec![ModelEvent::ToolCall { call: call.clone() }],
+                Some("resp-first"),
+            ),
+            completed_response(
+                vec![ModelEvent::TextDelta {
+                    text: "tool result considered".to_owned(),
+                }],
+                Some("resp-tool"),
+            ),
+            completed_response(
+                vec![ModelEvent::TextDelta {
+                    text: "next user considered".to_owned(),
+                }],
+                Some("resp-next"),
+            ),
+        ],
+    );
+    let tools = ToolRegistry::for_project(&project.root);
+    let mut agent = AgentLoop::new(&provider, &tools, "fixture");
+
+    let first = agent
+        .run_turn("inspect target", AgentCancellation::new())
+        .await
+        .unwrap();
+    assert!(matches!(
+        first,
+        AgentTurnOutcome::Completed {
+            model_requests: 2,
+            executions,
+            ..
+        } if executions.len() == 1
+    ));
+    let second = agent
+        .run_turn("what changed?", AgentCancellation::new())
+        .await
+        .unwrap();
+    assert!(matches!(
+        second,
+        AgentTurnOutcome::Completed {
+            model_requests: 1,
+            ..
+        }
+    ));
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 3);
+    assert!(!requests[0].is_incremental());
+    assert!(matches!(
+        requests[1].delivery(),
+        cyber_agent::ports::model::ModelRequestDelivery::Incremental { continuation }
+            if continuation.as_str() == "resp-first"
+    ));
+    assert!(matches!(
+        requests[1].input().content_items.as_slice(),
+        [ContentItem::ToolResult { result }]
+            if result.call_id == call.call_id && result.status == ToolResultStatus::Succeeded
+    ));
+    assert!(matches!(
+        requests[2].delivery(),
+        cyber_agent::ports::model::ModelRequestDelivery::Incremental { continuation }
+            if continuation.as_str() == "resp-tool"
+    ));
+    assert_eq!(
+        requests[2].input().content_items,
+        vec![ContentItem::user_text("what changed?")]
+    );
+}
+
+#[tokio::test]
+async fn typed_continuation_rejection_retries_one_full_sample_without_replaying_tool() {
+    let project = TestProject::new("continuation-fallback");
+    project.write("src/target.rs", "// fallback marker\n");
+    let call = tool_call(
+        "call-search",
+        "search_files",
+        json!({"pattern": "fallback marker", "paths": ["src"]}),
+    );
+    let provider = ScriptedProvider::with_capabilities(
+        incremental_capabilities(),
+        [
+            completed_response(
+                vec![ModelEvent::ToolCall { call: call.clone() }],
+                Some("resp-before-rejection"),
+            ),
+            rejected_response(vec![ModelEvent::TextDelta {
+                text: "discard this partial response".to_owned(),
+            }]),
+            completed_response(
+                vec![ModelEvent::TextDelta {
+                    text: "full fallback answer".to_owned(),
+                }],
+                Some("resp-after-fallback"),
+            ),
+        ],
+    );
+    let tools = ToolRegistry::for_project(&project.root);
+    let mut agent = AgentLoop::new(&provider, &tools, "fixture");
+
+    let outcome = agent
+        .run_turn("inspect target", AgentCancellation::new())
+        .await
+        .unwrap();
+    let AgentTurnOutcome::Completed {
+        assistant_text,
+        model_requests,
+        executions,
+    } = outcome
+    else {
+        panic!("the full fallback should complete the Turn")
+    };
+    assert_eq!(model_requests, 3, "counts actual Provider requests");
+    assert_eq!(executions.len(), 1, "the completed Tool is never replayed");
+    assert_eq!(assistant_text, "full fallback answer");
+    assert!(
+        agent
+            .history()
+            .items()
+            .iter()
+            .all(|item| item != &ContentItem::assistant_text("discard this partial response"))
+    );
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[1].is_incremental());
+    assert!(
+        !requests[2].is_incremental(),
+        "fallback is a complete request"
+    );
+    assert!(
+        requests[2]
+            .input()
+            .content_items
+            .iter()
+            .any(|item| matches!(
+                item,
+                ContentItem::ToolResult { result } if result.call_id == call.call_id
+            ))
+    );
+}
+
+#[tokio::test]
+async fn generic_provider_failure_never_falls_back_or_replays_a_completed_tool() {
+    let project = TestProject::new("generic-provider-failure");
+    project.write("src/target.rs", "// no fallback marker\n");
+    let call = tool_call(
+        "call-search",
+        "search_files",
+        json!({"pattern": "no fallback marker", "paths": ["src"]}),
+    );
+    let provider = ScriptedProvider::with_capabilities(
+        incremental_capabilities(),
+        [
+            completed_response(
+                vec![ModelEvent::ToolCall { call }],
+                Some("resp-before-generic-failure"),
+            ),
+            failed_response(ModelProviderError::ProviderFailure {
+                code: Some("rate_limit_exceeded".to_owned()),
+                message: "fixture rate limit".to_owned(),
+            }),
+        ],
+    );
+    let tools = ToolRegistry::for_project(&project.root);
+    let mut agent = AgentLoop::new(&provider, &tools, "fixture");
+
+    assert!(matches!(
+        agent
+            .run_turn("inspect target", AgentCancellation::new())
+            .await,
+        Err(AgentLoopError::Model(
+            cyber_agent::app::model_streaming::ModelStreamingError::Provider(
+                ModelProviderError::ProviderFailure { .. }
+            )
+        ))
+    ));
+    assert_eq!(provider.requests().len(), 2, "generic errors do not retry");
+    assert_eq!(agent.history().ensure_all_tool_calls_paired(), Ok(()));
+}
+
+#[tokio::test]
+async fn failed_full_fallback_keeps_a_provider_rejected_reset_until_a_later_full_success() {
+    let provider = ScriptedProvider::with_capabilities(
+        incremental_capabilities(),
+        [
+            completed_response(
+                vec![ModelEvent::TextDelta {
+                    text: "first response".to_owned(),
+                }],
+                Some("resp-before-rejection"),
+            ),
+            rejected_response(Vec::new()),
+            failed_response(ModelProviderError::TransportFailure {
+                message: "fixture fallback transport failure".to_owned(),
+            }),
+            completed_response(
+                vec![ModelEvent::TextDelta {
+                    text: "full recovery".to_owned(),
+                }],
+                Some("resp-after-recovery"),
+            ),
+        ],
+    );
+    let tools = ToolRegistry::for_project(env!("CARGO_MANIFEST_DIR"));
+    let mut agent = AgentLoop::new(&provider, &tools, "fixture");
+    agent
+        .run_turn("first input", AgentCancellation::new())
+        .await
+        .unwrap();
+    assert!(matches!(
+        agent
+            .run_turn("rejected input", AgentCancellation::new())
+            .await,
+        Err(AgentLoopError::Model(
+            cyber_agent::app::model_streaming::ModelStreamingError::Provider(
+                ModelProviderError::TransportFailure { .. }
+            )
+        ))
+    ));
+    agent
+        .run_turn("recovery input", AgentCancellation::new())
+        .await
+        .unwrap();
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 4);
+    assert!(requests[1].is_incremental());
+    assert!(!requests[2].is_incremental(), "first fallback is full");
+    assert!(
+        !requests[3].is_incremental(),
+        "the pending ProviderRejected reset survives a failed full fallback"
+    );
+}
+
+#[tokio::test]
+async fn invalid_model_sample_keeps_the_last_committed_continuation() {
+    let provider = ScriptedProvider::with_capabilities(
+        incremental_capabilities(),
+        [
+            completed_response(
+                vec![ModelEvent::TextDelta {
+                    text: "first response".to_owned(),
+                }],
+                Some("resp-committed"),
+            ),
+            completed_response(
+                vec![
+                    ModelEvent::ToolCall {
+                        call: tool_call("call-one", "read_file", json!({"path": "Cargo.toml"})),
+                    },
+                    ModelEvent::ToolCall {
+                        call: tool_call("call-two", "read_file", json!({"path": "src/lib.rs"})),
+                    },
+                ],
+                Some("resp-invalid"),
+            ),
+            completed_response(
+                vec![ModelEvent::TextDelta {
+                    text: "recovered response".to_owned(),
+                }],
+                Some("resp-recovered"),
+            ),
+        ],
+    );
+    let tools = ToolRegistry::for_project(env!("CARGO_MANIFEST_DIR"));
+    let mut agent = AgentLoop::new(&provider, &tools, "fixture");
+
+    agent
+        .run_turn("first input", AgentCancellation::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        agent
+            .run_turn("invalid input", AgentCancellation::new())
+            .await,
+        Err(AgentLoopError::MultipleToolCalls { count: 2 })
+    );
+    agent
+        .run_turn("recovery input", AgentCancellation::new())
+        .await
+        .unwrap();
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 3);
+    assert!(matches!(
+        requests[2].delivery(),
+        cyber_agent::ports::model::ModelRequestDelivery::Incremental { continuation }
+            if continuation.as_str() == "resp-committed"
+    ));
+    assert_eq!(
+        requests[2].input().content_items,
+        vec![
+            ContentItem::user_text("invalid input"),
+            ContentItem::user_text("recovery input"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn cancelled_model_sample_keeps_the_last_committed_continuation() {
+    let provider = ScriptedProvider::with_capabilities(
+        incremental_capabilities(),
+        [
+            completed_response(
+                vec![ModelEvent::TextDelta {
+                    text: "first response".to_owned(),
+                }],
+                Some("resp-before-cancel"),
+            ),
+            pending_response(),
+            completed_response(
+                vec![ModelEvent::TextDelta {
+                    text: "recovered response".to_owned(),
+                }],
+                Some("resp-after-cancel"),
+            ),
+        ],
+    );
+    let tools = ToolRegistry::for_project(env!("CARGO_MANIFEST_DIR"));
+    let mut agent = AgentLoop::new(&provider, &tools, "fixture");
+    agent
+        .run_turn("first input", AgentCancellation::new())
+        .await
+        .unwrap();
+
+    let cancellation = AgentCancellation::new();
+    let cancel_from_task = cancellation.clone();
+    tokio::spawn(async move {
+        tokio::task::yield_now().await;
+        cancel_from_task.cancel();
+    });
+    assert!(matches!(
+        agent.run_turn("cancelled input", cancellation).await,
+        Ok(AgentTurnOutcome::Cancelled {
+            model_requests: 1,
+            ..
+        })
+    ));
+    agent
+        .run_turn("recovery input", AgentCancellation::new())
+        .await
+        .unwrap();
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 3);
+    assert!(matches!(
+        requests[2].delivery(),
+        cyber_agent::ports::model::ModelRequestDelivery::Incremental { continuation }
+            if continuation.as_str() == "resp-before-cancel"
+    ));
+    assert_eq!(
+        requests[2].input().content_items,
+        vec![
+            ContentItem::user_text("cancelled input"),
+            ContentItem::user_text("recovery input"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn empty_model_sample_keeps_the_last_committed_continuation() {
+    let provider = ScriptedProvider::with_capabilities(
+        incremental_capabilities(),
+        [
+            completed_response(
+                vec![ModelEvent::TextDelta {
+                    text: "first response".to_owned(),
+                }],
+                Some("resp-before-empty"),
+            ),
+            completed_response(Vec::new(), Some("resp-empty")),
+            completed_response(
+                vec![ModelEvent::TextDelta {
+                    text: "recovered response".to_owned(),
+                }],
+                Some("resp-after-empty"),
+            ),
+        ],
+    );
+    let tools = ToolRegistry::for_project(env!("CARGO_MANIFEST_DIR"));
+    let mut agent = AgentLoop::new(&provider, &tools, "fixture");
+    agent
+        .run_turn("first input", AgentCancellation::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        agent
+            .run_turn("empty input", AgentCancellation::new())
+            .await,
+        Err(AgentLoopError::EmptyModelResponse)
+    );
+    agent
+        .run_turn("recovery input", AgentCancellation::new())
+        .await
+        .unwrap();
+
+    let requests = provider.requests();
+    assert!(matches!(
+        requests[2].delivery(),
+        cyber_agent::ports::model::ModelRequestDelivery::Incremental { continuation }
+            if continuation.as_str() == "resp-before-empty"
+    ));
+}
+
+#[tokio::test]
+async fn fresh_provider_sessions_never_share_a_continuation_identity() {
+    let provider = ScriptedProvider::with_capabilities(
+        incremental_capabilities(),
+        [
+            completed_response(
+                vec![ModelEvent::TextDelta {
+                    text: "primary first".to_owned(),
+                }],
+                Some("resp-primary"),
+            ),
+            completed_response(
+                vec![ModelEvent::TextDelta {
+                    text: "fresh session first".to_owned(),
+                }],
+                Some("resp-fresh"),
+            ),
+            completed_response(
+                vec![ModelEvent::TextDelta {
+                    text: "primary second".to_owned(),
+                }],
+                Some("resp-primary-next"),
+            ),
+        ],
+    );
+    let tools = ToolRegistry::for_project(env!("CARGO_MANIFEST_DIR"));
+    let mut primary = AgentLoop::with_primary_context(
+        &provider,
+        &tools,
+        "fixture",
+        ModelIdentity::new("fixture", "model"),
+        ModelProfile::new("profile", 1),
+        ProviderSession::new(
+            ProviderSessionId::new("primary-session"),
+            ProviderSessionRole::Primary,
+            1,
+        ),
+    )
+    .unwrap();
+    let mut fresh = AgentLoop::with_primary_context(
+        &provider,
+        &tools,
+        "fixture",
+        ModelIdentity::new("fixture", "model"),
+        ModelProfile::new("profile", 1),
+        ProviderSession::new(
+            ProviderSessionId::new("resumed-session"),
+            ProviderSessionRole::Primary,
+            2,
+        ),
+    )
+    .unwrap();
+
+    primary
+        .run_turn("primary first", AgentCancellation::new())
+        .await
+        .unwrap();
+    fresh
+        .run_turn("fresh first", AgentCancellation::new())
+        .await
+        .unwrap();
+    primary
+        .run_turn("primary second", AgentCancellation::new())
+        .await
+        .unwrap();
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 3);
+    assert!(!requests[0].is_incremental());
+    assert!(
+        !requests[1].is_incremental(),
+        "resume starts from a full request"
+    );
+    assert!(matches!(
+        requests[2].delivery(),
+        cyber_agent::ports::model::ModelRequestDelivery::Incremental { continuation }
+            if continuation.as_str() == "resp-primary"
+    ));
 }
 
 struct PendingToolExecutor {
@@ -457,12 +1046,9 @@ async fn cancellation_during_tool_execution_records_a_cancelled_pair() {
         .find(|spec| spec.name.as_str() == "read_file")
         .unwrap();
     let tools = PendingToolExecutor { spec };
-    let provider = ScriptedProvider::new([vec![
-        ModelEvent::ToolCall {
-            call: tool_call("call-pending", "read_file", json!({"path": "Cargo.toml"})),
-        },
-        ModelEvent::Completed,
-    ]]);
+    let provider = ScriptedProvider::new([vec![ModelEvent::ToolCall {
+        call: tool_call("call-pending", "read_file", json!({"path": "Cargo.toml"})),
+    }]]);
     let cancellation = AgentCancellation::new();
     let cancel_from_task = cancellation.clone();
     tokio::spawn(async move {
@@ -500,7 +1086,6 @@ async fn multiple_tool_calls_are_rejected_without_committing_partial_model_outpu
         ModelEvent::ToolCall {
             call: tool_call("call-2", "read_file", json!({"path": "src/lib.rs"})),
         },
-        ModelEvent::Completed,
     ]]);
     let tools = ToolRegistry::for_project(env!("CARGO_MANIFEST_DIR"));
     let mut agent = AgentLoop::new(&provider, &tools, "fixture");

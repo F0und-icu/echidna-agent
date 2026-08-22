@@ -2,4 +2,5 @@
 
 pub mod agent_loop;
 pub mod cancellation;
+mod model_sample;
 pub mod model_streaming;

@@ -7,12 +7,12 @@
 - Implementation: `STARTED`
 - Current milestone: `M1b`
 - Current slice: `M1b-S2`
-- Slice state: `READY_NOT_AUTHORIZED`
-- Lean governance: `ACTIVE`; M1b-S1 implementation and remote delivery are complete
-- Local Git initialized: `yes`; M1b-S1 code was delivered from `agent/m1b-s1-provider-baseline`
+- Slice state: `IN_PROGRESS`
+- Lean governance: `ACTIVE`; M1b-S2 is scope-locked to incremental Responses delivery and one bounded Full fallback
+- Local Git initialized: `yes`; M1b-S2 is being developed on `agent/m1b-s2-incremental-responses`
 - Remote repository: `F0und-icu/cyber-agent` private; PR `#6` was Squash Merged
 - Documentation baseline commit: `55ff3be`
-- Current code base: `main`/`origin/main` M1b-S1 code merge commit `a334415` before this status handoff
+- Current code base: `main`/`origin/main` M1b-S1 status-seal commit `045862e` before this Slice branch
 - Upstream Codex baseline: `3aae5d885bac39c1262491aa3fd100dfd8b3919f`
 
 ## Last Completed Slice
@@ -57,20 +57,29 @@
 - M1a-S3 Tool contracts, strict in-memory History, fixed FullAccess Tool Registry, bounded AgentLoop, OpenAI Tool history encoding and real temporary-project full-resample Gate.
 - M1b-S1 Turn/Step capture, Canonical Request hashing, non-destructive ProviderSession Baseline comparison and full-request AgentLoop audit.
 
-## Not Started
+## In Progress
 
-- M1b-S2 and later implementation; no response ID, incremental Provider request or fallback code has started.
+- Slice: `M1b-S2`
+- Delivery branch: `agent/m1b-s2-incremental-responses`
+- Base commit: `045862e`
+- Scope lock: add a Provider-neutral request/response continuation boundary, keep the opaque Provider response identity outside Domain/Research/Context, map OpenAI `previous_response_id` plus strict append-only delta, and allow exactly one Full retry only after a typed continuation rejection.
+- Intended production touch points: `ports/model`, `app/model_streaming`, `app/agent_loop`, `domain/context/baseline`, `adapters/mock_model` and `adapters/openai/{request,response,mod}`. A smaller final set is preferred; no new dependency is planned.
+- Intended permanent tests: Port/stream contracts, OpenAI loopback request snapshots, Baseline reset behavior and the single-Agent Tool loop across same-Turn, next-Turn, rejection fallback and fresh-session/compaction reset paths.
+- Atomicity constraint: a response ID and Incremental Baseline advance only after one complete model sample passes local validation and commits to History; failed/cancelled/invalid samples retain the last committed pair.
+- Retry constraint: fallback retries the same logical model sample, never re-enters or replays a completed local Tool execution, and never applies to generic transport, HTTP, protocol or Provider failures.
+- Live compatibility constraint: no public Provider request is part of this Slice Gate. The `store: false` plus `previous_response_id` behavior remains explicitly unverified until a separately authorized Live Test.
 
 ## Current Authorization
 
-The M1b-S1 implementation and delivery authorization has been consumed by merged PR `#6`. No implementation, Git or Live Test authorization exists for `M1b-S2` after this status handoff.
+The current user instruction explicitly authorizes continued implementation with delegated Terra/Luna development and normal version-controlled remote delivery until the first prototype reaches the separately authorized Live Provider validation boundary.
 
-- Run mode: `REVIEW_ONLY`
-- Slice ID: `M1b-S2`; state `READY_NOT_AUTHORIZED`
-- Git mode: `NO_COMMIT` after this authorized status-only handoff is merged
+- Run mode: `IMPLEMENT_TO_LIVE_BOUNDARY`
+- Slice ID: `M1b-S2`; state `IN_PROGRESS`
+- Git mode: `BRANCH_PR_REVIEW_MERGE`; commit, push, PR, CI review and merge are authorized when the Slice Gate passes
+- Delegation mode: `AUTHORIZED`; delegated implementation Agents must independently read the repository authority chain and stay inside the current Slice
 - Live test mode: `OFF`; no real Provider credential or public model request is authorized
-- Forbidden continuation: do not implement `previous_response_id`, incremental HTTP encoding, Provider fallback or any later-Slice behavior without new authorization
-- Stop condition: stop with M1b-S2 `READY_NOT_AUTHORIZED`
+- Forbidden continuation inside this Slice: M1c Batch/Scheduler/PTY/Job, Vision service, DeepSeek Adapter, CLI profile composition, Web, persistence, general Router/Hook/Plugin work, Codex source modification or Codex credentials/login access
+- Stop condition: complete and remotely seal M1b-S2 before starting the next Slice; do not run a Live Test
 
 ## Slice Lean Review
 
@@ -115,13 +124,42 @@ The M1b-S1 implementation and delivery authorization has been consumed by merged
 - No unused feature flag, generic Hook/Router, Provider SDK, persistent Schema, copied Codex code or unconsumed adapter path was retained.
 - Remaining governance debt: none inside M1b-S1; remote delivery evidence is complete.
 
+### M1b-S2 Draft Lean Review (awaiting parent review and Git delivery)
+
+#### Semantic Owners
+
+- `src/ports/model.rs` owns the provider-neutral `ModelRequest` delivery contract, opaque completion identity and the one capability-validation rule shared by Adapters.
+- `src/domain/context/baseline.rs` still owns only semantic Baseline comparison, reset priority and the `incremental_input=false` Full-delivery reason. It contains no Provider response identity.
+- `src/app/agent_loop.rs` is the sole owner of pairing a locally committed History/Baseline with an opaque continuation identity, selecting delta versus Full delivery and performing at most one typed-rejection Full fallback. Fallback counts against the existing 32-request Turn bound.
+- `src/app/model_sample.rs` owns atomic completed-sample decoding, validation and staged History commit; it was split from the control loop by change reason without adding a Trait or public API.
+- `src/adapters/openai/request.rs` and `response.rs` privately own Responses wire encoding/decoding. Only an incremental request with exact code `previous_response_not_found` is mapped to `ContinuationRejected`; all other Provider, protocol and HTTP failures remain non-fallback errors.
+
+#### Reuse, API and Dependencies
+
+- The existing `ModelInputIR`, History pairing, canonical Baseline and constrained HTTP/SSE stack are reused. The Port replaces a Domain `Completed` event with Port completion metadata, so OpenAI DTOs and response IDs remain outside Domain/Context/Research.
+- The only new public Port surface is the real Adapter contract: `ModelRequest`, `ModelRequestDelivery`, `ProviderResponseId`, `ModelResponseCompletion` and `ModelStreamEvent`. No test-only API, Cargo dependency, feature, SDK, Router, Hook or persistence type was added.
+- Main review split the 413-line mixed control/sample module into a 330-line AgentLoop and an 87-line private sample owner; further splitting was rejected because continuation delivery still has only one runtime consumer.
+- The Codex WebSocket implementation and tests at fixed upstream `3aae5d885bac39c1262491aa3fd100dfd8b3919f` remain `REFERENCE`: the local HTTP/SSE implementation was reimplemented without copied source, so no Port Ledger entry or license change is required.
+
+#### Test Layout, Removal and Deferred Work
+
+- Top-level permanent tests cover same-Turn ToolResult delta, next-Turn User delta, capability-disabled Full delivery, Compaction reset assessment, fresh ProviderSession isolation, SSE and non-2xx exact rejection mapping, one Full fallback, partial-event discard, no Tool replay, generic-error no fallback, and failed/cancelled/empty/multiple-Tool samples retaining the committed continuation.
+- Removed the full-request-only Port stream completion event and the misleading `record_full_response`/`assess_full_request` names. `record_completed_sample` now records either Full or incremental delivery from the same full logical snapshot.
+- `store:false + previous_response_id` over real OpenAI HTTP/SSE remains explicitly unverified. No Live Test was run; the next proof requires separately authorized dedicated Cyber Agent credentials and a public Provider request.
+
 ## Blockers
 
 - None for the completed M1b-S1 local implementation and Gate.
-- M1b-S2 is intentionally stopped at `READY_NOT_AUTHORIZED`.
+- M1b-S2 implementation passed parent architecture/Lean review and the local Gate; authorized commit/PR/CI delivery remains pending and is not a Live-Provider compatibility proof.
 - Live Provider compatibility remains unverified by design; missing live credentials do not block offline development and no Codex credential is an allowed substitute.
 
 ## Last Verification
+
+- M1b-S2 draft local Gate: PASS on Rust `1.93.1`; `cargo fmt --all -- --check`, `cargo clippy --locked --all-targets --all-features -- -D warnings`, `cargo test --locked --all-targets --all-features` (64 passed, 0 failed, 1 ignored), `cargo build --locked`, inline-test scan, Domain/App/Ports Provider-wire scan and `git diff --check` all exited `0`.
+- M1b-S2 loopback verification: PASS; Full requests retain `store:false`, incremental requests contain only delta input plus the opaque previous response identity, exact HTTP/SSE rejection makes one Full fallback, and fallback does not persist partial stream output or re-execute a completed Tool.
+- M1b-S2 Live Test: OFF; no Provider credential, public network request, Codex login state, `~/.codex` or `CODEX_HOME` was read or modified.
+
+### Retained M1b-S1 verification evidence
 
 - Pinned toolchain: Rust `1.93.1`; all final commands exited `0`.
 - `cargo fmt --all -- --check`: PASS.
@@ -135,7 +173,7 @@ The M1b-S1 implementation and delivery authorization has been consumed by merged
 - Inline-test scan: PASS; no `#[cfg(test)]` or test module remains under `src/`.
 - Dependency-boundary contract: PASS; Domain/App/Ports contain no OpenAI wire/HTTP client dependency and Adapters do not depend on App.
 - Credential-pattern and production fallback scans: PASS; no real key pattern, generic `OPENAI_API_KEY` production fallback, `CODEX_HOME`, Codex CLI login or `.codex` path exists in production code.
-- Forbidden-scope and Codex dependency scans: PASS; no `previous_response_id`, incremental HTTP, Vision service, DeepSeek, Hook/Plugin Registry or forbidden Codex crate exists in production.
+- Historical M1b-S1 forbidden-scope and Codex dependency scans: PASS at that Slice; `previous_response_id` and incremental HTTP were then absent and are now intentionally implemented only inside the M1b-S2 OpenAI Adapter boundary.
 - `codex/` worktree: clean at `3aae5d885bac39c1262491aa3fd100dfd8b3919f`; root diff contains no `codex/` path.
 - Frozen Architecture v1/v1.1: unchanged.
 - Root ignore rules for `/codex/`, `/target/` and `**/.cyber-agent/`: present.
