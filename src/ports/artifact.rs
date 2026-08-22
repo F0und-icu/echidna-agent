@@ -20,4 +20,8 @@ pub trait ArtifactStore: Send + Sync {
     type Error;
 
     fn publish_file(&self, source: &Path) -> Result<StoredBlob, Self::Error>;
+
+    /// Publishes already-owned bytes without forcing a caller to create a
+    /// temporary source file merely to obtain an audited Blob reference.
+    fn publish_bytes(&self, bytes: &[u8]) -> Result<StoredBlob, Self::Error>;
 }

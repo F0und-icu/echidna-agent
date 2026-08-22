@@ -5,11 +5,13 @@ mod artifact;
 mod command;
 mod filesystem;
 mod job;
+mod memory;
 mod output;
 mod pty;
 mod research;
 mod resources;
 mod search;
+mod snapshot;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -30,7 +32,7 @@ use active::{ActiveProcessId, ActiveProcessLeases};
 const TOOL_VERSION: &str = "1";
 const DEFAULT_OUTPUT_BYTES: usize = 128 * 1024;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 enum BuiltinTool {
     ReadFile,
     ReadFiles,
@@ -48,6 +50,9 @@ enum BuiltinTool {
     ResizePty,
     StopPty,
     ArtifactStore,
+    MemoryRead,
+    MemoryWrite,
+    InspectProject,
     ResearchGet,
     ResearchUpdate,
 }
@@ -79,6 +84,12 @@ impl ToolRegistry {
             (ToolName::new("resize_pty"), BuiltinTool::ResizePty),
             (ToolName::new("stop_pty"), BuiltinTool::StopPty),
             (ToolName::new("artifact_store"), BuiltinTool::ArtifactStore),
+            (ToolName::new("memory_read"), BuiltinTool::MemoryRead),
+            (ToolName::new("memory_write"), BuiltinTool::MemoryWrite),
+            (
+                ToolName::new("inspect_project"),
+                BuiltinTool::InspectProject,
+            ),
             (ToolName::new("research_get"), BuiltinTool::ResearchGet),
             (
                 ToolName::new("research_update"),
@@ -153,6 +164,11 @@ impl ToolExecutor for ToolRegistry {
                 return active_resource_busy(plan, conflict);
             }
             let timeout_plan = plan.clone();
+            let specs = if tool == BuiltinTool::InspectProject {
+                self.specs()
+            } else {
+                Vec::new()
+            };
             match tokio::time::timeout(
                 Duration::from_millis(plan.timeout_ms),
                 tool.execute(
@@ -160,6 +176,7 @@ impl ToolExecutor for ToolRegistry {
                     &self.jobs,
                     &self.ptys,
                     &self.active_leases,
+                    &specs,
                     plan,
                 ),
             )
@@ -234,6 +251,9 @@ impl BuiltinTool {
             Self::ResizePty => pty::normalize_resize(arguments),
             Self::StopPty => pty::normalize_stop(arguments),
             Self::ArtifactStore => artifact::normalize(project_root, arguments),
+            Self::MemoryRead => memory::normalize_read(project_root, arguments),
+            Self::MemoryWrite => memory::normalize_write(project_root, arguments),
+            Self::InspectProject => snapshot::normalize(project_root, arguments),
             Self::ResearchGet => research::normalize_get(project_root, arguments),
             Self::ResearchUpdate => research::normalize_update(project_root, arguments),
         }
@@ -245,6 +265,7 @@ impl BuiltinTool {
         jobs: &job::BackgroundJobs,
         ptys: &pty::PtySessions,
         active_leases: &ActiveProcessLeases,
+        specs: &[ToolSpec],
         plan: ToolExecutionPlan,
     ) -> ToolExecutionOutcome {
         match self {
@@ -264,6 +285,9 @@ impl BuiltinTool {
             Self::ResizePty => pty::execute_resize(ptys, plan).await,
             Self::StopPty => pty::execute_stop(ptys, plan).await,
             Self::ArtifactStore => artifact::execute(project_root, plan).await,
+            Self::MemoryRead => memory::execute_read(project_root, plan).await,
+            Self::MemoryWrite => memory::execute_write(project_root, plan).await,
+            Self::InspectProject => snapshot::execute(project_root, specs, plan).await,
             Self::ResearchGet => research::execute_get(project_root, plan).await,
             Self::ResearchUpdate => research::execute_update(project_root, plan).await,
         }
@@ -618,6 +642,42 @@ impl BuiltinTool {
                 ToolRetryPolicy::NeverAutoRetry,
                 ToolDeterminism::EnvironmentDependent,
                 120_000,
+            ),
+            Self::MemoryRead => spec(
+                "memory_read",
+                "Read one project Markdown Memory document and audit any externally edited revision.",
+                memory::read_input_schema(),
+                memory::output_schema(),
+                ToolParallelism::ResourceLocked,
+                Some("file:.cyber-agent/memory/{path},file:.cyber-agent/research.jsonl"),
+                ToolEffect::LocalMutation,
+                ToolRetryPolicy::NeverAutoRetry,
+                ToolDeterminism::EnvironmentDependent,
+                10_000,
+            ),
+            Self::MemoryWrite => spec(
+                "memory_write",
+                "Replace one project Markdown Memory document with expected-Hash protection and an audited Diff.",
+                memory::write_input_schema(),
+                memory::output_schema(),
+                ToolParallelism::ResourceLocked,
+                Some("file:.cyber-agent/memory/{path},file:.cyber-agent/research.jsonl"),
+                ToolEffect::LocalMutation,
+                ToolRetryPolicy::NeverAutoRetry,
+                ToolDeterminism::EnvironmentDependent,
+                30_000,
+            ),
+            Self::InspectProject => spec(
+                "inspect_project",
+                "Build or reuse the project-isolated metadata Snapshot, File Manifest, and fixed Tool Capability Cache.",
+                snapshot::input_schema(),
+                snapshot::output_schema(),
+                ToolParallelism::ResourceLocked,
+                Some("file:.cyber-agent/cache"),
+                ToolEffect::LocalMutation,
+                ToolRetryPolicy::NeverAutoRetry,
+                ToolDeterminism::EnvironmentDependent,
+                30_000,
             ),
             Self::ResearchGet => spec(
                 "research_get",

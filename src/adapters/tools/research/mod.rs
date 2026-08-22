@@ -118,7 +118,17 @@ pub(super) async fn execute_get(
         };
     let _ = arguments;
     match load_state(project_root) {
-        Ok(state) => ToolExecutionOutcome::succeeded(plan, json!({"status": "ok", "state": state})),
+        Ok(state) => {
+            let stream_event_count = state.applied_event_count();
+            ToolExecutionOutcome::succeeded(
+                plan,
+                json!({
+                    "status": "ok",
+                    "state": state,
+                    "stream_event_count": stream_event_count,
+                }),
+            )
+        }
         Err(error) => research_failure(plan, "research_read_failed", error),
     }
 }

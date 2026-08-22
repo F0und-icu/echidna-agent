@@ -9,6 +9,9 @@ use thiserror::Error;
 use crate::domain::artifacts::{ArtifactEvent, ArtifactEventError, ArtifactState};
 use crate::domain::canonical_json::canonical_json;
 use crate::domain::events::{EventEnvelope, EventId, OccurredAt};
+use crate::domain::memory::{
+    MEMORY_PAYLOAD_SCHEMA_VERSION, MemoryError, MemoryEvent, MemoryEventType,
+};
 
 use super::records::{
     EvidenceRef, ExperimentCapsuleRecord, ExperimentId, ExperimentRecord, ExperimentUpdate,
@@ -52,6 +55,8 @@ pub enum ResearchError {
     Fingerprint { message: String },
     #[error(transparent)]
     Artifact(#[from] ArtifactEventError),
+    #[error(transparent)]
+    Memory(#[from] MemoryError),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -68,6 +73,8 @@ pub enum ResearchEventType {
     RecordsMerged,
     ArtifactCreated,
     ArtifactDerived,
+    MemoryChanged,
+    MemoryExternalChangeDetected,
 }
 
 impl ResearchEventType {
@@ -85,6 +92,8 @@ impl ResearchEventType {
             Self::RecordsMerged => "research.records_merged",
             Self::ArtifactCreated => "artifact.created",
             Self::ArtifactDerived => "artifact.derived",
+            Self::MemoryChanged => "memory.changed",
+            Self::MemoryExternalChangeDetected => "memory.external_change_detected",
         }
     }
 
@@ -102,6 +111,8 @@ impl ResearchEventType {
             "research.records_merged" => Ok(Self::RecordsMerged),
             "artifact.created" => Ok(Self::ArtifactCreated),
             "artifact.derived" => Ok(Self::ArtifactDerived),
+            "memory.changed" => Ok(Self::MemoryChanged),
+            "memory.external_change_detected" => Ok(Self::MemoryExternalChangeDetected),
             _ => Err(ResearchError::UnknownEventType {
                 event_type: value.to_owned(),
             }),
@@ -136,6 +147,9 @@ pub enum ResearchEvent {
         reason: String,
     },
     Artifact(ArtifactEvent),
+    /// A typed Markdown revision fact. The content itself remains authoritative
+    /// in `memory/*.md`; Research State never owns Memory projection data.
+    Memory(MemoryEvent),
 }
 
 impl ResearchEvent {
@@ -155,6 +169,12 @@ impl ResearchEvent {
                 ArtifactEvent::Created(_) => ResearchEventType::ArtifactCreated,
                 ArtifactEvent::Derived(_) => ResearchEventType::ArtifactDerived,
             },
+            Self::Memory(event) => match event.event_type() {
+                MemoryEventType::Changed => ResearchEventType::MemoryChanged,
+                MemoryEventType::ExternalChangeDetected => {
+                    ResearchEventType::MemoryExternalChangeDetected
+                }
+            },
         }
     }
 
@@ -163,6 +183,22 @@ impl ResearchEvent {
             return serde_json::to_value(VersionedPayload {
                 research_schema_version: RESEARCH_SCHEMA_VERSION,
                 data: event.encode_payload()?,
+            })
+            .map_err(|error| ResearchError::MalformedPayload {
+                message: error.to_string(),
+            });
+        }
+        if let Self::Memory(event) = self {
+            let data = serde_json::to_value(MemoryVersionedPayload {
+                memory_schema_version: MEMORY_PAYLOAD_SCHEMA_VERSION,
+                data: event.clone(),
+            })
+            .map_err(|error| ResearchError::MalformedPayload {
+                message: error.to_string(),
+            })?;
+            return serde_json::to_value(VersionedPayload {
+                research_schema_version: RESEARCH_SCHEMA_VERSION,
+                data,
             })
             .map_err(|error| ResearchError::MalformedPayload {
                 message: error.to_string(),
@@ -206,6 +242,7 @@ impl ResearchEvent {
                 })
             }
             Self::Artifact(_) => unreachable!("Artifact Events return before Research encoding"),
+            Self::Memory(_) => unreachable!("Memory Events return before Research encoding"),
         }
         .map_err(|error| ResearchError::MalformedPayload {
             message: error.to_string(),
@@ -287,6 +324,29 @@ impl ResearchEvent {
                 Ok(ArtifactEvent::decode(event_type.as_str(), versioned.data)
                     .map(Self::Artifact)?)
             }
+            ResearchEventType::MemoryChanged | ResearchEventType::MemoryExternalChangeDetected => {
+                let memory: MemoryVersionedPayload = decode_record(versioned.data)?;
+                if memory.memory_schema_version != MEMORY_PAYLOAD_SCHEMA_VERSION {
+                    return Err(ResearchError::Memory(
+                        MemoryError::UnsupportedPayloadVersion {
+                            received: memory.memory_schema_version,
+                        },
+                    ));
+                }
+                let expected_type = match event_type {
+                    ResearchEventType::MemoryChanged => MemoryEventType::Changed,
+                    ResearchEventType::MemoryExternalChangeDetected => {
+                        MemoryEventType::ExternalChangeDetected
+                    }
+                    _ => unreachable!("only Memory Event types enter this decode branch"),
+                };
+                if memory.data.event_type() != expected_type {
+                    return Err(ResearchError::MalformedPayload {
+                        message: "Memory payload kind does not match outer Event type".to_owned(),
+                    });
+                }
+                Ok(Self::Memory(memory.data))
+            }
         }
     }
 
@@ -326,6 +386,7 @@ impl ResearchEvent {
                 Ok(())
             }
             Self::Artifact(event) => event.validate().map_err(ResearchError::from),
+            Self::Memory(event) => event.validate().map_err(ResearchError::from),
         }
     }
 }
@@ -568,6 +629,7 @@ impl ResearchReducer {
                 validate_artifact_event(state, &event)?;
                 state.artifacts.insert(event.record().clone());
             }
+            ResearchEvent::Memory(_) => {}
         }
         Ok(())
     }
@@ -619,6 +681,7 @@ impl ResearchReducer {
                 reason: _,
             } => validate_records_merged(state, from, into),
             ResearchEvent::Artifact(event) => validate_artifact_event(state, event),
+            ResearchEvent::Memory(event) => event.validate().map_err(ResearchError::from),
         }
     }
 }
@@ -1006,6 +1069,13 @@ fn semantic_event_digest(
 struct VersionedPayload {
     research_schema_version: u16,
     data: Value,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct MemoryVersionedPayload {
+    memory_schema_version: u16,
+    data: MemoryEvent,
 }
 
 #[derive(Deserialize, Serialize)]

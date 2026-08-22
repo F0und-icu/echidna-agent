@@ -95,7 +95,10 @@ async fn builtin_tools_cover_files_search_argv_failures_and_bounded_output() {
             "artifact_store",
             "input_job",
             "input_pty",
+            "inspect_project",
             "list_files",
+            "memory_read",
+            "memory_write",
             "poll_job",
             "poll_pty",
             "read_file",
@@ -667,7 +670,7 @@ async fn agent_loop_keeps_full_resampling_after_local_baseline_comparison() {
 
     let inputs = provider.inputs();
     assert_eq!(inputs.len(), 2);
-    assert_eq!(inputs[0].tool_specs.len(), 18);
+    assert_eq!(inputs[0].tool_specs.len(), 21);
     assert_eq!(inputs[0].content_items.len(), 1);
     assert_eq!(
         inputs[1].content_items[1],
@@ -743,6 +746,47 @@ async fn agent_loop_executes_research_update_through_the_fixed_registry() {
     let persisted = fs::read_to_string(project.root.join(".cyber-agent/research.jsonl")).unwrap();
     assert!(persisted.contains("research.target_snapshot_recorded"));
     assert!(persisted.contains("snapshot-agent-loop"));
+    assert_eq!(agent.history().ensure_all_tool_calls_paired(), Ok(()));
+}
+
+#[tokio::test]
+async fn agent_loop_executes_inspect_project_through_the_fixed_registry() {
+    let project = TestProject::new("agent-loop-inspect-project");
+    Project::initialize(&project.root).unwrap();
+    project.write("target.rs", "fn fixture() {}\n");
+    let requested_call = tool_call(
+        "call-inspect-project",
+        "inspect_project",
+        json!({"observed_at": "2026-08-23T12:00:00Z"}),
+    );
+    let provider = ScriptedProvider::new([
+        vec![ModelEvent::ToolCall {
+            call: requested_call,
+        }],
+        vec![ModelEvent::TextDelta {
+            text: "Project snapshot is ready.".to_owned(),
+        }],
+    ]);
+    let tools = ToolRegistry::for_project(&project.root);
+    let mut agent = AgentLoop::new(&provider, &tools, "fixture");
+
+    let outcome = agent
+        .run_turn("Inspect this project.", AgentCancellation::new())
+        .await
+        .unwrap();
+
+    let AgentTurnOutcome::Completed { executions, .. } = outcome else {
+        panic!("the fixture turn should complete")
+    };
+    assert_eq!(executions.len(), 1);
+    assert_eq!(executions[0].result.status, ToolResultStatus::Succeeded);
+    assert_eq!(executions[0].result.output["status"], "full_rebuild");
+    assert!(
+        project
+            .root
+            .join(".cyber-agent/cache/project-snapshot.json")
+            .is_file()
+    );
     assert_eq!(agent.history().ensure_all_tool_calls_paired(), Ok(()));
 }
 

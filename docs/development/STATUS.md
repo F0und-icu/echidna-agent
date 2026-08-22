@@ -7,12 +7,12 @@
 - Implementation: `STARTED`
 - Current milestone: `M2`
 - Current slice: `M2-S4`
-- Slice state: `READY_AUTHORIZED`; implementation starts only after this M2-S3 status seal is remotely merged
+- Slice state: `IN_PROGRESS`; started on `agent/m2-s4-memory-snapshot-cache` from M2-S3 status-seal base `feb5eb9`
 - Lean governance: `ACTIVE`; M2-S3 is complete and M2-S4 remains scope-locked to Project Memory, Snapshot and rebuildable Cache
-- Local Git initialized: `yes`; M2-S3 is being sealed on `agent/m2-s3-merge-status`
-- Remote repository: `F0und-icu/cyber-agent` private; M2-S3 implementation PR `#20` was Squash Merged
+- Local Git initialized: `yes`; M2-S4 implementation is in progress on `agent/m2-s4-memory-snapshot-cache`
+- Remote repository: `F0und-icu/cyber-agent` private; M2-S3 status PR `#21` was Squash Merged
 - Documentation baseline commit: `55ff3be`
-- Current code base: `main`/`origin/main` M2-S3 merge commit `15b2f88`
+- Current code base: M2-S3 status seal `feb5eb9`; M2-S4 branch `agent/m2-s4-memory-snapshot-cache`
 - Upstream Codex baseline: `3aae5d885bac39c1262491aa3fd100dfd8b3919f`
 
 ## Last Completed Slice
@@ -70,7 +70,7 @@
 
 - Slice: `M2-S4`
 - Planned delivery branch: `agent/m2-s4-memory-snapshot-cache`
-- Base commit: the M2-S3 status-seal merge commit, to be recorded at Slice start
+- Base commit: `feb5eb9` (M2-S3 status-seal merge)
 - Scope lock: add the minimum Project Memory facts, external-edit audit, two-level ProjectFingerprint, rebuildable Project Snapshot/File Manifest/Tool Capability Cache and one fixed `inspect_project` path.
 - Required behavior: unchanged projects reuse snapshots; changed files receive BLAKE3 only on demand; deleting Cache rebuilds from project/Memory/Research/Artifact facts; two projects never share Memory or derived state.
 - Intended production touch points: typed Memory revision contracts, local Markdown Memory Adapter, pure ProjectFingerprint/Snapshot contracts, one rebuildable local Cache Adapter and fixed `memory_read`/`memory_write`/`inspect_project` tools.
@@ -82,12 +82,19 @@
 The current user instruction explicitly authorizes continued implementation with delegated Terra/Luna development and normal version-controlled remote delivery until the first prototype reaches the separately authorized Live Provider validation boundary.
 
 - Run mode: `IMPLEMENT_TO_LIVE_BOUNDARY`
-- Slice ID: `M2-S4`; state `READY_AUTHORIZED` pending the separate M2-S3 status-seal merge
+- Slice ID: `M2-S4`; state `IN_PROGRESS` on `agent/m2-s4-memory-snapshot-cache` from `feb5eb9`
 - Git mode: `BRANCH_PR_REVIEW_MERGE`; commit, push, PR, CI review and merge are authorized when the Slice Gate passes
 - Delegation mode: `AUTHORIZED`; delegated implementation Agents must independently read the repository authority chain and stay inside the current Slice
 - Live test mode: `OFF`; no real Provider credential or public model request is authorized
 - Forbidden continuation inside M2-S4: file writes/Tool Cache, Context Planner, Mode/Profile/Vision, Compaction/Request Audit, general database/index/watcher/hook/router/plugin work, Codex source modification or Codex credentials/login access
-- Stop condition: remotely merge this M2-S3 status seal before starting M2-S4; do not run a Live Test
+- Stop condition: remotely seal M2-S4 before starting M2-S5; do not run a Live Test
+
+### M2-S4 Start Record
+
+- Branch/base: `agent/m2-s4-memory-snapshot-cache` from `feb5eb9`.
+- Intended production touch points: typed Memory revisions and facts, one local Markdown Memory Adapter, pure two-level ProjectFingerprint/Snapshot contracts, rebuildable cache files and fixed `memory_read`/`memory_write`/`inspect_project` Tool wiring.
+- Intended permanent regressions: audited internal/external Memory change, Hash/Revision Blob/Diff integrity, cheap unchanged-project hit, on-demand changed-file BLAKE3, cache deletion/rebuild, stale-cache rejection and project isolation.
+- Intended offline Gate: `cargo fmt --all -- --check`; `cargo clippy --locked --all-targets --all-features -- -D warnings`; `cargo test --locked --all-targets --all-features`; `cargo build --locked`; then inline-test, forbidden-dependency, credential/Codex and diff scans. Live Test remains `OFF`.
 
 ## Slice Lean Review
 
@@ -313,6 +320,38 @@ The current user instruction explicitly authorizes continued implementation with
 - Deterministic fault injection for a post-Blob Event append failure and a scheduler cancellation racing the synchronous commit remain P2 test-harness debt. The production ordering already publishes and syncs the Blob before append, never detaches commit work, and therefore cannot leave an Event that references a missing Blob or perform a late write after Tool return. Adversarial local filesystem TOCTOU hardening is also deferred under the trusted single-user threat model.
 - `research/reducer.rs` exceeds the 300-line review signal but retains the cohesive Research Event decode/idempotence/reference/apply invariant. A mechanical Artifact split would duplicate or expose that invariant; the split trigger is a separately consumed Research replay/upcaster family, not a generic coordinator.
 
+### M2-S4 Lean Review
+
+#### Semantic Owners
+
+- `src/domain/memory.rs` owns the fixed Memory path grammar, versioned Changed/ExternalChangeDetected revision contracts and the isolated pure Memory projection; Markdown remains content authority and Research state does not absorb Memory content.
+- `src/adapters/project_memory.rs` owns confined UTF-8 Markdown reads, symlink rejection, the single 64-KiB `core.md` bound, BLAKE3 content identity and deterministic replacement Diff; Notes/Decisions/Failed Paths are not given a speculative storage cap. `project_event_store/durable_file.rs` remains the sole same-directory temporary-write/rename/fsync owner.
+- `src/domain/research/reducer.rs` remains the strict `research.jsonl` envelope, Event-ID and replay owner. Memory is one typed, independently versioned ResearchEvent branch; unknown type/version/kind mismatch fails replay, while `MemoryState` is reduced separately.
+- `src/domain/snapshot.rs` owns the serialized ProjectFingerprint, File Manifest, Project Snapshot and fixed Tool Capability Cache contracts. `src/adapters/project_snapshot/fingerprint.rs` owns both levels of Git/filesystem invalidation and `src/adapters/project_snapshot/mod.rs` owns cache generation validation and manifest/tool/snapshot publication order.
+- The fixed `memory_read`, `memory_write` and `inspect_project` adapters own one synchronous Tool path each. They reuse the existing Tool Registry, Resource Keys, Receipt pairing and one project Writer lock; no background writer or second AgentLoop exists.
+
+#### Reuse, API and Dependencies
+
+- Reused `Project::open_writer`, the existing strict JSONL scanner/writer, `ResearchReducer`, `LocalArtifactStore`, `ArtifactStore`, fixed Tool Registry, canonical JSON, BLAKE3 and SHA-256 Blob identity. No crate, feature, fact stream, database, watcher, generic Manager or probe framework was added.
+- `ArtifactStore::publish_bytes` is the only new Port method; it avoids a temporary caller-owned file while preserving the existing single staging/publication owner. Memory revision bytes and Diffs are durable Blobs before any Event can reference them.
+- Git fingerprints use HEAD, stable porcelain-v2 status with `.cyber-agent`/`target` excluded, stable index size, dirty/untracked path type-size-mtime and control-fact metadata. A clean Git cache hit avoids a full source-tree metadata walk; a second edit while a path is already dirty invalidates correctly; non-Git projects use the documented sorted metadata fingerprint.
+- Explicit `hash_paths` performs an incremental BLAKE3 refresh only for requested files without a valid cached Hash. Already cached unchanged Hashes are reused; ordinary metadata changes make the old Hash stale without reading every changed file; missing, non-regular and symlinked requested paths fail explicitly.
+- Cache files carry schema, Project ID, source fingerprint, timestamp and reason; Manifest and Tool Capability files are durably replaced before the Project Snapshot completion marker, whose hashes bind both files. Mismatched generation/schema/project/content rebuilds instead of becoming fact.
+- Exact duplicate Memory Event IDs retain Research idempotence without reapplying the revision chain, and a CAS-valid no-op `memory_write` emits neither Blob nor Event. The one `core.md` size check executes before Blob publication and is also enforced on external reads.
+
+#### Test Layout and Scope
+
+- Permanent top-level regressions cover first Memory creation, no-op writes, old/new Hash and Blob/Diff bytes, exact duplicate Event replay, CAS rejection, external edit audit, the bounded `core.md`/unbounded Notes distinction, path confinement, symlink rejection, unknown Event/payload version/revision-chain failure and project isolation.
+- Snapshot regressions cover clean and cached-Hash hits, explicit incremental hash, stale-hash clearing, repeated dirty Git edits, deleted files, required-fact loss, corrupt/schema-incompatible/deleted Cache rebuild, Git cache self-exclusion, symlink non-traversal, missing requested paths, project isolation and a real AgentLoop Tool Call/Result/Receipt path.
+- Production `src/` retains no inline tests. Final local Gate passes 148 offline/local tests with one existing synthetic Live Smoke ignored. Terra xhigh found and drove fixes for duplicate Memory replay and cached-Hash reuse; Luna xhigh returned final `APPROVE` with no unresolved P0/P1 after the `core.md` bound was narrowed to the design-required document only.
+
+#### Removed and Deferred
+
+- Main review removed automatic content hashing for every new/metadata-changed file, repeated hashing of an unchanged explicitly requested file, unstable Git-index mtime invalidation, full Git tree traversal on a cache hit, unconditional ToolSpec cloning for unrelated tools, unverified partial-Cache hash reuse, a blanket Memory-document size limit and unused public Memory projection API.
+- The original mixed Snapshot Adapter exceeded 1,000 lines and was split by change reason into private cache lifecycle and fingerprint modules without a Trait or public API. Each retained module still exceeds the 300-line review signal but has one semantic owner. The 519-line Memory Tool module remains cohesive around one writer/replay/revision transaction; splitting it now would expose or duplicate the failure-atomic append/apply boundary.
+- Deferred exactly as scoped: M2-S5 file writes/apply_patch/Tool Result Cache, Context Planner, Mode/Profile/Vision, Compaction/Request Audit, watcher, FTS/database/vector index, external tool version probing and Live Provider requests.
+- Retained P2: deterministic injection of the narrow Markdown-replaced/Event-append-failed crash window, large Notes Diff compression, dirty submodule refinement and extreme same-size/same-mtime false negatives remain deferred. The next read repairs the crash window as an external revision, and no detached task can write after Tool completion.
+
 ## Blockers
 
 - None for the completed M2-S3 local and remote delivery Gates or the authorized M2-S4 start after this status seal.
@@ -321,10 +360,14 @@ The current user instruction explicitly authorizes continued implementation with
 
 ## Last Verification
 
+- M2-S4 local Gate: PASS on Rust `1.93.1`; formatting, denied-warning Clippy, 148 offline/local tests plus one ignored existing synthetic Live Smoke, locked build, inline-test scan, forbidden Codex dependency scan, credential-pattern scan, dependency/architecture diff scans, `git diff --check` and `codex/`-unchanged check all passed. No Live Test was run.
+- M2-S4 review: Terra xhigh `REQUEST_CHANGES` findings for exact duplicate Memory replay and cached BLAKE3 reuse were fixed with permanent regressions; main review fixed repeated-dirty Git invalidation and split the oversized Snapshot Adapter; Luna xhigh returned final `APPROVE` after the explicit `core.md` bound gained pre-Blob, external-read and Schema coverage. No unresolved P0/P1 remains.
+- M2-S4 Live Test: `OFF`; no credential, external model request, Codex login state, `~/.codex` or `CODEX_HOME` was read or modified.
 - M2-S3 local Gate: PASS on Rust `1.93.1`; formatting, denied-warning Clippy, 138 offline/local tests plus one ignored existing synthetic Live Smoke, locked build, inline-test scan, forbidden Codex dependency scan, credential-pattern scan, `git diff --check` and `codex/`-unchanged check all passed. No Live Test was run.
 - M2-S3 review: independent Luna xhigh returned `APPROVE` with no unresolved P0/P1 after the successful Receipt gained its Artifact ID, new Blob ancestry became crash-durable and unused public Artifact projection APIs were removed.
 - M2-S3 Live Test: `OFF`; no credential, external model request, Codex login state, `~/.codex` or `CODEX_HOME` was read or modified.
 - M2-S3 remote Gate: PASS; PR `#20` was Squash Merged as `15b2f88`, PR-head run `32586565660` passed, and post-merge `main` run `32586668048` passed the same Rust Gate.
+- M2-S3 status seal: PASS; PR `#21` was Squash Merged as `feb5eb9`, PR-head run `32586862900` passed, and post-merge `main` run `32586968200` passed the same Rust Gate before M2-S4 started.
 - M2-S2 local Gate: PASS on Rust `1.93.1`; formatting, denied-warning Clippy, 130 offline/local tests plus one ignored existing synthetic Live Smoke, locked build, inline-test scan, forbidden Codex dependency scan, credential-pattern scan, no-whole-ResearchState-clone scan, `git diff --check` and `codex/`-unchanged check all passed.
 - M2-S2 review: independent Luna xhigh returned `APPROVE` with no unresolved P0/P1 after exact validated Event-ID idempotence, merge provenance, strict missing-stream behavior, failure-atomic updates and initial Hypothesis evidence integrity were verified.
 - M2-S2 Live Test: `OFF`; no credential, external model request, Codex login state, `~/.codex` or `CODEX_HOME` was read or modified.

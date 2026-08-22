@@ -29,6 +29,40 @@ pub(crate) fn commit_new_durable_file(
     })
 }
 
+/// Atomically replaces an existing private project file after fully syncing a
+/// same-directory temporary file. This is intentionally separate from the
+/// no-overwrite publication path used by sentinels and content-addressed
+/// Blobs: only callers that already own the project Writer lock may use it.
+pub(crate) fn replace_durable_file(
+    destination: &Path,
+    bytes: &[u8],
+) -> Result<(), ProjectEventStoreError> {
+    let parent = destination_parent(destination)?;
+    let (mut temporary_file, temporary_path) = create_durable_temporary_file(parent)?;
+    let persist_result = temporary_file
+        .write_all(bytes)
+        .and_then(|()| temporary_file.sync_all());
+    if let Err(source) = persist_result {
+        drop(temporary_file);
+        remove_durable_temporary_file_best_effort(&temporary_path);
+        return Err(ProjectEventStoreError::Io {
+            operation: "persist durable replacement temporary file",
+            path: temporary_path,
+            source,
+        });
+    }
+    drop(temporary_file);
+    if let Err(source) = fs::rename(&temporary_path, destination) {
+        remove_durable_temporary_file_best_effort(&temporary_path);
+        return Err(ProjectEventStoreError::Io {
+            operation: "atomically replace durable file",
+            path: destination.to_path_buf(),
+            source,
+        });
+    }
+    sync_directory(parent)
+}
+
 fn commit_new_durable_file_with(
     destination: &Path,
     persist: impl FnOnce(&mut File) -> io::Result<()>,

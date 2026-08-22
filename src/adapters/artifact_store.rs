@@ -42,6 +42,40 @@ impl ArtifactStore for LocalArtifactStore {
     fn publish_file(&self, source: &Path) -> Result<StoredBlob, Self::Error> {
         let blob_directory = self.ensure_blob_directory()?;
         let (blob_id, size_bytes, temporary_path) = stage_source_once(source, &blob_directory)?;
+        self.publish_staged(blob_directory, blob_id, size_bytes, temporary_path)
+    }
+
+    fn publish_bytes(&self, bytes: &[u8]) -> Result<StoredBlob, Self::Error> {
+        let blob_directory = self.ensure_blob_directory()?;
+        let (blob_id, size_bytes, temporary_path) = stage_bytes_once(bytes, &blob_directory)?;
+        self.publish_staged(blob_directory, blob_id, size_bytes, temporary_path)
+    }
+}
+
+impl LocalArtifactStore {
+    /// Reads a previously published Blob only after revalidating its immutable
+    /// SHA-256 identity. Memory revision diffs use this narrow local helper;
+    /// it does not create a new Artifact or cache entry.
+    pub(crate) fn read_blob(&self, blob_id: &BlobId) -> Result<Vec<u8>, LocalArtifactStoreError> {
+        self.inspect_blob_directory()?;
+        let path = self.blob_directory().join(blob_id.as_str());
+        let (actual_blob_id, _) = hash_existing_blob(&path)?;
+        if actual_blob_id != *blob_id {
+            return Err(LocalArtifactStoreError::ExistingBlobConflict {
+                path,
+                blob_id: blob_id.clone(),
+            });
+        }
+        fs::read(&path).map_err(|source| LocalArtifactStoreError::ExistingBlobRead { path, source })
+    }
+
+    fn publish_staged(
+        &self,
+        blob_directory: PathBuf,
+        blob_id: BlobId,
+        size_bytes: u64,
+        temporary_path: PathBuf,
+    ) -> Result<StoredBlob, LocalArtifactStoreError> {
         let destination = blob_directory.join(blob_id.as_str());
 
         let result = (|| match inspect_existing_blob(&destination, &blob_id, size_bytes)? {
@@ -85,6 +119,40 @@ impl ArtifactStore for LocalArtifactStore {
             remove_durable_temporary_file_best_effort(&temporary_path);
         }
         result
+    }
+
+    fn blob_directory(&self) -> PathBuf {
+        BLOB_PATH_SEGMENTS
+            .into_iter()
+            .fold(self.project_root.clone(), |path, segment| {
+                path.join(segment)
+            })
+    }
+
+    fn inspect_blob_directory(&self) -> Result<(), LocalArtifactStoreError> {
+        let mut current = self.project_root.clone();
+        for segment in BLOB_PATH_SEGMENTS {
+            current.push(segment);
+            match fs::symlink_metadata(&current) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(LocalArtifactStoreError::BlobDirectorySymlink { path: current });
+                }
+                Ok(metadata) if !metadata.file_type().is_dir() => {
+                    return Err(LocalArtifactStoreError::BlobDirectoryNotDirectory {
+                        path: current,
+                    });
+                }
+                Ok(_) => {}
+                Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(()),
+                Err(source) => {
+                    return Err(LocalArtifactStoreError::InspectBlobDirectory {
+                        path: current,
+                        source,
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -196,6 +264,36 @@ fn stage_source_once(
         return Err(error);
     }
     let blob_id = BlobId::new(format!("{:x}", hasher.finalize())).expect("SHA-256 is valid");
+    Ok((blob_id, size_bytes, temporary_path))
+}
+
+fn stage_bytes_once(
+    bytes: &[u8],
+    blob_directory: &Path,
+) -> Result<(BlobId, u64, PathBuf), LocalArtifactStoreError> {
+    let (mut temporary_file, temporary_path) = create_durable_temporary_file(blob_directory)
+        .map_err(|error| LocalArtifactStoreError::Stage {
+            path: blob_directory.to_path_buf(),
+            error: Box::new(error),
+        })?;
+    let stage_result = temporary_file
+        .write_all(bytes)
+        .and_then(|()| temporary_file.sync_all())
+        .map_err(|source| LocalArtifactStoreError::StagedBlobWrite {
+            path: temporary_path.clone(),
+            source,
+        });
+    drop(temporary_file);
+    if let Err(error) = stage_result {
+        remove_durable_temporary_file_best_effort(&temporary_path);
+        return Err(error);
+    }
+    let blob_id = BlobId::new(format!("{:x}", Sha256::digest(bytes))).expect("SHA-256 is valid");
+    let size_bytes =
+        u64::try_from(bytes.len()).map_err(|_| LocalArtifactStoreError::SourceRead {
+            path: temporary_path.clone(),
+            source: io::Error::other("Artifact size exceeds u64"),
+        })?;
     Ok((blob_id, size_bytes, temporary_path))
 }
 

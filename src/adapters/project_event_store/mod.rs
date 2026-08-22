@@ -13,7 +13,7 @@ mod project;
 
 pub(crate) use durable_file::{
     commit_durable_temporary_file, create_durable_temporary_file,
-    remove_durable_temporary_file_best_effort, sync_directory,
+    remove_durable_temporary_file_best_effort, replace_durable_file, sync_directory,
 };
 pub use error::ProjectEventStoreError;
 pub(crate) use jsonl::read_existing_research_events;
