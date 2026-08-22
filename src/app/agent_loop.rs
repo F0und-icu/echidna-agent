@@ -1,5 +1,7 @@
 //! Bounded single-Agent Tool Call -> Tool Result -> full-resample loop.
 
+use std::collections::BTreeMap;
+
 use thiserror::Error;
 
 use crate::domain::context::{
@@ -9,15 +11,18 @@ use crate::domain::context::{
 };
 use crate::domain::history::{ConversationHistory, HistoryError};
 use crate::domain::model::{ModelInputIR, ModelRequestRequirements};
-use crate::domain::tools::{ExecutionId, ToolExecutionOutcome, ToolExposure, ToolResult};
+use crate::domain::tools::{
+    ExecutionId, IdempotencyKey, ToolCall, ToolExecutionOutcome, ToolExposure, ToolResult,
+};
 use crate::ports::model::{
     ModelProvider, ModelProviderError, ModelRequest, ModelResponseCompletion, ProviderResponseId,
 };
 use crate::ports::tool::ToolExecutor;
 
-use super::cancellation::{AgentCancellation, run_until_cancelled};
+use super::cancellation::AgentCancellation;
 use super::model_sample::ModelSample;
 use super::model_streaming::{ModelStreamOutcome, ModelStreamingError, ModelStreamingService};
+use super::tool_scheduler::execute_batch;
 
 const MAX_MODEL_REQUESTS_PER_TURN: usize = 32;
 
@@ -30,6 +35,7 @@ pub struct AgentLoop<'provider, 'tools, Provider: ?Sized, Tools: ?Sized> {
     profile: ModelProfile,
     provider_session: ProviderSession,
     continuation: Option<CommittedContinuation>,
+    completed_idempotency: BTreeMap<IdempotencyKey, ToolExecutionOutcome>,
     next_turn_sequence: u64,
     last_baseline_assessment: Option<BaselineAssessment>,
 }
@@ -82,6 +88,7 @@ where
             profile,
             provider_session,
             continuation: None,
+            completed_idempotency: BTreeMap::new(),
             next_turn_sequence: 0,
             last_baseline_assessment: None,
         })
@@ -179,11 +186,9 @@ where
                 }
             };
             let sample = ModelSample::from_events(events);
-            let tool_call = sample
-                .single_tool_call()
-                .map_err(|count| AgentLoopError::MultipleToolCalls { count })?;
+            let tool_calls = sample.tool_calls();
             let assistant_text = sample.assistant_text();
-            if tool_call.is_none() && assistant_text.is_empty() {
+            if tool_calls.is_empty() && assistant_text.is_empty() {
                 return Err(AgentLoopError::EmptyModelResponse);
             }
             self.require_continuation_identity(&completion, capabilities.incremental_input)?;
@@ -193,39 +198,21 @@ where
                 .record_completed_sample(&snapshot, server_output_items)?;
             self.commit_continuation(&completion);
 
-            let Some(call) = tool_call else {
+            if tool_calls.is_empty() {
                 return Ok(AgentTurnOutcome::Completed {
                     assistant_text,
                     model_requests: provider_requests,
                     executions,
                 });
-            };
+            }
 
-            let execution_id = ExecutionId::new(format!("execution:{}", call.call_id));
-            let plan = match self.tools.plan(execution_id, call.clone()) {
-                Ok(plan) => plan,
-                Err(error) => {
-                    self.history
-                        .append_tool_result(ToolResult::failed(&call, error.to_string()))?;
-                    continue;
-                }
-            };
-            let outcome =
-                run_until_cancelled(self.tools.execute(plan.clone()), &cancellation).await;
-            match outcome {
-                Some(outcome) => {
-                    self.history.append_tool_result(outcome.result.clone())?;
-                    executions.push(outcome);
-                }
-                None => {
-                    let outcome = ToolExecutionOutcome::cancelled(plan, "agent_cancelled");
-                    self.history.append_tool_result(outcome.result.clone())?;
-                    executions.push(outcome);
-                    return Ok(AgentTurnOutcome::Cancelled {
-                        model_requests: provider_requests,
-                        executions,
-                    });
-                }
+            let scheduled = self.execute_tool_calls(tool_calls, &cancellation).await?;
+            executions.extend(scheduled.executions);
+            if scheduled.cancelled {
+                return Ok(AgentTurnOutcome::Cancelled {
+                    model_requests: provider_requests,
+                    executions,
+                });
             }
         }
 
@@ -276,12 +263,75 @@ where
                     response_id,
                 });
     }
+
+    async fn execute_tool_calls(
+        &mut self,
+        calls: Vec<ToolCall>,
+        cancellation: &AgentCancellation,
+    ) -> Result<ScheduledCalls, AgentLoopError> {
+        let mut prepared = Vec::with_capacity(calls.len());
+        let mut plans = Vec::new();
+        for call in calls {
+            let execution_id = ExecutionId::new(format!("execution:{}", call.call_id));
+            match self.tools.plan(execution_id, call.clone()) {
+                Ok(plan) => {
+                    plans.push(plan);
+                    prepared.push(PreparedToolCall::Planned);
+                }
+                Err(error) => prepared.push(PreparedToolCall::PlanningFailure(ToolResult::failed(
+                    &call,
+                    error.to_string(),
+                ))),
+            }
+        }
+
+        let scheduled = execute_batch(
+            self.tools,
+            plans,
+            cancellation,
+            &mut self.completed_idempotency,
+        )
+        .await;
+        let mut outcomes = scheduled.outcomes.into_iter();
+        let mut executions = Vec::new();
+        for entry in prepared {
+            match entry {
+                PreparedToolCall::Planned => {
+                    let outcome = outcomes
+                        .next()
+                        .ok_or(AgentLoopError::SchedulerResultMissing)?;
+                    self.history.append_tool_result(outcome.result.clone())?;
+                    executions.push(outcome);
+                }
+                PreparedToolCall::PlanningFailure(result) => {
+                    self.history.append_tool_result(result)?;
+                }
+            }
+        }
+        if outcomes.next().is_some() {
+            return Err(AgentLoopError::SchedulerResultCountMismatch);
+        }
+        Ok(ScheduledCalls {
+            executions,
+            cancelled: scheduled.cancelled,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CommittedContinuation {
     session: crate::domain::context::ProviderSessionRef,
     response_id: ProviderResponseId,
+}
+
+enum PreparedToolCall {
+    Planned,
+    PlanningFailure(ToolResult),
+}
+
+struct ScheduledCalls {
+    executions: Vec<ToolExecutionOutcome>,
+    cancelled: bool,
 }
 
 fn reserve_provider_request(provider_requests: &mut usize) -> Result<(), AgentLoopError> {
@@ -321,12 +371,14 @@ pub enum AgentLoopError {
     History(#[from] HistoryError),
     #[error(transparent)]
     Context(#[from] ContextError),
-    #[error("one model response requested {count} Tools; M1a supports exactly one at a time")]
-    MultipleToolCalls { count: usize },
     #[error("the model completed without text or a Tool Call")]
     EmptyModelResponse,
     #[error("an incremental-capable Provider completed without a continuation identity")]
     ContinuationIdentityMissing,
     #[error("the Agent reached the per-Turn model-request limit of {limit}")]
     ModelRequestLimit { limit: usize },
+    #[error("the Tool scheduler returned fewer outcomes than staged plans")]
+    SchedulerResultMissing,
+    #[error("the Tool scheduler returned more outcomes than staged plans")]
+    SchedulerResultCountMismatch,
 }

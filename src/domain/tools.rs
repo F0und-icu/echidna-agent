@@ -8,6 +8,11 @@ use thiserror::Error;
 
 use super::artifacts::ArtifactId;
 
+mod resource;
+
+pub use resource::ResourceKey;
+pub(crate) use resource::scheduling_conflicts;
+
 macro_rules! string_id {
     ($name:ident) => {
         #[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -35,6 +40,8 @@ macro_rules! string_id {
 string_id!(ToolName);
 string_id!(ToolCallId);
 string_id!(ExecutionId);
+string_id!(IdempotencyKey);
+string_id!(RerunReason);
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -129,9 +136,17 @@ pub struct ToolExecutionPlan {
     pub execution_id: ExecutionId,
     pub call: ToolCall,
     pub tool_version: String,
-    pub resolved_resource_keys: Vec<String>,
+    pub parallelism: ToolParallelism,
+    pub resolved_resource_keys: Vec<ResourceKey>,
     pub effect: ToolEffect,
     pub retry_policy: ToolRetryPolicy,
+    /// A deliberate re-execution marker. It is excluded from the stable
+    /// idempotency key but retained in the plan and Receipt for audit.
+    #[serde(default)]
+    pub rerun_reason: Option<RerunReason>,
+    /// Present only for the explicitly deduplicable retry policy. It is a
+    /// stable execution identity, never an authorization or research key.
+    pub idempotency_key: Option<IdempotencyKey>,
     pub determinism: ToolDeterminism,
     pub cache_policy: ToolCachePolicy,
     pub timeout_ms: u64,
@@ -145,16 +160,52 @@ impl ToolExecutionPlan {
         execution_id: ExecutionId,
         call: ToolCall,
         spec: &ToolSpec,
-        resolved_resource_keys: Vec<String>,
+        resolved_resource_keys: Vec<ResourceKey>,
     ) -> Result<Self, ToolContractError> {
+        Self::new_with_rerun_reason(execution_id, call, spec, resolved_resource_keys, None)
+    }
+
+    pub(crate) fn new_with_rerun_reason(
+        execution_id: ExecutionId,
+        mut call: ToolCall,
+        spec: &ToolSpec,
+        mut resolved_resource_keys: Vec<ResourceKey>,
+        explicit_rerun_reason: Option<RerunReason>,
+    ) -> Result<Self, ToolContractError> {
+        let (arguments, embedded_rerun_reason) = split_execution_control(call.arguments)?;
+        call.arguments = arguments;
+        let rerun_reason = match (explicit_rerun_reason, embedded_rerun_reason) {
+            (Some(explicit), Some(embedded)) if explicit != embedded => {
+                return Err(ToolContractError::InvalidExecutionControl {
+                    message: "conflicting rerun reasons".to_owned(),
+                });
+            }
+            (Some(explicit), _) | (_, Some(explicit)) => Some(explicit),
+            (None, None) => None,
+        };
         let input_fingerprint = fingerprint(&call.arguments)?;
+        resolved_resource_keys.sort();
+        resolved_resource_keys.dedup();
+        let idempotency_key = (spec.retry_policy == ToolRetryPolicy::DedupeByKey)
+            .then(|| {
+                fingerprint(&IdempotencyFingerprint {
+                    tool_name: &call.name,
+                    tool_version: &spec.version,
+                    input_fingerprint: &input_fingerprint,
+                })
+                .map(IdempotencyKey::new)
+            })
+            .transpose()?;
         let mut plan = Self {
             execution_id,
             call,
             tool_version: spec.version.clone(),
+            parallelism: spec.parallelism,
             resolved_resource_keys,
             effect: spec.effect,
             retry_policy: spec.retry_policy,
+            rerun_reason,
+            idempotency_key,
             determinism: spec.determinism,
             cache_policy: spec.cache_policy,
             timeout_ms: spec.timeout_ms,
@@ -172,9 +223,12 @@ struct PlanFingerprintInput<'a> {
     execution_id: &'a ExecutionId,
     call: &'a ToolCall,
     tool_version: &'a str,
-    resource_keys: &'a [String],
+    parallelism: ToolParallelism,
+    resource_keys: &'a [ResourceKey],
     effect: ToolEffect,
     retry_policy: ToolRetryPolicy,
+    rerun_reason: Option<&'a RerunReason>,
+    idempotency_key: Option<&'a IdempotencyKey>,
     determinism: ToolDeterminism,
     cache_policy: ToolCachePolicy,
     timeout_ms: u64,
@@ -188,9 +242,12 @@ impl<'a> From<&'a ToolExecutionPlan> for PlanFingerprintInput<'a> {
             execution_id: &plan.execution_id,
             call: &plan.call,
             tool_version: &plan.tool_version,
+            parallelism: plan.parallelism,
             resource_keys: &plan.resolved_resource_keys,
             effect: plan.effect,
             retry_policy: plan.retry_policy,
+            rerun_reason: plan.rerun_reason.as_ref(),
+            idempotency_key: plan.idempotency_key.as_ref(),
             determinism: plan.determinism,
             cache_policy: plan.cache_policy,
             timeout_ms: plan.timeout_ms,
@@ -198,6 +255,47 @@ impl<'a> From<&'a ToolExecutionPlan> for PlanFingerprintInput<'a> {
             input_fingerprint: &plan.input_fingerprint,
         }
     }
+}
+
+#[derive(Serialize)]
+struct IdempotencyFingerprint<'a> {
+    tool_name: &'a ToolName,
+    tool_version: &'a str,
+    input_fingerprint: &'a str,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExecutionControl {
+    rerun_reason: String,
+}
+
+/// Removes the reserved, model-facing execution control envelope before a
+/// concrete Tool adapter validates its arguments. The typed reason remains on
+/// the execution Plan and Receipt, but never reaches adapter semantics.
+pub(crate) fn split_execution_control(
+    value: Value,
+) -> Result<(Value, Option<RerunReason>), ToolContractError> {
+    let Value::Object(mut object) = value else {
+        return Ok((value, None));
+    };
+    let Some(control) = object.remove("execution") else {
+        return Ok((Value::Object(object), None));
+    };
+    let control: ExecutionControl = serde_json::from_value(control).map_err(|error| {
+        ToolContractError::InvalidExecutionControl {
+            message: error.to_string(),
+        }
+    })?;
+    if control.rerun_reason.trim().is_empty() {
+        return Err(ToolContractError::InvalidExecutionControl {
+            message: "`execution.rerun_reason` must not be empty".to_owned(),
+        });
+    }
+    Ok((
+        Value::Object(object),
+        Some(RerunReason::new(control.rerun_reason)),
+    ))
 }
 
 fn fingerprint(value: &impl Serialize) -> Result<String, ToolContractError> {
@@ -242,6 +340,8 @@ pub struct ExecutionReceipt {
     pub exit_reason: Option<String>,
     pub output_artifact_ids: Vec<ArtifactId>,
     pub environment_change: Option<String>,
+    #[serde(default)]
+    pub rerun_reason: Option<RerunReason>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -269,6 +369,21 @@ impl ToolExecutionOutcome {
         )
     }
 
+    /// Produces the paired result for a duplicate `dedupe_by_key` invocation
+    /// without creating a second external execution. The original completed
+    /// Receipt stays authoritative and is intentionally reused.
+    pub(crate) fn deduplicated_for(plan: &ToolExecutionPlan, source: &Self) -> Self {
+        Self {
+            receipt: source.receipt.clone(),
+            result: ToolResult {
+                call_id: plan.call.call_id.clone(),
+                tool_name: plan.call.name.clone(),
+                status: source.result.status,
+                output: source.result.output.clone(),
+            },
+        }
+    }
+
     fn from_plan(
         plan: ToolExecutionPlan,
         status: ToolResultStatus,
@@ -288,6 +403,7 @@ impl ToolExecutionOutcome {
             exit_reason,
             output_artifact_ids: Vec::new(),
             environment_change: None,
+            rerun_reason: plan.rerun_reason,
         };
         Self { receipt, result }
     }
@@ -297,4 +413,6 @@ impl ToolExecutionOutcome {
 pub enum ToolContractError {
     #[error("failed to encode a stable Tool fingerprint: {message}")]
     Fingerprint { message: String },
+    #[error("invalid Tool execution control: {message}")]
+    InvalidExecutionControl { message: String },
 }

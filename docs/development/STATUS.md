@@ -7,12 +7,12 @@
 - Implementation: `STARTED`
 - Current milestone: `M1c`
 - Current slice: `M1c-S1`
-- Slice state: `READY_AUTHORIZED`; implementation starts only after this M1b-S2 status seal is remotely merged
-- Lean governance: `ACTIVE`; M1b-S2 is complete and M1c-S1 remains scope-locked to Batch plus Resource Scheduler
-- Local Git initialized: `yes`; M1b-S2 is being sealed on `agent/m1b-s2-merge-status`
-- Remote repository: `F0und-icu/cyber-agent` private; PR `#8` was Squash Merged
+- Slice state: `IN_PROGRESS`
+- Lean governance: `ACTIVE`; M1c-S1 is scope-locked to Batch plus Resource Scheduler
+- Local Git initialized: `yes`; M1c-S1 is being developed on `agent/m1c-s1-batch-scheduler`
+- Remote repository: `F0und-icu/cyber-agent` private; M1b-S2 status PR `#9` was Squash Merged
 - Documentation baseline commit: `55ff3be`
-- Current code base: `main`/`origin/main` M1b-S2 merge commit `216e800`
+- Current code base: `main`/`origin/main` M1b-S2 status-seal commit `4d08b42` before this Slice branch
 - Upstream Codex baseline: `3aae5d885bac39c1262491aa3fd100dfd8b3919f`
 
 ## Last Completed Slice
@@ -58,11 +58,11 @@
 - M1b-S1 Turn/Step capture, Canonical Request hashing, non-destructive ProviderSession Baseline comparison and full-request AgentLoop audit.
 - M1b-S2 Provider-neutral continuation, strict OpenAI Responses delta delivery, atomic Baseline/response identity advancement and bounded typed-rejection Full fallback.
 
-## Next Authorized Slice
+## In Progress
 
 - Slice: `M1c-S1`
-- Planned delivery branch: `agent/m1c-s1-batch-scheduler`
-- Base commit: the M1b-S2 status-seal merge commit, to be recorded at Slice start
+- Delivery branch: `agent/m1c-s1-batch-scheduler`
+- Base commit: `4d08b42`
 - Scope lock: add `read_files`, multi-pattern `search_files`, `run_commands`, deterministic Resource Key resolution and conflict-aware scheduling from existing Tool Effect/Retry/Idempotency metadata.
 - Required behavior: independent file/device/output resources may run concurrently; the same Device, PTY or Output resource remains serialized; a partial Batch failure preserves every other result and Tool Call/Result pairing.
 - Forbidden continuation: M1c-S2 background Job state, M1c-S3 PTY sessions, project persistence, Vision, DeepSeek Adapter, general Workflow/Hook/Router/Plugin abstractions, Live Provider requests and Codex credential/login access.
@@ -72,12 +72,12 @@
 The current user instruction explicitly authorizes continued implementation with delegated Terra/Luna development and normal version-controlled remote delivery until the first prototype reaches the separately authorized Live Provider validation boundary.
 
 - Run mode: `IMPLEMENT_TO_LIVE_BOUNDARY`
-- Slice ID: `M1c-S1`; state `READY_AUTHORIZED` pending the separate status-seal merge
+- Slice ID: `M1c-S1`; state `IN_PROGRESS`
 - Git mode: `BRANCH_PR_REVIEW_MERGE`; commit, push, PR, CI review and merge are authorized when the Slice Gate passes
 - Delegation mode: `AUTHORIZED`; delegated implementation Agents must independently read the repository authority chain and stay inside the current Slice
 - Live test mode: `OFF`; no real Provider credential or public model request is authorized
 - Forbidden continuation inside M1c-S1: background Job state, PTY sessions, Vision service, DeepSeek Adapter, CLI profile composition, Web, persistence, general Router/Hook/Plugin work, Codex source modification or Codex credentials/login access
-- Stop condition: remotely merge this M1b-S2 status seal before starting M1c-S1; do not run a Live Test
+- Stop condition: complete and remotely seal M1c-S1 before starting M1c-S2; do not run a Live Test
 
 ## Slice Lean Review
 
@@ -145,10 +145,31 @@ The current user instruction explicitly authorizes continued implementation with
 - Removed the full-request-only Port stream completion event and the misleading `record_full_response`/`assess_full_request` names. `record_completed_sample` now records either Full or incremental delivery from the same full logical snapshot.
 - `store:false + previous_response_id` over real OpenAI HTTP/SSE remains explicitly unverified. No Live Test was run; the next proof requires separately authorized dedicated Cyber Agent credentials and a public Provider request.
 
+### M1c-S1 Draft Lean Review (local Gate passed; remote seal pending)
+
+#### Semantic Owners
+
+- `src/domain/tools/resource.rs` owns typed `ResourceKey` values and the one pure Resource/Effect/Parallelism conflict predicate. Device, PTY and Output keys remain exclusive even if a future Adapter mislabels a plan as Parallel, while parallel read-only File plans may share a key. `src/app/tool_scheduler.rs` is the sole Turn-local consumer that starts non-conflicting plans, preserves model order and fills every staged Tool Call with a Result on cancellation.
+- `src/domain/tools.rs` owns normalized Plan fingerprints, the stable `dedupe_by_key` identity, explicit rerun control and the receipt-carried rerun reason. The scheduler indexes only non-cancelled completed Receipts in the current AgentLoop process; an explicit rerun bypasses a prior Receipt and replaces it after completion.
+- `src/adapters/tools/resources.rs` owns concrete project-relative path resolution to File/Output keys, including a symlink-aware existing-parent canonicalization. `src/adapters/tools/command.rs` owns the one command Resource JSON Schema, argv execution and batch command waves; it reuses the Domain conflict predicate rather than defining a second lock rule.
+- `src/adapters/tools/filesystem.rs` and `search.rs` own their respective batch argument/result handling while continuing to use the existing bounded-output owner. `src/app/model_sample.rs` remains the atomic model-sample staging owner; AgentLoop only invokes the Scheduler after staging valid Tool Calls.
+
+#### Reuse, API and Dependencies
+
+- Added `read_files`, multi-pattern `search_files` and explicit serial/parallel `run_commands`; each keeps individual partial failures in its ordered output and all commands remain argv arrays.
+- Added typed Resource/Idempotency/Rerun contracts to the existing Tool Domain, plus one private App scheduler. The explicit-rerun constructor remains `pub(crate)` because only the built-in Adapter consumes it; the existing public Plan constructor remains the Port-facing contract. No new Port, Cargo dependency, Cargo feature, Provider SDK, Hook/Router, Job, PTY or persistence abstraction was added.
+- The existing History pairing, cancellation authority, BLAKE3/Serde fingerprints, Tokio process timeout and bounded output implementation are reused. OpenAI wire types remain Adapter-private; no Codex source or dependency was copied (local implementation is `REIMPLEMENT`).
+
+#### Test Layout, Removal and Deferred Work
+
+- Permanent regressions are external: resource concurrency/serialization, batch partial failure and ordered pairing, cancellation, cross-Turn dedupe, explicit rerun replacement, typed key normalization, exact command-resource schemas, missing output behind a symlinked parent, built-in batch tools and multi-Tool model samples. `src/` has no inline test module.
+- Split the former mixed `process.rs` by distinct change reason into `command.rs` and `search.rs`; removed its duplicate responsibility. The command batch uses the Domain predicate rather than a second conflict implementation. Final review also preserved the pre-existing exact bounded-text behavior of un-ranged `read_file`, including trailing newlines, while range selection stays limited to `read_files`. No unused generic scheduler, schema-builder, cache or future feature was retained.
+- Deferred exactly as scoped: persistent ExecutionReceipts/Events, Tool cache, background Jobs, PTY sessions, Artifact storage, Project/Research updates, Vision/DeepSeek Adapter, CLI profile composition and real Provider validation. `parallel_tool_calls` remains unchanged in the OpenAI wire Adapter; AgentLoop support for multiple calls is local and protocol-neutral.
+
 ## Blockers
 
-- None for the completed M1b-S2 local and remote delivery Gates.
-- M1c-S1 can start after this status-only seal is remotely merged under the current user authorization.
+- None for the M1c-S1 local Gate.
+- M1c-S1 remains `IN_PROGRESS` until its authorized commit, PR/CI review and remote seal finish; M1c-S2 must not start before then.
 - Live Provider compatibility remains unverified by design; missing live credentials do not block offline development and no Codex credential is an allowed substitute.
 
 ## Last Verification
@@ -157,6 +178,8 @@ The current user instruction explicitly authorizes continued implementation with
 - M1b-S2 loopback verification: PASS; Full requests retain `store:false`, incremental requests contain only delta input plus the opaque previous response identity, exact HTTP/SSE rejection makes one Full fallback, and fallback does not persist partial stream output or re-execute a completed Tool.
 - M1b-S2 Live Test: OFF; no Provider credential, public network request, Codex login state, `~/.codex` or `CODEX_HOME` was read or modified.
 - M1b-S2 remote Gate: PASS; PR `#8` head run `32561668586` and post-merge `main` run `32561848176` passed, and independent Terra xhigh review returned APPROVE with no medium-or-higher issue.
+- M1c-S1 local Gate: PASS on Rust `1.93.1`; `cargo fmt --all -- --check`, `cargo clippy --locked --all-targets --all-features -- -D warnings`, `cargo test --locked --all-targets --all-features` (73 passed, 0 failed, 1 ignored synthetic Live Smoke) and `cargo build --locked` all exited `0`. Inline-test, forbidden Codex dependency, dedicated-credential, Provider-wire boundary, `git diff --check` and `codex/`-unchanged scans also passed.
+- M1c-S1 Live Test: OFF; no credential, external model request, Codex login state, `~/.codex` or `CODEX_HOME` was read or modified.
 
 ### Retained M1b-S1 verification evidence
 

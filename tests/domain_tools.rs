@@ -1,5 +1,5 @@
 use cyber_agent::domain::tools::{
-    ExecutionId, ToolCachePolicy, ToolCall, ToolCallId, ToolDeterminism, ToolEffect,
+    ExecutionId, ResourceKey, ToolCachePolicy, ToolCall, ToolCallId, ToolDeterminism, ToolEffect,
     ToolExecutionOutcome, ToolExecutionPlan, ToolExposure, ToolName, ToolOutputPolicy,
     ToolParallelism, ToolResultStatus, ToolRetryPolicy, ToolSpec,
 };
@@ -33,7 +33,7 @@ fn plan(arguments: Value) -> ToolExecutionPlan {
             arguments,
         ),
         &spec(),
-        vec!["file:/project/Cargo.toml".to_owned()],
+        vec![ResourceKey::file("/project/Cargo.toml")],
     )
     .expect("the fixture plan must be fingerprintable")
 }
@@ -87,5 +87,101 @@ fn outcome_constructors_keep_receipt_and_result_statuses_consistent() {
     assert_eq!(
         cancelled.receipt.exit_reason.as_deref(),
         Some("agent_cancelled")
+    );
+}
+
+#[test]
+fn resource_keys_are_sorted_and_dedupe_keys_ignore_execution_identity() {
+    let mut deduplicable = spec();
+    deduplicable.retry_policy = ToolRetryPolicy::DedupeByKey;
+    let first = ToolExecutionPlan::new(
+        ExecutionId::new("execution-first"),
+        ToolCall::new(
+            ToolCallId::new("call-first"),
+            ToolName::new("read_file"),
+            json!({"path": "Cargo.toml"}),
+        ),
+        &deduplicable,
+        vec![
+            ResourceKey::output("/project/result"),
+            ResourceKey::device("emulator-5554"),
+            ResourceKey::output("/project/result"),
+        ],
+    )
+    .unwrap();
+    let second = ToolExecutionPlan::new(
+        ExecutionId::new("execution-second"),
+        ToolCall::new(
+            ToolCallId::new("call-second"),
+            ToolName::new("read_file"),
+            json!({"path": "Cargo.toml"}),
+        ),
+        &deduplicable,
+        vec![
+            ResourceKey::device("emulator-5554"),
+            ResourceKey::output("/project/result"),
+        ],
+    )
+    .unwrap();
+
+    assert_eq!(
+        first.resolved_resource_keys,
+        vec![
+            ResourceKey::device("emulator-5554"),
+            ResourceKey::output("/project/result"),
+        ]
+    );
+    assert_eq!(first.idempotency_key, second.idempotency_key);
+    assert_ne!(first.plan_fingerprint, second.plan_fingerprint);
+}
+
+#[test]
+fn rerun_control_is_excluded_from_tool_semantics_but_retained_in_the_receipt() {
+    let mut deduplicable = spec();
+    deduplicable.retry_policy = ToolRetryPolicy::DedupeByKey;
+    let normal = ToolExecutionPlan::new(
+        ExecutionId::new("execution-normal"),
+        ToolCall::new(
+            ToolCallId::new("call-normal"),
+            ToolName::new("read_file"),
+            json!({"path": "Cargo.toml"}),
+        ),
+        &deduplicable,
+        Vec::new(),
+    )
+    .unwrap();
+    let mut rerun_call = ToolCall::new(
+        ToolCallId::new("call-rerun"),
+        ToolName::new("read_file"),
+        json!({
+            "path": "Cargo.toml",
+            "execution": {"rerun_reason": "user_requested_rerun"}
+        }),
+    );
+    let rerun = ToolExecutionPlan::new(
+        ExecutionId::new("execution-rerun"),
+        rerun_call.clone(),
+        &deduplicable,
+        Vec::new(),
+    )
+    .unwrap();
+
+    assert_eq!(rerun.call.arguments, json!({"path": "Cargo.toml"}));
+    assert_eq!(normal.input_fingerprint, rerun.input_fingerprint);
+    assert_eq!(normal.idempotency_key, rerun.idempotency_key);
+    assert_ne!(normal.plan_fingerprint, rerun.plan_fingerprint);
+    assert_eq!(
+        rerun.rerun_reason.as_ref().map(|reason| reason.as_str()),
+        Some("user_requested_rerun")
+    );
+    rerun_call.arguments["execution"] = json!({"unknown": "control"});
+    assert!(
+        ToolExecutionPlan::new(
+            ExecutionId::new("execution-invalid"),
+            rerun_call,
+            &deduplicable,
+            Vec::new(),
+        )
+        .is_err()
     );
 }

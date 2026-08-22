@@ -44,6 +44,19 @@
         "properties": {
           "path": {
             "type": "string"
+          },
+          "execution": {
+            "type": "object",
+            "properties": {
+              "rerun_reason": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "rerun_reason"
+            ],
+            "additionalProperties": false
           }
         },
         "required": [

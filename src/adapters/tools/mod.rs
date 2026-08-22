@@ -1,8 +1,10 @@
 //! Minimal FullAccess Tool Registry for the M1a single-Agent loop.
 
+mod command;
 mod filesystem;
 mod output;
-mod process;
+mod resources;
+mod search;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -12,9 +14,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::domain::tools::{
-    ExecutionId, ToolCachePolicy, ToolCall, ToolDeterminism, ToolEffect, ToolExecutionOutcome,
-    ToolExecutionPlan, ToolExposure, ToolName, ToolOutputPolicy, ToolParallelism, ToolRetryPolicy,
-    ToolSpec,
+    ExecutionId, ResourceKey, ToolCachePolicy, ToolCall, ToolDeterminism, ToolEffect,
+    ToolExecutionOutcome, ToolExecutionPlan, ToolExposure, ToolName, ToolOutputPolicy,
+    ToolParallelism, ToolRetryPolicy, ToolSpec, split_execution_control,
 };
 use crate::ports::tool::{ToolExecutionFuture, ToolExecutor, ToolExecutorError};
 
@@ -24,9 +26,11 @@ const DEFAULT_OUTPUT_BYTES: usize = 128 * 1024;
 #[derive(Clone, Copy)]
 enum BuiltinTool {
     ReadFile,
+    ReadFiles,
     ListFiles,
     SearchFiles,
     RunCommand,
+    RunCommands,
 }
 
 pub struct ToolRegistry {
@@ -38,9 +42,11 @@ impl ToolRegistry {
     pub fn for_project(project_root: impl Into<PathBuf>) -> Self {
         let tools = [
             (ToolName::new("read_file"), BuiltinTool::ReadFile),
+            (ToolName::new("read_files"), BuiltinTool::ReadFiles),
             (ToolName::new("list_files"), BuiltinTool::ListFiles),
             (ToolName::new("search_files"), BuiltinTool::SearchFiles),
             (ToolName::new("run_command"), BuiltinTool::RunCommand),
+            (ToolName::new("run_commands"), BuiltinTool::RunCommands),
         ]
         .into_iter()
         .collect();
@@ -68,15 +74,26 @@ impl ToolExecutor for ToolRegistry {
                 tool_name: call.name.to_string(),
             })?;
         let arguments = std::mem::take(&mut call.arguments);
+        let (arguments, rerun_reason) = split_execution_control(arguments).map_err(|error| {
+            ToolExecutorError::InvalidArguments {
+                tool_name: call.name.to_string(),
+                message: error.to_string(),
+            }
+        })?;
         let (normalized_arguments, resource_keys) =
             tool.normalize(&self.project_root, arguments)?;
         call.arguments = normalized_arguments;
         let spec = tool.spec();
-        ToolExecutionPlan::new(execution_id, call, &spec, resource_keys).map_err(|error| {
-            ToolExecutorError::PlanFailure {
-                tool_name: spec.name.to_string(),
-                message: error.to_string(),
-            }
+        ToolExecutionPlan::new_with_rerun_reason(
+            execution_id,
+            call,
+            &spec,
+            resource_keys,
+            rerun_reason,
+        )
+        .map_err(|error| ToolExecutorError::PlanFailure {
+            tool_name: spec.name.to_string(),
+            message: error.to_string(),
         })
     }
 
@@ -109,21 +126,25 @@ impl BuiltinTool {
         self,
         project_root: &Path,
         arguments: Value,
-    ) -> Result<(Value, Vec<String>), ToolExecutorError> {
+    ) -> Result<(Value, Vec<ResourceKey>), ToolExecutorError> {
         match self {
             Self::ReadFile => filesystem::normalize_read_file(project_root, arguments),
+            Self::ReadFiles => filesystem::normalize_read_files(project_root, arguments),
             Self::ListFiles => filesystem::normalize_list_files(project_root, arguments),
-            Self::SearchFiles => process::normalize_search_files(project_root, arguments),
-            Self::RunCommand => process::normalize_run_command(project_root, arguments),
+            Self::SearchFiles => search::normalize(project_root, arguments),
+            Self::RunCommand => command::normalize_one(project_root, arguments),
+            Self::RunCommands => command::normalize_batch(project_root, arguments),
         }
     }
 
     async fn execute(self, project_root: &Path, plan: ToolExecutionPlan) -> ToolExecutionOutcome {
         match self {
             Self::ReadFile => filesystem::execute_read_file(project_root, plan).await,
+            Self::ReadFiles => filesystem::execute_read_files(project_root, plan).await,
             Self::ListFiles => filesystem::execute_list_files(project_root, plan).await,
-            Self::SearchFiles => process::execute_search_files(project_root, plan).await,
-            Self::RunCommand => process::execute_run_command(project_root, plan).await,
+            Self::SearchFiles => search::execute(project_root, plan).await,
+            Self::RunCommand => command::execute_one(project_root, plan).await,
+            Self::RunCommands => command::execute_batch(project_root, plan).await,
         }
     }
 
@@ -146,6 +167,39 @@ impl BuiltinTool {
                 ToolRetryPolicy::ReplaySafe,
                 ToolDeterminism::EnvironmentDependent,
                 10_000,
+            ),
+            Self::ReadFiles => spec(
+                "read_files",
+                "Read multiple local files as bounded text, preserving per-file failures.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "files": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 32,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "path": {"type": "string"},
+                                    "start_line": {"type": "integer", "minimum": 1},
+                                    "end_line": {"type": "integer", "minimum": 1}
+                                },
+                                "required": ["path"],
+                                "additionalProperties": false
+                            }
+                        }
+                    },
+                    "required": ["files"],
+                    "additionalProperties": false
+                }),
+                common_output,
+                ToolParallelism::Parallel,
+                Some("file:{files[*].path}"),
+                ToolEffect::ReadOnly,
+                ToolRetryPolicy::ReplaySafe,
+                ToolDeterminism::EnvironmentDependent,
+                15_000,
             ),
             Self::ListFiles => spec(
                 "list_files",
@@ -173,9 +227,14 @@ impl BuiltinTool {
                     "type": "object",
                     "properties": {
                         "pattern": {"type": "string"},
+                        "patterns": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 32,
+                            "items": {"type": "string"}
+                        },
                         "paths": {"type": "array", "items": {"type": "string"}}
                     },
-                    "required": ["pattern"],
                     "additionalProperties": false
                 }),
                 common_output,
@@ -193,14 +252,49 @@ impl BuiltinTool {
                     "type": "object",
                     "properties": {
                         "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1},
-                        "cwd": {"type": "string"}
+                        "cwd": {"type": "string"},
+                        "resources": {"type": "array", "items": command::resource_schema()}
                     },
                     "required": ["argv"],
                     "additionalProperties": false
                 }),
                 common_output,
-                ToolParallelism::Serial,
-                Some("process:{cwd}"),
+                ToolParallelism::ResourceLocked,
+                Some("resource:{resources}"),
+                ToolEffect::Interactive,
+                ToolRetryPolicy::NeverAutoRetry,
+                ToolDeterminism::Nondeterministic,
+                120_000,
+            ),
+            Self::RunCommands => spec(
+                "run_commands",
+                "Run several argv arrays with an explicit serial or parallel mode; each result is retained.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "mode": {"type": "string", "enum": ["serial", "parallel"]},
+                        "commands": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 32,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                                    "cwd": {"type": "string"},
+                                    "resources": {"type": "array", "items": command::resource_schema()}
+                                },
+                                "required": ["argv"],
+                                "additionalProperties": false
+                            }
+                        }
+                    },
+                    "required": ["mode", "commands"],
+                    "additionalProperties": false
+                }),
+                common_output,
+                ToolParallelism::ResourceLocked,
+                Some("resource:{commands[*].resources}"),
                 ToolEffect::Interactive,
                 ToolRetryPolicy::NeverAutoRetry,
                 ToolDeterminism::Nondeterministic,
@@ -227,7 +321,7 @@ fn spec(
         name: ToolName::new(name),
         version: TOOL_VERSION.to_owned(),
         description: description.to_owned(),
-        input_schema,
+        input_schema: with_execution_control(input_schema),
         output_schema,
         exposure: ToolExposure::Direct,
         parallelism,
@@ -241,6 +335,28 @@ fn spec(
             max_bytes: DEFAULT_OUTPUT_BYTES,
         },
     }
+}
+
+fn with_execution_control(mut schema: Value) -> Value {
+    let Some(properties) = schema
+        .as_object_mut()
+        .and_then(|object| object.get_mut("properties"))
+        .and_then(Value::as_object_mut)
+    else {
+        return schema;
+    };
+    properties.insert(
+        "execution".to_owned(),
+        json!({
+            "type": "object",
+            "properties": {
+                "rerun_reason": {"type": "string", "minLength": 1}
+            },
+            "required": ["rerun_reason"],
+            "additionalProperties": false
+        }),
+    );
+    schema
 }
 
 fn decode_arguments<Arguments: for<'de> Deserialize<'de>>(

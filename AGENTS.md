@@ -25,11 +25,11 @@ If the user explicitly authorizes development sub-agents, every delegated agent 
 
 - Architecture v1.1 is sealed as an additive extension over the immutable v1 baseline.
 - M0-S1, M0-S2, M1a-S1, M1a-S2, M1a-S3, M1b-S1 and M1b-S2 are complete.
-- M1b-S2 is complete and remotely merged. M1c-S1 is the current Slice; the current user request authorizes its implementation only after the M1b-S2 status seal is merged on its own branch.
+- M1b-S2 is complete and remotely sealed. M1c-S1 is the current authorized Slice and is in progress on `agent/m1c-s1-batch-scheduler`.
 - Local Git is initialized and `main` tracks the private remote.
 - `codex/` is a clean, read-only upstream reference repository.
 
-Do not start M1b-S1, commit, push, create a PR or run a Live Test unless the current user request explicitly authorizes the corresponding action.
+Do not start a Slice, commit, push, create a PR or run a Live Test unless the current user request explicitly authorizes the corresponding action.
 
 ## Slice Discipline
 

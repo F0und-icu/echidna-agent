@@ -35,20 +35,14 @@ impl ModelSample {
         Self { items }
     }
 
-    pub(super) fn single_tool_call(&self) -> Result<Option<ToolCall>, usize> {
-        let calls = self
-            .items
+    pub(super) fn tool_calls(&self) -> Vec<ToolCall> {
+        self.items
             .iter()
             .filter_map(|item| match item {
-                SampleItem::ToolCall(call) => Some(call),
+                SampleItem::ToolCall(call) => Some(call.clone()),
                 SampleItem::AssistantText(_) => None,
             })
-            .collect::<Vec<_>>();
-        match calls.as_slice() {
-            [] => Ok(None),
-            [call] => Ok(Some((*call).clone())),
-            _ => Err(calls.len()),
-        }
+            .collect()
     }
 
     pub(super) fn commit(&self, history: &mut ConversationHistory) -> Result<(), HistoryError> {

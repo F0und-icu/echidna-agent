@@ -1,15 +1,18 @@
 //! FullAccess file reading and deterministic directory listing.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
+use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::fs;
 
-use crate::domain::tools::{ToolExecutionOutcome, ToolExecutionPlan};
+use crate::domain::tools::{ResourceKey, ToolExecutionOutcome, ToolExecutionPlan};
 use crate::ports::tool::ToolExecutorError;
 
 use super::output::bounded_text;
+use super::resources::ResourceKeyResolver;
 use super::{decode_arguments, invalid_arguments, invalid_plan};
 
 const MAX_LISTED_PATHS: usize = 2_000;
@@ -18,6 +21,22 @@ const MAX_LISTED_PATHS: usize = 2_000;
 #[serde(deny_unknown_fields)]
 struct ReadFileArgs {
     path: String,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ReadFileRangeArgs {
+    path: String,
+    #[serde(default)]
+    start_line: Option<u64>,
+    #[serde(default)]
+    end_line: Option<u64>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ReadFilesArgs {
+    files: Vec<ReadFileRangeArgs>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -40,19 +59,45 @@ const fn default_max_depth() -> u16 {
 pub(super) fn normalize_read_file(
     project_root: &Path,
     value: Value,
-) -> Result<(Value, Vec<String>), ToolExecutorError> {
+) -> Result<(Value, Vec<ResourceKey>), ToolExecutorError> {
     let arguments: ReadFileArgs = decode_arguments("read_file", value)?;
-    let path = resolve_path(project_root, &arguments.path);
+    let resource_keys = vec![ResourceKeyResolver::new(project_root).file(&arguments.path)];
     Ok((
         serde_json::to_value(arguments).expect("ReadFileArgs serialization cannot fail"),
-        vec![format!("file:{}", path.display())],
+        resource_keys,
+    ))
+}
+
+pub(super) fn normalize_read_files(
+    project_root: &Path,
+    value: Value,
+) -> Result<(Value, Vec<ResourceKey>), ToolExecutorError> {
+    let arguments: ReadFilesArgs = decode_arguments("read_files", value)?;
+    if arguments.files.is_empty() || arguments.files.len() > 32 {
+        return Err(invalid_arguments(
+            "read_files",
+            "`files` must contain between 1 and 32 entries",
+        ));
+    }
+    for file in &arguments.files {
+        validate_range(file, "read_files")?;
+    }
+    let resolver = ResourceKeyResolver::new(project_root);
+    let resource_keys = arguments
+        .files
+        .iter()
+        .map(|file| resolver.file(&file.path))
+        .collect();
+    Ok((
+        serde_json::to_value(arguments).expect("ReadFilesArgs serialization cannot fail"),
+        resource_keys,
     ))
 }
 
 pub(super) fn normalize_list_files(
     project_root: &Path,
     value: Value,
-) -> Result<(Value, Vec<String>), ToolExecutorError> {
+) -> Result<(Value, Vec<ResourceKey>), ToolExecutorError> {
     let arguments: ListFilesArgs = decode_arguments("list_files", value)?;
     if arguments.max_depth > 64 {
         return Err(invalid_arguments(
@@ -60,10 +105,10 @@ pub(super) fn normalize_list_files(
             "`max_depth` must not exceed 64",
         ));
     }
-    let path = resolve_path(project_root, &arguments.path);
+    let resource_keys = vec![ResourceKeyResolver::new(project_root).file(&arguments.path)];
     Ok((
         serde_json::to_value(arguments).expect("ListFilesArgs serialization cannot fail"),
-        vec![format!("file:{}", path.display())],
+        resource_keys,
     ))
 }
 
@@ -75,26 +120,50 @@ pub(super) async fn execute_read_file(
         Ok(arguments) => arguments,
         Err(error) => return invalid_plan(plan, error),
     };
-    let path = resolve_path(project_root, &arguments.path);
-    match fs::read(&path).await {
-        Ok(bytes) => {
-            let bounded = bounded_text(&bytes, plan.output_policy.max_bytes);
-            ToolExecutionOutcome::succeeded(
-                plan,
-                json!({
-                    "path": display_path(project_root, &path),
-                    "content": bounded.text,
-                    "original_bytes": bounded.original_bytes,
-                    "truncated": bounded.truncated,
-                }),
-            )
-        }
-        Err(error) => ToolExecutionOutcome::failed(
-            plan,
-            "read_failed",
-            json!({"error": error.to_string(), "path": path.display().to_string()}),
-        ),
+    let range = ReadFileRangeArgs {
+        path: arguments.path,
+        start_line: None,
+        end_line: None,
+    };
+    match read_file_value(project_root, &range, plan.output_policy.max_bytes).await {
+        Ok(value) => ToolExecutionOutcome::succeeded(plan, value),
+        Err(value) => ToolExecutionOutcome::failed(plan, "read_failed", value),
     }
+}
+
+pub(super) async fn execute_read_files(
+    project_root: &Path,
+    plan: ToolExecutionPlan,
+) -> ToolExecutionOutcome {
+    let arguments: ReadFilesArgs = match decode_arguments("read_files", plan.call.arguments.clone())
+    {
+        Ok(arguments) => arguments,
+        Err(error) => return invalid_plan(plan, error),
+    };
+    if let Err(error) = validate_read_files(&arguments) {
+        return invalid_plan(plan, error);
+    }
+
+    let max_each = per_item_limit(plan.output_policy.max_bytes, arguments.files.len());
+    let results = join_all(
+        arguments
+            .files
+            .iter()
+            .map(|file| read_file_value(project_root, file, max_each)),
+    )
+    .await;
+    let partial_failure = results.iter().any(Result::is_err);
+    let files = results
+        .into_iter()
+        .map(|result| match result {
+            Ok(value) => json!({"status": "succeeded", "result": value}),
+            Err(value) => json!({"status": "failed", "result": value}),
+        })
+        .collect::<Vec<_>>();
+    ToolExecutionOutcome::succeeded(
+        plan,
+        json!({"files": files, "partial_failure": partial_failure}),
+    )
 }
 
 pub(super) async fn execute_list_files(
@@ -192,4 +261,84 @@ pub(super) fn display_path(project_root: &Path, path: &Path) -> String {
         .unwrap_or(path)
         .display()
         .to_string()
+}
+
+fn validate_read_files(arguments: &ReadFilesArgs) -> Result<(), ToolExecutorError> {
+    if arguments.files.is_empty() || arguments.files.len() > 32 {
+        return Err(invalid_arguments(
+            "read_files",
+            "`files` must contain between 1 and 32 entries",
+        ));
+    }
+    for file in &arguments.files {
+        validate_range(file, "read_files")?;
+    }
+    Ok(())
+}
+
+fn validate_range(arguments: &ReadFileRangeArgs, tool_name: &str) -> Result<(), ToolExecutorError> {
+    if arguments.start_line == Some(0) {
+        return Err(invalid_arguments(
+            tool_name,
+            "`start_line` must be at least 1",
+        ));
+    }
+    if arguments.end_line == Some(0) {
+        return Err(invalid_arguments(
+            tool_name,
+            "`end_line` must be at least 1",
+        ));
+    }
+    if let (Some(start), Some(end)) = (arguments.start_line, arguments.end_line)
+        && end < start
+    {
+        return Err(invalid_arguments(
+            tool_name,
+            "`end_line` must not be before `start_line`",
+        ));
+    }
+    Ok(())
+}
+
+async fn read_file_value(
+    project_root: &Path,
+    arguments: &ReadFileRangeArgs,
+    max_bytes: usize,
+) -> Result<Value, Value> {
+    let path = resolve_path(project_root, &arguments.path);
+    let bytes = fs::read(&path)
+        .await
+        .map_err(|error| json!({"error": error.to_string(), "path": path.display().to_string()}))?;
+    let selected = if arguments.start_line.is_none() && arguments.end_line.is_none() {
+        Cow::Borrowed(bytes.as_slice())
+    } else {
+        Cow::Owned(select_lines(&bytes, arguments.start_line, arguments.end_line).into_bytes())
+    };
+    let bounded = bounded_text(&selected, max_bytes);
+    Ok(json!({
+        "path": display_path(project_root, &path),
+        "content": bounded.text,
+        "original_bytes": bytes.len(),
+        "selected_bytes": bounded.original_bytes,
+        "truncated": bounded.truncated,
+        "start_line": arguments.start_line,
+        "end_line": arguments.end_line,
+    }))
+}
+
+fn select_lines(bytes: &[u8], start_line: Option<u64>, end_line: Option<u64>) -> String {
+    let start = start_line.unwrap_or(1).saturating_sub(1) as usize;
+    let end = end_line.map(|line| line as usize);
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            (index >= start && end.is_none_or(|end| index < end)).then_some(line)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn per_item_limit(total: usize, count: usize) -> usize {
+    total / count.max(1)
 }

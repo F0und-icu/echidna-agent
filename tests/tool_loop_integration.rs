@@ -17,8 +17,8 @@ use cyber_agent::domain::model::{
     CapabilityMappingVersion, ContentItem, ModelCapabilities, ModelEvent, ModelInputIR,
 };
 use cyber_agent::domain::tools::{
-    ExecutionId, ToolCall, ToolCallId, ToolExecutionOutcome, ToolExecutionPlan, ToolName,
-    ToolResultStatus, ToolSpec,
+    ExecutionId, ResourceKey, ToolCall, ToolCallId, ToolExecutionOutcome, ToolExecutionPlan,
+    ToolName, ToolResultStatus, ToolSpec,
 };
 use cyber_agent::ports::model::{
     ModelEventStream, ModelProvider, ModelProviderError, ModelRequest, ModelResponseCompletion,
@@ -89,12 +89,41 @@ async fn builtin_tools_cover_files_search_argv_failures_and_bounded_output() {
             .iter()
             .map(|spec| spec.name.as_str())
             .collect::<Vec<_>>(),
-        vec!["list_files", "read_file", "run_command", "search_files"]
+        vec![
+            "list_files",
+            "read_file",
+            "read_files",
+            "run_command",
+            "run_commands",
+            "search_files",
+        ]
     );
     let run_spec = specs
         .iter()
         .find(|spec| spec.name.as_str() == "run_command")
         .unwrap();
+    let resource_schema = &run_spec.input_schema["properties"]["resources"]["items"];
+    assert_eq!(resource_schema["oneOf"].as_array().map(Vec::len), Some(3));
+    assert_eq!(
+        resource_schema["oneOf"][0]["properties"]["kind"]["const"],
+        "device"
+    );
+    assert_eq!(
+        resource_schema["oneOf"][1]["properties"]["kind"]["const"],
+        "pty"
+    );
+    assert_eq!(
+        resource_schema["oneOf"][2]["properties"]["kind"]["const"],
+        "output"
+    );
+    let batch_spec = specs
+        .iter()
+        .find(|spec| spec.name.as_str() == "run_commands")
+        .unwrap();
+    assert_eq!(
+        batch_spec.input_schema["properties"]["commands"]["items"]["properties"]["resources"]["items"],
+        resource_schema.clone()
+    );
     assert_eq!(
         (run_spec.effect, run_spec.retry_policy, run_spec.determinism),
         (
@@ -102,6 +131,21 @@ async fn builtin_tools_cover_files_search_argv_failures_and_bounded_output() {
             cyber_agent::domain::tools::ToolRetryPolicy::NeverAutoRetry,
             cyber_agent::domain::tools::ToolDeterminism::Nondeterministic,
         )
+    );
+    let normalized_output_plan = plan(
+        &tools,
+        "normalized-output",
+        "run_command",
+        json!({
+            "argv": ["rustc", "--version"],
+            "resources": [{"kind": "output", "path": "artifacts/../audit.txt"}]
+        }),
+    );
+    assert_eq!(
+        normalized_output_plan.resolved_resource_keys,
+        vec![ResourceKey::output(
+            project.root.join("audit.txt").display().to_string()
+        )]
     );
 
     let read = tools
@@ -113,11 +157,9 @@ async fn builtin_tools_cover_files_search_argv_failures_and_bounded_output() {
         ))
         .await;
     assert_eq!(read.result.status, ToolResultStatus::Succeeded);
-    assert!(
-        read.result.output["content"]
-            .as_str()
-            .unwrap()
-            .contains("path traversal")
+    assert_eq!(
+        read.result.output["content"],
+        "// candidate: path traversal\npub fn normalize(path: &str) -> &str { path }\n"
     );
 
     let listed = tools
@@ -211,6 +253,184 @@ async fn builtin_tools_cover_files_search_argv_failures_and_bounded_output() {
         ),
         Err(ToolExecutorError::InvalidArguments { .. })
     ));
+    assert!(matches!(
+        tools.plan(
+            ExecutionId::new("execution-invalid-resource"),
+            tool_call(
+                "invalid-resource",
+                "run_command",
+                json!({
+                    "argv": ["true"],
+                    "resources": [{"kind": "device", "serial": "one", "extra": true}]
+                }),
+            ),
+        ),
+        Err(ToolExecutorError::InvalidArguments { .. })
+    ));
+
+    let read_batch = tools
+        .execute(plan(
+            &tools,
+            "read-batch",
+            "read_files",
+            json!({
+                "files": [
+                    {"path": "src/lib.rs", "start_line": 1, "end_line": 1},
+                    {"path": "does-not-exist.txt"}
+                ]
+            }),
+        ))
+        .await;
+    assert_eq!(read_batch.result.status, ToolResultStatus::Succeeded);
+    assert_eq!(read_batch.result.output["partial_failure"], true);
+    assert_eq!(read_batch.result.output["files"][0]["status"], "succeeded");
+    assert_eq!(read_batch.result.output["files"][1]["status"], "failed");
+
+    let search_batch = tools
+        .execute(plan(
+            &tools,
+            "search-batch",
+            "search_files",
+            json!({"patterns": ["path traversal", "not-present"], "paths": ["src"]}),
+        ))
+        .await;
+    assert_eq!(search_batch.result.status, ToolResultStatus::Succeeded);
+    assert_eq!(search_batch.result.output["partial_failure"], false);
+    assert_eq!(
+        search_batch.result.output["results"]
+            .as_array()
+            .map(Vec::len),
+        Some(2)
+    );
+
+    let command_batch = tools
+        .execute(plan(
+            &tools,
+            "command-batch",
+            "run_commands",
+            json!({
+                "mode": "parallel",
+                "commands": [
+                    {"argv": ["rustc", "--version"]},
+                    {"argv": ["rustc", "--definitely-invalid-cyber-agent-flag"]}
+                ]
+            }),
+        ))
+        .await;
+    assert_eq!(command_batch.result.status, ToolResultStatus::Succeeded);
+    assert_eq!(command_batch.result.output["partial_failure"], true);
+    assert_eq!(
+        command_batch.result.output["commands"][0]["status"],
+        "succeeded"
+    );
+    assert_eq!(
+        command_batch.result.output["commands"][1]["status"],
+        "failed"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn output_resource_keys_resolve_missing_symlinked_outputs_to_one_key() {
+    let project = TestProject::new("symlinked-output-resource");
+    fs::create_dir_all(project.root.join("real")).unwrap();
+    std::os::unix::fs::symlink("real", project.root.join("alias")).unwrap();
+    let tools = ToolRegistry::for_project(&project.root);
+
+    let alias = plan(
+        &tools,
+        "alias-output",
+        "run_command",
+        json!({
+            "argv": ["true"],
+            "resources": [{"kind": "output", "path": "alias/out.txt"}]
+        }),
+    );
+    let real = plan(
+        &tools,
+        "real-output",
+        "run_command",
+        json!({
+            "argv": ["true"],
+            "resources": [{"kind": "output", "path": "real/out.txt"}]
+        }),
+    );
+
+    assert_eq!(alias.resolved_resource_keys, real.resolved_resource_keys);
+}
+
+#[tokio::test]
+async fn run_commands_parallel_mode_uses_explicit_resource_waves() {
+    let project = TestProject::new("command-resource-waves");
+    let tools = ToolRegistry::for_project(&project.root);
+    let barrier =
+        "touch \"$1\"; for _ in $(seq 1 50); do [ -f \"$2\" ] && exit 0; sleep 0.01; done; exit 73";
+
+    for (index, (first_resource, second_resource, expected_statuses)) in [
+        (
+            json!({"kind": "device", "serial": "first"}),
+            json!({"kind": "device", "serial": "second"}),
+            ["succeeded", "succeeded"],
+        ),
+        (
+            json!({"kind": "device", "serial": "shared"}),
+            json!({"kind": "device", "serial": "shared"}),
+            ["failed", "succeeded"],
+        ),
+        (
+            json!({"kind": "pty", "session": "shared"}),
+            json!({"kind": "pty", "session": "shared"}),
+            ["failed", "succeeded"],
+        ),
+        (
+            json!({"kind": "output", "path": "shared-output.txt"}),
+            json!({"kind": "output", "path": "shared-output.txt"}),
+            ["failed", "succeeded"],
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let first_marker = project.root.join(format!("marker-{index}-first"));
+        let second_marker = project.root.join(format!("marker-{index}-second"));
+        let command = |own: &PathBuf, peer: &PathBuf, resource: Value| {
+            json!({
+                "argv": [
+                    "sh",
+                    "-c",
+                    barrier,
+                    "cyber-agent-test-marker",
+                    own.display().to_string(),
+                    peer.display().to_string()
+                ],
+                "resources": [resource]
+            })
+        };
+        let outcome = tools
+            .execute(plan(
+                &tools,
+                &format!("resource-wave-{index}"),
+                "run_commands",
+                json!({
+                    "mode": "parallel",
+                    "commands": [
+                        command(&first_marker, &second_marker, first_resource),
+                        command(&second_marker, &first_marker, second_resource)
+                    ]
+                }),
+            ))
+            .await;
+
+        assert_eq!(outcome.result.status, ToolResultStatus::Succeeded);
+        assert_eq!(
+            outcome.result.output["commands"][0]["status"],
+            expected_statuses[0]
+        );
+        assert_eq!(
+            outcome.result.output["commands"][1]["status"],
+            expected_statuses[1]
+        );
+    }
 }
 
 fn capabilities() -> ModelCapabilities {
@@ -433,7 +653,7 @@ async fn agent_loop_keeps_full_resampling_after_local_baseline_comparison() {
 
     let inputs = provider.inputs();
     assert_eq!(inputs.len(), 2);
-    assert_eq!(inputs[0].tool_specs.len(), 4);
+    assert_eq!(inputs[0].tool_specs.len(), 6);
     assert_eq!(inputs[0].content_items.len(), 1);
     assert_eq!(
         inputs[1].content_items[1],
@@ -761,7 +981,7 @@ async fn failed_full_fallback_keeps_a_provider_rejected_reset_until_a_later_full
 }
 
 #[tokio::test]
-async fn invalid_model_sample_keeps_the_last_committed_continuation() {
+async fn multiple_tool_calls_commit_one_sample_then_advance_continuation() {
     let provider = ScriptedProvider::with_capabilities(
         incremental_capabilities(),
         [
@@ -780,13 +1000,19 @@ async fn invalid_model_sample_keeps_the_last_committed_continuation() {
                         call: tool_call("call-two", "read_file", json!({"path": "src/lib.rs"})),
                     },
                 ],
-                Some("resp-invalid"),
+                Some("resp-batch"),
             ),
             completed_response(
                 vec![ModelEvent::TextDelta {
-                    text: "recovered response".to_owned(),
+                    text: "batch result considered".to_owned(),
                 }],
-                Some("resp-recovered"),
+                Some("resp-after-batch"),
+            ),
+            completed_response(
+                vec![ModelEvent::TextDelta {
+                    text: "recovery response".to_owned(),
+                }],
+                Some("resp-recovery"),
             ),
         ],
     );
@@ -797,30 +1023,42 @@ async fn invalid_model_sample_keeps_the_last_committed_continuation() {
         .run_turn("first input", AgentCancellation::new())
         .await
         .unwrap();
-    assert_eq!(
-        agent
-            .run_turn("invalid input", AgentCancellation::new())
-            .await,
-        Err(AgentLoopError::MultipleToolCalls { count: 2 })
-    );
+    let batch = agent
+        .run_turn("batch input", AgentCancellation::new())
+        .await
+        .unwrap();
+    assert!(matches!(
+        batch,
+        AgentTurnOutcome::Completed { executions, .. } if executions.len() == 2
+    ));
+    assert_eq!(agent.history().ensure_all_tool_calls_paired(), Ok(()));
     agent
         .run_turn("recovery input", AgentCancellation::new())
         .await
         .unwrap();
 
     let requests = provider.requests();
-    assert_eq!(requests.len(), 3);
+    assert_eq!(requests.len(), 4);
     assert!(matches!(
         requests[2].delivery(),
         cyber_agent::ports::model::ModelRequestDelivery::Incremental { continuation }
-            if continuation.as_str() == "resp-committed"
+            if continuation.as_str() == "resp-batch"
+    ));
+    assert!(matches!(
+        requests[2].input().content_items.as_slice(),
+        [
+            ContentItem::ToolResult { result: first },
+            ContentItem::ToolResult { result: second },
+        ] if first.call_id.as_str() == "call-one" && second.call_id.as_str() == "call-two"
+    ));
+    assert!(matches!(
+        requests[3].delivery(),
+        cyber_agent::ports::model::ModelRequestDelivery::Incremental { continuation }
+            if continuation.as_str() == "resp-after-batch"
     ));
     assert_eq!(
-        requests[2].input().content_items,
-        vec![
-            ContentItem::user_text("invalid input"),
-            ContentItem::user_text("recovery input"),
-        ]
+        requests[3].input().content_items,
+        vec![ContentItem::user_text("recovery input")]
     );
 }
 
@@ -1075,28 +1313,48 @@ async fn cancellation_during_tool_execution_records_a_cancelled_pair() {
 }
 
 #[tokio::test]
-async fn multiple_tool_calls_are_rejected_without_committing_partial_model_output() {
-    let provider = ScriptedProvider::new([vec![
-        ModelEvent::TextDelta {
-            text: "I will inspect two paths.".to_owned(),
-        },
-        ModelEvent::ToolCall {
-            call: tool_call("call-1", "read_file", json!({"path": "Cargo.toml"})),
-        },
-        ModelEvent::ToolCall {
-            call: tool_call("call-2", "read_file", json!({"path": "src/lib.rs"})),
-        },
-    ]]);
+async fn multiple_tool_calls_are_staged_and_paired_in_model_order() {
+    let provider = ScriptedProvider::new([
+        vec![
+            ModelEvent::TextDelta {
+                text: "I will inspect two paths.".to_owned(),
+            },
+            ModelEvent::ToolCall {
+                call: tool_call("call-1", "read_file", json!({"path": "Cargo.toml"})),
+            },
+            ModelEvent::ToolCall {
+                call: tool_call("call-2", "read_file", json!({"path": "src/lib.rs"})),
+            },
+        ],
+        vec![ModelEvent::TextDelta {
+            text: "Both paths were inspected.".to_owned(),
+        }],
+    ]);
     let tools = ToolRegistry::for_project(env!("CARGO_MANIFEST_DIR"));
     let mut agent = AgentLoop::new(&provider, &tools, "fixture");
 
-    assert_eq!(
-        agent.run_turn("inspect", AgentCancellation::new()).await,
-        Err(AgentLoopError::MultipleToolCalls { count: 2 })
-    );
-    assert_eq!(
+    let outcome = agent
+        .run_turn("inspect", AgentCancellation::new())
+        .await
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        AgentTurnOutcome::Completed { executions, .. } if executions.len() == 2
+    ));
+    assert!(matches!(
         agent.history().items(),
-        &[ContentItem::user_text("inspect")]
-    );
+        [
+            ContentItem::Text { .. },
+            ContentItem::Text { .. },
+            ContentItem::ToolCall { call: first },
+            ContentItem::ToolCall { call: second },
+            ContentItem::ToolResult { result: first_result },
+            ContentItem::ToolResult { result: second_result },
+            ContentItem::Text { .. },
+        ] if first.call_id.as_str() == "call-1"
+            && second.call_id.as_str() == "call-2"
+            && first_result.call_id == first.call_id
+            && second_result.call_id == second.call_id
+    ));
     assert_eq!(agent.history().ensure_all_tool_calls_paired(), Ok(()));
 }

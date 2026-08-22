@@ -1,6 +1,6 @@
 //! One cancellation authority shared by model Streaming and Tool execution.
 
-use std::future::{Future, poll_fn};
+use std::future::poll_fn;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Poll, Waker};
@@ -43,6 +43,24 @@ impl AgentCancellation {
         self.state.cancelled.load(Ordering::Acquire)
     }
 
+    /// Resolves once cancellation is requested. A batch scheduler uses this as
+    /// its one outer cancellation wait while child Tool futures remain owned by
+    /// the scheduler and are dropped together on cancellation.
+    pub(crate) async fn wait_for_cancellation(&self) {
+        poll_fn(|context| {
+            if self.is_cancelled() {
+                return Poll::Ready(());
+            }
+            self.register(context.waker());
+            if self.is_cancelled() {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await
+    }
+
     pub(crate) fn register(&self, waker: &Waker) {
         let mut waiting_waker = self
             .state
@@ -57,28 +75,4 @@ impl Default for AgentCancellation {
     fn default() -> Self {
         Self::new()
     }
-}
-
-pub(crate) async fn run_until_cancelled<Output>(
-    future: impl Future<Output = Output>,
-    cancellation: &AgentCancellation,
-) -> Option<Output> {
-    let mut future = Box::pin(future);
-    poll_fn(|context| {
-        if cancellation.is_cancelled() {
-            return Poll::Ready(None);
-        }
-        match future.as_mut().poll(context) {
-            Poll::Ready(output) => Poll::Ready(Some(output)),
-            Poll::Pending => {
-                cancellation.register(context.waker());
-                if cancellation.is_cancelled() {
-                    Poll::Ready(None)
-                } else {
-                    Poll::Pending
-                }
-            }
-        }
-    })
-    .await
 }
