@@ -7,12 +7,12 @@
 - Implementation: `STARTED`
 - Current milestone: `M2`
 - Current slice: `M2-S1`
-- Slice state: `READY_AUTHORIZED`; implementation starts only after this M1c-S3 status seal is remotely merged
-- Lean governance: `ACTIVE`; M1c-S3 is complete and M2-S1 remains scope-locked to project isolation and the minimum Event Store
-- Local Git initialized: `yes`; M1c-S3 is being sealed on `agent/m1c-s3-merge-status`
-- Remote repository: `F0und-icu/cyber-agent` private; PR `#14` was Squash Merged
+- Slice state: `IN_PROGRESS`
+- Lean governance: `ACTIVE`; M2-S1 is scope-locked to project isolation and the minimum Event Store
+- Local Git initialized: `yes`; M2-S1 is being developed on `agent/m2-s1-project-event-store`
+- Remote repository: `F0und-icu/cyber-agent` private; M1c-S3 status PR `#15` was Squash Merged
 - Documentation baseline commit: `55ff3be`
-- Current code base: `main`/`origin/main` M1c-S3 merge commit `4fb42da`
+- Current code base: `main`/`origin/main` M1c-S3 status-seal commit `6955437` before this Slice branch
 - Upstream Codex baseline: `3aae5d885bac39c1262491aa3fd100dfd8b3919f`
 
 ## Last Completed Slice
@@ -62,13 +62,15 @@
 - M1c-S2 ordinary background Jobs, lifecycle Resource leases, stable launch/completion linkage and byte-offset output polling.
 - M1c-S3 current-platform PTY Sessions, shared live-process leases, stable terminal output and interactive controls.
 
-## Next Authorized Slice
+## In Progress
 
 - Slice: `M2-S1`
-- Planned delivery branch: `agent/m2-s1-project-event-store`
-- Base commit: the M1c-S3 status-seal merge commit, to be recorded at Slice start
+- Delivery branch: `agent/m2-s1-project-event-store`
+- Base commit: `6955437`
 - Scope lock: add `.cyber-agent/` project initialization, Session/Research JSONL Writers, one project advisory writer lock, corrupt-tail recovery Artifact, chained Upcaster Registry and export/migrate skeleton.
 - Required behavior: two project roots remain isolated; a second Writer is rejected; a corrupt final record is preserved and recoverable while non-tail corruption fails read-only; historical fixtures traverse every Upcaster version.
+- Intended production touch points: pure chained Upcaster registry in Domain, one Project/Event filesystem Adapter, the existing EventStore Port, and the minimum `init` CLI composition needed to create a real isolated project.
+- Intended permanent tests: project discovery/isolation, second-writer rejection, strict stream ordering, tail artifact-before-truncate recovery, non-tail no-mutation failure, historical fixture chaining and non-destructive export/migrate metadata.
 - Forbidden continuation: M2-S2 Research records and TargetSnapshot/Capsule, Blob/Lineage, Memory/Snapshot/Cache, Context Planner, Vision, Provider/Profile/CLI composition, general Workflow/Hook/Router/Plugin abstractions, Live Provider requests and Codex credential/login access.
 
 ## Current Authorization
@@ -76,12 +78,12 @@
 The current user instruction explicitly authorizes continued implementation with delegated Terra/Luna development and normal version-controlled remote delivery until the first prototype reaches the separately authorized Live Provider validation boundary.
 
 - Run mode: `IMPLEMENT_TO_LIVE_BOUNDARY`
-- Slice ID: `M2-S1`; state `READY_AUTHORIZED` pending the separate status-seal merge
+- Slice ID: `M2-S1`; state `IN_PROGRESS`
 - Git mode: `BRANCH_PR_REVIEW_MERGE`; commit, push, PR, CI review and merge are authorized when the Slice Gate passes
 - Delegation mode: `AUTHORIZED`; delegated implementation Agents must independently read the repository authority chain and stay inside the current Slice
 - Live test mode: `OFF`; no real Provider credential or public model request is authorized
 - Forbidden continuation inside M2-S1: M2-S2 Research/Target/Capsule, Blob/Lineage, Memory/Snapshot/Cache, Context Planner, Vision, Provider/Profile/CLI composition, Web, general Router/Hook/Plugin work, Codex source modification or Codex credentials/login access
-- Stop condition: remotely merge this M1c-S3 status seal before starting M2-S1; do not run a Live Test
+- Stop condition: complete and remotely seal M2-S1 before starting M2-S2; do not run a Live Test
 
 ## Slice Lean Review
 
@@ -219,6 +221,35 @@ The current user instruction explicitly authorizes continued implementation with
 - Deferred: PTY persistence/recovery, terminal retention/eviction policy, process-group/descendant management, broad Windows/Linux compatibility claims, terminal emulation/history/search, CLI profiles, Artifacts/Events, Vision, Provider changes and Live validation. Current Unix PTY EOF treats the native master `EIO` close condition as terminal EOF; any broader portability work needs a measured future Slice.
 - Remaining governance debt: terminal Job and PTY entries remain process-local without retention/eviction because no persistent lifecycle fact exists yet; a PTY reader that survives the bounded post-reap drain is sealed, explicitly marked incomplete and detached rather than blocking terminal publication. Rare standard-thread creation failure and already-running `spawn_blocking` control cancellation remain P2 lifecycle debt; neither changes the stable completion or lease rules on the verified path.
 
+### M2-S1 Draft Lean Review
+
+#### Semantic Owners
+
+- `src/domain/project.rs` owns the pure typed `ProjectId`; it is deliberately separate from Event schema semantics. `src/domain/events.rs` owns the pure `EventUpcasterRegistry`, requiring exact chained `vN -> vN+1` links and producing explicit missing-link, invalid-step and invalid-output failures without filesystem, clock or project-state access.
+- `src/adapters/project_event_store/durable_file.rs` is the private, single owner of durable no-overwrite file publication and Unix directory syncing. It writes and syncs a same-directory `create_new` temporary file, publishes only through a hard link that cannot replace a final name, then cleans the temporary name best-effort and syncs the parent. `project.rs` consumes it for the final `project.toml` sentinel and then syncs the project root; `migration.rs` consumes it for both target and last-written manifest; JSONL recovery consumes it for the content-addressed raw-tail Artifact before replacing the source stream.
+- `src/adapters/project_event_store/project.rs` owns canonical-root project initialization/discovery, safe Session physical-path segments, the stable `research` versus `session:<safe-id>` persisted namespace mapping, and the Rust `1.93` standard-library advisory `File::try_lock` boundary. An existing `.cyber-agent/` without `project.toml` is reported as incomplete without modification; initialization prepares required directories and a new empty Research stream before the durable final sentinel. Discovery recomputes `ProjectId` from the canonical root and rejects a configured identity mismatch. Only `WouldBlock` maps to `WriterLocked`; every other lock failure remains a typed Adapter I/O error.
+- `src/adapters/project_event_store/jsonl/scan.rs` is the sole JSONL byte-boundary, strict stream-ID/next-sequence and read-time Upcast owner. Only a lexical/parse failure of the final terminated record, or an unterminated final record, can reach recovery; parsed schema, Upcaster, stream and sequence failures—including in the final record—are exact-offset read-only corruption. Unknown `event_type` is intentionally not classified here and remains deferred to the M2-S2 reducer. `jsonl/recovery.rs` is the sole raw-tail Artifact and atomic replacement owner; it reuses the durable owner’s directory sync after persisting the Artifact and after same-directory stream replacement.
+- `src/adapters/project_event_store/migration.rs` owns the explicit non-destructive export/migrate skeleton under the `ProjectWriter` lock: it scans one fixed source-byte snapshot, pre-encodes a new target plus BLAKE3 source hash/target schema/tool-version manifest, and writes the manifest last as the completion sentinel. An existing pair is complete only when the manifest parses with a current schema, a formatted BLAKE3 digest and non-empty tool version and the target JSONL scans completely for the requested stream; otherwise it is `IncompleteMigration`. It never compares a retained historical hash against the live source or migrates source bytes in place.
+
+#### Reuse, API and Dependencies
+
+- The filesystem Adapter implements the existing generic `EventSource`/`EventSink`/`EventStore` Port for `serde_json::Value`; no second Event Port, reducer, Research record type, Blob Store, cache or generic manager was added. `Project`, `ProjectWriter`, `JsonlEventStore`, `ProjectEventStream`, explicit `RecoveryMetadata` and the narrow empty-tool-version Adapter error are the minimum runtime-facing contracts consumed by the `init` composition root and future Event callers. The durable-file owner is adapter-private rather than a generic transaction or utility surface.
+- Added only direct dependency `toml 0.8.23` (with its locked parser closure). The standard library has no TOML parser; using this narrow Serde-compatible parser avoids a fragile hand-written parser for escaped canonical paths and project configuration validation. Existing Serde JSON, BLAKE3 and `thiserror` own their prior responsibilities.
+- Codex classification is `REIMPLEMENT`: no Codex source, crate or Port was used. `codex/`, frozen architecture files and accepted ADRs remain unchanged.
+
+#### Test Layout, Removal and Deferred Work
+
+- Permanent external regressions are in `tests/`: real CLI initialization and parseable final TOML without durable temporary files, canonical-root Project-ID verification, upward discovery/two-project isolation, repeat-init and incomplete-init non-mutation, same- and cross-process second Writer rejection, Session(`research`) namespace isolation, Port reuse and strict sequence from one, durable lexical-tail Artifact/atomic-recovery ordering plus collision no-mutation, semantic-final-tail read-only exact-offset diagnostics, invalid-first-sequence no-mutation, source-preserving manifest-sentinel export, complete-pair no-overwrite, malformed-manifest and truncated/semantic-target `IncompleteMigration`, and the fixed historical v1 fixture traversing a pure v1-to-v2-to-v3 test registry with malformed-registry controls. `src/` has no inline test modules.
+- The original mixed Adapter draft was split by filesystem/layout, durable no-overwrite publication, JSONL writing, byte scanning, recovery and migration change reasons; no `manager`, Hook, router, plugin or future configuration surface remains. The project/layout module is now 297 lines, below the 300-line review signal after the precisely shared durability rules moved to the 110-line private durable-file owner; the shared Adapter error boundary and export-path work remain with their real owners.
+- Deferred exactly as scoped: M2-S2 Research/Target/Capsule records and reducers, including unknown `event_type` validation, Blob/Lineage beyond the required recovery raw-byte Artifact, Memory/Snapshot/Cache, Context, Vision, Provider/Profile/Web composition and all Live Provider work. A failed pre-sentinel init can leave only uncommitted preparation directories or an empty new Research file, never a readable `project.toml`; a failed recovery can retain its raw-tail Artifact while leaving the source unchanged; export target and manifest deliberately remain a non-transactional two-file pair, with a target-only or invalid pair diagnosed as `IncompleteMigration` and no automatic repair. Neither condition is promoted into a new recovery or filesystem abstraction in this Slice.
+- Remaining governance debt (P2): the JSONL scanner requires the first persisted sequence to be `1`, while the generic Domain reducer permits any first strictly-increasing sequence; an `append_event` `sync_data` failure can leave an uncertain external append while its in-memory Writer is not poisoned; non-Unix directory syncing remains a documented no-op; and a committed durable file’s temporary-name cleanup is best effort and can leave a harmless temporary file. Each requires a dedicated persistence/portability Slice rather than broadening M2-S1.
+
+#### Draft Gate
+
+- Local Gate: PASS on Rust `1.93.1`; `cargo fmt --all -- --check`, `cargo clippy --locked --all-targets --all-features -- -D warnings`, `cargo test --locked --all-targets --all-features` (114 passed, 0 failed, 1 ignored existing synthetic Live Smoke) and `cargo build --locked` all exited `0`.
+- Lean scans: PASS; `src/` inline-test scan, forbidden Codex dependency scan, `git diff --check`, and `codex/` unchanged check all exited `0`. No credential, Live Provider request, commit, push or PR was performed.
+- Slice state intentionally remains `IN_PROGRESS` for local review and authorized handoff; this Draft does not authorize M2-S2.
+
 ## Blockers
 
 - None for the completed M1c-S3 local and remote delivery Gates or the authorized M2-S1 start after this status seal.
@@ -226,6 +257,8 @@ The current user instruction explicitly authorizes continued implementation with
 - Live Provider compatibility remains unverified by design; missing live credentials do not block offline development and no Codex credential is an allowed substitute.
 
 ## Last Verification
+
+- M2-S1 Draft local Gate: PASS on Rust `1.93.1`; formatting, denied-warning Clippy, 114 offline/local tests plus one ignored existing synthetic Live Smoke, locked build, inline-test scan, forbidden Codex dependency scan, `git diff --check` and `codex/`-unchanged check all passed. The current branch has no commit, push, PR or Live Test from this Slice; M2-S1 remains `IN_PROGRESS` pending review.
 
 - M1c-S3 local Gate: PASS on Rust `1.93.1`; formatting, Clippy with denied warnings, 88 offline/local-loopback tests plus one ignored synthetic Live Smoke, locked build, inline-test scan, forbidden Codex dependency scan, dependency-tree review, `git diff --check` and `codex/` unchanged check passed. The seven PTY regressions passed 100 consecutive runs.
 - M1c-S3 review: independent Luna xhigh first returned `REQUEST_CHANGES` for post-terminal mutable output, post-spawn lease admission, synchronous PTY setup on Tokio and partial-setup child cleanup. The final diff adds a shared terminal seal, pre-spawn RAII lease, blocking setup isolation and abandoned-child kill-plus-wait; Luna's second review returned `APPROVE` with no unresolved P0/P1.

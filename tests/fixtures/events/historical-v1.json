@@ -1,0 +1,1 @@
+{"schema_family":"fixture.event","schema_version":1,"event_id":"historical-event","stream_id":"fixture-stream","sequence":1,"occurred_at":"2026-08-22T00:00:00Z","event_type":"fixture.created","payload":{"historical":true}}

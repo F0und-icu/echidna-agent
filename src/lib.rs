@@ -5,6 +5,8 @@ use clap::{CommandFactory, Parser, Subcommand};
 use serde::Serialize;
 use thiserror::Error;
 
+use crate::adapters::project_event_store::{Project, ProjectEventStoreError};
+
 pub mod adapters;
 pub mod app;
 pub mod domain;
@@ -37,6 +39,10 @@ pub enum CliError {
     Help(#[from] io::Error),
     #[error("failed to encode diagnostic output: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("failed to resolve the current working directory: {0}")]
+    WorkingDirectory(#[source] io::Error),
+    #[error(transparent)]
+    Project(#[from] ProjectEventStoreError),
 }
 
 #[derive(Debug, Serialize)]
@@ -58,6 +64,14 @@ struct ShellResponse {
     command: &'static str,
     status: &'static str,
     message: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct InitResponse {
+    command: &'static str,
+    status: &'static str,
+    project_id: String,
+    project_root: String,
 }
 
 fn doctor_report() -> DoctorReport {
@@ -92,6 +106,17 @@ fn print_shell_response(command: &'static str, message: &'static str) -> Result<
     })
 }
 
+fn initialize_current_project() -> Result<(), CliError> {
+    let root = std::env::current_dir().map_err(CliError::WorkingDirectory)?;
+    let project = Project::initialize(&root)?;
+    print_json(&InitResponse {
+        command: "init",
+        status: "initialized",
+        project_id: project.project_id().as_str().to_owned(),
+        project_root: project.root().display().to_string(),
+    })
+}
+
 pub fn run<I, T>(args: I) -> Result<(), CliError>
 where
     I: IntoIterator<Item = T>,
@@ -100,10 +125,7 @@ where
     let cli = Cli::parse_from(args);
 
     match cli.command {
-        Some(CliCommand::Init) => print_shell_response(
-            "init",
-            "project initialization is reserved for a later implementation slice",
-        ),
+        Some(CliCommand::Init) => initialize_current_project(),
         Some(CliCommand::Chat) => print_shell_response(
             "chat",
             "interactive chat is reserved for a later implementation slice",

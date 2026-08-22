@@ -9,6 +9,7 @@ pub mod context;
 pub mod events;
 pub mod history;
 pub mod model;
+pub mod project;
 pub mod tools;
 
 pub use artifacts::ArtifactId;

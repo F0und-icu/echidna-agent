@@ -71,6 +71,33 @@ impl fmt::Display for SchemaVersion {
     }
 }
 
+/// One concrete Event schema identity.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct EventSchema {
+    pub family: SchemaFamily,
+    pub version: SchemaVersion,
+}
+
+impl EventSchema {
+    /// Constructs a schema identity from explicit family and version values.
+    pub fn new(family: SchemaFamily, version: SchemaVersion) -> Self {
+        Self { family, version }
+    }
+
+    /// Returns the current published Event schema identity.
+    pub fn current() -> Self {
+        Self::new(
+            SchemaFamily::new(CURRENT_SCHEMA_FAMILY),
+            SchemaVersion::new(CURRENT_SCHEMA_VERSION),
+        )
+    }
+
+    /// Extracts the schema identity from an Event envelope.
+    pub fn from_envelope<T>(envelope: &EventEnvelope<T>) -> Self {
+        Self::new(envelope.schema_family.clone(), envelope.schema_version)
+    }
+}
+
 /// A sequence number that is strictly increasing within one stream.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
@@ -173,6 +200,64 @@ pub enum EventError {
         previous: EventSequence,
         received: EventSequence,
     },
+    #[error(
+        "Event sequence for stream `{stream_id}` must be the next value: expected `{expected}`, received `{received}`"
+    )]
+    UnexpectedSequence {
+        stream_id: StreamId,
+        expected: EventSequence,
+        received: EventSequence,
+    },
+    #[error("Event sequence for stream `{stream_id}` cannot advance beyond `{last}`")]
+    SequenceOverflow {
+        stream_id: StreamId,
+        last: EventSequence,
+    },
+    #[error(
+        "missing Event Upcaster for schema family `{schema_family}` from version `{from_version}` toward `{target_version}`"
+    )]
+    MissingUpcaster {
+        schema_family: SchemaFamily,
+        from_version: SchemaVersion,
+        target_version: SchemaVersion,
+    },
+    #[error(
+        "Event Upcaster must advance exactly one version, received `{from_version}` to `{to_version}`"
+    )]
+    InvalidUpcasterStep {
+        from_version: SchemaVersion,
+        to_version: SchemaVersion,
+    },
+    #[error(
+        "an Event Upcaster is already registered for schema family `{schema_family}` version `{from_version}`"
+    )]
+    DuplicateUpcaster {
+        schema_family: SchemaFamily,
+        from_version: SchemaVersion,
+    },
+    #[error(
+        "Event Upcaster output schema does not match its declared target: expected `{expected_schema_family}` version `{expected_schema_version}`, received `{actual_schema_family}` version `{actual_schema_version}`"
+    )]
+    InvalidUpcasterOutput {
+        expected_schema_family: SchemaFamily,
+        expected_schema_version: SchemaVersion,
+        actual_schema_family: SchemaFamily,
+        actual_schema_version: SchemaVersion,
+    },
+    #[error("Event Upcaster changed immutable Event identity field `{field:?}`")]
+    UpcasterIdentityChanged { field: EventIdentityField },
+}
+
+/// One immutable Event-envelope field that an Upcaster must preserve.
+///
+/// `event_type` is deliberately absent: changing it is a valid schema
+/// migration, while the event identity and ordering coordinates are not.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EventIdentityField {
+    EventId,
+    StreamId,
+    Sequence,
+    OccurredAt,
 }
 
 /// Converts one historical Event schema to the current schema.
@@ -183,22 +268,167 @@ pub trait EventUpcaster<T> {
     fn upcast(&self, envelope: EventEnvelope<T>) -> Result<EventEnvelope<T>, EventError>;
 }
 
+/// A pure, one-step Event schema transformation used by a chained registry.
+///
+/// Every registered transform must advance exactly from version `N` to
+/// version `N + 1`. It has no project state, clock, or I/O access.
+pub trait VersionedEventUpcaster<T> {
+    /// The schema family accepted and emitted by this transformation.
+    fn schema_family(&self) -> &SchemaFamily;
+
+    /// The version accepted by this transformation.
+    fn source_version(&self) -> SchemaVersion;
+
+    /// The version emitted by this transformation.
+    fn to_version(&self) -> SchemaVersion;
+
+    /// Transforms one envelope without mutating its persisted source bytes.
+    fn upcast(&self, envelope: EventEnvelope<T>) -> Result<EventEnvelope<T>, EventError>;
+}
+
+/// The sole pure owner of ordered, version-by-version Event Upcasting.
+///
+/// The registry never rewrites JSONL. File adapters use it only while reading
+/// raw records into the current in-memory representation.
+pub struct EventUpcasterRegistry<T> {
+    current_schema: EventSchema,
+    upcasters: BTreeMap<SchemaVersion, Box<dyn VersionedEventUpcaster<T>>>,
+}
+
+impl<T> EventUpcasterRegistry<T> {
+    /// Creates an empty registry for one target schema.
+    pub fn new(current_schema: EventSchema) -> Self {
+        Self {
+            current_schema,
+            upcasters: BTreeMap::new(),
+        }
+    }
+
+    /// Returns the in-memory schema produced by this registry.
+    pub fn current_schema(&self) -> &EventSchema {
+        &self.current_schema
+    }
+
+    /// Registers one exact `vN -> vN+1` transform.
+    pub fn register<U>(&mut self, upcaster: U) -> Result<(), EventError>
+    where
+        U: VersionedEventUpcaster<T> + 'static,
+    {
+        let schema_family = upcaster.schema_family().clone();
+        let from_version = upcaster.source_version();
+        let to_version = upcaster.to_version();
+
+        if schema_family != self.current_schema.family {
+            return Err(EventError::UnsupportedSchema {
+                schema_family,
+                schema_version: from_version,
+            });
+        }
+
+        if from_version
+            .get()
+            .checked_add(1)
+            .is_none_or(|expected| to_version.get() != expected)
+            || to_version > self.current_schema.version
+        {
+            return Err(EventError::InvalidUpcasterStep {
+                from_version,
+                to_version,
+            });
+        }
+
+        if self.upcasters.contains_key(&from_version) {
+            return Err(EventError::DuplicateUpcaster {
+                schema_family,
+                from_version,
+            });
+        }
+
+        self.upcasters.insert(from_version, Box::new(upcaster));
+        Ok(())
+    }
+
+    /// Converts one raw historical envelope through every required link.
+    pub fn upcast(&self, mut envelope: EventEnvelope<T>) -> Result<EventEnvelope<T>, EventError> {
+        let input_schema = EventSchema::from_envelope(&envelope);
+        if input_schema.family != self.current_schema.family
+            || input_schema.version > self.current_schema.version
+        {
+            return Err(EventError::UnsupportedSchema {
+                schema_family: input_schema.family,
+                schema_version: input_schema.version,
+            });
+        }
+
+        while envelope.schema_version != self.current_schema.version {
+            let from_version = envelope.schema_version;
+            let upcaster =
+                self.upcasters
+                    .get(&from_version)
+                    .ok_or_else(|| EventError::MissingUpcaster {
+                        schema_family: self.current_schema.family.clone(),
+                        from_version,
+                        target_version: self.current_schema.version,
+                    })?;
+            let expected_version = upcaster.to_version();
+            let expected_family = upcaster.schema_family().clone();
+            let event_id = envelope.event_id.clone();
+            let stream_id = envelope.stream_id.clone();
+            let sequence = envelope.sequence;
+            let occurred_at = envelope.occurred_at.clone();
+            let next = upcaster.upcast(envelope)?;
+
+            if next.schema_family != expected_family || next.schema_version != expected_version {
+                return Err(EventError::InvalidUpcasterOutput {
+                    expected_schema_family: expected_family,
+                    expected_schema_version: expected_version,
+                    actual_schema_family: next.schema_family,
+                    actual_schema_version: next.schema_version,
+                });
+            }
+
+            if next.event_id != event_id {
+                return Err(EventError::UpcasterIdentityChanged {
+                    field: EventIdentityField::EventId,
+                });
+            }
+            if next.stream_id != stream_id {
+                return Err(EventError::UpcasterIdentityChanged {
+                    field: EventIdentityField::StreamId,
+                });
+            }
+            if next.sequence != sequence {
+                return Err(EventError::UpcasterIdentityChanged {
+                    field: EventIdentityField::Sequence,
+                });
+            }
+            if next.occurred_at != occurred_at {
+                return Err(EventError::UpcasterIdentityChanged {
+                    field: EventIdentityField::OccurredAt,
+                });
+            }
+
+            envelope = next;
+        }
+
+        Ok(envelope)
+    }
+}
+
+impl<T> EventUpcasterRegistry<T> {
+    /// Creates the identity-only registry for the current published schema.
+    pub fn current() -> Self {
+        Self::new(EventSchema::current())
+    }
+}
+
 /// The current-schema Upcaster. Its supported path is an identity transform.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CurrentEventUpcaster;
 
 impl<T> EventUpcaster<T> for CurrentEventUpcaster {
     fn upcast(&self, envelope: EventEnvelope<T>) -> Result<EventEnvelope<T>, EventError> {
-        if envelope.schema_family.as_str() != CURRENT_SCHEMA_FAMILY
-            || envelope.schema_version.get() != CURRENT_SCHEMA_VERSION
-        {
-            return Err(EventError::UnsupportedSchema {
-                schema_family: envelope.schema_family,
-                schema_version: envelope.schema_version,
-            });
-        }
-
-        Ok(envelope)
+        EventUpcasterRegistry::current().upcast(envelope)
     }
 }
 

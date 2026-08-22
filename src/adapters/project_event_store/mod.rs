@@ -1,0 +1,17 @@
+//! Filesystem-backed project discovery and JSONL Event Store Adapter.
+//!
+//! The public facade is deliberately small. `project` owns layout and the OS
+//! writer lock, `durable_file` owns private no-overwrite publication, `jsonl`
+//! owns every byte-level stream/recovery rule, and `migration` owns the
+//! explicit non-destructive export skeleton.
+
+mod durable_file;
+mod error;
+mod jsonl;
+mod migration;
+mod project;
+
+pub use error::ProjectEventStoreError;
+pub use jsonl::{JsonlEventStore, RecoveryMetadata};
+pub use migration::ExportMigrationManifest;
+pub use project::{Project, ProjectEventStream, ProjectWriter};
