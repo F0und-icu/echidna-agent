@@ -37,6 +37,19 @@ pub(crate) fn read_existing_research_events(
     scan_stream(&path, &stream_id, &registry)?.into_complete(&path)
 }
 
+/// Reads an already-created Session stream without acquiring a Writer or
+/// creating the stream. Cache validation treats every read failure as a miss.
+pub(crate) fn read_existing_session_events(
+    project: &Project,
+    session_id: &StreamId,
+) -> Result<Vec<EventEnvelope<Value>>, ProjectEventStoreError> {
+    let stream = ProjectEventStream::Session(session_id.clone());
+    let path = project.session_stream_path_existing(session_id)?;
+    let stream_id = stream.stream_id();
+    let registry = EventUpcasterRegistry::current();
+    scan_stream(&path, &stream_id, &registry)?.into_complete(&path)
+}
+
 /// Explicit caller-provided facts for a possible `StreamRecovered` Event.
 ///
 /// Recovering a tail is only permitted when these identity and time values are

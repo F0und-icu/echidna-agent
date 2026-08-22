@@ -12,11 +12,11 @@ mod migration;
 mod project;
 
 pub(crate) use durable_file::{
-    commit_durable_temporary_file, create_durable_temporary_file,
+    commit_durable_temporary_file, commit_new_durable_file, create_durable_temporary_file,
     remove_durable_temporary_file_best_effort, replace_durable_file, sync_directory,
 };
 pub use error::ProjectEventStoreError;
-pub(crate) use jsonl::read_existing_research_events;
 pub use jsonl::{JsonlEventStore, RecoveryMetadata};
+pub(crate) use jsonl::{read_existing_research_events, read_existing_session_events};
 pub use migration::ExportMigrationManifest;
 pub use project::{Project, ProjectEventStream, ProjectWriter};

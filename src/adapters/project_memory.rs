@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+use crate::adapters::file_diff::replacement_diff as audit_replacement_diff;
 use crate::adapters::project_event_store::{Project, replace_durable_file, sync_directory};
 use crate::domain::memory::MemoryPath;
 
@@ -226,22 +227,7 @@ pub(crate) fn content_hash(bytes: &[u8]) -> String {
 /// It intentionally favours complete, self-contained evidence over a complex
 /// patch language that would need a separate parser in this early slice.
 pub(crate) fn replacement_diff(old: Option<&str>, new: Option<&str>) -> String {
-    let mut output = String::from("--- previous\n+++ current\n");
-    for line in old.unwrap_or_default().split_inclusive('\n') {
-        output.push('-');
-        output.push_str(line);
-        if !line.ends_with('\n') {
-            output.push('\n');
-        }
-    }
-    for line in new.unwrap_or_default().split_inclusive('\n') {
-        output.push('+');
-        output.push_str(line);
-        if !line.ends_with('\n') {
-            output.push('\n');
-        }
-    }
-    output
+    audit_replacement_diff(old, new, "previous", "current")
 }
 
 fn ensure_directory(path: &Path) -> Result<(), LocalProjectMemoryError> {

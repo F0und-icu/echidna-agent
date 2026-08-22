@@ -2,6 +2,7 @@
 
 mod schema;
 
+use std::fs;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -16,7 +17,9 @@ use crate::domain::research::{
     HypothesisDraft, HypothesisUpdate, NextActionDraft, NextActionUpdate, ResearchError,
     ResearchEvent, ResearchReducer, ResearchState, TargetSnapshotDraft, TargetSnapshotRecord,
 };
-use crate::domain::tools::{ResourceKey, ToolExecutionOutcome, ToolExecutionPlan};
+use crate::domain::tools::{
+    ResourceKey, ToolCacheValidation, ToolExecutionOutcome, ToolExecutionPlan,
+};
 use crate::ports::tool::ToolExecutorError;
 use crate::ports::{EventSink, EventSource};
 
@@ -117,17 +120,40 @@ pub(super) async fn execute_get(
             Err(error) => return invalid_plan(plan, error),
         };
     let _ = arguments;
+    let expected_resource_fingerprint = plan.cache_resource_fingerprint.clone();
+    let observed_before_fingerprint = expected_resource_fingerprint
+        .as_ref()
+        .and_then(|_| cache_resource_fingerprint(project_root, &plan.call.arguments));
     match load_state(project_root) {
         Ok(state) => {
             let stream_event_count = state.applied_event_count();
-            ToolExecutionOutcome::succeeded(
+            let observed_after_fingerprint = expected_resource_fingerprint
+                .as_ref()
+                .and_then(|_| cache_resource_fingerprint(project_root, &plan.call.arguments));
+            let mut outcome = ToolExecutionOutcome::succeeded(
                 plan,
                 json!({
                     "status": "ok",
                     "state": state,
                     "stream_event_count": stream_event_count,
                 }),
-            )
+            );
+            if let (
+                Some(cache_resource_fingerprint),
+                Some(observed_before_fingerprint),
+                Some(observed_after_fingerprint),
+            ) = (
+                expected_resource_fingerprint,
+                observed_before_fingerprint,
+                observed_after_fingerprint,
+            ) {
+                outcome.record_cache_validation(ToolCacheValidation {
+                    cache_resource_fingerprint,
+                    observed_before_fingerprint,
+                    observed_after_fingerprint,
+                });
+            }
+            outcome
         }
         Err(error) => research_failure(plan, "research_read_failed", error),
     }
@@ -242,6 +268,18 @@ pub(super) async fn execute_update(
 
 fn research_resource(project_root: &Path) -> Vec<ResourceKey> {
     vec![ResourceKeyResolver::new(project_root).file(".cyber-agent/research.jsonl")]
+}
+
+/// The cache resource for `research_get` is the exact authoritative JSONL
+/// byte stream. A hit avoids its strict scan/upcast/reducer work, while a
+/// changed stream receives a distinct project-scoped derived key.
+pub(super) fn cache_resource_fingerprint(project_root: &Path, arguments: &Value) -> Option<String> {
+    let _: ResearchGetArgs = serde_json::from_value(arguments.clone()).ok()?;
+    let project = Project::discover(project_root).ok()?;
+    let path = project.root().join(".cyber-agent/research.jsonl");
+    fs::read(path)
+        .ok()
+        .map(|bytes| blake3::hash(&bytes).to_hex().to_string())
 }
 
 fn load_state(project_root: &Path) -> Result<ResearchState, String> {

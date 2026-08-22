@@ -213,6 +213,26 @@ impl Project {
                 .join("events.jsonl")),
         }
     }
+
+    pub(crate) fn session_stream_path_existing(
+        &self,
+        session_id: &StreamId,
+    ) -> Result<PathBuf, ProjectEventStoreError> {
+        let path = self.stream_path(&ProjectEventStream::Session(session_id.clone()))?;
+        match fs::metadata(&path) {
+            Ok(metadata) if metadata.is_file() => Ok(path),
+            Ok(_) => Err(ProjectEventStoreError::Io {
+                operation: "inspect Session Event stream",
+                path,
+                source: io::Error::new(io::ErrorKind::InvalidData, "not a regular file"),
+            }),
+            Err(source) => Err(ProjectEventStoreError::Io {
+                operation: "inspect Session Event stream",
+                path,
+                source,
+            }),
+        }
+    }
 }
 
 /// The minimum serialized project configuration, kept at the filesystem edge.

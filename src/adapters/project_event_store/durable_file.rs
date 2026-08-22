@@ -39,6 +39,15 @@ pub(crate) fn replace_durable_file(
 ) -> Result<(), ProjectEventStoreError> {
     let parent = destination_parent(destination)?;
     let (mut temporary_file, temporary_path) = create_durable_temporary_file(parent)?;
+    if let Err(source) = preserve_existing_permissions(destination, &temporary_file) {
+        drop(temporary_file);
+        remove_durable_temporary_file_best_effort(&temporary_path);
+        return Err(ProjectEventStoreError::Io {
+            operation: "preserve durable replacement permissions",
+            path: destination.to_path_buf(),
+            source,
+        });
+    }
     let persist_result = temporary_file
         .write_all(bytes)
         .and_then(|()| temporary_file.sync_all());
@@ -61,6 +70,24 @@ pub(crate) fn replace_durable_file(
         });
     }
     sync_directory(parent)
+}
+
+#[cfg(unix)]
+fn preserve_existing_permissions(destination: &Path, temporary: &File) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    match fs::metadata(destination) {
+        Ok(metadata) => {
+            temporary.set_permissions(fs::Permissions::from_mode(metadata.permissions().mode()))
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(not(unix))]
+fn preserve_existing_permissions(_destination: &Path, _temporary: &File) -> io::Result<()> {
+    Ok(())
 }
 
 fn commit_new_durable_file_with(

@@ -7,6 +7,7 @@ use serde_json::Value;
 use thiserror::Error;
 
 use super::artifacts::ArtifactId;
+use super::events::{EventId, StreamId};
 
 mod resource;
 
@@ -41,6 +42,7 @@ string_id!(ToolName);
 string_id!(ToolCallId);
 string_id!(ExecutionId);
 string_id!(IdempotencyKey);
+string_id!(ToolResultCacheKey);
 string_id!(RerunReason);
 string_id!(JobId);
 string_id!(PtySessionId);
@@ -154,6 +156,10 @@ pub struct ToolExecutionPlan {
     pub timeout_ms: u64,
     pub output_policy: ToolOutputPolicy,
     pub input_fingerprint: String,
+    /// A Tool-owned stable description of every mutable read dependency. It
+    /// is absent unless the adapter can prove a result-cache hit is safe.
+    #[serde(default)]
+    pub cache_resource_fingerprint: Option<String>,
     pub plan_fingerprint: String,
 }
 
@@ -213,10 +219,32 @@ impl ToolExecutionPlan {
             timeout_ms: spec.timeout_ms,
             output_policy: spec.output_policy,
             input_fingerprint,
+            cache_resource_fingerprint: None,
             plan_fingerprint: String::new(),
         };
         plan.plan_fingerprint = fingerprint(&PlanFingerprintInput::from(&plan))?;
         Ok(plan)
+    }
+
+    /// Binds one verified read-dependency fingerprint to a plan before it is
+    /// executed. The concrete Tool adapter owns obtaining and validating this
+    /// value; Domain only owns its cache-eligibility and identity semantics.
+    pub(crate) fn bind_cache_resource_fingerprint(
+        &mut self,
+        cache_resource_fingerprint: String,
+    ) -> Result<(), ToolContractError> {
+        self.cache_resource_fingerprint = Some(cache_resource_fingerprint);
+        self.plan_fingerprint = fingerprint(&PlanFingerprintInput::from(&*self))?;
+        Ok(())
+    }
+
+    /// A persistent Tool result is eligible only when every declared
+    /// constraint is simultaneously true. Cache policy alone is never enough.
+    pub(crate) fn result_cache_eligible(&self) -> bool {
+        self.effect == ToolEffect::ReadOnly
+            && self.determinism == ToolDeterminism::Deterministic
+            && self.cache_policy == ToolCachePolicy::ContentAddressed
+            && self.cache_resource_fingerprint.is_some()
     }
 }
 
@@ -236,6 +264,7 @@ struct PlanFingerprintInput<'a> {
     timeout_ms: u64,
     output_policy: ToolOutputPolicy,
     input_fingerprint: &'a str,
+    cache_resource_fingerprint: Option<&'a str>,
 }
 
 impl<'a> From<&'a ToolExecutionPlan> for PlanFingerprintInput<'a> {
@@ -255,6 +284,7 @@ impl<'a> From<&'a ToolExecutionPlan> for PlanFingerprintInput<'a> {
             timeout_ms: plan.timeout_ms,
             output_policy: plan.output_policy,
             input_fingerprint: &plan.input_fingerprint,
+            cache_resource_fingerprint: plan.cache_resource_fingerprint.as_deref(),
         }
     }
 }
@@ -376,6 +406,80 @@ pub struct ExecutionReceipt {
     pub environment_change: Option<String>,
     #[serde(default)]
     pub rerun_reason: Option<RerunReason>,
+    /// Present only on a persistent derived-cache hit. This remains a
+    /// reference to the original completed Receipt; it never reuses that
+    /// Receipt's execution identity.
+    #[serde(default)]
+    pub cache_source: Option<ToolCacheSource>,
+    /// Verification facts for the mutable read dependency that made a source
+    /// result safe to retain in the derived cache.
+    #[serde(default)]
+    pub cache_validation: Option<ToolCacheValidation>,
+    /// Successful local file mutations retain their exact before/after facts
+    /// on the Receipt, independently of any UI rendering.
+    #[serde(default)]
+    pub file_mutations: Vec<FileMutationAudit>,
+}
+
+/// The single versioned payload shape for authoritative Session Events that
+/// persist an execution Receipt. The Event type distinguishes an original
+/// completion from a derived-cache hit; the Receipt itself owns the optional
+/// cache-source link so the persisted fact never duplicates that semantic.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ExecutionReceiptEventPayload {
+    schema_version: u16,
+    receipt: ExecutionReceipt,
+}
+
+impl ExecutionReceiptEventPayload {
+    const CURRENT_SCHEMA_VERSION: u16 = 1;
+
+    pub(crate) fn current(receipt: ExecutionReceipt) -> Self {
+        Self {
+            schema_version: Self::CURRENT_SCHEMA_VERSION,
+            receipt,
+        }
+    }
+
+    pub(crate) fn is_current_for(&self, receipt: &ExecutionReceipt) -> bool {
+        self.schema_version == Self::CURRENT_SCHEMA_VERSION && &self.receipt == receipt
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ToolCacheSource {
+    pub cache_key: ToolResultCacheKey,
+    pub source_stream_id: StreamId,
+    pub source_receipt_event_id: EventId,
+    pub source_execution_id: ExecutionId,
+    pub source_plan_fingerprint: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ToolCacheValidation {
+    pub cache_resource_fingerprint: String,
+    pub observed_before_fingerprint: String,
+    pub observed_after_fingerprint: String,
+}
+
+impl ToolCacheValidation {
+    pub(crate) fn is_verified_for(&self, plan: &ToolExecutionPlan) -> bool {
+        plan.cache_resource_fingerprint.as_deref() == Some(self.cache_resource_fingerprint.as_str())
+            && self.observed_before_fingerprint == self.cache_resource_fingerprint
+            && self.observed_after_fingerprint == self.cache_resource_fingerprint
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FileMutationAudit {
+    pub path: String,
+    pub expected_preimage_hash: Option<String>,
+    pub before_hash: Option<String>,
+    pub before_size: Option<u64>,
+    pub after_hash: Option<String>,
+    pub after_size: Option<u64>,
+    pub actual_diff: String,
 }
 
 /// The terminal state of the process launched by a background Job.
@@ -460,6 +564,52 @@ impl ToolExecutionOutcome {
         }
     }
 
+    /// Produces a fresh audit identity for a verified persistent Cache hit.
+    /// The paired Tool Result uses the new Tool Call ID while the new Receipt
+    /// references, rather than clones, the prior execution identity.
+    pub(crate) fn cached_for(
+        plan: ToolExecutionPlan,
+        source: &Self,
+        cache_key: ToolResultCacheKey,
+        source_stream_id: StreamId,
+        source_receipt_event_id: EventId,
+    ) -> Self {
+        let receipt = ExecutionReceipt {
+            execution_id: plan.execution_id,
+            plan_fingerprint: plan.plan_fingerprint,
+            status: ToolResultStatus::Succeeded,
+            exit_reason: None,
+            output_artifact_ids: source.receipt.output_artifact_ids.clone(),
+            environment_change: None,
+            rerun_reason: plan.rerun_reason,
+            cache_source: Some(ToolCacheSource {
+                cache_key,
+                source_stream_id,
+                source_receipt_event_id,
+                source_execution_id: source.receipt.execution_id.clone(),
+                source_plan_fingerprint: source.receipt.plan_fingerprint.clone(),
+            }),
+            cache_validation: None,
+            file_mutations: Vec::new(),
+        };
+        let result = ToolResult {
+            call_id: plan.call.call_id,
+            tool_name: plan.call.name,
+            status: ToolResultStatus::Succeeded,
+            output: source.result.output.clone(),
+        };
+        Self { receipt, result }
+    }
+
+    pub(crate) fn record_cache_validation(&mut self, validation: ToolCacheValidation) {
+        self.receipt.cache_validation = Some(validation);
+    }
+
+    pub(crate) fn record_file_mutations(&mut self, file_mutations: Vec<FileMutationAudit>) {
+        self.receipt.file_mutations = file_mutations;
+        self.receipt.environment_change = Some("local_files_mutated".to_owned());
+    }
+
     fn from_plan(
         plan: ToolExecutionPlan,
         status: ToolResultStatus,
@@ -480,6 +630,9 @@ impl ToolExecutionOutcome {
             output_artifact_ids: Vec::new(),
             environment_change: None,
             rerun_reason: plan.rerun_reason,
+            cache_source: None,
+            cache_validation: None,
+            file_mutations: Vec::new(),
         };
         Self { receipt, result }
     }

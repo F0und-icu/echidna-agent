@@ -1,0 +1,595 @@
+mod support;
+
+use std::fs;
+
+use cyber_agent::adapters::project_event_store::Project;
+use cyber_agent::adapters::tools::ToolRegistry;
+use cyber_agent::domain::events::StreamId;
+use cyber_agent::domain::tools::{
+    ExecutionId, ToolCachePolicy, ToolCall, ToolCallId, ToolDeterminism, ToolEffect, ToolName,
+    ToolResultStatus,
+};
+use cyber_agent::ports::tool::ToolExecutor;
+use serde_json::{Value, json};
+use support::TemporaryDirectory;
+
+fn initialized_project(label: &str) -> (TemporaryDirectory, Project) {
+    let root = TemporaryDirectory::new(label);
+    let project = Project::initialize(root.path()).unwrap();
+    (root, project)
+}
+
+fn session_tools(project: &Project) -> ToolRegistry {
+    ToolRegistry::for_project_with_session(project.root(), StreamId::new("tool-cache")).unwrap()
+}
+
+fn call(id: &str, name: &str, arguments: Value) -> ToolCall {
+    ToolCall::new(ToolCallId::new(id), ToolName::new(name), arguments)
+}
+
+async fn execute(
+    tools: &ToolRegistry,
+    id: &str,
+    name: &str,
+    arguments: Value,
+) -> cyber_agent::domain::tools::ToolExecutionOutcome {
+    let plan = tools
+        .plan(
+            ExecutionId::new(format!("execution-{id}")),
+            call(id, name, arguments),
+        )
+        .unwrap();
+    tools.execute(plan).await
+}
+
+fn hash(bytes: &[u8]) -> String {
+    blake3::hash(bytes).to_hex().to_string()
+}
+
+#[tokio::test]
+async fn write_file_is_atomic_auditable_and_rejects_a_stale_preimage() {
+    let (_root, project) = initialized_project("file-write-audit");
+    let tools = ToolRegistry::for_project(project.root());
+    let created = execute(
+        &tools,
+        "write-created",
+        "write_file",
+        json!({"path": "notes.txt", "content": "first\n", "expected_hash": null}),
+    )
+    .await;
+    assert_eq!(created.result.status, ToolResultStatus::Succeeded);
+    assert_eq!(
+        created.receipt.environment_change.as_deref(),
+        Some("local_files_mutated")
+    );
+    assert_eq!(
+        fs::read(project.root().join("notes.txt")).unwrap(),
+        b"first\n"
+    );
+    let audit = &created.receipt.file_mutations[0];
+    assert_eq!(audit.expected_preimage_hash, None);
+    assert_eq!(audit.before_hash, None);
+    assert_eq!(audit.after_hash.as_deref(), Some(hash(b"first\n").as_str()));
+    assert_eq!(audit.after_size, Some(6));
+    assert_eq!(audit.actual_diff, "--- notes.txt\n+++ notes.txt\n+first\n");
+    assert_eq!(created.result.output["changes"][0]["after_size"], 6);
+
+    let stale = execute(
+        &tools,
+        "write-stale",
+        "write_file",
+        json!({
+            "path": "notes.txt",
+            "content": "must not appear\n",
+            "expected_hash": "0".repeat(64)
+        }),
+    )
+    .await;
+    assert_eq!(stale.result.status, ToolResultStatus::Failed);
+    assert_eq!(
+        stale.receipt.exit_reason.as_deref(),
+        Some("file_preimage_mismatch")
+    );
+    assert_eq!(
+        fs::read(project.root().join("notes.txt")).unwrap(),
+        b"first\n"
+    );
+}
+
+#[tokio::test]
+async fn write_file_audit_marks_a_nonterminated_final_line() {
+    let (_root, project) = initialized_project("file-write-nonterminated-audit");
+    let tools = ToolRegistry::for_project(project.root());
+    let created = execute(
+        &tools,
+        "write-nonterminated",
+        "write_file",
+        json!({"path": "note.txt", "content": "last line", "expected_hash": null}),
+    )
+    .await;
+    assert_eq!(created.result.status, ToolResultStatus::Succeeded);
+    assert_eq!(
+        created.receipt.file_mutations[0].actual_diff,
+        "--- note.txt\n+++ note.txt\n+last line\n\\ No newline at end of file\n"
+    );
+}
+
+#[tokio::test]
+async fn apply_patch_stages_the_complete_single_file_change_before_publishing() {
+    let (_root, project) = initialized_project("file-patch");
+    let target = project.root().join("source.txt");
+    fs::write(&target, "alpha\nbeta\n").unwrap();
+    let tools = ToolRegistry::for_project(project.root());
+    let before = hash(b"alpha\nbeta\n");
+
+    let invalid = execute(
+        &tools,
+        "patch-invalid-hunk",
+        "apply_patch",
+        json!({
+            "patch": "--- a/source.txt\n+++ b/source.txt\n@@ -1,2 +1,2 @@\n alpha\n-missing\n+gamma\n",
+            "preimages": [{"path": "source.txt", "expected_hash": before}]
+        }),
+    )
+    .await;
+    assert_eq!(invalid.result.status, ToolResultStatus::Failed);
+    assert_eq!(
+        invalid.receipt.exit_reason.as_deref(),
+        Some("patch_apply_failed")
+    );
+    assert_eq!(fs::read(&target).unwrap(), b"alpha\nbeta\n");
+
+    let applied = execute(
+        &tools,
+        "patch-success",
+        "apply_patch",
+        json!({
+            "patch": "--- a/source.txt\n+++ b/source.txt\n@@ -1,2 +1,2 @@\n alpha\n-beta\n+gamma\n",
+            "preimages": [{"path": "source.txt", "expected_hash": before}]
+        }),
+    )
+    .await;
+    assert_eq!(applied.result.status, ToolResultStatus::Succeeded);
+    assert_eq!(fs::read(&target).unwrap(), b"alpha\ngamma\n");
+    let audit = &applied.receipt.file_mutations[0];
+    assert_eq!(audit.before_hash.as_deref(), Some(before.as_str()));
+    assert_eq!(
+        audit.after_hash.as_deref(),
+        Some(hash(b"alpha\ngamma\n").as_str())
+    );
+    assert!(audit.actual_diff.contains("-beta\n"));
+    assert!(audit.actual_diff.contains("+gamma\n"));
+}
+
+#[tokio::test]
+async fn write_paths_are_confined_and_patch_refuses_multi_file_transactions() {
+    let (_root, project) = initialized_project("file-write-confinement");
+    let tools = ToolRegistry::for_project(project.root());
+    assert!(
+        tools
+            .plan(
+                ExecutionId::new("execution-parent"),
+                call(
+                    "parent",
+                    "write_file",
+                    json!({"path": "../outside.txt", "content": "no", "expected_hash": null}),
+                ),
+            )
+            .is_err()
+    );
+    assert!(tools
+        .plan(
+            ExecutionId::new("execution-multi"),
+            call(
+                "multi",
+                "apply_patch",
+                json!({
+                    "patch": "--- a/one.txt\n+++ b/one.txt\n@@ -1 +1 @@\n-old\n+new\n--- a/two.txt\n+++ b/two.txt\n@@ -1 +1 @@\n-old\n+new\n",
+                    "preimages": [{"path": "one.txt", "expected_hash": "0".repeat(64)}]
+                }),
+            ),
+        )
+        .is_err());
+    assert!(
+        tools
+            .plan(
+                ExecutionId::new("execution-missing-preimage"),
+                call(
+                    "missing-preimage",
+                    "write_file",
+                    json!({"path": "required.txt", "content": "no explicit preimage"}),
+                ),
+            )
+            .is_err()
+    );
+    assert!(
+        tools
+            .plan(
+                ExecutionId::new("execution-uppercase-preimage"),
+                call(
+                    "uppercase-preimage",
+                    "write_file",
+                    json!({
+                        "path": "required.txt",
+                        "content": "bad hash",
+                        "expected_hash": "A".repeat(64)
+                    }),
+                ),
+            )
+            .is_err()
+    );
+    assert!(!project.root().join("outside.txt").exists());
+}
+
+#[tokio::test]
+async fn unified_hunk_data_beginning_with_three_dashes_is_not_mistaken_for_a_next_header() {
+    let (_root, project) = initialized_project("patch-dash-content");
+    let target = project.root().join("dash.txt");
+    fs::write(&target, "--- before\nkeep\n").unwrap();
+    let tools = ToolRegistry::for_project(project.root());
+    let outcome = execute(
+        &tools,
+        "patch-dash-content",
+        "apply_patch",
+        json!({
+            "patch": "--- a/dash.txt\n+++ b/dash.txt\n@@ -1,2 +1,2 @@\n---- before\n+--- after\n keep\n",
+            "preimages": [{"path": "dash.txt", "expected_hash": hash(b"--- before\nkeep\n")}]
+        }),
+    )
+    .await;
+    assert_eq!(outcome.result.status, ToolResultStatus::Succeeded);
+    assert_eq!(fs::read(&target).unwrap(), b"--- after\nkeep\n");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn write_file_preserves_existing_unix_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (_root, project) = initialized_project("file-write-permissions");
+    let target = project.root().join("script.sh");
+    fs::write(&target, "#!/bin/sh\necho before\n").unwrap();
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+    let tools = ToolRegistry::for_project(project.root());
+    let outcome = execute(
+        &tools,
+        "write-permissions",
+        "write_file",
+        json!({
+            "path": "script.sh",
+            "content": "#!/bin/sh\necho after\n",
+            "expected_hash": hash(b"#!/bin/sh\necho before\n")
+        }),
+    )
+    .await;
+    assert_eq!(outcome.result.status, ToolResultStatus::Succeeded);
+    assert_eq!(
+        fs::metadata(target).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn write_paths_reject_absolute_and_symlinked_targets() {
+    use std::os::unix::fs::symlink;
+
+    let (_root, project) = initialized_project("file-write-unix-path-safety");
+    let outside = project.root().join("outside.txt");
+    let parent_link = project.root().join("linked-parent");
+    let target_link = project.root().join("linked-target.txt");
+    fs::create_dir(project.root().join("real-parent")).unwrap();
+    symlink(project.root().join("real-parent"), &parent_link).unwrap();
+    fs::write(&outside, "outside\n").unwrap();
+    symlink(&outside, &target_link).unwrap();
+    let tools = ToolRegistry::for_project(project.root());
+
+    for (id, path) in [
+        ("absolute", outside.to_string_lossy().into_owned()),
+        ("parent-symlink", "linked-parent/child.txt".to_owned()),
+        ("target-symlink", "linked-target.txt".to_owned()),
+    ] {
+        assert!(
+            tools
+                .plan(
+                    ExecutionId::new(format!("execution-{id}")),
+                    call(
+                        id,
+                        "write_file",
+                        json!({"path": path, "content": "must not write\n", "expected_hash": null}),
+                    ),
+                )
+                .is_err()
+        );
+    }
+    assert_eq!(fs::read(&outside).unwrap(), b"outside\n");
+    assert!(!project.root().join("real-parent/child.txt").exists());
+}
+
+#[tokio::test]
+async fn only_verified_deterministic_read_only_research_gets_persisted_cache_hits() {
+    let (_root, project) = initialized_project("tool-cache-hit");
+    let first_tools = session_tools(&project);
+    let first = execute(&first_tools, "research-first", "research_get", json!({})).await;
+    assert_eq!(first.result.status, ToolResultStatus::Succeeded);
+    assert!(first.receipt.cache_source.is_none());
+    assert!(first.receipt.cache_validation.is_some());
+    drop(first_tools);
+
+    let second_tools = session_tools(&project);
+    let hit = execute(&second_tools, "research-hit", "research_get", json!({})).await;
+    assert_eq!(hit.result.status, ToolResultStatus::Succeeded);
+    let source = hit.receipt.cache_source.as_ref().unwrap();
+    assert_eq!(source.source_execution_id, first.receipt.execution_id);
+    assert_ne!(hit.receipt.execution_id, first.receipt.execution_id);
+    assert_ne!(hit.receipt.plan_fingerprint, first.receipt.plan_fingerprint);
+    assert_eq!(hit.result.call_id.as_str(), "research-hit");
+    assert_eq!(hit.result.output, first.result.output);
+    assert!(hit.receipt.cache_validation.is_none());
+
+    let specs = second_tools.specs();
+    let research = specs
+        .iter()
+        .find(|spec| spec.name.as_str() == "research_get")
+        .unwrap();
+    assert_eq!(
+        (research.effect, research.determinism, research.cache_policy),
+        (
+            ToolEffect::ReadOnly,
+            ToolDeterminism::Deterministic,
+            ToolCachePolicy::ContentAddressed,
+        )
+    );
+    assert!(specs.iter().all(|spec| {
+        spec.cache_policy != ToolCachePolicy::ContentAddressed
+            || (spec.effect == ToolEffect::ReadOnly
+                && spec.determinism == ToolDeterminism::Deterministic)
+    }));
+}
+
+#[tokio::test]
+async fn explicit_rerun_bypasses_a_persistent_cache() {
+    let (_root, project) = initialized_project("tool-cache-explicit-rerun");
+    let tools = session_tools(&project);
+    let source = execute(&tools, "rerun-source", "research_get", json!({})).await;
+    assert!(source.receipt.cache_source.is_none());
+
+    let rerun = execute(
+        &tools,
+        "rerun-fresh",
+        "research_get",
+        json!({"execution": {"rerun_reason": "verify current stream"}}),
+    )
+    .await;
+    assert_eq!(rerun.result.status, ToolResultStatus::Succeeded);
+    assert!(rerun.receipt.cache_source.is_none());
+    assert_eq!(
+        rerun
+            .receipt
+            .rerun_reason
+            .as_ref()
+            .map(|reason| reason.as_str()),
+        Some("verify current stream")
+    );
+
+    let hit = execute(&tools, "rerun-following-hit", "research_get", json!({})).await;
+    assert_eq!(
+        hit.receipt
+            .cache_source
+            .as_ref()
+            .map(|source| source.source_execution_id.as_str()),
+        Some("execution-rerun-source")
+    );
+}
+
+#[tokio::test]
+async fn apply_patch_rejects_crlf_content_before_publishing() {
+    let (_root, project) = initialized_project("file-patch-crlf");
+    let target = project.root().join("source.txt");
+    fs::write(&target, "old\n").unwrap();
+    let tools = ToolRegistry::for_project(project.root());
+    let plan = tools.plan(
+        ExecutionId::new("execution-patch-crlf"),
+        call(
+            "patch-crlf",
+            "apply_patch",
+            json!({
+                "patch": "--- a/source.txt\n+++ b/source.txt\n@@ -1 +1 @@\n-old\n+new\r\n",
+                "preimages": [{"path": "source.txt", "expected_hash": hash(b"old\n")}]
+            }),
+        ),
+    );
+    assert!(plan.is_err());
+    assert_eq!(fs::read(target).unwrap(), b"old\n");
+}
+
+#[tokio::test]
+async fn mutating_research_updates_never_cache_and_invalidate_research_get_results() {
+    let (_root, project) = initialized_project("tool-cache-research-invalidation");
+    let tools = session_tools(&project);
+    let before = execute(&tools, "research-before-update", "research_get", json!({})).await;
+    assert!(before.receipt.cache_source.is_none());
+
+    let update = json!({
+        "event_id": "event-cache-invalidation",
+        "occurred_at": "2026-08-23T12:00:00Z",
+        "operation": {
+            "kind": "record_target_snapshot",
+            "record": {
+                "id": "snapshot-cache-invalidation",
+                "target_id": "com.example.target",
+                "kind": "mobile",
+                "locator": "package:com.example.target",
+                "version": "1.0.0",
+                "build_id": "build-cache",
+                "target_artifact_ids": [],
+                "environment_fingerprint": "environment-cache",
+                "device_fingerprint": "device-cache",
+                "captured_at": "2026-08-23T11:59:00Z",
+                "notes": "cache invalidation fixture"
+            }
+        }
+    });
+    let recorded = execute(&tools, "update-recorded", "research_update", update.clone()).await;
+    assert_eq!(recorded.result.status, ToolResultStatus::Succeeded);
+    assert!(recorded.receipt.cache_source.is_none());
+
+    let duplicate = execute(&tools, "update-duplicate", "research_update", update).await;
+    assert_eq!(duplicate.result.status, ToolResultStatus::Failed);
+    assert_eq!(
+        duplicate.receipt.exit_reason.as_deref(),
+        Some("research_event_id_duplicate")
+    );
+    assert!(duplicate.receipt.cache_source.is_none());
+
+    let changed = execute(&tools, "research-after-update", "research_get", json!({})).await;
+    assert_eq!(changed.result.status, ToolResultStatus::Succeeded);
+    assert!(changed.receipt.cache_source.is_none());
+    assert_eq!(changed.result.output["stream_event_count"], 1);
+    assert!(
+        changed.result.output["state"]["target_snapshots"]
+            .get("snapshot-cache-invalidation")
+            .is_some()
+    );
+
+    let hit = execute(
+        &tools,
+        "research-after-update-hit",
+        "research_get",
+        json!({}),
+    )
+    .await;
+    assert_eq!(hit.result.status, ToolResultStatus::Succeeded);
+    assert_eq!(
+        hit.receipt
+            .cache_source
+            .as_ref()
+            .map(|source| source.source_execution_id.as_str()),
+        Some("execution-research-after-update")
+    );
+
+    let after_cache = execute(
+        &tools,
+        "update-after-cache",
+        "research_update",
+        json!({
+            "event_id": "event-after-cache",
+            "occurred_at": "2026-08-23T12:01:00Z",
+            "operation": {"kind": "record_target_snapshot", "record": {
+                "id": "snapshot-after-cache", "target_id": "com.example.target", "kind": "mobile",
+                "locator": "package:com.example.target", "version": "1.0.1", "build_id": "build-after-cache",
+                "target_artifact_ids": [], "environment_fingerprint": "environment-after-cache",
+                "device_fingerprint": "device-after-cache", "captured_at": "2026-08-23T12:01:00Z", "notes": "writer-lock regression"
+            }}
+        }),
+    )
+    .await;
+    assert_eq!(after_cache.result.status, ToolResultStatus::Succeeded);
+}
+
+#[tokio::test]
+async fn missing_or_corrupt_source_receipt_event_is_a_cache_miss() {
+    let (_root, project) = initialized_project("tool-cache-source-event-integrity");
+    let tools = session_tools(&project);
+    let source = execute(&tools, "source-event", "research_get", json!({})).await;
+    assert!(source.receipt.cache_source.is_none());
+    let events = project
+        .root()
+        .join(".cyber-agent/sessions/tool-cache/events.jsonl");
+    fs::remove_file(&events).unwrap();
+    let missing = execute(&tools, "source-event-missing", "research_get", json!({})).await;
+    assert!(missing.receipt.cache_source.is_none());
+    fs::write(&events, b"{not json}\n").unwrap();
+    let corrupt = execute(&tools, "source-event-corrupt", "research_get", json!({})).await;
+    assert!(corrupt.receipt.cache_source.is_none());
+}
+
+#[tokio::test]
+async fn session_cache_audit_serializes_concurrent_source_and_hit_events() {
+    let (_root, project) = initialized_project("tool-cache-audit-serialization");
+    let tools = session_tools(&project);
+    let (first, second) = tokio::join!(
+        execute(&tools, "serialized-first", "research_get", json!({})),
+        execute(&tools, "serialized-second", "research_get", json!({})),
+    );
+    assert_eq!(first.result.status, ToolResultStatus::Succeeded);
+    assert_eq!(second.result.status, ToolResultStatus::Succeeded);
+    let events = fs::read_to_string(
+        project
+            .root()
+            .join(".cyber-agent/sessions/tool-cache/events.jsonl"),
+    )
+    .unwrap()
+    .lines()
+    .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+    .collect::<Vec<_>>();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0]["sequence"], 1);
+    assert_eq!(events[1]["sequence"], 2);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn failed_cache_hit_event_append_never_returns_a_cache_hit() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (_root, project) = initialized_project("tool-cache-hit-event-failure");
+    let tools = session_tools(&project);
+    execute(&tools, "source-hit-failure", "research_get", json!({})).await;
+    let events = project
+        .root()
+        .join(".cyber-agent/sessions/tool-cache/events.jsonl");
+    fs::set_permissions(&events, fs::Permissions::from_mode(0o444)).unwrap();
+    let outcome = execute(&tools, "hit-event-failure", "research_get", json!({})).await;
+    fs::set_permissions(&events, fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(outcome.receipt.cache_source.is_none());
+}
+
+#[tokio::test]
+async fn deleted_or_tampered_cache_safely_degrades_to_a_new_source_receipt_and_projects_do_not_share()
+ {
+    let (_root_a, project_a) = initialized_project("tool-cache-a");
+    let tools_a = session_tools(&project_a);
+    let first = execute(&tools_a, "a-first", "research_get", json!({})).await;
+    assert!(first.receipt.cache_source.is_none());
+    let cache_directory = project_a.root().join(".cyber-agent/cache/tool-results");
+    let cache_file = fs::read_dir(&cache_directory)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let mut parseable_tampering: Value =
+        serde_json::from_slice(&fs::read(&cache_file).unwrap()).unwrap();
+    parseable_tampering["source"]["result"]["output"]["status"] = json!("tampered");
+    fs::write(
+        &cache_file,
+        serde_json::to_vec(&parseable_tampering).unwrap(),
+    )
+    .unwrap();
+    let after_tampering = execute(&tools_a, "a-tampered", "research_get", json!({})).await;
+    assert!(after_tampering.receipt.cache_source.is_none());
+    assert_eq!(after_tampering.result.output["status"], "ok");
+
+    fs::write(&cache_file, b"not json").unwrap();
+    let after_corruption = execute(&tools_a, "a-corrupt", "research_get", json!({})).await;
+    assert!(after_corruption.receipt.cache_source.is_none());
+    fs::remove_dir_all(&cache_directory).unwrap();
+    let after_deletion = execute(&tools_a, "a-deleted", "research_get", json!({})).await;
+    assert!(after_deletion.receipt.cache_source.is_none());
+    assert!(cache_directory.exists());
+
+    let (_root_b, project_b) = initialized_project("tool-cache-b");
+    let tools_b = session_tools(&project_b);
+    let b_first = execute(&tools_b, "b-first", "research_get", json!({})).await;
+    assert!(b_first.receipt.cache_source.is_none());
+    let b_cache_file = fs::read_dir(project_b.root().join(".cyber-agent/cache/tool-results"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    fs::write(&b_cache_file, fs::read(&cache_file).unwrap()).unwrap();
+    let isolated = execute(&tools_b, "b-isolated", "research_get", json!({})).await;
+    assert!(isolated.receipt.cache_source.is_none());
+}
