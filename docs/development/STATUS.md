@@ -6,30 +6,29 @@
 - Phase: `IMPLEMENTATION`
 - Implementation: `STARTED`
 - Current milestone: `M2`
-- Current slice: `M2-S2`
-- Slice state: `IN_PROGRESS`
-- Lean governance: `ACTIVE`; M2-S2 is scope-locked to Research facts, TargetSnapshot, Experiment Capsule and two fixed Research tools
-- Local Git initialized: `yes`; M2-S2 is being developed on `agent/m2-s2-research-kernel`
-- Remote repository: `F0und-icu/cyber-agent` private; M2-S1 status PR `#17` was Squash Merged
+- Current slice: `M2-S3`
+- Slice state: `READY_AUTHORIZED`; implementation starts only after this M2-S2 status seal is remotely merged
+- Lean governance: `ACTIVE`; M2-S2 is complete and M2-S3 remains scope-locked to Blob storage, Artifact facts and Lineage
+- Local Git initialized: `yes`; M2-S2 is being sealed on `agent/m2-s2-merge-status`
+- Remote repository: `F0und-icu/cyber-agent` private; M2-S2 implementation PR `#18` was Squash Merged
 - Documentation baseline commit: `55ff3be`
-- Current code base: `main`/`origin/main` M2-S1 status-seal commit `a73bcce` before this Slice branch
+- Current code base: `main`/`origin/main` M2-S2 merge commit `ba8d880`
 - Upstream Codex baseline: `3aae5d885bac39c1262491aa3fd100dfd8b3919f`
 
 ## Last Completed Slice
 
-- Slice: `M2-S1`
-- Delivery branch: `agent/m2-s1-project-event-store`
-- Base commit: `6955437`
-- Scope: canonical-root project initialization/discovery, isolated Research and Session JSONL streams, one project advisory Writer lock, strict chained Upcasters, durable corrupt-tail recovery Artifact and non-destructive export/migrate skeleton.
-- Persistence behavior: Events are durable before they enter memory, sequence starts at one and remains contiguous, only lexical final-tail damage is recoverable, and semantic or non-tail corruption is a precise read-only failure.
-- Isolation behavior: two roots derive distinct Project IDs and facts; persisted `research` and `session:<id>` namespaces cannot collide; a second process cannot acquire the same project Writer.
-- Recovery behavior: raw tail bytes are published without overwrite and synced before same-directory stream replacement; migration writes its completion manifest last and never rewrites the source stream.
-- Test path: permanent external regressions cover project discovery/isolation, same- and cross-process Writer rejection, strict stream ordering, tail recovery/no-mutation failures, migration integrity and fixed historical Upcaster fixtures.
-- Forbidden work preserved: no Research business records/reducer, Blob Store/Lineage, Memory/Snapshot/Cache, Context/Vision/Profile composition, Live request, Codex credential/login access, Codex source modification or Codex code port.
-- Result: `COMPLETE`; all local and remote Cargo/Lean Gates pass.
-- Dependencies and schemas: adds only `toml 0.8.23`, typed Project identity and the pure chained Event Upcaster registry; the existing generic EventStore Port remains authoritative and frozen architecture is unchanged.
-- Git: PR `#16` was Squash Merged as `b2c69a1` (`feat(events): add isolated project event store`).
-- GitHub Actions: PR-head run `32578862449` and post-merge `main` run `32578967609` passed on macOS with Rust `1.93.1`; formatting, production test-layout scan, Clippy, 114 tests plus one ignored Live Smoke, and locked build all passed.
+- Slice: `M2-S2`
+- Delivery branch: `agent/m2-s2-research-kernel`
+- Base commit: `a73bcce`
+- Scope: versioned Research facts and pure replay, immutable TargetSnapshot, ExperimentCapsule, deterministic identity/action fingerprints and the fixed `research_get`/`research_update` tools.
+- Research behavior: strict validated Event-ID idempotence, explicit merge provenance, staged failure-atomic updates, first-record reference integrity and evidence/Snapshot requirements for reproduced or confirmed Findings.
+- Persistence behavior: read-only Research replay takes no Writer lock and creates no state; mutation holds one project Writer across replay, validation, durable append and in-memory apply, and a missing initialized Research stream is never recreated.
+- Test path: permanent external regressions cover fingerprint boundaries, strict malformed/unknown replay, duplicate Event semantics, no-mutation failures, dedup/rerun choices, merge provenance, missing-stream behavior, project isolation and one AgentLoop Tool path.
+- Forbidden work preserved: no Blob Store/Artifact Lineage implementation, Memory/Snapshot/Cache, Context/Vision/Profile composition, Live request, Codex credential/login access, Codex source modification or Codex code port.
+- Result: `COMPLETE`; all local and remote Cargo/Lean Gates pass and independent Luna xhigh review found no unresolved P0/P1.
+- Dependencies and schemas: no dependency or Cargo feature changed; Research payload schema version 1 and fixed `research.*` Event types are provider-neutral and preserve the prior `StreamRecovered` control Event.
+- Git: PR `#18` was Squash Merged as `ba8d880` (`feat(research): add reproducible research kernel`).
+- GitHub Actions: PR-head run `32583858745` and post-merge `main` run `32583981820` passed on macOS with Rust `1.93.1`; formatting, production test-layout scan, Clippy, 130 tests plus one ignored Live Smoke, and locked build all passed.
 - Live Test: `OFF`; the existing synthetic smoke remains ignored and no real credential or public Provider request was used.
 
 ## Current Authority
@@ -62,29 +61,30 @@
 - M1c-S2 ordinary background Jobs, lifecycle Resource leases, stable launch/completion linkage and byte-offset output polling.
 - M1c-S3 current-platform PTY Sessions, shared live-process leases, stable terminal output and interactive controls.
 - M2-S1 isolated local projects, strict JSONL Event streams, one project Writer lock, corrupt-tail recovery, chained Upcasters and source-preserving export/migrate.
+- M2-S2 versioned Research facts, immutable TargetSnapshot, ExperimentCapsule, deterministic fingerprints, strict replay and fixed Research tools.
 
-## In Progress
+## Next Authorized Slice
 
-- Slice: `M2-S2`
-- Delivery branch: `agent/m2-s2-research-kernel`
-- Base commit: `a73bcce`
-- Scope lock: add the minimum versioned Research events/reducer, TargetSnapshotRecord, ExperimentCapsuleRecord, deterministic dedup/action fingerprints and fixed `research_get`/`research_update` tools.
-- Required behavior: Target semantic changes create a new Snapshot; Tool version changes alter the action fingerprint without fabricating Target change; confirmed Findings require Snapshot and Evidence references; similarity never auto-merges records.
-- Intended production touch points: pure Research Domain contracts/reducer/fingerprints, the existing Research JSONL stream and EventStore Adapter, two fixed Tool adapters and the existing one AgentLoop/Tool Registry.
-- Intended permanent tests: every Research transition/invariant, duplicate identity handling, `RecordsMerged` provenance, Target/Action fingerprint boundaries, project isolation and exact Tool schemas/results.
-- Forbidden continuation: M2-S3 Blob Store/Artifact Lineage beyond typed references, M2-S4 Memory/Snapshot/Cache, M2-S5 writes/cache, Context Planner, Vision, Provider/Profile/Web composition, general Workflow/Hook/Router/Plugin abstractions, Live Provider requests and Codex credential/login access.
+- Slice: `M2-S3`
+- Planned delivery branch: `agent/m2-s3-artifact-lineage`
+- Base commit: the M2-S2 status-seal merge commit, to be recorded at Slice start
+- Scope lock: add the minimum SHA-256 Blob Store, versioned Artifact facts, provenance-preserving ArtifactRecord/Lineage projection and one fixed `artifact_store` tool.
+- Required behavior: identical bytes deduplicate only Blob content; distinct research origins retain distinct Artifact IDs and provenance; parent/transform/producer/TargetSnapshot links remain auditable; deleting derived Cache cannot break Artifact or Research references.
+- Intended production touch points: pure Artifact Domain contracts/reducer, an ArtifactStore Port, a local content-addressed filesystem Adapter, versioned Research/Session Artifact events only where required, and one fixed Tool adapter.
+- Intended permanent tests: same-byte Blob deduplication, same-Blob distinct Artifact provenance, parent/transform/producer/target linkage, project isolation, no-overwrite durability, invalid reference failures and Cache-independent replay.
+- Forbidden continuation: M2-S4 Memory/Project Snapshot/Cache, M2-S5 file writes/Tool Cache, Context Planner, Vision, Provider/Profile/Web composition, destructive Blob GC, general graph/workflow/hook/router/plugin abstractions, Live Provider requests and Codex credential/login access.
 
 ## Current Authorization
 
 The current user instruction explicitly authorizes continued implementation with delegated Terra/Luna development and normal version-controlled remote delivery until the first prototype reaches the separately authorized Live Provider validation boundary.
 
 - Run mode: `IMPLEMENT_TO_LIVE_BOUNDARY`
-- Slice ID: `M2-S2`; state `IN_PROGRESS`
+- Slice ID: `M2-S3`; state `READY_AUTHORIZED` pending the separate M2-S2 status-seal merge
 - Git mode: `BRANCH_PR_REVIEW_MERGE`; commit, push, PR, CI review and merge are authorized when the Slice Gate passes
 - Delegation mode: `AUTHORIZED`; delegated implementation Agents must independently read the repository authority chain and stay inside the current Slice
 - Live test mode: `OFF`; no real Provider credential or public model request is authorized
-- Forbidden continuation inside M2-S2: Blob/Lineage implementation, Memory/Snapshot/Cache, file writes/cache, Context Planner, Vision, Provider/Profile/Web composition, general Router/Hook/Plugin work, Codex source modification or Codex credentials/login access
-- Stop condition: complete and remotely seal M2-S2 before starting M2-S3; do not run a Live Test
+- Forbidden continuation inside M2-S3: Memory/Project Snapshot/Cache, file writes/Tool Cache, Context Planner, Vision, Provider/Profile/Web composition, destructive Blob GC, general graph/router/hook/plugin work, Codex source modification or Codex credentials/login access
+- Stop condition: remotely merge this M2-S2 status seal before starting M2-S3; do not run a Live Test
 
 ## Slice Lean Review
 
@@ -282,11 +282,16 @@ The current user instruction explicitly authorizes continued implementation with
 
 ## Blockers
 
-- None for the completed M2-S1 local and remote delivery Gates or the authorized M2-S2 start after this status seal.
-- M2-S2 remains scope-locked to Research facts, TargetSnapshot, Experiment Capsule and their fixed tools; Blob/Lineage implementation starts only in M2-S3.
+- None for the completed M2-S2 local and remote delivery Gates or the authorized M2-S3 start after this status seal.
+- M2-S3 remains scope-locked to Blob storage, Artifact facts, provenance and its fixed tool; Memory/Snapshot/Cache implementation starts only in M2-S4.
 - Live Provider compatibility remains unverified by design; missing live credentials do not block offline development and no Codex credential is an allowed substitute.
 
 ## Last Verification
+
+- M2-S2 local Gate: PASS on Rust `1.93.1`; formatting, denied-warning Clippy, 130 offline/local tests plus one ignored existing synthetic Live Smoke, locked build, inline-test scan, forbidden Codex dependency scan, credential-pattern scan, no-whole-ResearchState-clone scan, `git diff --check` and `codex/`-unchanged check all passed.
+- M2-S2 review: independent Luna xhigh returned `APPROVE` with no unresolved P0/P1 after exact validated Event-ID idempotence, merge provenance, strict missing-stream behavior, failure-atomic updates and initial Hypothesis evidence integrity were verified.
+- M2-S2 Live Test: `OFF`; no credential, external model request, Codex login state, `~/.codex` or `CODEX_HOME` was read or modified.
+- M2-S2 remote Gate: PASS; PR `#18` was Squash Merged as `ba8d880`, PR-head run `32583858745` passed, and post-merge `main` run `32583981820` passed the same Rust Gate.
 
 - M2-S1 local Gate: PASS on Rust `1.93.1`; formatting, denied-warning Clippy, 114 offline/local tests plus one ignored existing synthetic Live Smoke, locked build, inline-test scan, forbidden Codex dependency scan, credential-pattern scan, `git diff --check` and `codex/`-unchanged check all passed.
 - M2-S1 review: independent Luna xhigh returned `APPROVE` with no P0/P1 after the final durability, canonical Project identity, Session namespace and migration-integrity fixes.
