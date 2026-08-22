@@ -1,9 +1,11 @@
 //! Minimal FullAccess Tool Registry for the M1a single-Agent loop.
 
+mod active;
 mod command;
 mod filesystem;
 mod job;
 mod output;
+mod pty;
 mod resources;
 mod search;
 
@@ -21,6 +23,8 @@ use crate::domain::tools::{
 };
 use crate::ports::tool::{ToolExecutionFuture, ToolExecutor, ToolExecutorError};
 
+use active::{ActiveProcessId, ActiveProcessLeases};
+
 const TOOL_VERSION: &str = "1";
 const DEFAULT_OUTPUT_BYTES: usize = 128 * 1024;
 
@@ -36,12 +40,19 @@ enum BuiltinTool {
     PollJob,
     InputJob,
     StopJob,
+    StartPty,
+    PollPty,
+    InputPty,
+    ResizePty,
+    StopPty,
 }
 
 pub struct ToolRegistry {
     project_root: PathBuf,
     tools: BTreeMap<ToolName, BuiltinTool>,
     jobs: job::BackgroundJobs,
+    ptys: pty::PtySessions,
+    active_leases: ActiveProcessLeases,
 }
 
 impl ToolRegistry {
@@ -57,6 +68,11 @@ impl ToolRegistry {
             (ToolName::new("poll_job"), BuiltinTool::PollJob),
             (ToolName::new("input_job"), BuiltinTool::InputJob),
             (ToolName::new("stop_job"), BuiltinTool::StopJob),
+            (ToolName::new("start_pty"), BuiltinTool::StartPty),
+            (ToolName::new("poll_pty"), BuiltinTool::PollPty),
+            (ToolName::new("input_pty"), BuiltinTool::InputPty),
+            (ToolName::new("resize_pty"), BuiltinTool::ResizePty),
+            (ToolName::new("stop_pty"), BuiltinTool::StopPty),
         ]
         .into_iter()
         .collect();
@@ -64,6 +80,8 @@ impl ToolRegistry {
             project_root: project_root.into(),
             tools,
             jobs: job::BackgroundJobs::new(),
+            ptys: pty::PtySessions::new(),
+            active_leases: ActiveProcessLeases::new(),
         }
     }
 }
@@ -118,22 +136,21 @@ impl ToolExecutor for ToolRegistry {
                     json!({"error": "execution plan names an unregistered Tool"}),
                 );
             };
-            if !is_job_control(plan.call.name.as_str())
-                && let Some(conflict) = self.jobs.conflicting_job(&plan)
+            if !is_process_lifecycle_tool(plan.call.name.as_str())
+                && let Some(conflict) = self.active_leases.conflicting(&plan)
             {
-                return ToolExecutionOutcome::failed(
-                    plan,
-                    "job_resource_busy",
-                    json!({
-                        "error": "Tool resources conflict with an active background Job",
-                        "conflicting_job_id": conflict,
-                    }),
-                );
+                return active_resource_busy(plan, conflict);
             }
             let timeout_plan = plan.clone();
             match tokio::time::timeout(
                 Duration::from_millis(plan.timeout_ms),
-                tool.execute(&self.project_root, &self.jobs, plan),
+                tool.execute(
+                    &self.project_root,
+                    &self.jobs,
+                    &self.ptys,
+                    &self.active_leases,
+                    plan,
+                ),
             )
             .await
             {
@@ -144,8 +161,43 @@ impl ToolExecutor for ToolRegistry {
     }
 }
 
-fn is_job_control(tool_name: &str) -> bool {
-    matches!(tool_name, "poll_job" | "input_job" | "stop_job")
+fn is_process_lifecycle_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "start_job"
+            | "poll_job"
+            | "input_job"
+            | "stop_job"
+            | "start_pty"
+            | "poll_pty"
+            | "input_pty"
+            | "resize_pty"
+            | "stop_pty"
+    )
+}
+
+fn active_resource_busy(
+    plan: ToolExecutionPlan,
+    conflict: ActiveProcessId,
+) -> ToolExecutionOutcome {
+    match conflict {
+        ActiveProcessId::Job(job_id) => ToolExecutionOutcome::failed(
+            plan,
+            "job_resource_busy",
+            json!({
+                "error": "Tool resources conflict with an active background Job",
+                "conflicting_job_id": job_id,
+            }),
+        ),
+        ActiveProcessId::Pty(pty_session_id) => ToolExecutionOutcome::failed(
+            plan,
+            "pty_resource_busy",
+            json!({
+                "error": "Tool resources conflict with an active PTY session",
+                "conflicting_pty_session_id": pty_session_id,
+            }),
+        ),
+    }
 }
 
 impl BuiltinTool {
@@ -165,6 +217,11 @@ impl BuiltinTool {
             Self::PollJob => job::normalize_poll(arguments),
             Self::InputJob => job::normalize_input(arguments),
             Self::StopJob => job::normalize_stop(arguments),
+            Self::StartPty => pty::normalize_start(project_root, arguments),
+            Self::PollPty => pty::normalize_poll(arguments),
+            Self::InputPty => pty::normalize_input(arguments),
+            Self::ResizePty => pty::normalize_resize(arguments),
+            Self::StopPty => pty::normalize_stop(arguments),
         }
     }
 
@@ -172,6 +229,8 @@ impl BuiltinTool {
         self,
         project_root: &Path,
         jobs: &job::BackgroundJobs,
+        ptys: &pty::PtySessions,
+        active_leases: &ActiveProcessLeases,
         plan: ToolExecutionPlan,
     ) -> ToolExecutionOutcome {
         match self {
@@ -181,10 +240,15 @@ impl BuiltinTool {
             Self::SearchFiles => search::execute(project_root, plan).await,
             Self::RunCommand => command::execute_one(project_root, plan).await,
             Self::RunCommands => command::execute_batch(project_root, plan).await,
-            Self::StartJob => job::execute_start(project_root, jobs, plan).await,
+            Self::StartJob => job::execute_start(project_root, jobs, active_leases, plan).await,
             Self::PollJob => job::execute_poll(jobs, plan).await,
             Self::InputJob => job::execute_input(jobs, plan).await,
             Self::StopJob => job::execute_stop(jobs, plan).await,
+            Self::StartPty => pty::execute_start(project_root, ptys, active_leases, plan).await,
+            Self::PollPty => pty::execute_poll(ptys, plan).await,
+            Self::InputPty => pty::execute_input(ptys, plan).await,
+            Self::ResizePty => pty::execute_resize(ptys, plan).await,
+            Self::StopPty => pty::execute_stop(ptys, plan).await,
         }
     }
 
@@ -418,6 +482,109 @@ impl BuiltinTool {
                 common_output,
                 ToolParallelism::ResourceLocked,
                 Some("job:{job_id}"),
+                ToolEffect::Interactive,
+                ToolRetryPolicy::NeverAutoRetry,
+                ToolDeterminism::Nondeterministic,
+                10_000,
+            ),
+            Self::StartPty => spec(
+                "start_pty",
+                "Start one current-platform PTY argv process and return its PTY Session ID.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                        "cwd": {"type": "string"},
+                        "resources": {"type": "array", "items": command::resource_schema()},
+                        "rows": {"type": "integer", "minimum": 1, "maximum": 65535},
+                        "cols": {"type": "integer", "minimum": 1, "maximum": 65535}
+                    },
+                    "required": ["argv"],
+                    "additionalProperties": false
+                }),
+                common_output,
+                ToolParallelism::ResourceLocked,
+                Some("resource:{resources}"),
+                ToolEffect::Interactive,
+                ToolRetryPolicy::DedupeByKey,
+                ToolDeterminism::Nondeterministic,
+                10_000,
+            ),
+            Self::PollPty => spec(
+                "poll_pty",
+                "Read only newly captured PTY bytes after a caller-supplied offset.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "pty_session_id": {"type": "string", "minLength": 1},
+                        "offset": {"type": "integer", "minimum": 0}
+                    },
+                    "required": ["pty_session_id"],
+                    "additionalProperties": false
+                }),
+                common_output,
+                ToolParallelism::ResourceLocked,
+                Some("pty:{pty_session_id}"),
+                ToolEffect::ReadOnly,
+                ToolRetryPolicy::ReplaySafe,
+                ToolDeterminism::EnvironmentDependent,
+                10_000,
+            ),
+            Self::InputPty => spec(
+                "input_pty",
+                "Write input bytes to one running PTY session.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "pty_session_id": {"type": "string", "minLength": 1},
+                        "input": {"type": "string"}
+                    },
+                    "required": ["pty_session_id", "input"],
+                    "additionalProperties": false
+                }),
+                common_output,
+                ToolParallelism::ResourceLocked,
+                Some("pty:{pty_session_id}"),
+                ToolEffect::Interactive,
+                ToolRetryPolicy::NeverAutoRetry,
+                ToolDeterminism::Nondeterministic,
+                10_000,
+            ),
+            Self::ResizePty => spec(
+                "resize_pty",
+                "Resize one running PTY terminal on the current platform.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "pty_session_id": {"type": "string", "minLength": 1},
+                        "rows": {"type": "integer", "minimum": 1, "maximum": 65535},
+                        "cols": {"type": "integer", "minimum": 1, "maximum": 65535}
+                    },
+                    "required": ["pty_session_id", "rows", "cols"],
+                    "additionalProperties": false
+                }),
+                common_output,
+                ToolParallelism::ResourceLocked,
+                Some("pty:{pty_session_id}"),
+                ToolEffect::Interactive,
+                ToolRetryPolicy::NeverAutoRetry,
+                ToolDeterminism::Nondeterministic,
+                10_000,
+            ),
+            Self::StopPty => spec(
+                "stop_pty",
+                "Stop and reap one PTY direct child, then return its stable terminal completion.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "pty_session_id": {"type": "string", "minLength": 1}
+                    },
+                    "required": ["pty_session_id"],
+                    "additionalProperties": false
+                }),
+                common_output,
+                ToolParallelism::ResourceLocked,
+                Some("pty:{pty_session_id}"),
                 ToolEffect::Interactive,
                 ToolRetryPolicy::NeverAutoRetry,
                 ToolDeterminism::Nondeterministic,

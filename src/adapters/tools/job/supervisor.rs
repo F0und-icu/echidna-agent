@@ -10,7 +10,9 @@ use tokio::task::JoinHandle;
 
 use crate::domain::tools::{JobCompletion, JobId, JobStatus, ToolExecutionPlan};
 
-use super::{JobOutput, JobTable, lock_output, lock_table};
+use super::super::active::ActiveProcessLeaseGuard;
+use super::super::output::{CapturedOutput, lock_captured_output};
+use super::{JobTable, lock_table};
 
 const OUTPUT_DRAIN_GRACE: Duration = Duration::from_millis(100);
 
@@ -20,11 +22,12 @@ pub(super) struct JobSupervisor {
     pub(super) plan: ToolExecutionPlan,
     pub(super) stdout: ChildStdout,
     pub(super) stderr: ChildStderr,
-    pub(super) stdout_buffer: Arc<Mutex<JobOutput>>,
-    pub(super) stderr_buffer: Arc<Mutex<JobOutput>>,
+    pub(super) stdout_buffer: Arc<Mutex<CapturedOutput>>,
+    pub(super) stderr_buffer: Arc<Mutex<CapturedOutput>>,
     pub(super) timeout_ms: u64,
     pub(super) stop_receiver: oneshot::Receiver<()>,
     pub(super) jobs: Arc<Mutex<JobTable>>,
+    pub(super) active_lease: ActiveProcessLeaseGuard,
 }
 
 impl JobSupervisor {
@@ -40,6 +43,7 @@ impl JobSupervisor {
             timeout_ms,
             mut stop_receiver,
             jobs,
+            active_lease,
         } = self;
         let mut stdout_task = tokio::spawn(drain_output(stdout, stdout_buffer.clone()));
         let mut stderr_task = tokio::spawn(drain_output(stderr, stderr_buffer.clone()));
@@ -72,6 +76,9 @@ impl JobSupervisor {
         if let Some(job) = table.entries.get_mut(&job_id) {
             job.publish_completion(completion);
         }
+        drop(table);
+        // Keep the RAII lease alive through the stable terminal publication.
+        drop(active_lease);
     }
 }
 
@@ -138,23 +145,23 @@ async fn terminal_after_termination(
 
 async fn finish_reader(
     task: &mut JoinHandle<()>,
-    output: &Arc<Mutex<JobOutput>>,
+    output: &Arc<Mutex<CapturedOutput>>,
     timeout_reason: &'static str,
 ) {
     match tokio::time::timeout(OUTPUT_DRAIN_GRACE, &mut *task).await {
-        Ok(Ok(())) => {}
+        Ok(Ok(())) => lock_captured_output(output).seal(),
         Ok(Err(error)) => {
-            lock_output(output).mark_incomplete(format!("reader_task_failed:{error}"))
+            lock_captured_output(output).mark_incomplete(format!("reader_task_failed:{error}"))
         }
         Err(_) => {
             task.abort();
             let _ = task.await;
-            lock_output(output).mark_incomplete(timeout_reason);
+            lock_captured_output(output).mark_incomplete(timeout_reason);
         }
     }
 }
 
-async fn drain_output<Reader>(mut reader: Reader, output: Arc<Mutex<JobOutput>>)
+async fn drain_output<Reader>(mut reader: Reader, output: Arc<Mutex<CapturedOutput>>)
 where
     Reader: tokio::io::AsyncRead + Unpin,
 {
@@ -162,9 +169,9 @@ where
     loop {
         match reader.read(&mut buffer).await {
             Ok(0) => return,
-            Ok(read) => lock_output(&output).append(&buffer[..read]),
+            Ok(read) => lock_captured_output(&output).append(&buffer[..read]),
             Err(error) => {
-                lock_output(&output).set_read_error(error.to_string());
+                lock_captured_output(&output).set_read_error(error.to_string());
                 return;
             }
         }

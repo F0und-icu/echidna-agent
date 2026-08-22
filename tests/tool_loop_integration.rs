@@ -91,15 +91,20 @@ async fn builtin_tools_cover_files_search_argv_failures_and_bounded_output() {
             .collect::<Vec<_>>(),
         vec![
             "input_job",
+            "input_pty",
             "list_files",
             "poll_job",
+            "poll_pty",
             "read_file",
             "read_files",
+            "resize_pty",
             "run_command",
             "run_commands",
             "search_files",
             "start_job",
+            "start_pty",
             "stop_job",
+            "stop_pty",
         ]
     );
     let run_spec = specs
@@ -657,7 +662,7 @@ async fn agent_loop_keeps_full_resampling_after_local_baseline_comparison() {
 
     let inputs = provider.inputs();
     assert_eq!(inputs.len(), 2);
-    assert_eq!(inputs[0].tool_specs.len(), 10);
+    assert_eq!(inputs[0].tool_specs.len(), 15);
     assert_eq!(inputs[0].content_items.len(), 1);
     assert_eq!(
         inputs[1].content_items[1],

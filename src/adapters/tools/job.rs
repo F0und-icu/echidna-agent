@@ -5,7 +5,6 @@
 
 mod control;
 mod launch;
-mod output;
 mod supervisor;
 
 use std::collections::BTreeMap;
@@ -15,16 +14,14 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::process::ChildStdin;
 use tokio::sync::{Mutex as AsyncMutex, oneshot, watch};
 
-use crate::domain::tools::{
-    JobCompletion, JobId, JobStatus, ResourceKey, ToolEffect, ToolExecutionPlan, ToolParallelism,
-    scheduling_conflicts,
-};
+use crate::domain::tools::{JobCompletion, JobId, JobStatus};
+
+use super::output::CapturedOutput;
 
 pub(super) use control::{
     execute_input, execute_poll, execute_stop, normalize_input, normalize_poll, normalize_stop,
 };
 pub(super) use launch::{execute_start, normalize_start};
-pub(in crate::adapters::tools::job) use output::{JobOutput, OffsetError};
 pub(in crate::adapters::tools::job) use supervisor::JobSupervisor;
 
 /// The live Job table is intentionally per ToolRegistry/Agent process. A
@@ -56,13 +53,12 @@ pub(in crate::adapters::tools::job) struct JobTable {
 
 pub(in crate::adapters::tools::job) struct JobEntry {
     pub(in crate::adapters::tools::job) status: JobStatus,
-    pub(in crate::adapters::tools::job) stdout: Arc<Mutex<JobOutput>>,
-    pub(in crate::adapters::tools::job) stderr: Arc<Mutex<JobOutput>>,
+    pub(in crate::adapters::tools::job) stdout: Arc<Mutex<CapturedOutput>>,
+    pub(in crate::adapters::tools::job) stderr: Arc<Mutex<CapturedOutput>>,
     pub(in crate::adapters::tools::job) stdin: Option<Arc<AsyncMutex<ChildStdin>>>,
     pub(in crate::adapters::tools::job) stop: Option<oneshot::Sender<()>>,
     pub(in crate::adapters::tools::job) terminal: watch::Sender<()>,
     pub(in crate::adapters::tools::job) completion: Option<JobCompletion>,
-    pub(in crate::adapters::tools::job) resolved_resource_keys: Vec<ResourceKey>,
 }
 
 impl JobEntry {
@@ -91,65 +87,9 @@ impl JobEntry {
 }
 
 impl BackgroundJobs {
-    /// Returns an active Job that conflicts with a candidate non-control plan.
-    /// The table is the sole owner of live Job resource leases; terminal Jobs
-    /// remain queryable but no longer participate in conflict checks.
-    pub(in crate::adapters::tools) fn conflicting_job(
-        &self,
-        plan: &ToolExecutionPlan,
-    ) -> Option<JobId> {
-        let table = lock_table(&self.jobs);
-        table.conflicting_job(plan.parallelism, plan.effect, &plan.resolved_resource_keys)
-    }
-
-    pub(in crate::adapters::tools::job) fn try_insert(
-        &self,
-        job_id: JobId,
-        entry: JobEntry,
-    ) -> Result<(), JobId> {
+    pub(in crate::adapters::tools::job) fn insert(&self, job_id: JobId, entry: JobEntry) {
         let mut table = lock_table(&self.jobs);
-        if let Some(conflict) = table.conflicting_keys(
-            ToolParallelism::ResourceLocked,
-            ToolEffect::Interactive,
-            &entry.resolved_resource_keys,
-        ) {
-            return Err(conflict);
-        }
         table.entries.insert(job_id, entry);
-        Ok(())
-    }
-}
-
-impl JobTable {
-    fn conflicting_job(
-        &self,
-        parallelism: ToolParallelism,
-        effect: ToolEffect,
-        resource_keys: &[ResourceKey],
-    ) -> Option<JobId> {
-        self.conflicting_keys(parallelism, effect, resource_keys)
-    }
-
-    fn conflicting_keys(
-        &self,
-        parallelism: ToolParallelism,
-        effect: ToolEffect,
-        resource_keys: &[ResourceKey],
-    ) -> Option<JobId> {
-        self.entries.iter().find_map(|(job_id, job)| {
-            if job.completion.is_some() {
-                return None;
-            }
-            scheduling_conflicts(
-                parallelism,
-                effect,
-                resource_keys,
-                ToolParallelism::ResourceLocked,
-                ToolEffect::Interactive,
-                &job.resolved_resource_keys,
-            )
-            .then(|| job_id.clone())
-        })
     }
 }
 
@@ -157,10 +97,4 @@ pub(in crate::adapters::tools::job) fn lock_table(
     table: &Arc<Mutex<JobTable>>,
 ) -> MutexGuard<'_, JobTable> {
     table.lock().unwrap_or_else(|error| error.into_inner())
-}
-
-pub(in crate::adapters::tools::job) fn lock_output(
-    output: &Arc<Mutex<JobOutput>>,
-) -> MutexGuard<'_, JobOutput> {
-    output.lock().unwrap_or_else(|error| error.into_inner())
 }

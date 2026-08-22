@@ -12,12 +12,14 @@ use tokio::sync::{Mutex as AsyncMutex, oneshot, watch};
 use crate::domain::tools::{JobStatus, ResourceKey, ToolExecutionOutcome, ToolExecutionPlan};
 use crate::ports::tool::ToolExecutorError;
 
+use super::super::active::{ActiveProcessId, ActiveProcessLeases};
 use super::super::command::{
     CommandResource, RunCommandArgs, command_resource_keys, validate_command,
 };
 use super::super::filesystem::{display_path, resolve_path};
+use super::super::output::CapturedOutput;
 use super::super::{decode_arguments, invalid_arguments, invalid_plan};
-use super::{BackgroundJobs, JobEntry, JobOutput, JobSupervisor};
+use super::{BackgroundJobs, JobEntry, JobSupervisor};
 
 const DEFAULT_JOB_TIMEOUT_MS: u64 = 300_000;
 
@@ -59,6 +61,7 @@ pub(in crate::adapters::tools) fn normalize_start(
 pub(in crate::adapters::tools) async fn execute_start(
     project_root: &Path,
     jobs: &BackgroundJobs,
+    active_leases: &ActiveProcessLeases,
     plan: ToolExecutionPlan,
 ) -> ToolExecutionOutcome {
     let arguments: StartJobArgs = match decode_arguments("start_job", plan.call.arguments.clone()) {
@@ -73,6 +76,14 @@ pub(in crate::adapters::tools) async fn execute_start(
         project_root,
         command_arguments.cwd.as_deref().unwrap_or("."),
     );
+    let job_id = jobs.next_job_id();
+    let process_id = ActiveProcessId::Job(job_id.clone());
+    let mut lease_keys = plan.resolved_resource_keys.clone();
+    lease_keys.push(ResourceKey::job(job_id.as_str()));
+    let active_lease = match active_leases.acquire(process_id, lease_keys) {
+        Ok(active_lease) => active_lease,
+        Err(conflict) => return resource_busy(plan, conflict),
+    };
     let mut command = Command::new(&command_arguments.argv[0]);
     command
         .args(&command_arguments.argv[1..])
@@ -94,6 +105,8 @@ pub(in crate::adapters::tools) async fn execute_start(
     let (Some(stdin), Some(stdout), Some(stderr)) =
         (child.stdin.take(), child.stdout.take(), child.stderr.take())
     else {
+        let _ = child.start_kill();
+        let _ = child.wait().await;
         return ToolExecutionOutcome::failed(
             plan,
             "job_stdio_unavailable",
@@ -101,9 +114,12 @@ pub(in crate::adapters::tools) async fn execute_start(
         );
     };
 
-    let job_id = jobs.next_job_id();
-    let stdout_buffer = Arc::new(Mutex::new(JobOutput::new(plan.output_policy.max_bytes / 2)));
-    let stderr_buffer = Arc::new(Mutex::new(JobOutput::new(plan.output_policy.max_bytes / 2)));
+    let stdout_buffer = Arc::new(Mutex::new(CapturedOutput::new(
+        plan.output_policy.max_bytes / 2,
+    )));
+    let stderr_buffer = Arc::new(Mutex::new(CapturedOutput::new(
+        plan.output_policy.max_bytes / 2,
+    )));
     let stdin = Arc::new(AsyncMutex::new(stdin));
     let (stop, stop_receiver) = oneshot::channel();
     let (terminal, _) = watch::channel(());
@@ -115,20 +131,8 @@ pub(in crate::adapters::tools) async fn execute_start(
         stop: Some(stop),
         terminal,
         completion: None,
-        resolved_resource_keys: plan.resolved_resource_keys.clone(),
     };
-    if let Err(conflict) = jobs.try_insert(job_id.clone(), entry) {
-        let _ = child.start_kill();
-        let _ = child.wait().await;
-        return ToolExecutionOutcome::failed(
-            plan,
-            "job_resource_busy",
-            json!({
-                "error": "Job resources conflict with an active Job",
-                "conflicting_job_id": conflict,
-            }),
-        );
-    }
+    jobs.insert(job_id.clone(), entry);
 
     tokio::spawn(
         JobSupervisor {
@@ -142,6 +146,7 @@ pub(in crate::adapters::tools) async fn execute_start(
             timeout_ms: arguments.timeout_ms,
             stop_receiver,
             jobs: jobs.jobs.clone(),
+            active_lease,
         }
         .run(),
     );
@@ -155,6 +160,27 @@ pub(in crate::adapters::tools) async fn execute_start(
             "timeout_ms": arguments.timeout_ms,
         }),
     )
+}
+
+fn resource_busy(plan: ToolExecutionPlan, conflict: ActiveProcessId) -> ToolExecutionOutcome {
+    match conflict {
+        ActiveProcessId::Job(job_id) => ToolExecutionOutcome::failed(
+            plan,
+            "job_resource_busy",
+            json!({
+                "error": "Job resources conflict with an active background Job",
+                "conflicting_job_id": job_id,
+            }),
+        ),
+        ActiveProcessId::Pty(pty_session_id) => ToolExecutionOutcome::failed(
+            plan,
+            "pty_resource_busy",
+            json!({
+                "error": "Job resources conflict with an active PTY session",
+                "conflicting_pty_session_id": pty_session_id,
+            }),
+        ),
+    }
 }
 
 const fn default_job_timeout_ms() -> u64 {

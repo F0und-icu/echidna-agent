@@ -43,6 +43,7 @@ string_id!(ExecutionId);
 string_id!(IdempotencyKey);
 string_id!(RerunReason);
 string_id!(JobId);
+string_id!(PtySessionId);
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -331,6 +332,21 @@ pub enum JobStatus {
     TimedOut,
 }
 
+/// Stable lifecycle states for one in-process current-platform PTY session.
+///
+/// The PTY adapter owns the live terminal and direct child. This type remains
+/// provider- and terminal-implementation-neutral so a later persistence
+/// Slice can record it without importing `portable-pty` into the Domain.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PtySessionStatus {
+    Running,
+    Stopping,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ToolResult {
     pub call_id: ToolCallId,
@@ -372,6 +388,20 @@ pub struct ExecutionReceipt {
 pub struct JobCompletion {
     pub job_id: JobId,
     pub status: JobStatus,
+    pub exit_code: Option<i32>,
+    pub start_execution_id: ExecutionId,
+    pub start_plan_fingerprint: String,
+    pub exit_reason: String,
+}
+
+/// The one terminal observation for a PTY direct child.
+///
+/// `start_pty` owns the successful launch Receipt. This completion is linked
+/// to that launch instead of creating a second execution identity.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PtySessionCompletion {
+    pub pty_session_id: PtySessionId,
+    pub status: PtySessionStatus,
     pub exit_code: Option<i32>,
     pub start_execution_id: ExecutionId,
     pub start_plan_fingerprint: String,

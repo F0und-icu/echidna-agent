@@ -10,8 +10,9 @@ use crate::domain::tools::{
 };
 use crate::ports::tool::ToolExecutorError;
 
+use super::super::output::{OffsetError, lock_captured_output};
 use super::super::{decode_arguments, invalid_plan};
-use super::{BackgroundJobs, OffsetError, lock_output, lock_table};
+use super::{BackgroundJobs, lock_table};
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -94,8 +95,8 @@ pub(in crate::adapters::tools) async fn execute_poll(
             job.completion.clone(),
         )
     };
-    let stdout = lock_output(&snapshot.1).slice_after_offset(arguments.stdout_offset);
-    let stderr = lock_output(&snapshot.2).slice_after_offset(arguments.stderr_offset);
+    let stdout = lock_captured_output(&snapshot.1).slice_after_offset(arguments.stdout_offset);
+    let stderr = lock_captured_output(&snapshot.2).slice_after_offset(arguments.stderr_offset);
     let (stdout, stderr) = match (stdout, stderr) {
         (Ok(stdout), Ok(stderr)) => (stdout, stderr),
         (stdout, stderr) => {
