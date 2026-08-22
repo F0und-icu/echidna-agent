@@ -6,29 +6,30 @@
 - Phase: `IMPLEMENTATION`
 - Implementation: `STARTED`
 - Current milestone: `M1c`
-- Current slice: `M1c-S1`
-- Slice state: `IN_PROGRESS`
-- Lean governance: `ACTIVE`; M1c-S1 is scope-locked to Batch plus Resource Scheduler
-- Local Git initialized: `yes`; M1c-S1 is being developed on `agent/m1c-s1-batch-scheduler`
-- Remote repository: `F0und-icu/cyber-agent` private; M1b-S2 status PR `#9` was Squash Merged
+- Current slice: `M1c-S2`
+- Slice state: `READY_AUTHORIZED`; implementation starts only after this M1c-S1 status seal is remotely merged
+- Lean governance: `ACTIVE`; M1c-S1 is complete and M1c-S2 remains scope-locked to ordinary background Jobs
+- Local Git initialized: `yes`; M1c-S1 is being sealed on `agent/m1c-s1-merge-status`
+- Remote repository: `F0und-icu/cyber-agent` private; PR `#10` was Squash Merged
 - Documentation baseline commit: `55ff3be`
-- Current code base: `main`/`origin/main` M1b-S2 status-seal commit `4d08b42` before this Slice branch
+- Current code base: `main`/`origin/main` M1c-S1 merge commit `59fc30f`
 - Upstream Codex baseline: `3aae5d885bac39c1262491aa3fd100dfd8b3919f`
 
 ## Last Completed Slice
 
-- Slice: `M1b-S2`
-- Delivery branch: `agent/m1b-s2-incremental-responses`
-- Base commit: `045862e`
-- Scope: Provider-neutral request delivery and opaque completion identity, OpenAI-private `previous_response_id` mapping, strict append-only deltas and exactly one typed continuation-rejection Full fallback.
-- Agent behavior: the one AgentLoop commits History, Canonical Baseline and continuation identity atomically after a valid completed sample; failed, cancelled, empty, multiple-Tool and partial-stream samples do not advance them.
-- Retry behavior: only exact `previous_response_not_found` on an incremental request triggers one Full fallback; the fallback counts toward the 32-request Turn bound and never replays a completed local Tool.
-- Test path: local HTTP/SSE loopback and permanent AgentLoop regressions cover same-Turn and next-Turn delta, session isolation, capability-disabled Full delivery, typed fallback, generic-error no-fallback and all non-commit paths.
-- Forbidden work preserved: no Batch/Scheduler/PTY/Job, Vision service, DeepSeek Adapter, CLI profile composition, persistence, Live Provider request, Codex credential/login access, Codex source modification or Codex code port.
+- Slice: `M1c-S1`
+- Delivery branch: `agent/m1c-s1-batch-scheduler`
+- Base commit: `4d08b42`
+- Scope: `read_files`, multi-pattern `search_files`, argv-only serial/parallel `run_commands`, typed Resource Keys, conflict-aware scheduling, completed Receipt dedupe and explicit rerun audit.
+- Agent behavior: the one AgentLoop stages multiple Tool Calls from one completed sample, executes non-conflicting plans concurrently, preserves model order and appends one paired Result for every planned, failed or cancelled call.
+- Resource behavior: Device, PTY and Output keys are exclusive even for a mislabelled Parallel plan; independent files/devices/outputs can overlap, unresolved interactive work remains globally serial, and path identities canonicalize existing symlink parents.
+- Retry behavior: semantic idempotency excludes execution identity; a non-cancelled completed Receipt prevents duplicate execution within the AgentLoop process, while an explicit rerun replaces the current Receipt and records its reason.
+- Test path: permanent Domain, Adapter and AgentLoop regressions cover partial Batch failures, output bounds, resource waves, cancellation, cross-Turn dedupe, rerun replacement, symlinked outputs and multiple Tool Call pairing.
+- Forbidden work preserved: no background Job state, PTY runtime, persistence, Vision service, DeepSeek Adapter, CLI profile composition, Live Provider request, Codex credential/login access, Codex source modification or Codex code port.
 - Result: `COMPLETE`; all local and remote Cargo/Lean Gates pass.
 - Dependencies and schemas: no dependency, Cargo, ModelInputIR/Event/Project/Research schema or frozen architecture change.
-- Git: PR `#8` was Squash Merged as `216e800` (`feat(model): add incremental Responses continuation`).
-- GitHub Actions: PR-head run `32561668586` and post-merge `main` run `32561848176` passed on macOS with Rust `1.93.1`; formatting, production test-layout scan, Clippy, 64 tests plus one ignored Live Smoke, and locked build all passed.
+- Git: PR `#10` was Squash Merged as `59fc30f` (`feat(tools): add batch resource scheduler`).
+- GitHub Actions: PR-head run `32564693085` and post-merge `main` run `32564797656` passed on macOS with Rust `1.93.1`; formatting, production test-layout scan, Clippy, 73 tests plus one ignored Live Smoke, and locked build all passed.
 - Live Test: `OFF`; the existing synthetic smoke remains ignored and no real credential or public Provider request was used.
 
 ## Current Authority
@@ -57,27 +58,28 @@
 - M1a-S3 Tool contracts, strict in-memory History, fixed FullAccess Tool Registry, bounded AgentLoop, OpenAI Tool history encoding and real temporary-project full-resample Gate.
 - M1b-S1 Turn/Step capture, Canonical Request hashing, non-destructive ProviderSession Baseline comparison and full-request AgentLoop audit.
 - M1b-S2 Provider-neutral continuation, strict OpenAI Responses delta delivery, atomic Baseline/response identity advancement and bounded typed-rejection Full fallback.
+- M1c-S1 Batch tools, typed Resource Key scheduling, ordered multi-Tool pairing and in-process completed Receipt dedupe with explicit rerun audit.
 
-## In Progress
+## Next Authorized Slice
 
-- Slice: `M1c-S1`
-- Delivery branch: `agent/m1c-s1-batch-scheduler`
-- Base commit: `4d08b42`
-- Scope lock: add `read_files`, multi-pattern `search_files`, `run_commands`, deterministic Resource Key resolution and conflict-aware scheduling from existing Tool Effect/Retry/Idempotency metadata.
-- Required behavior: independent file/device/output resources may run concurrently; the same Device, PTY or Output resource remains serialized; a partial Batch failure preserves every other result and Tool Call/Result pairing.
-- Forbidden continuation: M1c-S2 background Job state, M1c-S3 PTY sessions, project persistence, Vision, DeepSeek Adapter, general Workflow/Hook/Router/Plugin abstractions, Live Provider requests and Codex credential/login access.
+- Slice: `M1c-S2`
+- Planned delivery branch: `agent/m1c-s2-background-jobs`
+- Base commit: the M1c-S1 status-seal merge commit, to be recorded at Slice start
+- Scope lock: add ordinary non-PTY background process Jobs with typed Job ID/status, bounded stdout/stderr offset polling, input/stop operations, timeout/cancellation and completed Receipt integration.
+- Required behavior: polling returns only bytes after the caller's offset, process completion is stable, stop/cancel leaves no orphaned process or corrupt Job state, and completed dedupe does not relaunch the same execution.
+- Forbidden continuation: M1c-S3 PTY sessions, project persistence, Artifact/Event stores, Vision, DeepSeek Adapter, CLI profile composition, general Workflow/Hook/Router/Plugin abstractions, Live Provider requests and Codex credential/login access.
 
 ## Current Authorization
 
 The current user instruction explicitly authorizes continued implementation with delegated Terra/Luna development and normal version-controlled remote delivery until the first prototype reaches the separately authorized Live Provider validation boundary.
 
 - Run mode: `IMPLEMENT_TO_LIVE_BOUNDARY`
-- Slice ID: `M1c-S1`; state `IN_PROGRESS`
+- Slice ID: `M1c-S2`; state `READY_AUTHORIZED` pending the separate status-seal merge
 - Git mode: `BRANCH_PR_REVIEW_MERGE`; commit, push, PR, CI review and merge are authorized when the Slice Gate passes
 - Delegation mode: `AUTHORIZED`; delegated implementation Agents must independently read the repository authority chain and stay inside the current Slice
 - Live test mode: `OFF`; no real Provider credential or public model request is authorized
-- Forbidden continuation inside M1c-S1: background Job state, PTY sessions, Vision service, DeepSeek Adapter, CLI profile composition, Web, persistence, general Router/Hook/Plugin work, Codex source modification or Codex credentials/login access
-- Stop condition: complete and remotely seal M1c-S1 before starting M1c-S2; do not run a Live Test
+- Forbidden continuation inside M1c-S2: PTY sessions, Vision service, DeepSeek Adapter, CLI profile composition, Web, persistence, Artifact/Event stores, general Router/Hook/Plugin work, Codex source modification or Codex credentials/login access
+- Stop condition: remotely merge this M1c-S1 status seal before starting M1c-S2; do not run a Live Test
 
 ## Slice Lean Review
 
@@ -145,7 +147,7 @@ The current user instruction explicitly authorizes continued implementation with
 - Removed the full-request-only Port stream completion event and the misleading `record_full_response`/`assess_full_request` names. `record_completed_sample` now records either Full or incremental delivery from the same full logical snapshot.
 - `store:false + previous_response_id` over real OpenAI HTTP/SSE remains explicitly unverified. No Live Test was run; the next proof requires separately authorized dedicated Cyber Agent credentials and a public Provider request.
 
-### M1c-S1 Draft Lean Review (local Gate passed; remote seal pending)
+### M1c-S1 Lean Review
 
 #### Semantic Owners
 
@@ -168,8 +170,8 @@ The current user instruction explicitly authorizes continued implementation with
 
 ## Blockers
 
-- None for the M1c-S1 local Gate.
-- M1c-S1 remains `IN_PROGRESS` until its authorized commit, PR/CI review and remote seal finish; M1c-S2 must not start before then.
+- None for the completed M1c-S1 local and remote delivery Gates.
+- M1c-S2 can start after this status-only seal is remotely merged under the current user authorization.
 - Live Provider compatibility remains unverified by design; missing live credentials do not block offline development and no Codex credential is an allowed substitute.
 
 ## Last Verification
@@ -180,6 +182,7 @@ The current user instruction explicitly authorizes continued implementation with
 - M1b-S2 remote Gate: PASS; PR `#8` head run `32561668586` and post-merge `main` run `32561848176` passed, and independent Terra xhigh review returned APPROVE with no medium-or-higher issue.
 - M1c-S1 local Gate: PASS on Rust `1.93.1`; `cargo fmt --all -- --check`, `cargo clippy --locked --all-targets --all-features -- -D warnings`, `cargo test --locked --all-targets --all-features` (73 passed, 0 failed, 1 ignored synthetic Live Smoke) and `cargo build --locked` all exited `0`. Inline-test, forbidden Codex dependency, dedicated-credential, Provider-wire boundary, `git diff --check` and `codex/`-unchanged scans also passed.
 - M1c-S1 Live Test: OFF; no credential, external model request, Codex login state, `~/.codex` or `CODEX_HOME` was read or modified.
+- M1c-S1 remote Gate: PASS; PR `#10` head run `32564693085` and post-merge `main` run `32564797656` passed, and independent Luna xhigh review returned APPROVE with no P0/P1 issue before the final Domain exclusivity fix and full Gate rerun.
 
 ### Retained M1b-S1 verification evidence
 
