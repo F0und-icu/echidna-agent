@@ -6,29 +6,29 @@
 - Phase: `IMPLEMENTATION`
 - Implementation: `STARTED`
 - Current milestone: `M3`
-- Current slice: `M3-S3`
-- Slice state: `READY_NOT_AUTHORIZED`; M3-S2 implementation and both remote Cargo Gates are complete, and this status seal is the final boundary before M3-S3 starts
-- Lean governance: `ACTIVE`; M3-S2 passed its local and remote Cargo/Lean Gates with no unresolved P0/P1
-- Local Git initialized: `yes`; M3-S2 remote evidence is being sealed on `agent/m3-s2-status-seal`
-- Remote repository: `F0und-icu/cyber-agent` private; M3-S2 implementation PR `#29` was Squash Merged
+- Current slice: `M3-S3b`
+- Slice state: `READY_NOT_AUTHORIZED`; M3-S3a is locally complete but M3-S3b cannot start before the M3-S3a implementation merge and separate status seal
+- Lean governance: `ACTIVE`; M3-S3a passed its local Cargo/Lean Gate and Luna xhigh final review with no unresolved P0/P1
+- Local Git initialized: `yes`; the completed M3-S3a implementation remains on `agent/m3-s3a-session-resume` for PR delivery
+- Remote repository: `F0und-icu/cyber-agent` private; M3-S2 implementation PR `#29` and status PR `#30` were Squash Merged
 - Documentation baseline commit: `55ff3be`
-- Current code base: M3-S2 Squash Merge commit `64209bc` on `origin/main`
+- Current code base: locally complete M3-S3a branch based on M3-S2 status-seal merge commit `48c8cb1`
 - Upstream Codex baseline: `3aae5d885bac39c1262491aa3fd100dfd8b3919f`
 
 ## Last Completed Slice
 
-- Slice: `M3-S2`
-- Delivery branch: `agent/m3-s2-world-state-mode`
-- Base commit: `d4217d2`
-- Scope: bounded ResearchWorldState and Project Snapshot Full/Diff projections, fixed Tool Exposure and `tool_search`, Prompt/Mode/Agent Model Profiles, pure capability-driven Vision routing and offline profile diagnostics.
-- Context behavior: the existing Context Planner remains the sole rendered-budget owner; AgentLoop may send a causal State Diff only when both Full projections were completely selected, and accumulated Full-plus-Diff delivery falls back to the Planner-verified Full request before exceeding budget.
-- Tool behavior: the fixed registry exposes eleven high-frequency Direct tools, discovers only currently Deferred tools, never exposes Hidden tools and rejects model calls absent from the exact sent schema; any Exposure-directory change invalidates the Primary Baseline even when Direct schemas remain identical.
-- Profile behavior: configuration applies atomically at Turn boundaries; Primary semantic changes create a fresh Primary ProviderSession, while secondary-only changes do not cross identities or reset Primary state. Vision routing uses only explicit versioned capabilities and the four frozen modes.
-- Test path: permanent external regressions cover Section uniqueness/hash/bounds, Full/Diff causal ordering and failure commit boundaries, cumulative budget fallback, Project Snapshot semantics, Fragment Cache reuse, Tool discovery/execution authority, Exposure-only invalidation, Prompt/Schema metrics, exhaustive Vision routing and Primary/secondary switching.
-- Forbidden work preserved: no Compaction/Resume/RequestAudit persistence, image execution or VisionAnalysisService, general Router/Hook/Plugin/database/watcher, Live request, Codex credential/login access, Codex source modification or Codex code port.
-- Result: `COMPLETE`; local and remote Cargo/Lean Gates pass and Luna xhigh returned final `APPROVE` with no unresolved P0/P1 after Terra xhigh fixed cumulative delivery budgeting and Exposure-only Baseline invalidation.
-- Dependencies and schemas: no dependency or Cargo feature changed; no authoritative Event/Research/Artifact schema or Provider protocol changed.
-- Git: implementation PR `#29` was Squash Merged as `64209bc`; PR-head run `32632629044` and post-merge `main` run `32632750182` passed.
+- Slice: `M3-S3a`
+- Delivery branch: `agent/m3-s3a-session-resume`
+- Base commit: `48c8cb1`
+- Scope: one History normalization owner, strict versioned Session lifecycle/history facts and Reducer, append-before-apply Session projection, durable-state-bound Resume and Resume-first Full delivery.
+- History behavior: complete Tool pairs and non-Tool items preserve order, orphan Results are removed, interrupted Calls gain stable cancelled `aborted` Results, and duplicate/mismatched pairs fail through `ConversationHistory`.
+- Session behavior: the existing Event envelope and JSONL Store are reused; payload v1 rejects unknown types, versions and fields, existing Receipt/CacheHit/StreamRecovered facts remain compatible, failed validation or append never promotes State, and Primary ProviderSession IDs cannot be reused.
+- Resume behavior: only an Active replayed Session with a durable `session.resumed` fact and exactly matching fresh Primary identity can replace volatile History; continuation and committed delivery state are cleared, the first real request remains Full with `SessionResumed`, and only a successful sample enables later incremental delivery.
+- Test path: permanent external regressions cover normalization/repair/rejection, strict Session payloads and transitions, legacy fact replay, duplicate append idempotence, real JSONL replay and append failure, permanent ProviderSession identity uniqueness, restored History delivery, failed resumed Full retry and subsequent incremental recovery.
+- Forbidden work preserved: no Summary/Compaction, RequestAudit/Blob, inspection CLI, image path, general Manager/Router/Hook/database, Provider request, credential/login access, Codex source modification or Codex code port.
+- Result: `COMPLETE` locally; the full Cargo/Lean Gate passes and Luna xhigh returned final `APPROVE` with no unresolved P0/P1 after Terra implementation and main-agent schema/commit-boundary hardening. Remote PR/CI/merge evidence is pending.
+- Dependencies and schemas: no dependency, Cargo feature, Provider DTO or envelope schema changed; Session payload schema v1 is the one new authoritative fact contract, while existing Receipt payload fields only gained strict unknown-field rejection.
+- Git: implementation is ready on the M3-S3a Slice branch; exact commit, PR, CI and Squash Merge identities will be added by the separate remote status seal.
 - Live Test: `OFF`; the existing synthetic smoke remains ignored and no real credential or public Provider request was used.
 
 ## Current Authority
@@ -68,16 +68,17 @@
 - M2-S5 auditable atomic file writes, a constrained owned Patch Adapter and a project/session-bound deterministic read-only Tool Result Cache.
 - M3-S1 budgeted Context planning, explainable decisions, logical manifests, Fragment Cache and AgentLoop Context compilation.
 - M3-S2 bounded World/Project State Diff delivery, fixed Tool Exposure/search, Mode/Profile composition and pure Vision routing.
+- M3-S3a strict History normalization, versioned Session facts/replay, append-before-apply persistence and Resume-first Full delivery.
 
 ## Next Planned Slice
 
-- Slice: `M3-S3`
-- State: `READY_NOT_AUTHORIZED`; M3-S2 implementation and post-merge `main` Gates pass, and M3-S3 may be activated from the merged status seal under the current user's continuing authorization.
-- Planned delivery branch: `agent/m3-s3-compaction-request-audit`
-- Base commit: resolve from `main` after this status seal merges; never branch from the old M3-S2 implementation head.
-- Scope lock: History normalization, Session Summary and Compaction, Resume-first Full semantics, RequestAuditManifest with content-addressed audit Blobs and the minimum prompt/snapshot/metrics inspection surfaces.
-- Required behavior: complete Tool pairs survive normalization/Compaction; summaries remain derived and do not replace facts; Resume never reuses an old Provider response identity; historical semantic requests remain reconstructible after source Prompt/Memory changes.
-- Intended permanent tests: Tool-pair preservation, Summary updates not spuriously resetting an active Baseline, Compaction/Resume full resets, content de-duplication and historical request reconstruction.
+- Slice: `M3-S3b`
+- State: `READY_NOT_AUTHORIZED` until M3-S3a is Squash Merged, its post-merge `main` Gate passes and a separate status-seal PR records both remote identities.
+- Planned delivery branch: `agent/m3-s3b-session-compaction`
+- Base commit: resolve from the remotely sealed `main`; never branch from the unmerged M3-S3a head.
+- Scope lock: one deterministic derived SessionSummary projection, versioned Compaction fact, retained normalized History boundary and Compaction-first Full reset only.
+- Required behavior: Summary remains deletable/rebuildable from Session Events, never replaces facts, complete Tool pairs survive retention, ordinary Summary updates do not reset an active Baseline, and Compaction forces exactly the next real request Full.
+- Intended permanent tests: deterministic Summary rebuild, required vulnerability-research fields, Tool-pair retention, original Event preservation, Summary/Baseline separation, and failed/successful Compaction Full-reset boundaries.
 - Forbidden continuation: M3-S4 image execution/VisionAnalysisService, M4 research Profiles/Eval/Replay/Observation, general router/hook/plugin/database/watcher work, Live Provider requests and Codex credential/login access.
 
 ## Current Authorization
@@ -85,12 +86,11 @@
 The current user instruction explicitly authorizes continued implementation with delegated Terra/Luna development and normal version-controlled remote delivery until the first prototype reaches the separately authorized Live Provider validation boundary.
 
 - Run mode: `IMPLEMENT_TO_LIVE_BOUNDARY`
-- Slice ID: `M3-S3`; state `READY_NOT_AUTHORIZED` until this status seal merges; the current user's continuing authorization may then activate it
+- Slice ID: `M3-S3b`; state `READY_NOT_AUTHORIZED` while M3-S3a remote sealing is incomplete; the current user's continuing authorization may activate it only after that Gate
 - Git mode: `BRANCH_PR_REVIEW_MERGE`; commit, push, PR, CI review and merge are authorized when the Slice Gate passes
 - Delegation mode: `AUTHORIZED`; delegated implementation Agents must independently read the repository authority chain and stay inside the current Slice
 - Live test mode: `OFF`; no real Provider credential or public model request is authorized
-- Start condition: merge this M3-S2 status seal and pass its post-merge `main` CI before creating the M3-S3 delivery branch
-- Forbidden continuation before the status seal: all M3-S3 production work, M3-S4 image execution/VisionAnalysisService, general database/index/watcher/hook/router/plugin work, Codex source modification or Codex credentials/login access
+- Forbidden continuation before M3-S3a remote sealing: all M3-S3b production work, M3-S3c RequestAudit, M3-S3d inspection CLI, M3-S4 image execution/VisionAnalysisService, M4 work, general database/index/watcher/hook/router/plugin work, Codex source modification or Codex credentials/login access
 - Stop condition: complete and remotely seal each authorized Slice before advancing; stop at the first prototype's separately authorized Live Provider validation boundary without running a Live Test
 
 ## M2-S5 Slice Start
@@ -122,7 +122,46 @@ The current user instruction explicitly authorizes continued implementation with
 - Delegation: one Terra xhigh implementation owner for the bounded vertical path, followed by Luna xhigh read-only review; the main agent owns scope decisions, fixes, Git and merge authority.
 - Live Test: `OFF`; only pure Domain, Mock, Fixture and local integration paths are authorized.
 
+## M3-S3a Slice Start
+
+- Delivery branch: `agent/m3-s3a-session-resume`
+- Base commit: `48c8cb1`
+- Split rationale: the former broad M3-S3 crossed History, Session facts, derived Summary, audit Blob and CLI composition boundaries. It was split before production implementation into M3-S3a through M3-S3d; frozen architecture and fact ownership are unchanged.
+- Intended production touch points: the existing `domain/history` pairing owner, one strict Session payload/Reducer beside the existing Event envelope, the existing Project Session stream commit boundary, and the ProviderSession reset path.
+- Scope budget: no Summary, Compaction payload, RequestAuditManifest, audit Blob, CLI inspection composition, database, Provider protocol, general replay framework, image path, background service, Hook/Router or second runtime Agent.
+- Intended permanent tests: Tool pairs normalize without split ownership; unknown/invalid Session Events and transitions fail; failed append never applies; replay is deterministic; Resume uses a fresh Primary ProviderSession and forces exactly the next request Full.
+- Acceptance commands: the locked Cargo fmt/clippy/test/build Gate; production inline-test, forbidden Codex dependency, credential isolation, Provider-wire boundary, architecture direction, one-AgentLoop/no-second-History-owner and `codex/`-unchanged scans; `git diff --check`.
+- Delegation: Luna xhigh performs a read-only contract/reuse audit before one Terra xhigh implementation owner; Luna xhigh then performs the final read-only review. The main agent owns scope, schema, fixes, Git and merge authority.
+- Live Test: `OFF`; only pure Domain, Mock, Fixture and local Session Event integration paths are authorized.
+
 ## Slice Lean Review
+
+### M3-S3a Lean Review
+
+#### Semantic Owners
+
+- `src/domain/history.rs` remains the only Tool Call/Result pairing and normalization owner. Runtime append, Session replay, Context validation and recovery all delegate to `ConversationHistory`; orphan removal, stable aborted repair, duplicate rejection and tool-name matching are not reimplemented elsewhere.
+- `src/domain/session.rs` owns the exhaustive Session payload v1 vocabulary, lifecycle transitions, durable History projection, used-Primary identity set and typed Session errors. `domain/events` still solely owns the `cyber-agent.event` envelope, schema/upcasting, Event identity and sequence metadata; `domain/tools` still owns the published ExecutionReceipt payload.
+- `src/app/session.rs` owns only validate-before-append and promote-after-success composition through the existing `EventSink`. The existing JSONL Adapter remains the sole durable Event Store; an already-applied duplicate is a no-write idempotent result and cannot desynchronize stream sequence.
+- `ProviderSession` remains the only Incremental Baseline owner. `AgentLoop::resume_from_session` binds an already-durable Active/Resumed Session projection to one exactly matching fresh Primary identity, replaces volatile History and clears only runtime delivery state before the forced Full request.
+
+#### Reuse, API and Dependencies
+
+- Reused `ContentItem`, `ConversationHistory`, `ExecutionReceiptEventPayload`, the generic Event Reducer/Port, Project Session JSONL streams, `ProviderSession` reset semantics and existing AgentLoop Context compilation. No second transcript, pairing map, Event Store, Provider session, continuation or recovery format was added.
+- New public contracts are limited to `SessionEvent`, `SessionState`, `SessionReducer`, `SessionProjection`, their typed errors, the History normalizer and the durable-state-bound AgentLoop resume entry. Replay-only mutation helpers and resumed-state predicates remain crate-private; direct unaudited runtime resume was removed.
+- No Cargo dependency or feature changed. No Provider DTO, credential source, envelope schema, Artifact/Research fact, Cache, database or configuration service was added. Existing ExecutionReceipt shapes only reject unknown fields more strictly; their required/defaulted fields and version remain unchanged.
+
+#### Test Layout, Split Review and Codex Classification
+
+- Production `src/` contains no inline test module. Permanent regressions live in `tests/history_pairing.rs`, `tests/session_resume.rs` and the existing shared AgentLoop fixture; the full repository Gate passes 220 offline/local tests with one existing synthetic Live Smoke ignored.
+- The 617-line pure Session module was split-reviewed and retained as one exhaustive schema/reducer boundary: event-type mapping, payload encode/decode, lifecycle transition and error attribution must change together. Filesystem append composition remains separately isolated in the 75-line App module, and no generic Session Manager or Journal was extracted.
+- Codex History normalization remains `REFERENCE`; the small local pairing/repair algorithm is `REIMPLEMENT`. No upstream line, crate or test framework was copied, no forbidden dependency was added and no Upstream Port Ledger or license change is required.
+
+#### Removed and Deferred
+
+- Removed normalizer-only runtime call-order storage, direct resume that could bypass a durable `session.resumed` fact, public helpers used only by tests, duplicate Event re-appends that could strand sequence state, nested unknown-field acceptance and any reuse of an old Primary ID with a changed generation or later A-to-B-to-A cycle.
+- Deferred exactly as scope-locked: derived SessionSummary/Compaction to M3-S3b, RequestAudit/Blob reconstruction to M3-S3c, prompt/snapshot/metrics CLI reads to M3-S3d, and all image/Vision execution to M3-S4. No implementation for those Slices exists in this branch.
+- Retained P2 for M3-S3d: Resume preserves `last_context_plan` and `last_successful_context` as historical derived inspection values; the future CLI must label them as belonging to the previous ProviderSession or clear its active display. `StreamRecovered` also retains its pre-Session-v1 recovery payload without a nested payload version for M2-S1 compatibility.
 
 ### M3-S2 Lean Review
 
@@ -468,18 +507,25 @@ The current user instruction explicitly authorizes continued implementation with
 
 - None for M2-S5: implementation, stabilization and status PRs plus all post-merge `main` CI runs are complete.
 - None for M3-S1: implementation PR `#27`, status PR `#28` and all corresponding post-merge `main` Gates are complete.
-- None for M3-S2: its implementation PR, PR-head Gate, Squash Merge and post-merge `main` Gate are complete; this documentation-only status seal records the completed boundary.
-- M3-S3 cannot start before this status seal merges, even though the current user instruction authorizes continued development afterward.
+- None for M3-S2: implementation PR `#29`, status PR `#30` and all corresponding post-merge `main` Gates are complete.
+- None for M3-S3a local implementation; its PR, remote CI, Squash Merge, post-merge `main` Gate and separate status seal are pending.
+- M3-S3b cannot start before those M3-S3a remote boundaries complete, even though the current user instruction authorizes continued development afterward.
 - Live Provider compatibility remains unverified by design; missing live credentials do not block offline development and no Codex credential is an allowed substitute.
 
 ## Last Verification
 
+- M3-S3a local Gate: PASS on Rust `1.93.1`; formatting, denied-warning Clippy, 220 offline/local tests plus one ignored existing synthetic Live Smoke, locked build, inline-test scan, forbidden Codex dependency scan, credential isolation, Provider-wire and dependency-direction scans, one-AgentLoop/no-second-History-owner review, `git diff --check` and `codex/`-unchanged check all passed.
+- M3-S3a Session/Resume Gate: PASS; Session payload v1 is strict including nested fields, failed validation/append leaves State unchanged, duplicate append is a no-write result, existing Receipt/CacheHit/Recovery facts replay, used Primary IDs never recur, and only a durable Active/Resumed projection can restore normalized History and force `SessionResumed` Full delivery.
+- M3-S3a review: Terra xhigh implemented the bounded path; main review added existing-Session-event compatibility, permanent identity uniqueness, durable History restoration, duplicate-append sequence safety and strict nested payload checks. Luna xhigh returned final `APPROVE` with no P0/P1. Historical Context inspection labeling and the legacy `StreamRecovered` payload are recorded P2 for the later inspection/migration boundary.
+- M3-S3a Live Test: `OFF`; no credential, external model request, Codex login state, `~/.codex` or `CODEX_HOME` was read or modified.
+- M3-S3a remote Gate: pending implementation commit, PR, macOS CI, Squash Merge, post-merge `main` CI and separate status seal.
 - M3-S2 local Gate: PASS on Rust `1.93.1`; formatting, denied-warning Clippy, 211 offline/local tests plus one ignored existing synthetic Live Smoke, locked build, inline-test scan, forbidden Codex dependency scan, credential-isolation scan, Provider-wire and dependency-direction scans, one-AgentLoop/no-general-router review, `git diff --check` and `codex/`-unchanged check all passed.
 - M3-S2 runtime Gate: PASS; State Diff delivery is causal, fully selected and revalidated by the Context Planner against the actual cumulative rendered input. Overflow falls back to Full and a successful Full establishes a fresh incremental Baseline; failed requests do not promote derived state markers.
 - M3-S2 Tool/Profile Gate: PASS; only the sent Direct schemas can execute, `tool_search` sees only Deferred tools, Hidden tools remain undiscoverable, Exposure-directory changes force `TOOLS_CHANGED`, and Primary/secondary Profile identities never cross. Vision routing is capability-only and exhaustively tested.
 - M3-S2 review: Terra xhigh implemented and repaired the bounded vertical path. Luna xhigh first returned `REQUEST_CHANGES` for cumulative Diff budgeting, Deferred/Hidden-only invalidation and an unused doctor wrapper; after permanent regressions and removal, its second review returned `APPROVE` with no P0/P1. Static CLI doctor integration remains recorded P2 for the later CLI/Profile composition path.
 - M3-S2 Live Test: `OFF`; no credential, external model request, Codex login state, `~/.codex` or `CODEX_HOME` was read or modified.
 - M3-S2 remote Gate: PASS; implementation PR `#29` was Squash Merged as `64209bc`, PR-head run `32632629044` and post-merge `main` run `32632750182` passed the macOS Rust Gate before this status seal.
+- M3-S2 status seal: PASS; PR `#30` was Squash Merged as `48c8cb1`, PR-head run `32632953088` and post-merge `main` run `32633057788` passed before M3-S3 started.
 - M3-S1 local Gate: PASS on Rust `1.93.1`; formatting, denied-warning Clippy, 192 offline/local tests plus one ignored existing synthetic Live Smoke, locked build, inline-test scan, forbidden Codex dependency scan, dedicated-credential review, dependency-direction scan, secret-pattern scan, `git diff --check` and `codex/`-unchanged check all passed.
 - M3-S1 review: Terra xhigh implemented the bounded Context path and four P1 hardening rounds; Luna xhigh initially returned `REQUEST_CHANGES`, then returned final `APPROVE` after UTF-8/rendered-overhead budgeting, constructor-owned estimates, complete cache content identity/checksum and mismatched-hit revalidation gained permanent regressions. No unresolved P0/P1 remains.
 - M3-S1 runtime Gate: PASS; AgentLoop sends only the Planner's final `ModelInputIR`, successful Context state advances only after Provider/History/Baseline commit, and a failed request exposes its attempted plan without replacing the preceding successful inspection or committed logical manifest.

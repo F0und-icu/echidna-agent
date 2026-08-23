@@ -31,6 +31,33 @@ impl ConversationHistory {
         }
     }
 
+    /// Appends one persisted History item through the sole Tool pairing
+    /// owner. This preserves every non-Tool item verbatim and rejects invalid
+    /// Tool pair transitions.
+    pub(crate) fn append_content_item(&mut self, item: ContentItem) -> Result<(), HistoryError> {
+        match item {
+            ContentItem::ToolCall { call } => self.append_tool_call(call),
+            ContentItem::ToolResult { result } => self.append_tool_result(result),
+            ContentItem::Text { .. }
+            | ContentItem::ImageArtifact { .. }
+            | ContentItem::Unsupported { .. } => {
+                self.append_non_tool_item(item);
+                Ok(())
+            }
+        }
+    }
+
+    /// Replays complete persisted History through the same pairing rules used
+    /// by the AgentLoop and Context Planner.
+    pub(crate) fn from_complete_content_items(items: &[ContentItem]) -> Result<Self, HistoryError> {
+        let mut history = Self::default();
+        for item in items {
+            history.append_content_item(item.clone())?;
+        }
+        history.ensure_all_tool_calls_paired()?;
+        Ok(history)
+    }
+
     pub fn append_tool_call(&mut self, call: ToolCall) -> Result<(), HistoryError> {
         if self.tool_pairs.contains_key(&call.call_id) {
             return Err(HistoryError::DuplicateToolCall {
@@ -83,6 +110,68 @@ impl ConversationHistory {
     pub fn items(&self) -> &[ContentItem] {
         &self.items
     }
+
+    fn append_non_tool_item(&mut self, item: ContentItem) {
+        self.items.push(item);
+    }
+
+    fn unpaired_tool_calls_in_call_order(&self) -> Vec<(ToolCallId, ToolName)> {
+        self.items
+            .iter()
+            .filter_map(|item| match item {
+                ContentItem::ToolCall { call } => {
+                    self.tool_pairs.get(&call.call_id).and_then(|state| {
+                        (!state.completed).then(|| (call.call_id.clone(), state.tool_name.clone()))
+                    })
+                }
+                ContentItem::ToolResult { .. }
+                | ContentItem::Text { .. }
+                | ContentItem::ImageArtifact { .. }
+                | ContentItem::Unsupported { .. } => None,
+            })
+            .collect()
+    }
+}
+
+/// Produces a complete, provider-safe History while retaining the one Tool
+/// Call/Result pairing owner. Complete pairs and non-Tool items keep their
+/// input order. Orphan Results are historical noise and are omitted; every
+/// Call without a Result receives one deterministic terminal Result at the
+/// end of the normalized History.
+///
+/// Duplicate Call IDs, duplicate Results, and Result/Call tool-name
+/// mismatches remain malformed History and are rejected rather than repaired.
+pub fn normalize_content_items(items: &[ContentItem]) -> Result<Vec<ContentItem>, HistoryError> {
+    let mut history = ConversationHistory::default();
+    for item in items {
+        match item {
+            ContentItem::ToolCall { call } => history.append_tool_call(call.clone())?,
+            ContentItem::ToolResult { result } => {
+                match history.append_tool_result(result.clone()) {
+                    Ok(()) => {}
+                    Err(HistoryError::MissingToolCall { .. }) => {
+                        // A Result that was never preceded by its Call cannot be
+                        // made meaningful by a later Call, so it is omitted.
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            ContentItem::Text { .. }
+            | ContentItem::ImageArtifact { .. }
+            | ContentItem::Unsupported { .. } => history.append_content_item(item.clone())?,
+        }
+    }
+
+    for (call_id, tool_name) in history.unpaired_tool_calls_in_call_order() {
+        history.append_tool_result(ToolResult {
+            call_id,
+            tool_name,
+            status: super::tools::ToolResultStatus::Cancelled,
+            output: serde_json::json!({"error": "aborted"}),
+        })?;
+    }
+
+    Ok(history.items)
 }
 
 /// Validates externally assembled Context items by replaying Tool pairing

@@ -855,3 +855,235 @@ async fn failed_turn_boundary_configuration_keeps_pending_prompt_and_exposure_un
             .any(|spec| spec.name.as_str() == "write_file")
     );
 }
+
+#[tokio::test]
+async fn resume_replaces_the_primary_identity_forces_full_then_allows_fresh_incremental_delivery() {
+    let root = TemporaryDirectory::new("m3-session-resume");
+    let tools = ToolRegistry::for_project(root.path());
+    let provider = ScriptedProvider::new(
+        incremental_capabilities(),
+        [
+            completed_response("initial", "response-initial"),
+            completed_response("resumed", "response-resumed"),
+            completed_response("continued", "response-continued"),
+        ],
+    );
+    let mut agent = AgentLoop::with_primary_context(
+        &provider,
+        &tools,
+        "fixture",
+        ModelIdentity::new("fixture", "model"),
+        ModelProfile::new("profile", 1),
+        ProviderSession::new(
+            ProviderSessionId::new("primary-initial"),
+            ProviderSessionRole::Primary,
+            1,
+        ),
+    )
+    .unwrap();
+
+    agent
+        .run_turn("initial user input", AgentCancellation::new())
+        .await
+        .unwrap();
+    let resumed = resumed_session_state("primary-resumed", 2);
+    assert!(matches!(
+        agent.resume_from_session(
+            &resumed,
+            ProviderSession::new(
+                ProviderSessionId::new("primary-wrong"),
+                ProviderSessionRole::Primary,
+                2,
+            ),
+        ),
+        Err(cyber_agent::app::agent_loop::AgentLoopConfigurationError::ReplayedSessionProviderMismatch { .. })
+    ));
+    agent
+        .resume_from_session(
+            &resumed,
+            ProviderSession::new(
+                ProviderSessionId::new("primary-resumed"),
+                ProviderSessionRole::Primary,
+                2,
+            ),
+        )
+        .unwrap();
+    agent
+        .run_turn("resumed user input", AgentCancellation::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        agent.last_baseline_assessment(),
+        Some(&BaselineAssessment::FullRequest {
+            reason: BaselineInvalidationReason::SessionResumed,
+        })
+    );
+    agent
+        .run_turn("continue after resume", AgentCancellation::new())
+        .await
+        .unwrap();
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 3);
+    assert!(!requests[0].is_incremental());
+    assert!(
+        !requests[1].is_incremental(),
+        "the first resumed request must not reuse the old response identity"
+    );
+    assert!(matches!(
+        requests[2].delivery(),
+        cyber_agent::ports::model::ModelRequestDelivery::Incremental { continuation }
+            if continuation.as_str() == "response-resumed"
+    ));
+}
+
+#[tokio::test]
+async fn failed_resumed_full_keeps_session_resumed_pending_for_the_next_attempt() {
+    let root = TemporaryDirectory::new("m3-session-resume-failure");
+    let tools = ToolRegistry::for_project(root.path());
+    let provider = ScriptedProvider::new(
+        incremental_capabilities(),
+        [
+            completed_response("initial", "response-initial"),
+            vec![Err(ModelProviderError::ProviderFailure {
+                code: Some("temporary_failure".to_owned()),
+                message: "the resumed full request failed".to_owned(),
+            })],
+            completed_response("retry", "response-resumed-retry"),
+        ],
+    );
+    let mut agent = AgentLoop::with_primary_context(
+        &provider,
+        &tools,
+        "fixture",
+        ModelIdentity::new("fixture", "model"),
+        ModelProfile::new("profile", 1),
+        ProviderSession::new(
+            ProviderSessionId::new("primary-initial"),
+            ProviderSessionRole::Primary,
+            1,
+        ),
+    )
+    .unwrap();
+    agent
+        .run_turn("initial user input", AgentCancellation::new())
+        .await
+        .unwrap();
+    agent
+        .resume_from_session(
+            &resumed_session_state("primary-resumed", 2),
+            ProviderSession::new(
+                ProviderSessionId::new("primary-resumed"),
+                ProviderSessionRole::Primary,
+                2,
+            ),
+        )
+        .unwrap();
+
+    assert!(matches!(
+        agent
+            .run_turn("failed resumed input", AgentCancellation::new())
+            .await,
+        Err(cyber_agent::app::agent_loop::AgentLoopError::Model(_))
+    ));
+    assert_eq!(
+        agent.last_baseline_assessment(),
+        Some(&BaselineAssessment::FullRequest {
+            reason: BaselineInvalidationReason::SessionResumed,
+        })
+    );
+    agent
+        .run_turn("retry resumed input", AgentCancellation::new())
+        .await
+        .unwrap();
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 3);
+    assert!(requests.iter().all(|request| !request.is_incremental()));
+    assert_eq!(
+        agent.last_baseline_assessment(),
+        Some(&BaselineAssessment::FullRequest {
+            reason: BaselineInvalidationReason::SessionResumed,
+        })
+    );
+}
+
+#[tokio::test]
+async fn resume_from_replayed_session_history_replaces_runtime_history_and_forces_full() {
+    let root = TemporaryDirectory::new("m3-replayed-session-resume");
+    let tools = ToolRegistry::for_project(root.path());
+    let provider = ScriptedProvider::new(
+        incremental_capabilities(),
+        [
+            completed_response("initial", "response-initial"),
+            completed_response("restored", "response-restored"),
+        ],
+    );
+    let mut agent = AgentLoop::with_primary_context(
+        &provider,
+        &tools,
+        "fixture",
+        ModelIdentity::new("fixture", "model"),
+        ModelProfile::new("profile", 1),
+        ProviderSession::new(
+            ProviderSessionId::new("primary-initial"),
+            ProviderSessionRole::Primary,
+            1,
+        ),
+    )
+    .unwrap();
+    agent
+        .run_turn("volatile user input", AgentCancellation::new())
+        .await
+        .unwrap();
+    let mut restored = resumed_session_state("primary-restored", 2);
+    SessionReducer
+        .apply(
+            &mut restored,
+            SessionEvent::HistoryItemRecorded {
+                item: ContentItem::user_text("durably recorded user input"),
+            }
+            .into_envelope(
+                EventId::new("history-user"),
+                StreamId::new("session:resume-fixture"),
+                EventSequence::new(3),
+                OccurredAt::new("2026-08-23T00:00:02Z"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    agent
+        .resume_from_session(
+            &restored,
+            ProviderSession::new(
+                ProviderSessionId::new("primary-restored"),
+                ProviderSessionRole::Primary,
+                2,
+            ),
+        )
+        .unwrap();
+    agent
+        .run_turn("continue restored session", AgentCancellation::new())
+        .await
+        .unwrap();
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(!requests[1].is_incremental());
+    assert!(
+        requests[1]
+            .input()
+            .content_items
+            .iter()
+            .any(|item| matches!(
+                item,
+                ContentItem::Text { text, .. } if text == "durably recorded user input"
+            ))
+    );
+    assert_eq!(
+        agent.last_baseline_assessment(),
+        Some(&BaselineAssessment::FullRequest {
+            reason: BaselineInvalidationReason::SessionResumed,
+        })
+    );
+}

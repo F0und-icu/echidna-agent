@@ -455,23 +455,74 @@ Gate：在临时项目目录完成一次真实文件分析闭环。
 - Capability 矩阵穷举、无模型名猜测、无价格/延迟/失败驱动的隐式 fallback。
 - Profile/VisionMode 只在 Turn 边界切换，必要时重置 Primary Baseline。
 
-### M3-S3：Compaction、Resume 与 Request Audit
+### M3-S3a：History、Session Reducer 与 Resume
 
-目标：长会话可恢复并能重建语义请求。
+目标：先建立长会话恢复所需的最小事实和归一化边界，不同时引入 Summary、Audit Blob 或 CLI 组装。
 
 交付：
 
-- History 归一化。
-- Session Summary 和 Compaction。
-- RequestAuditManifest 和内容 Blob。
-- `/prompt inspect`、`/snapshot`、`/metrics`。
+- `domain/history` 继续作为唯一 History Normalizer 和 Tool Call/Result 配对所有者。
+- 复用 `cyber-agent.event` envelope v1，为 Session payload 定义独立、严格、版本化的 schema v1 和 Reducer。
+- Session Event 只有在 durable append 成功后才进入 Reducer。
+- Resume 创建全新的 Primary ProviderSession，丢弃旧 continuation/Incremental Baseline，首次真实请求以 `SessionResumed` 原因发送 Full。
 
 测试：
 
-- Tool Pair 不被拆散。
-- Summary 不自动清空活跃 Baseline。
-- Resume 首次 Full Request。
-- 源 Prompt/Memory 改动后仍能重建历史语义请求。
+- 完整 Tool Pair 保序；孤立 Result 被删除；未完成 Call 获得稳定 `aborted` Result；重复或错配 ID 被拒绝。
+- 未知 Session Event、未知 payload schema 和非法状态转移明确失败。
+- append 失败不推进 Reducer；重放严格复原 Session 状态。
+- Resume 后新旧 ProviderSession ID 不交叉，首次请求为 Full，成功提交后才可恢复增量。
+
+### M3-S3b：Session Summary 与 Compaction
+
+目标：在不覆盖 Session Event 事实的前提下生成可重建的长会话派生视图。
+
+交付：
+
+- 版本化结构化 SessionSummary 及其从严格 Session Reducer 的确定性投影。
+- Compaction 记录 Summary revision/hash、保留边界和归一化后的最近 History；原始 Events 永不删除或覆盖。
+- 活跃 Baseline 中的本地 Summary 更新不触发替换；Compaction 后下一次真实请求以 `CompactionReset` 发送 Full。
+
+测试：
+
+- Summary 可从 Events 删除重建，且不能覆盖 Research、Memory 或原始 Session History。
+- Compaction 保留完整 Tool Pair、当前目标、Target/Version、已验证事实、活跃假设、失败路径、Artifact、修改文件、未完成执行和下一步。
+- 普通 Summary 更新不误清空活跃 Baseline；Compaction 强制一次 Full，成功后恢复增量。
+
+### M3-S3c：Request Audit 与历史语义重建
+
+目标：即使 Prompt、Memory 和项目文件随后变化，也能从本地事实重建历史语义请求。
+
+交付：
+
+- 一个版本化 RequestAuditManifest，按发送顺序记录语义组成、来源、版本、Hash 和内容引用。
+- 复用现有 `ArtifactStore::publish_bytes` 和 SHA-256 Blob 身份保存首次出现的渲染内容，不建立第二个 Blob Store 或 Audit Manager。
+- 记录 ModelInputIR hash/schema、Provider Adapter version、Capability Mapping hash、delivery mode/reason；排除 API Key、Authorization Header 和非语义 Transport metadata。
+- Event durable append 成功后才把一次请求审计视为已提交；提供按 Manifest 重建历史语义请求的只读路径。
+
+测试：
+
+- 相同内容跨请求去重，不同项目的事件引用不串扰。
+- 源 Prompt/Memory 修改后仍能按原顺序和原内容重建历史请求。
+- Blob 缺失、Hash 不符、未知 schema 或乱序引用明确失败。
+- Blob/Event 持久化失败不产生已成功审计的假象。
+
+### M3-S3d：最小检查 CLI
+
+目标：把现有 Context、Snapshot 和审计信息接到个人可用的只读 CLI 检查面。
+
+交付：
+
+- `/prompt inspect` 显示最近已提交请求的组装顺序、来源、版本、Hash、Blob/Event 引用和 Token 估算。
+- `/snapshot` 显示 Hit、Incremental Refresh 或 Full Rebuild 及稳定原因。
+- `/metrics` 显示当前 Session/项目的本地请求、Token、Full/Incremental、回退、Cache 和 Compaction 指标。
+- 复用现有 ContextDecisionManifest、Project Snapshot、Event 和 RequestAudit 事实，不创建第二套指标或状态存储。
+
+测试：
+
+- CLI 对空项目、无请求、损坏引用和正常 Session 均输出稳定且可审计的结果。
+- 检查命令只读，不触发 Provider 请求、工具执行、状态推进或凭据解析。
+- 输出不包含 credential、Authorization 或非语义 Transport metadata。
 
 ### M3-S4：多模态
 

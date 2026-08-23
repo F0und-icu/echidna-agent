@@ -430,6 +430,7 @@ impl ToolResult {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExecutionReceipt {
     pub execution_id: ExecutionId,
     pub plan_fingerprint: String,
@@ -478,9 +479,36 @@ impl ExecutionReceiptEventPayload {
     pub(crate) fn is_current_for(&self, receipt: &ExecutionReceipt) -> bool {
         self.schema_version == Self::CURRENT_SCHEMA_VERSION && &self.receipt == receipt
     }
+
+    /// Strictly decodes the already-published Session Receipt payload without
+    /// exposing or duplicating its schema in another Session owner.
+    pub(crate) fn decode_current(
+        value: Value,
+    ) -> Result<ExecutionReceipt, ExecutionReceiptPayloadError> {
+        let payload: Self = serde_json::from_value(value).map_err(|error| {
+            ExecutionReceiptPayloadError::Malformed {
+                message: error.to_string(),
+            }
+        })?;
+        if payload.schema_version != Self::CURRENT_SCHEMA_VERSION {
+            return Err(ExecutionReceiptPayloadError::UnsupportedSchemaVersion {
+                schema_version: payload.schema_version,
+            });
+        }
+        Ok(payload.receipt)
+    }
+}
+
+/// Strict decoding errors for the already-published Receipt Event payload.
+/// Session reduction maps these onto its event-type-aware error boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ExecutionReceiptPayloadError {
+    Malformed { message: String },
+    UnsupportedSchemaVersion { schema_version: u16 },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToolCacheSource {
     pub cache_key: ToolResultCacheKey,
     pub source_stream_id: StreamId,
@@ -490,6 +518,7 @@ pub struct ToolCacheSource {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToolCacheValidation {
     pub cache_resource_fingerprint: String,
     pub observed_before_fingerprint: String,
@@ -505,6 +534,7 @@ impl ToolCacheValidation {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct FileMutationAudit {
     pub path: String,
     pub expected_preimage_hash: Option<String>,

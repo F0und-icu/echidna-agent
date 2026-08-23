@@ -17,6 +17,7 @@ use crate::domain::history::{ConversationHistory, HistoryError};
 use crate::domain::mode::{ModeError, PromptComposition};
 use crate::domain::model::ModelInputIR;
 use crate::domain::profile::{AgentModelProfile, AgentModelProfileError};
+use crate::domain::session::SessionState;
 use crate::domain::tools::{
     ExecutionId, IdempotencyKey, ToolCall, ToolExecutionOutcome, ToolExposurePlan, ToolResult,
 };
@@ -158,6 +159,39 @@ where
 
     pub fn history(&self) -> &ConversationHistory {
         &self.history
+    }
+
+    /// Replaces volatile runtime History from a strictly replayed Session
+    /// State, normalizes any interrupted Tool Calls, then resumes with a new
+    /// Primary ProviderSession. The next Provider request is therefore Full.
+    pub fn resume_from_session(
+        &mut self,
+        session: &SessionState,
+        mut provider_session: ProviderSession,
+    ) -> Result<(), AgentLoopConfigurationError> {
+        if session.lifecycle() != crate::domain::session::SessionLifecycle::Active
+            || !session.has_resumed()
+        {
+            return Err(AgentLoopConfigurationError::ActiveResumedSessionRequired);
+        }
+        let expected = session
+            .primary_provider_session()
+            .ok_or(AgentLoopConfigurationError::ActiveResumedSessionRequired)?;
+        if expected != provider_session.reference() {
+            return Err(
+                AgentLoopConfigurationError::ReplayedSessionProviderMismatch {
+                    expected: expected.clone(),
+                    received: provider_session.reference().clone(),
+                },
+            );
+        }
+        let normalized_items = session.normalized_history_items()?;
+        let history = ConversationHistory::from_complete_content_items(&normalized_items)?;
+        provider_session.reset(BaselineInvalidationReason::SessionResumed);
+        self.history = history;
+        self.provider_session = provider_session;
+        self.clear_committed_primary_delivery_state();
+        Ok(())
     }
 
     pub fn with_fragment_cache(mut self, cache: Arc<dyn ContextFragmentCache>) -> Self {
@@ -483,12 +517,7 @@ where
                     ProviderSessionRole::Primary,
                     generation,
                 );
-                self.continuation = None;
-                self.committed_context_manifest = None;
-                self.committed_delivery_input = None;
-                self.committed_history_len = self.history.items().len();
-                self.committed_world_state = None;
-                self.committed_project_snapshot = None;
+                self.clear_committed_primary_delivery_state();
             }
             self.active_agent_model_profile = Some(profile);
         }
@@ -500,6 +529,16 @@ where
         self.profile != *next_primary.profile()
             || self.model != *next_primary.model()
             || self.provider.capabilities() != *next_primary.capabilities()
+    }
+
+    fn clear_committed_primary_delivery_state(&mut self) {
+        self.continuation = None;
+        self.committed_context_manifest = None;
+        self.committed_delivery_input = None;
+        self.committed_history_len = self.history.items().len();
+        self.committed_world_state = None;
+        self.committed_project_snapshot = None;
+        self.last_baseline_assessment = None;
     }
 
     fn request_for_assessment(
@@ -641,6 +680,8 @@ pub enum AgentLoopConfigurationError {
     #[error("the AgentLoop requires a primary ProviderSession")]
     PrimarySessionRequired,
     #[error(transparent)]
+    History(#[from] HistoryError),
+    #[error(transparent)]
     PromptComposition(#[from] ModeError),
     #[error(transparent)]
     AgentModelProfile(#[from] AgentModelProfileError),
@@ -650,6 +691,15 @@ pub enum AgentLoopConfigurationError {
     PrimaryCapabilitiesDoNotMatchProvider,
     #[error("the selected primary model does not match the Provider bound to this AgentLoop")]
     PrimaryModelDoesNotMatchProvider,
+    #[error("resume requires an Active SessionState with a durable session.resumed fact")]
+    ActiveResumedSessionRequired,
+    #[error(
+        "replayed Session primary identity {expected:?} does not match supplied runtime identity {received:?}"
+    )]
+    ReplayedSessionProviderMismatch {
+        expected: crate::domain::context::ProviderSessionRef,
+        received: crate::domain::context::ProviderSessionRef,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

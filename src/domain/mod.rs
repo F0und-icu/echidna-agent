@@ -15,6 +15,7 @@ pub mod model;
 pub mod profile;
 pub mod project;
 pub mod research;
+pub mod session;
 pub mod snapshot;
 pub mod tools;
 pub mod world_state;

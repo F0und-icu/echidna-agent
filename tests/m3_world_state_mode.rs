@@ -20,6 +20,7 @@ use cyber_agent::domain::context::{
     ProviderSession, ProviderSessionId, ProviderSessionRef, ProviderSessionRole, StepSnapshot,
     TurnContext, TurnId,
 };
+use cyber_agent::domain::events::{EventId, EventSequence, OccurredAt, StreamId};
 use cyber_agent::domain::mode::{ModePack, PromptComposition};
 use cyber_agent::domain::model::{
     CapabilityMappingVersion, ContentItem, ModelCapabilities, ModelEvent, ModelInputIR,
@@ -30,6 +31,7 @@ use cyber_agent::domain::profile::{
     VisionRouteReason, resolve_vision_route,
 };
 use cyber_agent::domain::project::ProjectId;
+use cyber_agent::domain::session::{SessionEvent, SessionReducer, SessionState};
 use cyber_agent::domain::snapshot::{ProjectFingerprint, ProjectFingerprintKind, ProjectSnapshot};
 use cyber_agent::domain::tools::{
     ExecutionId, ToolCall, ToolCallId, ToolExecutionOutcome, ToolExecutionPlan, ToolExposure,
@@ -59,6 +61,41 @@ fn capabilities(image_input: bool) -> ModelCapabilities {
         context_window: 32_768,
         capability_mapping_version: CapabilityMappingVersion::new(7),
     }
+}
+
+fn resumed_session_state(primary_id: &str, generation: u64) -> SessionState {
+    SessionReducer
+        .reduce([
+            SessionEvent::Started {
+                primary_provider_session: ProviderSessionRef {
+                    id: ProviderSessionId::new("audit-start"),
+                    role: ProviderSessionRole::Primary,
+                    generation: 1,
+                },
+            }
+            .into_envelope(
+                EventId::new("session-started"),
+                StreamId::new("session:resume-fixture"),
+                EventSequence::new(1),
+                OccurredAt::new("2026-08-23T00:00:00Z"),
+            )
+            .unwrap(),
+            SessionEvent::Resumed {
+                primary_provider_session: ProviderSessionRef {
+                    id: ProviderSessionId::new(primary_id),
+                    role: ProviderSessionRole::Primary,
+                    generation,
+                },
+            }
+            .into_envelope(
+                EventId::new("session-resumed"),
+                StreamId::new("session:resume-fixture"),
+                EventSequence::new(2),
+                OccurredAt::new("2026-08-23T00:00:01Z"),
+            )
+            .unwrap(),
+        ])
+        .unwrap()
 }
 
 fn provider_profile(id: &str, generation: u64, image_input: bool) -> ProviderProfile {

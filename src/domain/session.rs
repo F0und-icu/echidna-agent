@@ -1,0 +1,617 @@
+//! Strict, versioned Session facts and deterministic reduction.
+//!
+//! Session facts reuse the shared `cyber-agent.event` envelope. This module
+//! owns only the Session payload vocabulary and lifecycle transitions; the
+//! generic envelope remains the owner of schema/upcasting, event identity and
+//! sequence validation.
+
+use std::collections::BTreeSet;
+
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use thiserror::Error;
+
+use super::context::{ProviderSessionId, ProviderSessionRef, ProviderSessionRole};
+use super::events::{
+    ApplyOutcome, CurrentEventUpcaster, EventEnvelope, EventError, EventId, EventReducer,
+    EventSequence, EventType, EventUpcaster, OccurredAt, State, StreamId,
+};
+use super::history::{ConversationHistory, HistoryError, normalize_content_items};
+use super::model::ContentItem;
+use super::tools::{ExecutionReceipt, ExecutionReceiptEventPayload, ExecutionReceiptPayloadError};
+
+const SESSION_STREAM_PREFIX: &str = "session:";
+const SESSION_STARTED_EVENT_TYPE: &str = "session.started";
+const SESSION_RESUMED_EVENT_TYPE: &str = "session.resumed";
+const SESSION_ENDED_EVENT_TYPE: &str = "session.ended";
+const RECEIPT_RECORDED_EVENT_TYPE: &str = "tool.execution_receipt_recorded";
+const CACHE_HIT_EVENT_TYPE: &str = "tool.result_cache_hit";
+const STREAM_RECOVERED_EVENT_TYPE: &str = "StreamRecovered";
+const HISTORY_ITEM_RECORDED_EVENT_TYPE: &str = "session.history_item_recorded";
+const CURRENT_SESSION_PAYLOAD_SCHEMA_VERSION: u16 = 1;
+
+/// The distinct lifecycle state reconstructed from a Session stream.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionLifecycle {
+    Unstarted,
+    Active,
+    Ended,
+}
+
+/// A strictly known Session fact. Tool Receipt variants deliberately reuse
+/// the Tool domain's `ExecutionReceipt` rather than defining a Session copy.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SessionEvent {
+    Started {
+        primary_provider_session: ProviderSessionRef,
+    },
+    Resumed {
+        primary_provider_session: ProviderSessionRef,
+    },
+    Ended,
+    ExecutionReceiptRecorded {
+        receipt: ExecutionReceipt,
+    },
+    ToolResultCacheHit {
+        receipt: ExecutionReceipt,
+    },
+    StreamRecovered {
+        recovery_artifact: String,
+        truncated_from_offset: u64,
+        resumed_after_sequence: Option<u64>,
+    },
+    HistoryItemRecorded {
+        item: ContentItem,
+    },
+}
+
+impl SessionEvent {
+    /// Builds a versioned Session envelope using the shared current Event
+    /// schema. Sequence allocation remains the Event Store's responsibility.
+    pub fn into_envelope(
+        self,
+        event_id: EventId,
+        stream_id: StreamId,
+        sequence: EventSequence,
+        occurred_at: OccurredAt,
+    ) -> Result<EventEnvelope<Value>, SessionError> {
+        let event_type = self.event_type();
+        let payload = self.encode_payload(&event_type)?;
+        Ok(EventEnvelope::current(
+            event_id,
+            stream_id,
+            sequence,
+            occurred_at,
+            event_type,
+            payload,
+        ))
+    }
+
+    fn event_type(&self) -> EventType {
+        match self {
+            Self::Started { .. } => EventType::new(SESSION_STARTED_EVENT_TYPE),
+            Self::Resumed { .. } => EventType::new(SESSION_RESUMED_EVENT_TYPE),
+            Self::Ended => EventType::new(SESSION_ENDED_EVENT_TYPE),
+            Self::ExecutionReceiptRecorded { .. } => EventType::new(RECEIPT_RECORDED_EVENT_TYPE),
+            Self::ToolResultCacheHit { .. } => EventType::new(CACHE_HIT_EVENT_TYPE),
+            Self::StreamRecovered { .. } => EventType::new(STREAM_RECOVERED_EVENT_TYPE),
+            Self::HistoryItemRecorded { .. } => EventType::new(HISTORY_ITEM_RECORDED_EVENT_TYPE),
+        }
+    }
+
+    fn encode_payload(&self, event_type: &EventType) -> Result<Value, SessionError> {
+        let payload = match self {
+            Self::Started {
+                primary_provider_session,
+            }
+            | Self::Resumed {
+                primary_provider_session,
+            } => serde_json::to_value(SessionLifecyclePayload::current(
+                primary_provider_session.clone(),
+            )),
+            Self::Ended => serde_json::to_value(EmptySessionPayload::current()),
+            Self::ExecutionReceiptRecorded { receipt } | Self::ToolResultCacheHit { receipt } => {
+                serde_json::to_value(ExecutionReceiptEventPayload::current(receipt.clone()))
+            }
+            Self::StreamRecovered {
+                recovery_artifact,
+                truncated_from_offset,
+                resumed_after_sequence,
+            } => serde_json::to_value(StreamRecoveredPayload {
+                recovery_artifact: recovery_artifact.clone(),
+                truncated_from_offset: *truncated_from_offset,
+                resumed_after_sequence: *resumed_after_sequence,
+            }),
+            Self::HistoryItemRecorded { item } => {
+                serde_json::to_value(SessionHistoryItemPayload::current(item.clone()))
+            }
+        };
+        payload.map_err(|error| SessionError::PayloadEncode {
+            event_type: event_type.clone(),
+            message: error.to_string(),
+        })
+    }
+
+    fn decode(event_type: &EventType, payload: Value) -> Result<Self, SessionError> {
+        match event_type.as_str() {
+            SESSION_STARTED_EVENT_TYPE => {
+                let payload: SessionLifecyclePayload = decode_strict_payload(event_type, payload)?;
+                require_current_payload_schema(event_type, payload.schema_version)?;
+                Ok(Self::Started {
+                    primary_provider_session: payload.primary_provider_session,
+                })
+            }
+            SESSION_RESUMED_EVENT_TYPE => {
+                let payload: SessionLifecyclePayload = decode_strict_payload(event_type, payload)?;
+                require_current_payload_schema(event_type, payload.schema_version)?;
+                Ok(Self::Resumed {
+                    primary_provider_session: payload.primary_provider_session,
+                })
+            }
+            SESSION_ENDED_EVENT_TYPE => {
+                let payload: EmptySessionPayload = decode_strict_payload(event_type, payload)?;
+                require_current_payload_schema(event_type, payload.schema_version)?;
+                Ok(Self::Ended)
+            }
+            RECEIPT_RECORDED_EVENT_TYPE => decode_execution_receipt(payload, event_type)
+                .map(|receipt| Self::ExecutionReceiptRecorded { receipt }),
+            CACHE_HIT_EVENT_TYPE => decode_execution_receipt(payload, event_type)
+                .map(|receipt| Self::ToolResultCacheHit { receipt }),
+            STREAM_RECOVERED_EVENT_TYPE => {
+                let payload: StreamRecoveredPayload = decode_strict_payload(event_type, payload)?;
+                if payload.recovery_artifact.is_empty() {
+                    return Err(SessionError::MalformedPayload {
+                        event_type: event_type.clone(),
+                        message: "StreamRecovered recovery_artifact must not be empty".to_owned(),
+                    });
+                }
+                Ok(Self::StreamRecovered {
+                    recovery_artifact: payload.recovery_artifact,
+                    truncated_from_offset: payload.truncated_from_offset,
+                    resumed_after_sequence: payload.resumed_after_sequence,
+                })
+            }
+            HISTORY_ITEM_RECORDED_EVENT_TYPE => {
+                let payload: SessionHistoryItemPayload =
+                    decode_strict_payload(event_type, payload)?;
+                require_current_payload_schema(event_type, payload.schema_version)?;
+                Ok(Self::HistoryItemRecorded { item: payload.item })
+            }
+            _ => Err(SessionError::UnknownEventType {
+                event_type: event_type.clone(),
+            }),
+        }
+    }
+}
+
+/// The pure Session state reconstructed from one ordered Session stream.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionState {
+    event_state: State,
+    stream_id: Option<StreamId>,
+    lifecycle: SessionLifecycle,
+    primary_provider_session: Option<ProviderSessionRef>,
+    used_primary_provider_session_ids: BTreeSet<ProviderSessionId>,
+    history: ConversationHistory,
+    resume_count: u64,
+    execution_receipt_count: u64,
+    cache_hit_count: u64,
+    recovery_count: u64,
+}
+
+impl Default for SessionState {
+    fn default() -> Self {
+        Self {
+            event_state: State::default(),
+            stream_id: None,
+            lifecycle: SessionLifecycle::Unstarted,
+            primary_provider_session: None,
+            used_primary_provider_session_ids: BTreeSet::new(),
+            history: ConversationHistory::default(),
+            resume_count: 0,
+            execution_receipt_count: 0,
+            cache_hit_count: 0,
+            recovery_count: 0,
+        }
+    }
+}
+
+impl SessionState {
+    pub fn stream_id(&self) -> Option<&StreamId> {
+        self.stream_id.as_ref()
+    }
+
+    pub const fn lifecycle(&self) -> SessionLifecycle {
+        self.lifecycle
+    }
+
+    pub fn primary_provider_session(&self) -> Option<&ProviderSessionRef> {
+        self.primary_provider_session.as_ref()
+    }
+
+    /// The exact History items replayed from durable Session facts. It may
+    /// contain an interrupted Tool Call until the normalized recovery view is
+    /// requested.
+    pub fn history(&self) -> &ConversationHistory {
+        &self.history
+    }
+
+    /// Produces the complete recovery History using the sole History
+    /// normalizer. Interrupted Calls receive deterministic aborted Results;
+    /// malformed durable pairings had already failed strict replay.
+    pub(crate) fn normalized_history_items(&self) -> Result<Vec<ContentItem>, HistoryError> {
+        normalize_content_items(self.history.items())
+    }
+
+    /// Whether a durable `session.resumed` fact has established the current
+    /// lifecycle's resumed Provider identity.
+    pub(crate) const fn has_resumed(&self) -> bool {
+        self.resume_count > 0
+    }
+
+    pub const fn execution_receipt_count(&self) -> u64 {
+        self.execution_receipt_count
+    }
+
+    pub const fn cache_hit_count(&self) -> u64 {
+        self.cache_hit_count
+    }
+
+    pub const fn recovery_count(&self) -> u64 {
+        self.recovery_count
+    }
+
+    pub fn applied_event_count(&self) -> usize {
+        self.event_state.applied_event_count()
+    }
+}
+
+/// The sole pure reducer for known Session event types.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SessionReducer;
+
+impl SessionReducer {
+    pub fn reduce<Events>(&self, events: Events) -> Result<SessionState, SessionError>
+    where
+        Events: IntoIterator<Item = EventEnvelope<Value>>,
+    {
+        let mut state = SessionState::default();
+        for event in events {
+            self.apply(&mut state, event)?;
+        }
+        Ok(state)
+    }
+
+    /// Validates and reduces an Event without mutating `state` if any envelope,
+    /// payload, stream or transition rule fails.
+    pub fn apply(
+        &self,
+        state: &mut SessionState,
+        event: EventEnvelope<Value>,
+    ) -> Result<ApplyOutcome, SessionError> {
+        let event = EventUpcaster::upcast(&CurrentEventUpcaster, event)?;
+        validate_session_stream(state, &event.stream_id)?;
+        let session_event = SessionEvent::decode(&event.event_type, event.payload.clone())?;
+        let stream_id = event.stream_id.clone();
+        let sequence = event.sequence;
+
+        let mut next = state.clone();
+        let outcome = EventReducer.apply(&mut next.event_state, event)?;
+        if outcome == ApplyOutcome::DuplicateIgnored {
+            return Ok(outcome);
+        }
+        require_next_sequence(state, &stream_id, sequence)?;
+        next.stream_id = Some(stream_id);
+        apply_session_event(&mut next, session_event)?;
+        *state = next;
+        Ok(outcome)
+    }
+}
+
+fn decode_execution_receipt(
+    payload: Value,
+    event_type: &EventType,
+) -> Result<ExecutionReceipt, SessionError> {
+    ExecutionReceiptEventPayload::decode_current(payload).map_err(|error| match error {
+        ExecutionReceiptPayloadError::Malformed { message } => SessionError::MalformedPayload {
+            event_type: event_type.clone(),
+            message,
+        },
+        ExecutionReceiptPayloadError::UnsupportedSchemaVersion { schema_version } => {
+            SessionError::UnsupportedPayloadSchema {
+                event_type: event_type.clone(),
+                schema_version,
+            }
+        }
+    })
+}
+
+fn require_next_sequence(
+    state: &SessionState,
+    stream_id: &StreamId,
+    received: EventSequence,
+) -> Result<(), SessionError> {
+    let expected = match state.event_state.last_sequence_for(stream_id) {
+        Some(last) => EventSequence::new(last.get().checked_add(1).ok_or_else(|| {
+            SessionError::Event(EventError::SequenceOverflow {
+                stream_id: stream_id.clone(),
+                last,
+            })
+        })?),
+        None => EventSequence::new(1),
+    };
+    if received == expected {
+        Ok(())
+    } else {
+        Err(SessionError::Event(EventError::UnexpectedSequence {
+            stream_id: stream_id.clone(),
+            expected,
+            received,
+        }))
+    }
+}
+
+fn validate_session_stream(state: &SessionState, stream_id: &StreamId) -> Result<(), SessionError> {
+    if stream_id
+        .as_str()
+        .strip_prefix(SESSION_STREAM_PREFIX)
+        .is_none_or(str::is_empty)
+    {
+        return Err(SessionError::UnexpectedStream {
+            stream_id: stream_id.clone(),
+        });
+    }
+    if let Some(expected) = state.stream_id()
+        && expected != stream_id
+    {
+        return Err(SessionError::StreamChanged {
+            expected: expected.clone(),
+            received: stream_id.clone(),
+        });
+    }
+    Ok(())
+}
+
+fn apply_session_event(state: &mut SessionState, event: SessionEvent) -> Result<(), SessionError> {
+    match event {
+        SessionEvent::Started {
+            primary_provider_session,
+        } => {
+            require_primary_provider_session(&primary_provider_session)?;
+            require_transition(
+                state.lifecycle,
+                "session.started",
+                SessionLifecycle::Unstarted,
+            )?;
+            record_fresh_primary_provider_session_id(state, &primary_provider_session)?;
+            state.lifecycle = SessionLifecycle::Active;
+            state.primary_provider_session = Some(primary_provider_session);
+        }
+        SessionEvent::Resumed {
+            primary_provider_session,
+        } => {
+            require_primary_provider_session(&primary_provider_session)?;
+            require_transition(state.lifecycle, "session.resumed", SessionLifecycle::Active)?;
+            record_fresh_primary_provider_session_id(state, &primary_provider_session)?;
+            state.resume_count = increment("resume count", state.resume_count)?;
+            state.primary_provider_session = Some(primary_provider_session);
+        }
+        SessionEvent::Ended => {
+            require_transition(state.lifecycle, "session.ended", SessionLifecycle::Active)?;
+            state.lifecycle = SessionLifecycle::Ended;
+        }
+        SessionEvent::ExecutionReceiptRecorded { .. } => {
+            state.execution_receipt_count =
+                increment("execution receipt count", state.execution_receipt_count)?;
+        }
+        SessionEvent::ToolResultCacheHit { .. } => {
+            state.cache_hit_count = increment("cache hit count", state.cache_hit_count)?;
+        }
+        SessionEvent::StreamRecovered { .. } => {
+            state.recovery_count = increment("recovery count", state.recovery_count)?;
+        }
+        SessionEvent::HistoryItemRecorded { item } => {
+            require_transition(
+                state.lifecycle,
+                "session.history_item_recorded",
+                SessionLifecycle::Active,
+            )?;
+            state.history.append_content_item(item)?;
+        }
+    }
+    Ok(())
+}
+
+fn increment(field: &'static str, value: u64) -> Result<u64, SessionError> {
+    value
+        .checked_add(1)
+        .ok_or(SessionError::StateOverflow { field })
+}
+
+fn require_primary_provider_session(
+    provider_session: &ProviderSessionRef,
+) -> Result<(), SessionError> {
+    if provider_session.role == ProviderSessionRole::Primary {
+        Ok(())
+    } else {
+        Err(SessionError::PrimaryProviderSessionRequired {
+            provider_session: provider_session.clone(),
+        })
+    }
+}
+
+fn record_fresh_primary_provider_session_id(
+    state: &mut SessionState,
+    provider_session: &ProviderSessionRef,
+) -> Result<(), SessionError> {
+    if state
+        .used_primary_provider_session_ids
+        .insert(provider_session.id.clone())
+    {
+        Ok(())
+    } else {
+        Err(SessionError::ProviderSessionIdReused {
+            provider_session_id: provider_session.id.clone(),
+        })
+    }
+}
+
+fn require_transition(
+    current: SessionLifecycle,
+    event_type: &'static str,
+    expected: SessionLifecycle,
+) -> Result<(), SessionError> {
+    if current == expected {
+        Ok(())
+    } else {
+        Err(SessionError::InvalidTransition {
+            event_type,
+            current,
+        })
+    }
+}
+
+fn decode_strict_payload<T>(event_type: &EventType, payload: Value) -> Result<T, SessionError>
+where
+    T: DeserializeOwned + Serialize,
+{
+    let decoded = serde_json::from_value(payload.clone()).map_err(|error| {
+        SessionError::MalformedPayload {
+            event_type: event_type.clone(),
+            message: error.to_string(),
+        }
+    })?;
+    let canonical =
+        serde_json::to_value(&decoded).map_err(|error| SessionError::PayloadEncode {
+            event_type: event_type.clone(),
+            message: error.to_string(),
+        })?;
+    if canonical != payload {
+        return Err(SessionError::MalformedPayload {
+            event_type: event_type.clone(),
+            message: "payload contains unsupported or non-canonical fields".to_owned(),
+        });
+    }
+    Ok(decoded)
+}
+
+fn require_current_payload_schema(
+    event_type: &EventType,
+    schema_version: u16,
+) -> Result<(), SessionError> {
+    if schema_version == CURRENT_SESSION_PAYLOAD_SCHEMA_VERSION {
+        Ok(())
+    } else {
+        Err(SessionError::UnsupportedPayloadSchema {
+            event_type: event_type.clone(),
+            schema_version,
+        })
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SessionLifecyclePayload {
+    schema_version: u16,
+    primary_provider_session: ProviderSessionRef,
+}
+
+impl SessionLifecyclePayload {
+    fn current(primary_provider_session: ProviderSessionRef) -> Self {
+        Self {
+            schema_version: CURRENT_SESSION_PAYLOAD_SCHEMA_VERSION,
+            primary_provider_session,
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct EmptySessionPayload {
+    schema_version: u16,
+}
+
+impl EmptySessionPayload {
+    const fn current() -> Self {
+        Self {
+            schema_version: CURRENT_SESSION_PAYLOAD_SCHEMA_VERSION,
+        }
+    }
+}
+
+/// This technical recovery payload predates the strict Session vocabulary.
+/// It remains explicitly accepted for existing Session JSONL streams.
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StreamRecoveredPayload {
+    recovery_artifact: String,
+    truncated_from_offset: u64,
+    resumed_after_sequence: Option<u64>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SessionHistoryItemPayload {
+    schema_version: u16,
+    item: ContentItem,
+}
+
+impl SessionHistoryItemPayload {
+    fn current(item: ContentItem) -> Self {
+        Self {
+            schema_version: CURRENT_SESSION_PAYLOAD_SCHEMA_VERSION,
+            item,
+        }
+    }
+}
+
+/// Explicit Session schema, stream, payload and transition failures.
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
+pub enum SessionError {
+    #[error(transparent)]
+    Event(#[from] EventError),
+    #[error(transparent)]
+    History(#[from] HistoryError),
+    #[error("Session Event stream `{stream_id}` must use the `session:` namespace")]
+    UnexpectedStream { stream_id: StreamId },
+    #[error("Session Event stream changed from `{expected}` to `{received}` during reduction")]
+    StreamChanged {
+        expected: StreamId,
+        received: StreamId,
+    },
+    #[error("unknown Session Event type `{event_type}`")]
+    UnknownEventType { event_type: EventType },
+    #[error("Session Event `{event_type}` has malformed payload: {message}")]
+    MalformedPayload {
+        event_type: EventType,
+        message: String,
+    },
+    #[error(
+        "Session Event `{event_type}` uses unsupported payload schema version {schema_version}"
+    )]
+    UnsupportedPayloadSchema {
+        event_type: EventType,
+        schema_version: u16,
+    },
+    #[error("failed to encode Session Event `{event_type}` payload: {message}")]
+    PayloadEncode {
+        event_type: EventType,
+        message: String,
+    },
+    #[error("Session Event `{event_type}` is invalid while lifecycle is {current:?}")]
+    InvalidTransition {
+        event_type: &'static str,
+        current: SessionLifecycle,
+    },
+    #[error("Session Event requires a Primary ProviderSession, received {provider_session:?}")]
+    PrimaryProviderSessionRequired {
+        provider_session: ProviderSessionRef,
+    },
+    #[error("Session lifecycle must not reuse Primary ProviderSession ID `{provider_session_id}`")]
+    ProviderSessionIdReused {
+        provider_session_id: ProviderSessionId,
+    },
+    #[error("Session {field} overflowed while reducing a finite Event stream")]
+    StateOverflow { field: &'static str },
+}

@@ -1,4 +1,5 @@
-use cyber_agent::domain::history::{ConversationHistory, HistoryError};
+use cyber_agent::domain::history::{ConversationHistory, HistoryError, normalize_content_items};
+use cyber_agent::domain::model::ContentItem;
 use cyber_agent::domain::tools::{ToolCall, ToolCallId, ToolName, ToolResult, ToolResultStatus};
 use serde_json::json;
 
@@ -94,4 +95,117 @@ fn failed_and_cancelled_results_are_complete_pairs() {
             .unwrap();
         assert_eq!(history.ensure_all_tool_calls_paired(), Ok(()));
     }
+}
+
+#[test]
+fn normalization_preserves_complete_pairs_drops_orphans_and_repairs_open_calls_in_call_order() {
+    let completed_call = call("complete", "read_file");
+    let completed_result = result("complete", "read_file", ToolResultStatus::Succeeded);
+    let first_open_call = call("first-open", "list_files");
+    let second_open_call = call("second-open", "search_files");
+    let normalized = normalize_content_items(&[
+        ContentItem::user_text("inspect the workspace"),
+        ContentItem::ToolCall {
+            call: completed_call.clone(),
+        },
+        ContentItem::ToolResult {
+            result: completed_result.clone(),
+        },
+        ContentItem::ToolResult {
+            result: result("orphan", "read_file", ToolResultStatus::Failed),
+        },
+        ContentItem::ToolCall {
+            call: first_open_call.clone(),
+        },
+        ContentItem::assistant_text("the remaining calls were interrupted"),
+        ContentItem::ToolCall {
+            call: second_open_call.clone(),
+        },
+    ])
+    .unwrap();
+
+    assert_eq!(normalized.len(), 8);
+    assert_eq!(
+        normalized[1],
+        ContentItem::ToolCall {
+            call: completed_call
+        }
+    );
+    assert_eq!(
+        normalized[2],
+        ContentItem::ToolResult {
+            result: completed_result
+        }
+    );
+    assert!(!normalized.iter().any(|item| matches!(
+        item,
+        ContentItem::ToolResult { result } if result.call_id.as_str() == "orphan"
+    )));
+    assert_eq!(
+        normalized[6],
+        ContentItem::ToolResult {
+            result: ToolResult {
+                call_id: first_open_call.call_id,
+                tool_name: first_open_call.name,
+                status: ToolResultStatus::Cancelled,
+                output: json!({"error": "aborted"}),
+            }
+        }
+    );
+    assert_eq!(
+        normalized[7],
+        ContentItem::ToolResult {
+            result: ToolResult {
+                call_id: second_open_call.call_id,
+                tool_name: second_open_call.name,
+                status: ToolResultStatus::Cancelled,
+                output: json!({"error": "aborted"}),
+            }
+        }
+    );
+}
+
+#[test]
+fn normalization_rejects_duplicate_calls_results_and_name_mismatches() {
+    let duplicate_call = || {
+        normalize_content_items(&[
+            ContentItem::ToolCall {
+                call: call("duplicate", "read_file"),
+            },
+            ContentItem::ToolCall {
+                call: call("duplicate", "read_file"),
+            },
+        ])
+    };
+    assert!(matches!(
+        duplicate_call(),
+        Err(HistoryError::DuplicateToolCall { call_id }) if call_id.as_str() == "duplicate"
+    ));
+
+    assert!(matches!(
+        normalize_content_items(&[
+            ContentItem::ToolCall {
+                call: call("duplicate-result", "read_file"),
+            },
+            ContentItem::ToolResult {
+                result: result("duplicate-result", "read_file", ToolResultStatus::Succeeded),
+            },
+            ContentItem::ToolResult {
+                result: result("duplicate-result", "read_file", ToolResultStatus::Succeeded),
+            },
+        ]),
+        Err(HistoryError::DuplicateToolResult { call_id }) if call_id.as_str() == "duplicate-result"
+    ));
+
+    assert!(matches!(
+        normalize_content_items(&[
+            ContentItem::ToolCall {
+                call: call("mismatch", "read_file"),
+            },
+            ContentItem::ToolResult {
+                result: result("mismatch", "list_files", ToolResultStatus::Succeeded),
+            },
+        ]),
+        Err(HistoryError::ToolNameMismatch { call_id, .. }) if call_id.as_str() == "mismatch"
+    ));
 }
