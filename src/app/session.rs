@@ -52,6 +52,12 @@ impl SessionProjection {
         &self.state
     }
 
+    pub(crate) fn next_event_sequence(
+        &self,
+    ) -> Result<crate::domain::events::EventSequence, SessionError> {
+        self.state.next_event_sequence()
+    }
+
     /// Persists the supplied complete Event through the caller's EventSink.
     /// State promotion remains conditional on a successful durable append.
     pub fn append<S>(

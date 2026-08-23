@@ -2,6 +2,7 @@
 
 mod compaction;
 mod context_state;
+mod request_audit;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -19,6 +20,9 @@ use crate::domain::history::{ConversationHistory, HistoryError};
 use crate::domain::mode::{ModeError, PromptComposition};
 use crate::domain::model::ModelInputIR;
 use crate::domain::profile::{AgentModelProfile, AgentModelProfileError};
+use crate::domain::request_audit::{
+    RequestAuditAttempt, RequestAuditError, RequestAuditRunContext,
+};
 use crate::domain::session::{SessionError, SessionState, SessionSummary, SessionSummaryDraft};
 use crate::domain::tools::{
     ExecutionId, IdempotencyKey, ToolCall, ToolExecutionOutcome, ToolExposurePlan, ToolResult,
@@ -36,6 +40,7 @@ use super::model_sample::ModelSample;
 use super::model_streaming::{ModelStreamOutcome, ModelStreamingError, ModelStreamingService};
 use super::tool_scheduler::execute_batch;
 use compaction::AppliedCompaction;
+use request_audit::RequestAuditStage;
 
 const MAX_MODEL_REQUESTS_PER_TURN: usize = 32;
 static NEXT_PRIMARY_RUNTIME_SESSION: AtomicU64 = AtomicU64::new(1);
@@ -305,6 +310,34 @@ where
         user_text: impl Into<String>,
         cancellation: AgentCancellation,
     ) -> Result<AgentTurnOutcome, AgentLoopError> {
+        self.run_turn_inner(user_text, cancellation, None).await
+    }
+
+    /// Runs one Turn through an explicitly supplied request-audit stage. The
+    /// ordinary [`Self::run_turn`] path deliberately remains unaudited so
+    /// callers opt into Blob/Event persistence rather than getting a silent
+    /// second fact path.
+    pub async fn run_turn_audited(
+        &mut self,
+        user_text: impl Into<String>,
+        cancellation: AgentCancellation,
+        audit_context: &RequestAuditRunContext,
+        record_attempt: &mut dyn FnMut(RequestAuditAttempt) -> Result<(), AgentLoopError>,
+    ) -> Result<AgentTurnOutcome, AgentLoopError> {
+        self.run_turn_inner(
+            user_text,
+            cancellation,
+            Some((audit_context, record_attempt)),
+        )
+        .await
+    }
+
+    async fn run_turn_inner(
+        &mut self,
+        user_text: impl Into<String>,
+        cancellation: AgentCancellation,
+        mut audit: Option<RequestAuditStage<'_>>,
+    ) -> Result<AgentTurnOutcome, AgentLoopError> {
         self.apply_pending_configuration()?;
         if cancellation.is_cancelled() {
             return Ok(AgentTurnOutcome::Cancelled {
@@ -410,6 +443,13 @@ where
             let request = self.request_for_assessment(&delivery_input, &assessment)?;
             reserve_provider_request(&mut provider_requests)?;
             self.last_context_plan = Some(plan.clone());
+            self.record_request_audit_attempt(
+                &mut audit,
+                &full_input,
+                &request,
+                &capabilities,
+                &assessment,
+            )?;
             let stream = match ModelStreamingService::new(self.provider)
                 .consume(request.clone(), cancellation.clone())
                 .await
@@ -420,9 +460,10 @@ where
                 })) if request.is_incremental() => {
                     self.provider_session
                         .reset(BaselineInvalidationReason::ProviderRejected);
-                    self.last_baseline_assessment = Some(BaselineAssessment::FullRequest {
+                    let fallback_assessment = BaselineAssessment::FullRequest {
                         reason: BaselineInvalidationReason::ProviderRejected,
-                    });
+                    };
+                    self.last_baseline_assessment = Some(fallback_assessment.clone());
                     delivery_input = full_input.clone();
                     snapshot = StepSnapshot::capture(
                         &turn,
@@ -432,11 +473,16 @@ where
                         InternalRequestMetadata::default(),
                     )?;
                     reserve_provider_request(&mut provider_requests)?;
+                    let fallback_request = ModelRequest::full(delivery_input.clone());
+                    self.record_request_audit_attempt(
+                        &mut audit,
+                        &full_input,
+                        &fallback_request,
+                        &capabilities,
+                        &fallback_assessment,
+                    )?;
                     ModelStreamingService::new(self.provider)
-                        .consume(
-                            ModelRequest::full(delivery_input.clone()),
-                            cancellation.clone(),
-                        )
+                        .consume(fallback_request, cancellation.clone())
                         .await
                 }
                 Err(error) => Err(error),
@@ -792,6 +838,8 @@ pub enum AgentLoopError {
     #[error(transparent)]
     Session(#[from] SessionError),
     #[error(transparent)]
+    RequestAudit(#[from] RequestAuditError),
+    #[error(transparent)]
     Context(#[from] ContextError),
     #[error(transparent)]
     ContextCompilation(#[from] ContextCompilationError),
@@ -809,6 +857,10 @@ pub enum AgentLoopError {
     EmptyModelResponse,
     #[error("an incremental-capable Provider completed without a continuation identity")]
     ContinuationIdentityMissing,
+    #[error("the selected RequestAudit delivery does not match the actual Provider request")]
+    RequestAuditDeliveryMismatch,
+    #[error("RequestAudit commit failed: {message}")]
+    RequestAuditCommit { message: String },
     #[error("the Agent reached the per-Turn model-request limit of {limit}")]
     ModelRequestLimit { limit: usize },
     #[error("the Tool scheduler returned fewer outcomes than staged plans")]

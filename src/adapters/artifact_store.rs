@@ -50,23 +50,31 @@ impl ArtifactStore for LocalArtifactStore {
         let (blob_id, size_bytes, temporary_path) = stage_bytes_once(bytes, &blob_directory)?;
         self.publish_staged(blob_directory, blob_id, size_bytes, temporary_path)
     }
+
+    fn read_blob(&self, blob_id: &BlobId) -> Result<Vec<u8>, Self::Error> {
+        self.read_blob_checked(blob_id)
+    }
 }
 
 impl LocalArtifactStore {
     /// Reads a previously published Blob only after revalidating its immutable
     /// SHA-256 identity. Memory revision diffs use this narrow local helper;
     /// it does not create a new Artifact or cache entry.
-    pub(crate) fn read_blob(&self, blob_id: &BlobId) -> Result<Vec<u8>, LocalArtifactStoreError> {
+    fn read_blob_checked(&self, blob_id: &BlobId) -> Result<Vec<u8>, LocalArtifactStoreError> {
         self.inspect_blob_directory()?;
         let path = self.blob_directory().join(blob_id.as_str());
-        let (actual_blob_id, _) = hash_existing_blob(&path)?;
+        let mut file = open_regular_existing_blob(&path)?;
+        let mut bytes = Vec::new();
+        let (actual_blob_id, _) = hash_open_existing_blob(&path, &mut file, |chunk| {
+            bytes.extend_from_slice(chunk);
+        })?;
         if actual_blob_id != *blob_id {
             return Err(LocalArtifactStoreError::ExistingBlobConflict {
                 path,
                 blob_id: blob_id.clone(),
             });
         }
-        fs::read(&path).map_err(|source| LocalArtifactStoreError::ExistingBlobRead { path, source })
+        Ok(bytes)
     }
 
     fn publish_staged(
@@ -333,6 +341,14 @@ fn inspect_existing_blob(
 
 fn hash_existing_blob(path: &Path) -> Result<(BlobId, u64), LocalArtifactStoreError> {
     let mut file = open_regular_existing_blob(path)?;
+    hash_open_existing_blob(path, &mut file, |_| {})
+}
+
+fn hash_open_existing_blob(
+    path: &Path,
+    file: &mut File,
+    mut collect: impl FnMut(&[u8]),
+) -> Result<(BlobId, u64), LocalArtifactStoreError> {
     let mut hasher = Sha256::new();
     let mut size_bytes = 0_u64;
     let mut buffer = [0_u8; HASH_BUFFER_BYTES];
@@ -347,6 +363,7 @@ fn hash_existing_blob(path: &Path) -> Result<(BlobId, u64), LocalArtifactStoreEr
             break;
         }
         hasher.update(&buffer[..read]);
+        collect(&buffer[..read]);
         size_bytes = size_bytes.checked_add(read as u64).ok_or_else(|| {
             LocalArtifactStoreError::ExistingBlobRead {
                 path: path.to_path_buf(),

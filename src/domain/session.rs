@@ -19,6 +19,7 @@ use super::events::{
 };
 use super::history::{ConversationHistory, HistoryError, normalize_content_items};
 use super::model::ContentItem;
+use super::request_audit::{RequestAuditError, RequestAuditManifest};
 use super::tools::{ExecutionReceipt, ExecutionReceiptEventPayload, ExecutionReceiptPayloadError};
 
 const SESSION_STREAM_PREFIX: &str = "session:";
@@ -30,6 +31,7 @@ const CACHE_HIT_EVENT_TYPE: &str = "tool.result_cache_hit";
 const STREAM_RECOVERED_EVENT_TYPE: &str = "StreamRecovered";
 const HISTORY_ITEM_RECORDED_EVENT_TYPE: &str = "session.history_item_recorded";
 pub(super) const COMPACTION_CREATED_EVENT_TYPE: &str = "session.compaction_created";
+pub(super) const REQUEST_AUDIT_RECORDED_EVENT_TYPE: &str = "session.request_audit_recorded";
 pub(super) const CURRENT_SESSION_PAYLOAD_SCHEMA_VERSION: u16 = 1;
 
 mod compaction;
@@ -74,6 +76,9 @@ pub enum SessionEvent {
     CompactionCreated {
         compaction: SessionCompaction,
     },
+    RequestAuditRecorded {
+        manifest: RequestAuditManifest,
+    },
 }
 
 impl SessionEvent {
@@ -108,6 +113,7 @@ impl SessionEvent {
             Self::StreamRecovered { .. } => EventType::new(STREAM_RECOVERED_EVENT_TYPE),
             Self::HistoryItemRecorded { .. } => EventType::new(HISTORY_ITEM_RECORDED_EVENT_TYPE),
             Self::CompactionCreated { .. } => EventType::new(COMPACTION_CREATED_EVENT_TYPE),
+            Self::RequestAuditRecorded { .. } => EventType::new(REQUEST_AUDIT_RECORDED_EVENT_TYPE),
         }
     }
 
@@ -138,6 +144,7 @@ impl SessionEvent {
                 serde_json::to_value(SessionHistoryItemPayload::current(item.clone()))
             }
             Self::CompactionCreated { compaction } => serde_json::to_value(compaction),
+            Self::RequestAuditRecorded { manifest } => serde_json::to_value(manifest),
         };
         payload.map_err(|error| SessionError::PayloadEncode {
             event_type: event_type.clone(),
@@ -194,6 +201,16 @@ impl SessionEvent {
                 let compaction: SessionCompaction = decode_strict_payload(event_type, payload)?;
                 Ok(Self::CompactionCreated { compaction })
             }
+            REQUEST_AUDIT_RECORDED_EVENT_TYPE => {
+                let manifest: RequestAuditManifest = decode_strict_payload(event_type, payload)?;
+                manifest
+                    .validate()
+                    .map_err(|error| SessionError::MalformedPayload {
+                        event_type: event_type.clone(),
+                        message: error.to_string(),
+                    })?;
+                Ok(Self::RequestAuditRecorded { manifest })
+            }
             _ => Err(SessionError::UnknownEventType {
                 event_type: event_type.clone(),
             }),
@@ -215,6 +232,7 @@ pub struct SessionState {
     cache_hit_count: u64,
     recovery_count: u64,
     latest_compaction: Option<SessionCompaction>,
+    request_audits: Vec<RequestAuditManifest>,
 }
 
 impl Default for SessionState {
@@ -231,6 +249,7 @@ impl Default for SessionState {
             cache_hit_count: 0,
             recovery_count: 0,
             latest_compaction: None,
+            request_audits: Vec::new(),
         }
     }
 }
@@ -321,6 +340,35 @@ impl SessionState {
     pub fn applied_event_count(&self) -> usize {
         self.event_state.applied_event_count()
     }
+
+    pub(crate) fn contains_event_id(&self, event_id: &EventId) -> bool {
+        self.event_state.contains_event_id(event_id)
+    }
+
+    /// The immutable audit manifests committed through this Session stream in
+    /// append order. Blob reconstruction remains outside the pure reducer.
+    pub fn request_audits(&self) -> &[RequestAuditManifest] {
+        &self.request_audits
+    }
+
+    /// Returns the precise next Session Event sequence without allocating or
+    /// mutating it. The existing Event Store remains sequence/durability owner.
+    pub(crate) fn next_event_sequence(&self) -> Result<EventSequence, SessionError> {
+        let stream_id = self
+            .stream_id()
+            .ok_or(SessionError::RequestAuditSessionStreamMissing)?;
+        match self.event_state.last_sequence_for(stream_id) {
+            Some(last) => Ok(EventSequence::new(last.get().checked_add(1).ok_or_else(
+                || {
+                    SessionError::Event(EventError::SequenceOverflow {
+                        stream_id: stream_id.clone(),
+                        last,
+                    })
+                },
+            )?)),
+            None => Ok(EventSequence::new(1)),
+        }
+    }
 }
 
 /// The sole pure reducer for known Session event types.
@@ -351,10 +399,19 @@ impl SessionReducer {
         let session_event = SessionEvent::decode(&event.event_type, event.payload.clone())?;
         let stream_id = event.stream_id.clone();
         let sequence = event.sequence;
+        let event_id = event.event_id.clone();
 
         let mut next = state.clone();
         let outcome = EventReducer.apply(&mut next.event_state, event)?;
         if outcome == ApplyOutcome::DuplicateIgnored {
+            if let SessionEvent::RequestAuditRecorded { manifest } = session_event {
+                let exact_existing = state.request_audits.iter().any(|existing| {
+                    existing.audit_event_id() == &event_id && existing == &manifest
+                });
+                if !exact_existing {
+                    return Err(SessionError::RequestAuditDuplicateEventConflict { event_id });
+                }
+            }
             return Ok(outcome);
         }
         require_next_sequence(state, &stream_id, sequence)?;
@@ -362,7 +419,7 @@ impl SessionReducer {
         let source_event_sequence = state
             .stream_id()
             .and_then(|stream_id| state.event_state.last_sequence_for(stream_id));
-        apply_session_event(&mut next, session_event, source_event_sequence)?;
+        apply_session_event(&mut next, session_event, source_event_sequence, &event_id)?;
         *state = next;
         Ok(outcome)
     }
@@ -436,6 +493,7 @@ fn apply_session_event(
     state: &mut SessionState,
     event: SessionEvent,
     source_event_sequence: Option<EventSequence>,
+    event_id: &EventId,
 ) -> Result<(), SessionError> {
     match event {
         SessionEvent::Started {
@@ -516,6 +574,30 @@ fn apply_session_event(
                 });
             }
             state.latest_compaction = Some(compaction);
+        }
+        SessionEvent::RequestAuditRecorded { manifest } => {
+            require_transition(
+                state.lifecycle,
+                "session.request_audit_recorded",
+                SessionLifecycle::Active,
+            )?;
+            manifest.validate()?;
+            if manifest.audit_event_id() != event_id {
+                return Err(SessionError::RequestAuditEventIdentityMismatch {
+                    expected: event_id.clone(),
+                    received: manifest.audit_event_id().clone(),
+                });
+            }
+            let expected_stream_id = state
+                .stream_id()
+                .ok_or(SessionError::RequestAuditSessionStreamMissing)?;
+            if manifest.binding().session_stream_id() != expected_stream_id {
+                return Err(SessionError::RequestAuditSessionStreamMismatch {
+                    expected: expected_stream_id.clone(),
+                    received: manifest.binding().session_stream_id().clone(),
+                });
+            }
+            state.request_audits.push(manifest);
         }
     }
     Ok(())
@@ -671,6 +753,8 @@ pub enum SessionError {
     Event(#[from] EventError),
     #[error(transparent)]
     History(#[from] HistoryError),
+    #[error(transparent)]
+    RequestAudit(#[from] RequestAuditError),
     #[error("Session Event stream `{stream_id}` must use the `session:` namespace")]
     UnexpectedStream { stream_id: StreamId },
     #[error("Session Event stream changed from `{expected}` to `{received}` during reduction")]
@@ -712,6 +796,22 @@ pub enum SessionError {
     },
     #[error("Session {field} overflowed while reducing a finite Event stream")]
     StateOverflow { field: &'static str },
+    #[error("RequestAudit requires an initialized Session Event stream")]
+    RequestAuditSessionStreamMissing,
+    #[error("RequestAudit Session stream `{received}` does not match Event stream `{expected}")]
+    RequestAuditSessionStreamMismatch {
+        expected: StreamId,
+        received: StreamId,
+    },
+    #[error(
+        "RequestAudit Manifest event ID `{received}` does not match Event envelope `{expected}"
+    )]
+    RequestAuditEventIdentityMismatch {
+        expected: EventId,
+        received: EventId,
+    },
+    #[error("duplicate RequestAudit Event ID `{event_id}` has conflicting durable content")]
+    RequestAuditDuplicateEventConflict { event_id: EventId },
     #[error("Session Compaction Summary fingerprint does not match its structured content")]
     CompactionFingerprintMismatch,
     #[error("Session Compaction Summary field `{field}` must not be empty")]

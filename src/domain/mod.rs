@@ -14,6 +14,7 @@ pub mod mode;
 pub mod model;
 pub mod profile;
 pub mod project;
+pub mod request_audit;
 pub mod research;
 pub mod session;
 pub mod snapshot;

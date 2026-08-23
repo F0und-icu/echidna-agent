@@ -452,6 +452,13 @@ impl State {
     pub fn last_sequence_for(&self, stream_id: &StreamId) -> Option<EventSequence> {
         self.last_sequences.get(stream_id).copied()
     }
+
+    /// Whether this exact Event identity has already been reduced. App
+    /// services use this narrow query to reject caller-supplied identity reuse
+    /// before performing irreversible side effects.
+    pub(crate) fn contains_event_id(&self, event_id: &EventId) -> bool {
+        self.applied_event_ids.contains(event_id)
+    }
 }
 
 /// The result of applying one Event to a State.

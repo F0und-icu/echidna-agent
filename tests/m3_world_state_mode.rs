@@ -1,3 +1,5 @@
+#[path = "m3_world_state_mode/request_audit.rs"]
+mod request_audit;
 #[path = "m3_world_state_mode/session_compaction.rs"]
 mod session_compaction;
 mod support;

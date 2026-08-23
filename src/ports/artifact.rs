@@ -24,4 +24,9 @@ pub trait ArtifactStore: Send + Sync {
     /// Publishes already-owned bytes without forcing a caller to create a
     /// temporary source file merely to obtain an audited Blob reference.
     fn publish_bytes(&self, bytes: &[u8]) -> Result<StoredBlob, Self::Error>;
+
+    /// Reads one previously published immutable Blob after the concrete Store
+    /// revalidates its SHA-256 identity. Historical request reconstruction is
+    /// the current consumer; this Port never exposes Blob filesystem paths.
+    fn read_blob(&self, blob_id: &BlobId) -> Result<Vec<u8>, Self::Error>;
 }
