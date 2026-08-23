@@ -18,3 +18,5 @@ pub use planner::{
     FullLogicalManifest, FullLogicalManifestEntry, LogicalAppendOnlyRejection,
     LogicalBaselineRelation,
 };
+
+pub(crate) use planner::estimate_audit_component_tokens;

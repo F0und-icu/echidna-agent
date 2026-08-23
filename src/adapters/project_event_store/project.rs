@@ -186,8 +186,8 @@ impl Project {
     /// stream to have been created by project initialization.
     pub(crate) fn research_stream_path_existing(&self) -> Result<PathBuf, ProjectEventStoreError> {
         let path = self.control_directory().join(RESEARCH_FILE);
-        match fs::metadata(&path) {
-            Ok(metadata) if metadata.is_file() => Ok(path),
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if !metadata.file_type().is_symlink() && metadata.is_file() => Ok(path),
             Ok(_) => Err(ProjectEventStoreError::InvalidResearchStream { path }),
             Err(source) if source.kind() == io::ErrorKind::NotFound => {
                 Err(ProjectEventStoreError::MissingResearchStream { path })
@@ -219,8 +219,8 @@ impl Project {
         session_id: &StreamId,
     ) -> Result<PathBuf, ProjectEventStoreError> {
         let path = self.stream_path(&ProjectEventStream::Session(session_id.clone()))?;
-        match fs::metadata(&path) {
-            Ok(metadata) if metadata.is_file() => Ok(path),
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if !metadata.file_type().is_symlink() && metadata.is_file() => Ok(path),
             Ok(_) => Err(ProjectEventStoreError::Io {
                 operation: "inspect Session Event stream",
                 path,
@@ -232,6 +232,74 @@ impl Project {
                 source,
             }),
         }
+    }
+
+    /// Lists already-created Session directory names without creating or
+    /// opening a stream. Inspection uses this to discover the current local
+    /// Session while preserving the Event Store's read-only boundary.
+    pub(crate) fn existing_session_ids(&self) -> Result<Vec<StreamId>, ProjectEventStoreError> {
+        let path = self.control_directory().join(SESSIONS_DIRECTORY);
+        let metadata =
+            fs::symlink_metadata(&path).map_err(|source| ProjectEventStoreError::Io {
+                operation: "inspect Session directory",
+                path: path.clone(),
+                source,
+            })?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(ProjectEventStoreError::Io {
+                operation: "inspect Session directory",
+                path,
+                source: io::Error::new(io::ErrorKind::InvalidData, "not a regular directory"),
+            });
+        }
+        let mut ids =
+            fs::read_dir(&path)
+                .map_err(|source| ProjectEventStoreError::Io {
+                    operation: "read Session directory",
+                    path: path.clone(),
+                    source,
+                })?
+                .map(|entry| {
+                    let entry = entry.map_err(|source| ProjectEventStoreError::Io {
+                        operation: "read Session directory entry",
+                        path: path.clone(),
+                        source,
+                    })?;
+                    let entry_path = entry.path();
+                    let metadata = fs::symlink_metadata(&entry_path).map_err(|source| {
+                        ProjectEventStoreError::Io {
+                            operation: "inspect Session directory entry",
+                            path: entry_path.clone(),
+                            source,
+                        }
+                    })?;
+                    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                        return Err(ProjectEventStoreError::Io {
+                            operation: "inspect Session directory entry",
+                            path: entry_path,
+                            source: io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "Session entry is not a regular directory",
+                            ),
+                        });
+                    }
+                    let name = entry.file_name().into_string().map_err(|_| {
+                        ProjectEventStoreError::Io {
+                            operation: "decode Session directory entry",
+                            path: entry_path.clone(),
+                            source: io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "Session directory name is not valid UTF-8",
+                            ),
+                        }
+                    })?;
+                    let id = StreamId::new(name);
+                    self.session_stream_path_existing(&id)?;
+                    Ok(id)
+                })
+                .collect::<Result<Vec<_>, ProjectEventStoreError>>()?;
+        ids.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        Ok(ids)
     }
 }
 

@@ -9,6 +9,13 @@ mod manifest;
 mod render;
 mod selection;
 
+/// Estimates audit component bytes with the same deterministic conservative
+/// rule used by Context budgeting. Audit inspection does not own a second
+/// token formula.
+pub(crate) fn estimate_audit_component_tokens(encoded_bytes: usize) -> u32 {
+    estimator::estimate_encoded_tokens(encoded_bytes)
+}
+
 use serde::Serialize;
 
 use super::canonical::{RequestHash, canonical_tool_schemas};

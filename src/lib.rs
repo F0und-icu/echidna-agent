@@ -12,6 +12,8 @@ pub mod app;
 pub mod domain;
 pub mod ports;
 
+mod cli_inspection;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "cyber-agent",
@@ -31,6 +33,19 @@ enum CliCommand {
     Chat,
     /// Inspect local configuration and runtime readiness.
     Doctor,
+    /// Inspect the most recently committed audited request.
+    Prompt {
+        #[command(subcommand)]
+        inspection: PromptCommand,
+    },
+    /// Inspect the existing Project Snapshot cache without rebuilding it.
+    Snapshot,
+    /// Display local Session and project metrics.
+    Metrics {
+        /// Inspect one exact Session directory identity.
+        #[arg(long)]
+        session: Option<String>,
+    },
     /// Inspect locally available derived state.
     Inspect {
         #[command(subcommand)]
@@ -44,6 +59,16 @@ enum InspectCommand {
     Context,
 }
 
+#[derive(Debug, Subcommand)]
+enum PromptCommand {
+    /// Inspect the most recently committed audited request.
+    Inspect {
+        /// Inspect one exact Session directory identity.
+        #[arg(long)]
+        session: Option<String>,
+    },
+}
+
 #[derive(Debug, Error)]
 pub enum CliError {
     #[error("failed to render CLI help: {0}")]
@@ -54,6 +79,12 @@ pub enum CliError {
     WorkingDirectory(#[source] io::Error),
     #[error(transparent)]
     Project(#[from] ProjectEventStoreError),
+    #[error("Session `{session_id}` does not exist in the current project")]
+    SessionNotFound { session_id: String },
+    #[error(
+        "the current project has {session_count} Sessions; select one explicitly with `--session <session-id>`"
+    )]
+    SessionSelectionRequired { session_count: usize },
 }
 
 #[derive(Debug, Serialize)]
@@ -150,6 +181,11 @@ where
             "interactive chat is reserved for a later implementation slice",
         ),
         Some(CliCommand::Doctor) => print_json(&doctor_report()),
+        Some(CliCommand::Prompt {
+            inspection: PromptCommand::Inspect { session },
+        }) => cli_inspection::print_prompt_inspection(session.as_deref()),
+        Some(CliCommand::Snapshot) => cli_inspection::print_snapshot_inspection(),
+        Some(CliCommand::Metrics { session }) => cli_inspection::print_metrics(session.as_deref()),
         Some(CliCommand::Inspect {
             inspection: InspectCommand::Context,
         }) => print_no_active_context(),

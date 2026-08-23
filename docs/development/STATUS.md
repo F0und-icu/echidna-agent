@@ -6,29 +6,29 @@
 - Phase: `IMPLEMENTATION`
 - Implementation: `STARTED`
 - Current milestone: `M3`
-- Current slice: `M3-S3d`
-- Slice state: `READY_NOT_AUTHORIZED`; M3-S3c is locally complete but M3-S3d cannot start before the M3-S3c implementation merge and separate status seal
-- Lean governance: `ACTIVE`; M3-S3c passed its local Cargo/Lean Gate and Luna xhigh final review with no unresolved P0/P1
-- Local Git initialized: `yes`; the completed M3-S3c implementation remains on `agent/m3-s3c-request-audit` for PR delivery
-- Remote repository: `F0und-icu/cyber-agent` private; M3-S3c implementation PR `#35` was Squash Merged and its status seal is pending
+- Current slice: `M3-S4`
+- Slice state: `READY_NOT_AUTHORIZED`; M3-S3d is locally complete but M3-S4 cannot start before the M3-S3d implementation merge and separate status seal
+- Lean governance: `ACTIVE`; M3-S3d passed its local Cargo/Lean Gate and Terra xhigh final review with no unresolved P0/P1
+- Local Git initialized: `yes`; the completed M3-S3d implementation remains on `agent/m3-s3d-inspection-cli` for PR delivery
+- Remote repository: `F0und-icu/cyber-agent` private; M3-S3c implementation PR `#35` and status PR `#36` were Squash Merged
 - Documentation baseline commit: `55ff3be`
-- Current code base: M3-S3c Squash Merge commit `cb6781e`; post-merge `main` CI passed
+- Current code base: locally complete M3-S3d branch based on M3-S3c status-seal Squash Merge commit `96385f1`
 - Upstream Codex baseline: `3aae5d885bac39c1262491aa3fd100dfd8b3919f`
 
 ## Last Completed Slice
 
-- Slice: `M3-S3c`
-- Delivery branch: `agent/m3-s3c-request-audit`
-- Base commit: `d6639c5`
-- Scope: one strict versioned RequestAuditManifest, ordered exact semantic component Blobs, actual-delivery and full-logical IR identities, one durable Session audit fact and read-only historical semantic reconstruction through the existing Artifact Store.
-- Audit behavior: each explicit audited AgentLoop Provider attempt is committed before streaming; Full, Incremental and ProviderRejected Full fallback retain distinct delivery mode/reason and full-logical versus delivered semantic hashes. Audit failure makes zero Provider calls.
-- Durability behavior: the service preflights Project/Session binding and Event identity before Blob publication, then publishes exact component bytes through the existing SHA-256 owner and treats Session Event append as the commit point. Conflicting duplicate RequestAudit Event IDs fail strictly; Event failure may leave only unreachable content-addressed Blobs.
-- Reconstruction behavior: historical requests read only Manifest and same-handle hash-verified Blob bytes; current Prompt, Memory, project source, Provider, Tool, clock and credentials are not consulted. BLAKE3 semantic identities remain distinct from SHA-256 Blob identities.
-- Test path: permanent external regressions cover exact reconstruction after source mutation, same-content dedupe, Full/incremental/rejected-fallback attempts, real-service pre-stream commit, Project/Session isolation, preflight zero-Blob failures, duplicate Event conflicts, unknown Manifest/IR schema, component order/identity errors, missing/tampered content, Event/Blob failure atomicity and credential/transport exclusion.
-- Forbidden work preserved: no inspection CLI, image/Vision execution, raw HTTP snapshot, Provider wire change, Artifact provenance fact, general Manager/Router/Hook/database, second Blob/Event Store or AgentLoop, credential/login access, Codex source modification or Codex code port.
-- Result: `COMPLETE`; the full Cargo/Lean Gate passes 236 offline/local tests with one existing opt-in Live Smoke ignored, and Luna xhigh returned final `APPROVE` with no unresolved P0/P1 after Terra implementation and main-agent preflight/duplicate-identity hardening. PR-head and post-merge `main` CI both passed.
-- Dependencies and schemas: no dependency, Cargo feature, Provider DTO or envelope schema changed; `request_audit_manifest` v1 and `session.request_audit_recorded` payload v1 are the only new persisted contracts, while `ArtifactStore::read_blob` extends the existing Blob Port.
-- Git: implementation commit `c4a2cf9`, PR `#35`, PR-head CI `32643924616`, Squash Merge `cb6781e` and post-merge `main` CI `32644062157`; this evidence is delivered by the separate status seal.
+- Slice: `M3-S3d`
+- Delivery branch: `agent/m3-s3d-inspection-cli`
+- Base commit: `96385f1`
+- Scope: deterministic read-only `prompt inspect`, `snapshot` and `metrics` CLI projections over the existing Project, Session Event, RequestAudit Blob and Project Snapshot facts.
+- Prompt behavior: the selected Session's latest committed request exposes ordered component identity/source, Blob and audit Event references, Manifest/IR/Adapter/Capability versions and hashes, delivery mode/reason and the existing Context estimator's conservative Token estimate; Provider usage remains explicitly unavailable.
+- Snapshot behavior: the command validates the existing cache and current source fingerprint without rebuilding or writing it. A currently valid cache is reported as `hit` even when its historical build used an incremental explicit-path refresh; a missing, stale or invalid cache reports the stable Full-rebuild reason.
+- Session/metrics behavior: one Session is selected automatically, multiple Sessions require explicit `--session`, and missing/corrupt/non-regular Session streams fail explicitly. Counts for requests, estimated Tokens, Full/incremental delivery, ProviderRejected fallback, Tool cache hits and Compaction derive only from replayed facts.
+- Test path: permanent subprocess regressions cover uninitialized/empty projects, normal and explicit Session selection, ambiguous/missing Sessions, current Snapshot Hit/Full behavior, historical incremental-cache provenance, missing Blob, corrupt Session JSONL, Session Event symlinks, stable output, secret/transport exclusion and no local mutation.
+- Forbidden work preserved: no Provider or Tool call, credential resolution, Snapshot rebuild, Event/Blob write, metrics store, image/Vision execution, new schema, general Manager/Router/Hook/database, second runtime Agent, Codex source change or Codex code port.
+- Result: `COMPLETE` locally; the full Cargo/Lean Gate passes 244 offline/local tests with one existing opt-in Live Smoke ignored. Terra xhigh returned final `APPROVE` with no P0/P1/P2 blocker after main-agent correctness and reuse hardening. Remote PR/CI/merge evidence is pending.
+- Dependencies and schemas: no Cargo dependency, feature, Provider DTO, Port, credential source, persisted Event/Manifest schema or remote transport changed; all inspection reports are non-authoritative derived views.
+- Git: implementation is ready on the M3-S3d Slice branch; exact commit, PR, CI and Squash Merge identities will be added by the separate remote status seal.
 - Live Test: `OFF`; the existing synthetic smoke remains ignored and no real credential or public Provider request was used.
 
 ## Current Authority
@@ -71,28 +71,29 @@
 - M3-S3a strict History normalization, versioned Session facts/replay, append-before-apply persistence and Resume-first Full delivery.
 - M3-S3b bounded typed SessionSummary, strict Compaction facts, pair-safe retained History and Compaction-first Full delivery.
 - M3-S3c strict RequestAudit facts, deduplicated exact semantic component Blobs, pre-stream durable commit and historical reconstruction.
+- M3-S3d read-only prompt, Snapshot and local metrics CLI inspection over existing auditable facts.
 
 ## Next Planned Slice
 
-- Slice: `M3-S3d`
-- State: `READY_NOT_AUTHORIZED` until M3-S3c is Squash Merged, its post-merge `main` Gate passes and a separate status-seal PR records both remote identities.
-- Planned delivery branch: `agent/m3-s3d-inspection-cli`
-- Base commit: resolve from the remotely sealed `main`; never branch from the unmerged M3-S3c head.
-- Scope lock: one read-only CLI inspection composition over existing ContextDecisionManifest, Project Snapshot, Session Event and RequestAudit facts only.
-- Required behavior: prompt/request, snapshot and local metrics inspection remain deterministic and do not call a Provider, execute a Tool, mutate state or resolve credentials; formal Provider composition remains deferred and must use `run_turn_audited` before prototype exit.
-- Intended permanent tests: empty project, no request, normal Session and corrupted audit reference output; stable local request/Full/incremental/fallback/cache/compaction counts; credential and transport sentinel exclusion.
-- Forbidden continuation: M3-S4 image execution/VisionAnalysisService, M4 research Profiles/Eval/Replay/Observation, general router/hook/plugin/database/watcher work, Live Provider requests and Codex credential/login access.
+- Slice: `M3-S4`
+- State: `READY_NOT_AUTHORIZED` until M3-S3d is Squash Merged, its post-merge `main` Gate passes and a separate status-seal PR records both remote identities.
+- Planned delivery branch: `agent/m3-s4-multimodal`
+- Base commit: resolve from the remotely sealed `main`; never branch from the unmerged M3-S3d head.
+- Scope lock: one auditable local-image vertical path implementing the accepted Architecture v1.1/ADR-0002 Direct or Secondary vision composition inside the existing single AgentLoop and Session authority.
+- Required behavior: validate/store original and derived image Artifacts, resolve the pure capability-driven Vision route, keep Primary/Vision request identities isolated, persist route/observation provenance, and support zero-request Mechanical Replay. Formal Primary composition must use `run_turn_audited` before prototype exit.
+- Intended permanent tests: supported/corrupt/oversized images, deterministic budgeted derivation and Lineage, exhaustive route matrix, direct-versus-secondary call separation, initial-image non-omission, Primary/Vision identity isolation, structured uncertainty and zero-request replay.
+- Forbidden continuation: M4 vulnerability Profiles/Eval/TargetDelta/long-flow work, general model router, autonomous vision Agent, database/index/watcher/hook/plugin work, Live Provider requests and Codex credential/login access.
 
 ## Current Authorization
 
 The current user instruction explicitly authorizes continued implementation with delegated Terra/Luna development and normal version-controlled remote delivery until the first prototype reaches the separately authorized Live Provider validation boundary.
 
 - Run mode: `IMPLEMENT_TO_LIVE_BOUNDARY`
-- Slice ID: `M3-S3d`; state `READY_NOT_AUTHORIZED` while M3-S3c remote sealing is incomplete; the current user's continuing authorization may activate it only after that Gate
+- Slice ID: `M3-S4`; state `READY_NOT_AUTHORIZED` while M3-S3d remote sealing is incomplete; the current user's continuing authorization may activate it only after that Gate
 - Git mode: `BRANCH_PR_REVIEW_MERGE`; commit, push, PR, CI review and merge are authorized when the Slice Gate passes
 - Delegation mode: `AUTHORIZED`; delegated implementation Agents must independently read the repository authority chain and stay inside the current Slice
 - Live test mode: `OFF`; no real Provider credential or public model request is authorized
-- Forbidden continuation before M3-S3c remote sealing: all M3-S3d production work, M3-S4 image execution/VisionAnalysisService, M4 work, general database/index/watcher/hook/router/plugin work, Codex source modification or Codex credentials/login access
+- Forbidden continuation before M3-S3d remote sealing: all M3-S4 image execution/VisionAnalysisService work, M4 work, general database/index/watcher/hook/router/plugin work, Codex source modification or Codex credentials/login access
 - Stop condition: complete and remotely seal each authorized Slice before advancing; stop at the first prototype's separately authorized Live Provider validation boundary without running a Live Test
 
 ## M2-S5 Slice Start
@@ -158,7 +159,45 @@ The current user instruction explicitly authorizes continued implementation with
 - Delegation: Luna xhigh performs a read-only contract/reuse audit before one Terra xhigh implementation owner; Luna xhigh performs the final read-only review. The main agent owns scope, schema, corrections, Git and merge authority.
 - Live Test: `OFF`; only pure Domain, temporary local projects, Fixture and Mock paths are authorized.
 
+## M3-S3d Slice Start
+
+- Delivery branch: `agent/m3-s3d-inspection-cli`
+- Base commit: `96385f1`
+- Intended production touch points: one read-only App inspection projection over the existing ContextDecisionManifest, Project Snapshot/Cache outcome, Session facts and RequestAuditManifest; thin CLI command dispatch and stable human-readable output only.
+- Scope budget: no new fact source, metrics store, Provider/Tool execution path, credential resolution, raw request snapshot, database, general Manager/Router/Hook, second Event/Blob Store or second runtime Agent.
+- Intended permanent tests: empty/uninitialized project, no Session/request, normal and corrupt Session/audit reference paths; stable prompt/snapshot/metrics output; counts derived from existing facts; no writes, Provider calls, Tool calls or secret/transport fields.
+- Acceptance commands: the locked Cargo fmt/clippy/test/build Gate; production inline-test, forbidden Codex dependency, credential/transport, dependency-direction and `codex/`-unchanged scans; `git diff --check`.
+- Delegation: Luna xhigh owns the bounded implementation; the main agent owns contract decisions, corrections, Git and merge authority, with Terra review only if cross-layer risk remains after the local Gate.
+- Live Test: `OFF`; this Slice uses only local Event/Blob fixtures and subprocess CLI tests.
+
 ## Slice Lean Review
+
+### M3-S3d Lean Review
+
+#### Semantic Owners
+
+- `src/app/inspection_{prompt,snapshot,metrics}.rs` own only deterministic report projections for their individual CLI views. They consume validated existing facts and do not own a second Session reducer, request model, Snapshot lifecycle, metrics store or generic inspection registry.
+- `src/cli_inspection.rs` is the filesystem composition boundary: it discovers one existing Project, selects one exact Session, replays the existing Session projection and supplies existing Snapshot/Blob facts to the App projections. It has no Provider, Tool execution, credential or write path.
+- `RequestAuditService::reconstruct` remains the sole App-level binding and exact Blob reconstruction path. The new CLI calls it rather than copying binding or content validation. The Context Planner's existing estimator remains the one conservative Token-estimation owner.
+- `LocalProjectSnapshot::inspect_read_only` owns current cache validation without persistence. It reuses the existing fingerprint, Tool capability and complete-cache validators; historical `rebuild_reason` cannot turn a currently valid cache Hit into a false current Incremental Refresh.
+
+#### Reuse, API and Dependencies
+
+- Reused `SessionProjection`, RequestAuditManifest, ArtifactStore, RequestAuditService, Project Snapshot/cache validators, fixed Tool specs, Baseline reason codes and Session counters. No request/metrics/Event/Blob/Cache duplicate, Provider-specific DTO or second Token formula was added.
+- Public API growth is limited to two CLI error variants and the command surface. Inspection report types and projection modules remain crate-private; test access did not widen Domain, Port or Adapter contracts.
+- No Cargo dependency, feature, Provider wire type, credential reference, persisted schema, Event type, configuration source or remote transport changed. The command output is a derived JSON view and is never treated as an authoritative fact.
+
+#### Test Layout, Split Review and Codex Classification
+
+- Production `src/` contains no inline test module. Eight permanent subprocess regressions live in `tests/inspection_cli.rs` and `tests/inspection_audited_cli.rs`; the full repository Gate passes 244 offline/local tests with one existing synthetic Live Smoke ignored.
+- Prompt, Snapshot and Metrics projections are separate narrow modules because their output contracts and fact inputs change independently. The shared module contains only immutable report inputs and the calls into the existing estimator; no `utils`, Manager, Registry or speculative Trait was introduced.
+- Codex prompt inspection and local metrics behavior remain `REFERENCE`; all local composition is `REIMPLEMENT`. No upstream line, crate or test framework was copied, so no Upstream Port Ledger or license change is required.
+
+#### Removed and Deferred
+
+- Removed redundant `inspect` aliases, eager loading of unrelated Session/Blob/Snapshot facts, duplicated RequestAudit binding validation, lexicographic multi-Session guessing, historical incremental-build/current-Hit conflation and acceptance of symlinked Session Event files.
+- Deferred exactly as scope-locked: image validation/direct delivery, VisionAnalysisService, Vision route/observation facts and replay to M3-S4; vulnerability Profiles, Trace Replay/Shadow Eval, Observation/TargetDelta and long-flow validation to M4. No implementation for those Slices exists in this branch.
+- Retained prototype-exit gates: the standalone `chat` command still has no formal Project/Session/Provider composition, and `doctor` still has no configured Profile source. Before any Live Test, one CLI runtime must compose `run_turn_audited`, real History Session facts and dedicated Cyber Agent credentials without adding a second AgentLoop or reading Codex login state.
 
 ### M3-S3c Lean Review
 
@@ -587,11 +626,18 @@ The current user instruction explicitly authorizes continued implementation with
 - None for M3-S2: implementation PR `#29`, status PR `#30` and all corresponding post-merge `main` Gates are complete.
 - None for M3-S3a; implementation PR `#31`, status PR `#32` and all corresponding post-merge `main` Gates are complete.
 - None for M3-S3b; implementation PR `#33`, status PR `#34` and all corresponding post-merge `main` Gates are complete.
-- None for M3-S3c offline implementation.
+- None for M3-S3c; implementation PR `#35`, status PR `#36` and all corresponding post-merge `main` Gates are complete.
+- None for M3-S3d offline implementation; remote implementation and status sealing are pending.
 - Live Provider compatibility remains unverified by design; missing live credentials do not block offline development and no Codex credential is an allowed substitute.
 
 ## Last Verification
 
+- M3-S3d local Gate: PASS on Rust `1.93.1`; formatting, denied-warning Clippy, 244 offline/local tests plus one ignored existing synthetic Live Smoke, locked build, inline-test scan, forbidden Codex dependency scan, credential/transport and `codex/`-unchanged scans, plus `git diff --check`, all passed.
+- M3-S3d inspection Gate: PASS; uninitialized/empty/normal/corrupt facts are stable, one Session auto-selects while ambiguity requires `--session`, all RequestAudit Blob references are revalidated through the existing service, current Snapshot disposition does not misreport historical refresh provenance, and inspections perform no local write, Provider call, Tool execution or credential resolution.
+- M3-S3d review: Luna xhigh implemented the bounded path; main review separated per-command reads, removed redundant aliases/abstractions, added explicit Session selection and strict filesystem handling, reused the RequestAudit/Token owners and fixed current-Hit semantics. Terra xhigh returned final `APPROVE` with no P0/P1/P2 blocker.
+- M3-S3d Live Test: `OFF`; no credential, external model request, Codex login state, `~/.codex` or `CODEX_HOME` was read or modified.
+- M3-S3c remote Gate: PASS; implementation commit `c4a2cf9` was Squash Merged through PR `#35` as `cb6781e`, with PR-head run `32643924616` and post-merge `main` run `32644062157` passing the macOS Rust Gate.
+- M3-S3c status seal: PASS; PR `#36` was Squash Merged as `96385f1`, with PR-head run `32644218115` and post-merge `main` run `32644328650` passing before M3-S3d started.
 - M3-S3b local Gate: PASS on Rust `1.93.1`; formatting, denied-warning Clippy, 228 offline/local tests plus one ignored existing synthetic Live Smoke, locked build, inline-test scan, forbidden Codex dependency scan, credential isolation, Provider-wire and dependency-direction scans, one-AgentLoop/no-second-History-owner review, `git diff --check` and `codex/`-unchanged check all passed.
 - M3-S3b Summary/Compaction Gate: PASS; explicit bounded typed Summary content replays from strict Events, actual recent History retention preserves complete Tool pairs and all original facts, source/revision/fingerprint mismatches fail atomically, later History remains recoverable, and exact full-payload Compaction application is Session/Primary-bound and idempotent.
 - M3-S3b runtime Gate: PASS; pending Summary changes remain outside active Context/Baseline, durable Compaction forces `CompactionReset` Full, failure/empty/cancellation preserve the reset, one completed committed sample clears it, a repeated exact fact is a no-op and compacted Resume restores Summary plus retained/post-boundary History under `SessionResumed`.

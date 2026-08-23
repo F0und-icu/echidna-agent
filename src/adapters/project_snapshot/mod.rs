@@ -44,6 +44,16 @@ pub(crate) struct InspectionResult {
     pub(crate) hashed_paths: Vec<String>,
 }
 
+/// The result of validating the existing Project Snapshot cache. Unlike
+/// [`InspectionResult`], this value is produced without rebuilding or
+/// persisting any cache file.
+#[derive(Clone, Debug)]
+pub(crate) struct ReadOnlyInspectionResult {
+    pub(crate) disposition: CacheDisposition,
+    pub(crate) source_fingerprint: ProjectFingerprint,
+    pub(crate) snapshot: Option<ProjectSnapshot>,
+}
+
 pub(crate) struct LocalProjectSnapshot<'project> {
     project: &'project Project,
 }
@@ -125,6 +135,41 @@ impl<'project> LocalProjectSnapshot<'project> {
             hash_paths,
             created_at,
         )
+    }
+
+    /// Validates only the current cache and its cheap source fingerprint.
+    /// This is the inspection CLI's read-only path: it never calls
+    /// `rebuild_cache`, creates a directory, or replaces a cache file.
+    pub(crate) fn inspect_read_only(
+        &self,
+        specs: &[ToolSpec],
+    ) -> Result<ReadOnlyInspectionResult, LocalProjectSnapshotError> {
+        ensure_control_directory(self.project)?;
+        let fingerprint = first_level(self.project)?.fingerprint;
+        let expected_tool_capabilities = tool_capabilities(specs);
+        if fingerprint.cacheable
+            && let Some(cache) =
+                self.load_complete_cache(&fingerprint, &expected_tool_capabilities)?
+        {
+            return Ok(ReadOnlyInspectionResult {
+                // `rebuild_reason` describes how this cache was produced. It
+                // must not change the current observation: a complete cache
+                // matching the current source fingerprint is a hit.
+                disposition: CacheDisposition::Hit,
+                source_fingerprint: fingerprint,
+                snapshot: Some(cache.snapshot),
+            });
+        }
+        let reason = if fingerprint.cacheable {
+            self.cache_miss_reason(&fingerprint)?
+        } else {
+            "git_parse_failed".to_owned()
+        };
+        Ok(ReadOnlyInspectionResult {
+            disposition: CacheDisposition::FullRebuild { reason },
+            source_fingerprint: fingerprint,
+            snapshot: None,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
