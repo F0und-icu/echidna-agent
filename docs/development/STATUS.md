@@ -7,12 +7,12 @@
 - Implementation: `STARTED`
 - Current milestone: `M3`
 - Current slice: `M3-S3`
-- Slice state: `READY_NOT_AUTHORIZED`; M3-S2 is locally complete but M3-S3 cannot start before the M3-S2 implementation merge and separate status seal
-- Lean governance: `ACTIVE`; M3-S2 passed its local Cargo/Lean Gate and final Luna xhigh review with no unresolved P0/P1
-- Local Git initialized: `yes`; the completed M3-S2 implementation remains on `agent/m3-s2-world-state-mode` for PR delivery
-- Remote repository: `F0und-icu/cyber-agent` private; M3-S1 implementation PR `#27` and status PR `#28` were Squash Merged
+- Slice state: `READY_NOT_AUTHORIZED`; M3-S2 implementation and both remote Cargo Gates are complete, and this status seal is the final boundary before M3-S3 starts
+- Lean governance: `ACTIVE`; M3-S2 passed its local and remote Cargo/Lean Gates with no unresolved P0/P1
+- Local Git initialized: `yes`; M3-S2 remote evidence is being sealed on `agent/m3-s2-status-seal`
+- Remote repository: `F0und-icu/cyber-agent` private; M3-S2 implementation PR `#29` was Squash Merged
 - Documentation baseline commit: `55ff3be`
-- Current code base: locally complete M3-S2 branch based on M3-S1 status-seal merge commit `d4217d2`
+- Current code base: M3-S2 Squash Merge commit `64209bc` on `origin/main`
 - Upstream Codex baseline: `3aae5d885bac39c1262491aa3fd100dfd8b3919f`
 
 ## Last Completed Slice
@@ -26,9 +26,9 @@
 - Profile behavior: configuration applies atomically at Turn boundaries; Primary semantic changes create a fresh Primary ProviderSession, while secondary-only changes do not cross identities or reset Primary state. Vision routing uses only explicit versioned capabilities and the four frozen modes.
 - Test path: permanent external regressions cover Section uniqueness/hash/bounds, Full/Diff causal ordering and failure commit boundaries, cumulative budget fallback, Project Snapshot semantics, Fragment Cache reuse, Tool discovery/execution authority, Exposure-only invalidation, Prompt/Schema metrics, exhaustive Vision routing and Primary/secondary switching.
 - Forbidden work preserved: no Compaction/Resume/RequestAudit persistence, image execution or VisionAnalysisService, general Router/Hook/Plugin/database/watcher, Live request, Codex credential/login access, Codex source modification or Codex code port.
-- Result: `COMPLETE` locally; the full Cargo/Lean Gate passes and Luna xhigh returned final `APPROVE` with no unresolved P0/P1 after Terra xhigh fixed cumulative delivery budgeting and Exposure-only Baseline invalidation. Remote PR/CI/merge evidence is pending.
+- Result: `COMPLETE`; local and remote Cargo/Lean Gates pass and Luna xhigh returned final `APPROVE` with no unresolved P0/P1 after Terra xhigh fixed cumulative delivery budgeting and Exposure-only Baseline invalidation.
 - Dependencies and schemas: no dependency or Cargo feature changed; no authoritative Event/Research/Artifact schema or Provider protocol changed.
-- Git: implementation is ready on the M3-S2 Slice branch; exact commit, PR, CI and Squash Merge identities will be added by the separate remote status seal.
+- Git: implementation PR `#29` was Squash Merged as `64209bc`; PR-head run `32632629044` and post-merge `main` run `32632750182` passed.
 - Live Test: `OFF`; the existing synthetic smoke remains ignored and no real credential or public Provider request was used.
 
 ## Current Authority
@@ -72,9 +72,9 @@
 ## Next Planned Slice
 
 - Slice: `M3-S3`
-- State: `READY_NOT_AUTHORIZED` until M3-S2 is Squash Merged, its post-merge `main` Gate passes and a separate status-seal PR records both remote identities.
+- State: `READY_NOT_AUTHORIZED`; M3-S2 implementation and post-merge `main` Gates pass, and M3-S3 may be activated from the merged status seal under the current user's continuing authorization.
 - Planned delivery branch: `agent/m3-s3-compaction-request-audit`
-- Base commit: resolve from the remotely sealed `main`; never branch from the unmerged M3-S2 head.
+- Base commit: resolve from `main` after this status seal merges; never branch from the old M3-S2 implementation head.
 - Scope lock: History normalization, Session Summary and Compaction, Resume-first Full semantics, RequestAuditManifest with content-addressed audit Blobs and the minimum prompt/snapshot/metrics inspection surfaces.
 - Required behavior: complete Tool pairs survive normalization/Compaction; summaries remain derived and do not replace facts; Resume never reuses an old Provider response identity; historical semantic requests remain reconstructible after source Prompt/Memory changes.
 - Intended permanent tests: Tool-pair preservation, Summary updates not spuriously resetting an active Baseline, Compaction/Resume full resets, content de-duplication and historical request reconstruction.
@@ -85,11 +85,12 @@
 The current user instruction explicitly authorizes continued implementation with delegated Terra/Luna development and normal version-controlled remote delivery until the first prototype reaches the separately authorized Live Provider validation boundary.
 
 - Run mode: `IMPLEMENT_TO_LIVE_BOUNDARY`
-- Slice ID: `M3-S3`; state `READY_NOT_AUTHORIZED` while M3-S2 remote sealing is incomplete; the current user's continuing authorization may activate it only after that Gate
+- Slice ID: `M3-S3`; state `READY_NOT_AUTHORIZED` until this status seal merges; the current user's continuing authorization may then activate it
 - Git mode: `BRANCH_PR_REVIEW_MERGE`; commit, push, PR, CI review and merge are authorized when the Slice Gate passes
 - Delegation mode: `AUTHORIZED`; delegated implementation Agents must independently read the repository authority chain and stay inside the current Slice
 - Live test mode: `OFF`; no real Provider credential or public model request is authorized
-- Forbidden continuation before M3-S2 remote sealing: all M3-S3 production work, M3-S4 image execution/VisionAnalysisService, general database/index/watcher/hook/router/plugin work, Codex source modification or Codex credentials/login access
+- Start condition: merge this M3-S2 status seal and pass its post-merge `main` CI before creating the M3-S3 delivery branch
+- Forbidden continuation before the status seal: all M3-S3 production work, M3-S4 image execution/VisionAnalysisService, general database/index/watcher/hook/router/plugin work, Codex source modification or Codex credentials/login access
 - Stop condition: complete and remotely seal each authorized Slice before advancing; stop at the first prototype's separately authorized Live Provider validation boundary without running a Live Test
 
 ## M2-S5 Slice Start
@@ -467,8 +468,8 @@ The current user instruction explicitly authorizes continued implementation with
 
 - None for M2-S5: implementation, stabilization and status PRs plus all post-merge `main` CI runs are complete.
 - None for M3-S1: implementation PR `#27`, status PR `#28` and all corresponding post-merge `main` Gates are complete.
-- None for the M3-S2 local implementation: its Cargo/Lean Gate and final Luna review pass. Remote PR CI, Squash Merge, post-merge `main` CI and the separate status seal remain required delivery gates.
-- M3-S3 cannot start before the M3-S2 implementation merge and status seal, even though the current user instruction authorizes continued development afterward.
+- None for M3-S2: its implementation PR, PR-head Gate, Squash Merge and post-merge `main` Gate are complete; this documentation-only status seal records the completed boundary.
+- M3-S3 cannot start before this status seal merges, even though the current user instruction authorizes continued development afterward.
 - Live Provider compatibility remains unverified by design; missing live credentials do not block offline development and no Codex credential is an allowed substitute.
 
 ## Last Verification
@@ -478,6 +479,7 @@ The current user instruction explicitly authorizes continued implementation with
 - M3-S2 Tool/Profile Gate: PASS; only the sent Direct schemas can execute, `tool_search` sees only Deferred tools, Hidden tools remain undiscoverable, Exposure-directory changes force `TOOLS_CHANGED`, and Primary/secondary Profile identities never cross. Vision routing is capability-only and exhaustively tested.
 - M3-S2 review: Terra xhigh implemented and repaired the bounded vertical path. Luna xhigh first returned `REQUEST_CHANGES` for cumulative Diff budgeting, Deferred/Hidden-only invalidation and an unused doctor wrapper; after permanent regressions and removal, its second review returned `APPROVE` with no P0/P1. Static CLI doctor integration remains recorded P2 for the later CLI/Profile composition path.
 - M3-S2 Live Test: `OFF`; no credential, external model request, Codex login state, `~/.codex` or `CODEX_HOME` was read or modified.
+- M3-S2 remote Gate: PASS; implementation PR `#29` was Squash Merged as `64209bc`, PR-head run `32632629044` and post-merge `main` run `32632750182` passed the macOS Rust Gate before this status seal.
 - M3-S1 local Gate: PASS on Rust `1.93.1`; formatting, denied-warning Clippy, 192 offline/local tests plus one ignored existing synthetic Live Smoke, locked build, inline-test scan, forbidden Codex dependency scan, dedicated-credential review, dependency-direction scan, secret-pattern scan, `git diff --check` and `codex/`-unchanged check all passed.
 - M3-S1 review: Terra xhigh implemented the bounded Context path and four P1 hardening rounds; Luna xhigh initially returned `REQUEST_CHANGES`, then returned final `APPROVE` after UTF-8/rendered-overhead budgeting, constructor-owned estimates, complete cache content identity/checksum and mismatched-hit revalidation gained permanent regressions. No unresolved P0/P1 remains.
 - M3-S1 runtime Gate: PASS; AgentLoop sends only the Planner's final `ModelInputIR`, successful Context state advances only after Provider/History/Baseline commit, and a failed request exposes its attempted plan without replacing the preceding successful inspection or committed logical manifest.
