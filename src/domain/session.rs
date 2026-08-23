@@ -29,7 +29,14 @@ const RECEIPT_RECORDED_EVENT_TYPE: &str = "tool.execution_receipt_recorded";
 const CACHE_HIT_EVENT_TYPE: &str = "tool.result_cache_hit";
 const STREAM_RECOVERED_EVENT_TYPE: &str = "StreamRecovered";
 const HISTORY_ITEM_RECORDED_EVENT_TYPE: &str = "session.history_item_recorded";
-const CURRENT_SESSION_PAYLOAD_SCHEMA_VERSION: u16 = 1;
+pub(super) const COMPACTION_CREATED_EVENT_TYPE: &str = "session.compaction_created";
+pub(super) const CURRENT_SESSION_PAYLOAD_SCHEMA_VERSION: u16 = 1;
+
+mod compaction;
+
+pub use compaction::{
+    SessionCompaction, SessionSummary, SessionSummaryDraft, UnfinishedExecutionRef,
+};
 
 /// The distinct lifecycle state reconstructed from a Session stream.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -64,6 +71,9 @@ pub enum SessionEvent {
     HistoryItemRecorded {
         item: ContentItem,
     },
+    CompactionCreated {
+        compaction: SessionCompaction,
+    },
 }
 
 impl SessionEvent {
@@ -97,6 +107,7 @@ impl SessionEvent {
             Self::ToolResultCacheHit { .. } => EventType::new(CACHE_HIT_EVENT_TYPE),
             Self::StreamRecovered { .. } => EventType::new(STREAM_RECOVERED_EVENT_TYPE),
             Self::HistoryItemRecorded { .. } => EventType::new(HISTORY_ITEM_RECORDED_EVENT_TYPE),
+            Self::CompactionCreated { .. } => EventType::new(COMPACTION_CREATED_EVENT_TYPE),
         }
     }
 
@@ -126,6 +137,7 @@ impl SessionEvent {
             Self::HistoryItemRecorded { item } => {
                 serde_json::to_value(SessionHistoryItemPayload::current(item.clone()))
             }
+            Self::CompactionCreated { compaction } => serde_json::to_value(compaction),
         };
         payload.map_err(|error| SessionError::PayloadEncode {
             event_type: event_type.clone(),
@@ -178,6 +190,10 @@ impl SessionEvent {
                 require_current_payload_schema(event_type, payload.schema_version)?;
                 Ok(Self::HistoryItemRecorded { item: payload.item })
             }
+            COMPACTION_CREATED_EVENT_TYPE => {
+                let compaction: SessionCompaction = decode_strict_payload(event_type, payload)?;
+                Ok(Self::CompactionCreated { compaction })
+            }
             _ => Err(SessionError::UnknownEventType {
                 event_type: event_type.clone(),
             }),
@@ -198,6 +214,7 @@ pub struct SessionState {
     execution_receipt_count: u64,
     cache_hit_count: u64,
     recovery_count: u64,
+    latest_compaction: Option<SessionCompaction>,
 }
 
 impl Default for SessionState {
@@ -213,6 +230,7 @@ impl Default for SessionState {
             execution_receipt_count: 0,
             cache_hit_count: 0,
             recovery_count: 0,
+            latest_compaction: None,
         }
     }
 }
@@ -237,11 +255,17 @@ impl SessionState {
         &self.history
     }
 
-    /// Produces the complete recovery History using the sole History
-    /// normalizer. Interrupted Calls receive deterministic aborted Results;
-    /// malformed durable pairings had already failed strict replay.
+    /// Produces the active recovery History using the sole History normalizer.
+    /// After Compaction, the retained normalized suffix is followed only by
+    /// durable History facts recorded after that boundary; the original full
+    /// History remains available through [`Self::history`].
     pub(crate) fn normalized_history_items(&self) -> Result<Vec<ContentItem>, HistoryError> {
-        normalize_content_items(self.history.items())
+        let Some(compaction) = self.latest_compaction.as_ref() else {
+            return normalize_content_items(self.history.items());
+        };
+        let mut items = compaction.retained_history().to_vec();
+        items.extend_from_slice(&self.history.items()[compaction.source_history_item_count()..]);
+        normalize_content_items(&items)
     }
 
     /// Whether a durable `session.resumed` fact has established the current
@@ -260,6 +284,38 @@ impl SessionState {
 
     pub const fn recovery_count(&self) -> u64 {
         self.recovery_count
+    }
+
+    /// The latest derived Summary/retention view reconstructed from the
+    /// ordered append-only Session Event stream.
+    pub fn latest_compaction(&self) -> Option<&SessionCompaction> {
+        self.latest_compaction.as_ref()
+    }
+
+    pub fn next_compaction(
+        &self,
+        summary: SessionSummaryDraft,
+        requested_recent_items: usize,
+    ) -> Result<SessionCompaction, SessionError> {
+        require_transition(
+            self.lifecycle,
+            "session.compaction_created",
+            SessionLifecycle::Active,
+        )?;
+        let revision = match self.latest_compaction.as_ref() {
+            Some(compaction) => increment("Compaction revision", compaction.summary().revision())?,
+            None => 1,
+        };
+        let source_event_sequence = self
+            .stream_id()
+            .and_then(|stream_id| self.event_state.last_sequence_for(stream_id))
+            .ok_or(SessionError::CompactionSourceSequenceMissing)?;
+        SessionCompaction::from_history(
+            &self.history,
+            SessionSummary::from_draft(summary, revision)?,
+            source_event_sequence,
+            requested_recent_items,
+        )
     }
 
     pub fn applied_event_count(&self) -> usize {
@@ -303,7 +359,10 @@ impl SessionReducer {
         }
         require_next_sequence(state, &stream_id, sequence)?;
         next.stream_id = Some(stream_id);
-        apply_session_event(&mut next, session_event)?;
+        let source_event_sequence = state
+            .stream_id()
+            .and_then(|stream_id| state.event_state.last_sequence_for(stream_id));
+        apply_session_event(&mut next, session_event, source_event_sequence)?;
         *state = next;
         Ok(outcome)
     }
@@ -373,7 +432,11 @@ fn validate_session_stream(state: &SessionState, stream_id: &StreamId) -> Result
     Ok(())
 }
 
-fn apply_session_event(state: &mut SessionState, event: SessionEvent) -> Result<(), SessionError> {
+fn apply_session_event(
+    state: &mut SessionState,
+    event: SessionEvent,
+    source_event_sequence: Option<EventSequence>,
+) -> Result<(), SessionError> {
     match event {
         SessionEvent::Started {
             primary_provider_session,
@@ -418,6 +481,41 @@ fn apply_session_event(state: &mut SessionState, event: SessionEvent) -> Result<
                 SessionLifecycle::Active,
             )?;
             state.history.append_content_item(item)?;
+            if state.latest_compaction.is_some() {
+                state.normalized_history_items()?;
+            }
+        }
+        SessionEvent::CompactionCreated { compaction } => {
+            require_transition(
+                state.lifecycle,
+                "session.compaction_created",
+                SessionLifecycle::Active,
+            )?;
+            compaction.validate_shape()?;
+            if Some(compaction.source_event_sequence()) != source_event_sequence {
+                return Err(SessionError::CompactionSourceSequenceMismatch {
+                    expected: source_event_sequence,
+                    received: compaction.source_event_sequence(),
+                });
+            }
+            let normalized_history = normalize_content_items(state.history.items())?;
+            if compaction.source_history_item_count() != state.history.items().len()
+                || compaction.retained_from_normalized_history_index() > normalized_history.len()
+                || compaction.retained_history()
+                    != &normalized_history[compaction.retained_from_normalized_history_index()..]
+            {
+                return Err(SessionError::CompactionRetentionMismatch);
+            }
+            let expected_revision = state.latest_compaction.as_ref().map_or(Ok(1), |previous| {
+                increment("Compaction revision", previous.summary().revision())
+            })?;
+            if compaction.summary().revision() != expected_revision {
+                return Err(SessionError::CompactionRevisionMismatch {
+                    expected: expected_revision,
+                    received: compaction.summary().revision(),
+                });
+            }
+            state.latest_compaction = Some(compaction);
         }
     }
     Ok(())
@@ -614,4 +712,27 @@ pub enum SessionError {
     },
     #[error("Session {field} overflowed while reducing a finite Event stream")]
     StateOverflow { field: &'static str },
+    #[error("Session Compaction Summary fingerprint does not match its structured content")]
+    CompactionFingerprintMismatch,
+    #[error("Session Compaction Summary field `{field}` must not be empty")]
+    CompactionSummaryFieldRequired { field: &'static str },
+    #[error("Session Compaction Summary list `{field}` contains an empty entry")]
+    CompactionSummaryEntryEmpty { field: &'static str },
+    #[error("Session Compaction Summary list `{field}` repeats `{value}`")]
+    CompactionSummaryEntryDuplicate { field: &'static str, value: String },
+    #[error("Session Compaction Summary is {actual} bytes, above the {maximum}-byte local bound")]
+    CompactionSummaryTooLarge { actual: usize, maximum: usize },
+    #[error("Session Compaction requires the preceding durable Event sequence")]
+    CompactionSourceSequenceMissing,
+    #[error(
+        "Session Compaction source Event sequence mismatch: expected {expected:?}, received {received}"
+    )]
+    CompactionSourceSequenceMismatch {
+        expected: Option<EventSequence>,
+        received: EventSequence,
+    },
+    #[error("Session Compaction retained History is not the normalized complete History boundary")]
+    CompactionRetentionMismatch,
+    #[error("Session Compaction revision mismatch: expected {expected}, received {received}")]
+    CompactionRevisionMismatch { expected: u64, received: u64 },
 }

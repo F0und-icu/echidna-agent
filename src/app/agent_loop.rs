@@ -1,5 +1,6 @@
 //! Bounded single-Agent Tool Call -> Tool Result -> full-resample loop.
 
+mod compaction;
 mod context_state;
 
 use std::collections::BTreeMap;
@@ -13,11 +14,12 @@ use crate::domain::context::{
     FullLogicalManifest, InternalRequestMetadata, ModelIdentity, ModelProfile, ProviderSession,
     ProviderSessionId, ProviderSessionRole, StepSnapshot, TurnContext, TurnId,
 };
+use crate::domain::events::StreamId;
 use crate::domain::history::{ConversationHistory, HistoryError};
 use crate::domain::mode::{ModeError, PromptComposition};
 use crate::domain::model::ModelInputIR;
 use crate::domain::profile::{AgentModelProfile, AgentModelProfileError};
-use crate::domain::session::SessionState;
+use crate::domain::session::{SessionError, SessionState, SessionSummary, SessionSummaryDraft};
 use crate::domain::tools::{
     ExecutionId, IdempotencyKey, ToolCall, ToolExecutionOutcome, ToolExposurePlan, ToolResult,
 };
@@ -33,6 +35,7 @@ use super::context_compilation::{ContextCacheSummary, ContextCompilationError};
 use super::model_sample::ModelSample;
 use super::model_streaming::{ModelStreamOutcome, ModelStreamingError, ModelStreamingService};
 use super::tool_scheduler::execute_batch;
+use compaction::AppliedCompaction;
 
 const MAX_MODEL_REQUESTS_PER_TURN: usize = 32;
 static NEXT_PRIMARY_RUNTIME_SESSION: AtomicU64 = AtomicU64::new(1);
@@ -44,6 +47,8 @@ pub struct AgentLoop<'provider, 'tools, Provider: ?Sized, Tools: ?Sized> {
     pending_prompt_composition: Option<PromptComposition>,
     world_state: Option<ResearchWorldState>,
     project_snapshot: Option<ProjectSnapshotContext>,
+    session_summary: Option<SessionSummary>,
+    pending_session_summary: Option<SessionSummaryDraft>,
     history: ConversationHistory,
     model: ModelIdentity,
     profile: ModelProfile,
@@ -64,6 +69,8 @@ pub struct AgentLoop<'provider, 'tools, Provider: ?Sized, Tools: ?Sized> {
     committed_history_len: usize,
     committed_world_state: Option<ResearchWorldState>,
     committed_project_snapshot: Option<ProjectSnapshotContext>,
+    bound_session_stream: Option<StreamId>,
+    applied_compaction: Option<AppliedCompaction>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -134,6 +141,8 @@ where
             pending_prompt_composition: None,
             world_state: None,
             project_snapshot: None,
+            session_summary: None,
+            pending_session_summary: None,
             history: ConversationHistory::default(),
             model,
             profile,
@@ -154,6 +163,8 @@ where
             committed_history_len: 0,
             committed_world_state: None,
             committed_project_snapshot: None,
+            bound_session_stream: None,
+            applied_compaction: None,
         })
     }
 
@@ -185,11 +196,25 @@ where
                 },
             );
         }
+        let stream_id = session
+            .stream_id()
+            .cloned()
+            .ok_or(AgentLoopConfigurationError::CompactionSessionStreamMissing)?;
         let normalized_items = session.normalized_history_items()?;
         let history = ConversationHistory::from_complete_content_items(&normalized_items)?;
+        let applied_compaction = session
+            .latest_compaction()
+            .map(|compaction| AppliedCompaction::from_compaction(stream_id.clone(), compaction))
+            .transpose()?;
         provider_session.reset(BaselineInvalidationReason::SessionResumed);
         self.history = history;
         self.provider_session = provider_session;
+        self.bound_session_stream = Some(stream_id);
+        self.session_summary = session
+            .latest_compaction()
+            .map(|compaction| compaction.summary().clone());
+        self.pending_session_summary = None;
+        self.applied_compaction = applied_compaction;
         self.clear_committed_primary_delivery_state();
         Ok(())
     }
@@ -234,6 +259,12 @@ where
     /// cache and snapshot fact owners remain outside this loop.
     pub fn set_project_snapshot(&mut self, project_snapshot: ProjectSnapshotContext) {
         self.project_snapshot = Some(project_snapshot);
+    }
+
+    /// Replaces the local candidate for the next Compaction. It does not
+    /// change active model Context or reset the current Provider Baseline.
+    pub fn update_session_summary_candidate(&mut self, summary: SessionSummaryDraft) {
+        self.pending_session_summary = Some(summary);
     }
 
     /// Queues a named Agent profile for the next Turn. Validation happens now
@@ -308,6 +339,7 @@ where
                     prompt_composition: &self.prompt_composition,
                     world_state: self.world_state.as_ref(),
                     project_snapshot: self.project_snapshot.as_ref(),
+                    session_summary: self.session_summary.as_ref(),
                     history: self.history.items(),
                     turn_history_start,
                     planner: &self.context_planner,
@@ -682,6 +714,8 @@ pub enum AgentLoopConfigurationError {
     #[error(transparent)]
     History(#[from] HistoryError),
     #[error(transparent)]
+    Session(#[from] SessionError),
+    #[error(transparent)]
     PromptComposition(#[from] ModeError),
     #[error(transparent)]
     AgentModelProfile(#[from] AgentModelProfileError),
@@ -700,6 +734,40 @@ pub enum AgentLoopConfigurationError {
         expected: crate::domain::context::ProviderSessionRef,
         received: crate::domain::context::ProviderSessionRef,
     },
+    #[error("apply_compaction requires a durable session.compaction_created fact")]
+    CompactionRequired,
+    #[error("the durable Compaction Summary does not match the active local candidate")]
+    CompactionSummaryCandidateMismatch,
+    #[error("Compaction requires an Active replayed SessionState")]
+    ActiveSessionCompactionRequired,
+    #[error("Compaction requires a replayed Session stream identity")]
+    CompactionSessionStreamMissing,
+    #[error(
+        "Compaction Session stream `{received}` does not match the AgentLoop-bound Session stream `{expected}`"
+    )]
+    CompactionSessionStreamMismatch {
+        expected: StreamId,
+        received: StreamId,
+    },
+    #[error(
+        "Compaction Session primary identity {expected:?} does not match the active AgentLoop identity {received:?}"
+    )]
+    CompactionProviderMismatch {
+        expected: crate::domain::context::ProviderSessionRef,
+        received: crate::domain::context::ProviderSessionRef,
+    },
+    #[error(
+        "Compaction revision {received_revision} is stale for Session stream `{stream_id}`; revision {applied_revision} is already applied"
+    )]
+    StaleCompaction {
+        stream_id: StreamId,
+        applied_revision: u64,
+        received_revision: u64,
+    },
+    #[error(
+        "Compaction revision {revision} conflicts with the already applied durable fact for Session stream `{stream_id}`"
+    )]
+    ConflictingCompaction { stream_id: StreamId, revision: u64 },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -721,6 +789,8 @@ pub enum AgentLoopError {
     Model(#[from] ModelStreamingError),
     #[error(transparent)]
     History(#[from] HistoryError),
+    #[error(transparent)]
+    Session(#[from] SessionError),
     #[error(transparent)]
     Context(#[from] ContextError),
     #[error(transparent)]

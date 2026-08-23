@@ -15,6 +15,7 @@ use crate::domain::mode::PromptComposition;
 use crate::domain::model::{
     ContentItem, ModelCapabilities, ModelInputIR, ModelRequestRequirements,
 };
+use crate::domain::session::SessionSummary;
 use crate::domain::tools::ToolSpec;
 use crate::domain::world_state::{ProjectSnapshotContext, ResearchWorldState};
 use crate::ports::context::ContextFragmentCache;
@@ -26,6 +27,7 @@ pub(super) struct ContextCompilationInput<'a> {
     pub(super) prompt_composition: &'a PromptComposition,
     pub(super) world_state: Option<&'a ResearchWorldState>,
     pub(super) project_snapshot: Option<&'a ProjectSnapshotContext>,
+    pub(super) session_summary: Option<&'a SessionSummary>,
     pub(super) history: &'a [ContentItem],
     pub(super) turn_history_start: usize,
     pub(super) planner: &'a ContextPlanner,
@@ -61,6 +63,7 @@ pub(super) fn compile_context(
         prompt_composition,
         world_state,
         project_snapshot,
+        session_summary,
         history,
         turn_history_start,
         planner,
@@ -107,6 +110,14 @@ pub(super) fn compile_context(
             cache,
             capabilities,
             budget,
+        )?;
+    }
+    if let Some(session_summary) = session_summary {
+        push_content_fragment(
+            &mut fragments,
+            "session:summary",
+            ContextFragmentSource::SessionSummary,
+            &[session_summary.context_item()?],
         )?;
     }
     push_content_fragment(

@@ -174,6 +174,44 @@ pub fn normalize_content_items(items: &[ContentItem]) -> Result<Vec<ContentItem>
     Ok(history.items)
 }
 
+/// Selects a recent normalized History suffix without splitting any Tool
+/// Call/Result pair. Pair discovery and complete-history validation remain in
+/// this sole History owner.
+pub(crate) fn retain_recent_complete_history(
+    items: &[ContentItem],
+    requested_recent_items: usize,
+) -> Result<(usize, Vec<ContentItem>), HistoryError> {
+    let normalized = normalize_content_items(items)?;
+    let mut retained_from = normalized.len().saturating_sub(requested_recent_items);
+    loop {
+        let required_call_ids = normalized[retained_from..]
+            .iter()
+            .filter_map(|item| match item {
+                ContentItem::ToolResult { result } => Some(result.call_id.clone()),
+                _ => None,
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        let expanded_from = normalized[..retained_from]
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| match item {
+                ContentItem::ToolCall { call } if required_call_ids.contains(&call.call_id) => {
+                    Some(index)
+                }
+                _ => None,
+            })
+            .min()
+            .unwrap_or(retained_from);
+        if expanded_from == retained_from {
+            break;
+        }
+        retained_from = expanded_from;
+    }
+    let retained = normalized[retained_from..].to_vec();
+    ConversationHistory::from_complete_content_items(&retained)?;
+    Ok((retained_from, retained))
+}
+
 /// Validates externally assembled Context items by replaying Tool pairing
 /// through the same History owner used by the AgentLoop.
 pub(crate) fn validate_content_items(items: &[ContentItem]) -> Result<(), HistoryError> {
