@@ -5,31 +5,30 @@
 - Architecture version: `1.1.0`
 - Phase: `IMPLEMENTATION`
 - Implementation: `STARTED`
-- Current milestone: `M2`
-- Current slice: `M2-S5`
-- Slice state: `IN_PROGRESS`
-- Lean governance: `ACTIVE`; M2-S4 is complete and M2-S5 remains scope-locked to auditable file writes and deterministic Tool Result Cache
-- Local Git initialized: `yes`; M2-S5 is being implemented on `agent/m2-s5-file-writes-tool-cache`
-- Remote repository: `F0und-icu/cyber-agent` private; M2-S4 implementation PR `#22` and status PR `#23` were Squash Merged
+- Current milestone: `M3`
+- Current slice: `M3-S1`
+- Slice state: `AUTHORIZED_PENDING_STATUS_SEAL`
+- Lean governance: `ACTIVE`; M2-S5 is complete and M3-S1 remains scope-locked to the Context Planner and Decision Manifest after this status seal is remotely merged
+- Local Git initialized: `yes`; the M2-S5 status seal is being prepared on `agent/m2-s5-merge-status`
+- Remote repository: `F0und-icu/cyber-agent` private; M2-S5 implementation PR `#24` and Writer-lock stabilization PR `#26` were Squash Merged
 - Documentation baseline commit: `55ff3be`
-- Current code base: M2-S5 branch based on the M2-S4 status-seal merge commit `01f6782`
+- Current code base: M2-S5 stabilization merge commit `018d47a`
 - Upstream Codex baseline: `3aae5d885bac39c1262491aa3fd100dfd8b3919f`
 
 ## Last Completed Slice
 
-- Slice: `M2-S4`
-- Delivery branch: `agent/m2-s4-memory-snapshot-cache`
-- Base commit: `feb5eb9`
-- Scope: project-isolated Markdown Memory, typed revision audit, two-level Project Fingerprints and rebuildable Project Snapshot/File Manifest/Tool Capability caches with fixed `memory_read`, `memory_write` and `inspect_project` tools.
-- Memory behavior: CAS-protected durable replacement, external-edit audit, exact Event-ID idempotence, old/new revision-chain validation, revision/diff Blobs and no-op elision preserve Markdown authority; only always-injected `core.md` has the design-required 64-KiB bound.
-- Snapshot behavior: Git and filesystem metadata provide cheap invalidation; dirty path metadata catches repeated edits, unchanged BLAKE3 values are reused and explicit paths without a Hash are streamed on demand.
-- Cache behavior: Manifest and Tool Capability generations are durably published before the Snapshot completion marker; project/schema/fingerprint/content/tool mismatches rebuild, and missing control facts never fall back to Cache.
-- Test path: permanent external regressions cover Memory audit/CAS/no-op/duplicates/chains/size/path/symlink/isolation and Snapshot hit/refresh/rebuild/corruption/fact-loss/Git dirty/cache exclusion/project isolation plus one AgentLoop path.
-- Forbidden work preserved: no M2-S5 file writes/Tool Result Cache, Context/Vision/Profile composition, Live request, Codex credential/login access, Codex source modification or Codex code port.
-- Result: `COMPLETE`; all local and remote Cargo/Lean Gates pass and independent Terra/Luna xhigh review has no unresolved P0/P1.
-- Dependencies and schemas: no dependency or Cargo feature changed; the outer Research schema remains v1, Memory payload schema v1 and rebuildable Cache schema v1 are independently strict, and fixed Tool specs remain v1.
-- Git: PR `#22` was Squash Merged as `19253a2` (`feat(memory): add project snapshots and rebuildable cache`).
-- GitHub Actions: PR-head run `32591476669` and post-merge `main` run `32591626316` passed on macOS with Rust `1.93.1`; formatting, production test-layout scan, Clippy, 148 tests plus one ignored Live Smoke, and locked build all passed.
+- Slice: `M2-S5`
+- Delivery branch: `agent/m2-s5-file-writes-tool-cache`
+- Base commit: `01f6782`
+- Scope: auditable atomic single-file `write_file`, a Cyber Agent-owned UTF-8/LF `apply_patch` subset and a project/session-bound deterministic read-only Tool Result Cache.
+- Write behavior: project-relative path and whole-operation preimage validation precede a staged, synced atomic replacement; successful Receipts retain before/after BLAKE3, byte sizes, actual Diff and existing Unix permissions.
+- Cache behavior: only `read_only + deterministic + content_addressed` `research_get` results are eligible; source Receipt Events are durable before cache publication, and every hit returns a fresh Receipt only after its own hit Event is appended.
+- Test path: permanent external regressions cover file-write/patch evidence and failure atomicity plus cache eligibility, invalidation, corruption, deletion, project/session isolation, Event linkage, one AgentLoop cache-hit path and immediate Project Writer lock release.
+- Forbidden work preserved: no multi-file or binary Patch transaction, Context/Vision/Profile composition, Live request, Codex credential/login access, Codex source modification or Codex code port.
+- Result: `COMPLETE`; all local and remote Cargo/Lean Gates pass and Luna xhigh returned final `APPROVE` with no unresolved P0/P1 after Terra implementation and main-agent review fixes.
+- Dependencies and schemas: no dependency or Cargo feature changed; the strict versioned `ExecutionReceiptEventPayload` is the single owner of persisted Receipt payload semantics.
+- Git: implementation PR `#24` was Squash Merged as `a46ad33`; Writer-lock stabilization PR `#26` was Squash Merged as `018d47a`.
+- GitHub Actions: implementation runs `32598264243`/`32598378267` and stabilization runs `32614460762`/`32614845713` passed on macOS with Rust `1.93.1`; the current Gate covers formatting, production test layout, Clippy, 165 tests plus one ignored Live Smoke and locked build.
 - Live Test: `OFF`; the existing synthetic smoke remains ignored and no real credential or public Provider request was used.
 
 ## Current Authority
@@ -66,29 +65,31 @@
 - M2-S2 versioned Research facts, immutable TargetSnapshot, ExperimentCapsule, deterministic fingerprints, strict replay and fixed Research tools.
 - M2-S3 durable SHA-256 Blobs, versioned Artifact facts, provenance-preserving Lineage and the fixed Artifact tool.
 - M2-S4 audited Project Memory, two-level Project Fingerprints and rebuildable Snapshot/File Manifest/Tool Capability caches.
+- M2-S5 auditable atomic file writes, a constrained owned Patch Adapter and a project/session-bound deterministic read-only Tool Result Cache.
 
 ## Next Authorized Slice
 
-- Slice: `M2-S5`
-- Planned delivery branch: `agent/m2-s5-file-writes-tool-cache`
-- Base commit: `01f6782`
-- Scope lock: add auditable atomic `write_file`, a Cyber Agent-owned `apply_patch` Adapter and deterministic read-only Tool Result Cache only.
-- Required behavior: validation failures never partially write; successful writes retain preimage, before/after Hash and actual Diff; only deterministic read-only results cache; every Cache Hit emits a new Event/Receipt reference without replaying side effects.
-- Intended production touch points: typed file-mutation audit contracts, the existing durable-file owner, fixed write/patch tools, one content-addressed derived Tool Result Cache and existing Receipt/Event paths.
-- Intended permanent tests: preimage mismatch and invalid Patch leave files unchanged, successful writes preserve before/after evidence, nondeterministic/mutating Tools never cache, deterministic read-only hits retain a new audited Receipt and Cache deletion rebuilds safely.
-- Forbidden continuation: Context Planner, Mode/Profile/Vision, Compaction/Request Audit, general database/index/watcher/hook/router/plugin abstractions, Live Provider requests and Codex credential/login access.
+- Slice: `M3-S1`
+- Planned delivery branch: `agent/m3-s1-context-planner`
+- Base commit: the M2-S5 status-seal merge commit, to be recorded after its remote Gate passes
+- Scope lock: add the provider-neutral Context Planner, Full Logical Manifest, Append-only Candidate, ContextDecisionManifest, Fragment Cache and `/context` inspection only.
+- Required behavior: fixed full-request assembly order; stable include/truncate/artifact-ref/exclude decisions and Reason Codes; unchanged Fragments reuse cached rendering; historical request audit is never rewritten by Context Recompile.
+- Intended production touch points: pure Context Domain contracts and planning/fingerprint owner, one project-isolated rebuildable Fragment Cache Adapter, the existing AgentLoop/Baseline integration and a minimal CLI `/context` view.
+- Intended permanent tests: stable ordering/fingerprints/reasons, every budget decision, cache hit/miss/corruption/deletion, append-only versus full-logical relations, and non-destructive recompile audit behavior.
+- Forbidden continuation: M3-S2 WorldState/Tool Exposure/Mode/Profile/Vision routing, Compaction/Request Audit, general database/index/watcher/hook/router/plugin abstractions, Live Provider requests and Codex credential/login access.
 
 ## Current Authorization
 
 The current user instruction explicitly authorizes continued implementation with delegated Terra/Luna development and normal version-controlled remote delivery until the first prototype reaches the separately authorized Live Provider validation boundary.
 
 - Run mode: `IMPLEMENT_TO_LIVE_BOUNDARY`
-- Slice ID: `M2-S5`; state `IN_PROGRESS`
+- Slice ID: `M3-S1`; state `AUTHORIZED_PENDING_STATUS_SEAL`
 - Git mode: `BRANCH_PR_REVIEW_MERGE`; commit, push, PR, CI review and merge are authorized when the Slice Gate passes
 - Delegation mode: `AUTHORIZED`; delegated implementation Agents must independently read the repository authority chain and stay inside the current Slice
 - Live test mode: `OFF`; no real Provider credential or public model request is authorized
-- Forbidden continuation inside M2-S5: Context Planner, Mode/Profile/Vision, Compaction/Request Audit, general database/index/watcher/hook/router/plugin work, Codex source modification or Codex credentials/login access
-- Stop condition: complete and remotely merge M2-S5 before advancing to M3-S1; do not run a Live Test
+- Start condition: merge this M2-S5 status seal and pass its post-merge `main` CI before creating the M3-S1 delivery branch
+- Forbidden continuation inside M3-S1: M3-S2 WorldState/Tool Exposure/Mode/Profile/Vision, Compaction/Request Audit, general database/index/watcher/hook/router/plugin work, Codex source modification or Codex credentials/login access
+- Stop condition: complete and remotely seal each authorized Slice before advancing; stop at the first prototype's separately authorized Live Provider validation boundary without running a Live Test
 
 ## M2-S5 Slice Start
 
@@ -361,6 +362,7 @@ The current user instruction explicitly authorizes continued implementation with
 
 - `src/adapters/tools/file_write/{schema,patch,filesystem}.rs` own, respectively, the fixed single-file schemas and normalization, the deliberately small UTF-8/LF Unified Diff subset, and project-confined preimage/afterimage filesystem evidence. `src/adapters/tools/file_write.rs` is only the execution facade and never claims a multi-file transaction.
 - `src/adapters/project_event_store/durable_file.rs` remains the sole same-directory staged-write, sync and atomic-rename owner; the file Tools reuse it and retain existing Unix permissions. `src/adapters/file_diff.rs` is the one complete replacement-Diff renderer shared by Memory and file-mutation audit, including explicit no-final-newline markers.
+- `src/adapters/project_event_store/project.rs` remains the sole project Writer-lock owner and now explicitly unlocks before its descriptor closes. The status-seal Gate exposed that implicit close-based release was not deterministic enough on macOS; one permanent regression proves immediate reacquisition after `ProjectWriter` drop without adding a retry or second lock manager.
 - `src/domain/tools.rs` owns cache eligibility, Tool Cache identity links, file-mutation Receipt facts and the single strict versioned `ExecutionReceiptEventPayload`. A Cache Hit has a fresh execution/plan Receipt whose `cache_source` is the only persisted source-link copy.
 - `src/adapters/tool_result_cache.rs` owns the project-isolated content-addressed derived Cache. `tool_result_cache/session.rs` owns only its fixed Session Event append/validation path and short-lived Writer acquisition; it is not a general audit manager. `research_get` remains the only consumer because avoiding its JSONL scan, Upcast and Reducer work has a concrete benefit.
 
@@ -375,7 +377,7 @@ The current user instruction explicitly authorizes continued implementation with
 
 - Permanent top-level regressions cover stale/missing preimages, invalid hunks and CRLF, actual before/after Hash/size/Diff, non-terminated final lines, Unix permission preservation, absolute/parent/symlink rejection, and explicit refusal of multi-file Patch transactions.
 - Cache regressions cover Effect/Determinism eligibility, explicit rerun bypass, Research invalidation, plan/outcome binding, source checksum/JSON/deletion/project isolation, missing/corrupt source Receipt Events, source and hit Event linkage, append failure refusing an unaudited hit, short Writer lifetime, ordered Session sequences and one AgentLoop vertical path. The Session sequence regression passed 30 consecutive additional runs.
-- Final local Gate passes on Rust `1.93.1`: formatting, denied-warning Clippy, 164 offline/local tests plus one ignored synthetic Live Smoke, locked build, `git diff --check`, production inline-test scan, forbidden Codex dependency scan, credential-isolation scan and `codex/`-unchanged check. Terra xhigh implemented the bounded slice; main review fixed the long-held Writer, plan/outcome binding and duplicate Event source payload; Luna xhigh returned final `APPROVE` with no unresolved P0/P1.
+- Final local Gate passes on Rust `1.93.1`: formatting, denied-warning Clippy, 165 offline/local tests plus one ignored synthetic Live Smoke, locked build, `git diff --check`, production inline-test scan, forbidden Codex dependency scan, credential-isolation scan and `codex/`-unchanged check. Terra xhigh implemented the bounded slice; main review fixed the long-held Writer, plan/outcome binding and duplicate Event source payload; Luna xhigh returned final `APPROVE` and independently constrained the later lock-release correction to the existing Writer owner.
 
 #### Removed and Deferred
 
@@ -385,8 +387,8 @@ The current user instruction explicitly authorizes continued implementation with
 
 ## Blockers
 
-- None for the completed M2-S5 local Gate and independent final review; remote PR/CI/merge remains before the Slice can be sealed.
-- M2-S5 remains scope-locked to auditable file writes and deterministic read-only Tool Result Cache until remote merge; Context Planner starts only after the separate status seal authorizes M3-S1.
+- None for M2-S5: implementation and Writer-lock stabilization PRs, PR CI and post-merge `main` CI are complete.
+- M3-S1 starts only after this independent status seal is merged and its post-merge `main` CI passes.
 - Live Provider compatibility remains unverified by design; missing live credentials do not block offline development and no Codex credential is an allowed substitute.
 
 ## Last Verification
@@ -394,6 +396,9 @@ The current user instruction explicitly authorizes continued implementation with
 - M2-S5 local Gate: PASS on Rust `1.93.1`; formatting, denied-warning Clippy, 164 offline/local tests plus one ignored existing synthetic Live Smoke, locked build, inline-test scan, forbidden Codex dependency scan, credential-isolation scan, `git diff --check` and `codex/`-unchanged check all passed. The Session sequence regression passed 30 additional consecutive runs.
 - M2-S5 review: Terra xhigh completed the bounded implementation; main review fixed the persistent Receipt/Event contract, long-held Project Writer, plan/outcome binding and duplicate Event source payload; final Luna xhigh review returned `APPROVE` with no unresolved P0/P1.
 - M2-S5 Live Test: `OFF`; no credential, external model request, Codex login state, `~/.codex` or `CODEX_HOME` was read or modified.
+- M2-S5 remote Gate: PASS; PR `#24` was Squash Merged as `a46ad33`, PR-head run `32598264243` passed, and post-merge `main` run `32598378267` passed the same Rust Gate.
+- M2-S5 status-seal correction: PR `#25` run `32601709085` exposed nondeterministic implicit macOS Writer-lock release on two attempts. The sole `ProjectWriter` owner now explicitly unlocks and a permanent immediate-reacquisition regression was added; the broader Tool-dispatch refactor was rejected as unnecessary.
+- M2-S5 stabilization Gate: PASS; local formatting, denied-warning Clippy, 165 offline/local tests plus one ignored Live Smoke and locked build passed. PR `#26` was Squash Merged as `018d47a`; PR-head run `32614460762` and post-merge `main` run `32614845713` passed.
 - M2-S4 local Gate: PASS on Rust `1.93.1`; formatting, denied-warning Clippy, 148 offline/local tests plus one ignored existing synthetic Live Smoke, locked build, inline-test scan, forbidden Codex dependency scan, credential-pattern scan, dependency/architecture diff scans, `git diff --check` and `codex/`-unchanged check all passed. No Live Test was run.
 - M2-S4 review: Terra xhigh `REQUEST_CHANGES` findings for exact duplicate Memory replay and cached BLAKE3 reuse were fixed with permanent regressions; main review fixed repeated-dirty Git invalidation and split the oversized Snapshot Adapter; Luna xhigh returned final `APPROVE` after the explicit `core.md` bound gained pre-Blob, external-read and Schema coverage. No unresolved P0/P1 remains.
 - M2-S4 Live Test: `OFF`; no credential, external model request, Codex login state, `~/.codex` or `CODEX_HOME` was read or modified.
