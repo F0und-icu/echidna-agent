@@ -7,12 +7,12 @@
 - Implementation: `STARTED`
 - Current milestone: `M3`
 - Current slice: `M3-S3b`
-- Slice state: `READY_NOT_AUTHORIZED`; M3-S3a is locally complete but M3-S3b cannot start before the M3-S3a implementation merge and separate status seal
+- Slice state: `READY_NOT_AUTHORIZED`; M3-S3a implementation is remotely complete but M3-S3b cannot start before the separate M3-S3a status seal
 - Lean governance: `ACTIVE`; M3-S3a passed its local Cargo/Lean Gate and Luna xhigh final review with no unresolved P0/P1
-- Local Git initialized: `yes`; the completed M3-S3a implementation remains on `agent/m3-s3a-session-resume` for PR delivery
-- Remote repository: `F0und-icu/cyber-agent` private; M3-S2 implementation PR `#29` and status PR `#30` were Squash Merged
+- Local Git initialized: `yes`; the M3-S3a remote evidence is being sealed on `agent/m3-s3a-status-seal`
+- Remote repository: `F0und-icu/cyber-agent` private; M3-S3a implementation PR `#31` was Squash Merged
 - Documentation baseline commit: `55ff3be`
-- Current code base: locally complete M3-S3a branch based on M3-S2 status-seal merge commit `48c8cb1`
+- Current code base: M3-S3a Squash Merge commit `3154787` on `origin/main`
 - Upstream Codex baseline: `3aae5d885bac39c1262491aa3fd100dfd8b3919f`
 
 ## Last Completed Slice
@@ -26,9 +26,9 @@
 - Resume behavior: only an Active replayed Session with a durable `session.resumed` fact and exactly matching fresh Primary identity can replace volatile History; continuation and committed delivery state are cleared, the first real request remains Full with `SessionResumed`, and only a successful sample enables later incremental delivery.
 - Test path: permanent external regressions cover normalization/repair/rejection, strict Session payloads and transitions, legacy fact replay, duplicate append idempotence, real JSONL replay and append failure, permanent ProviderSession identity uniqueness, restored History delivery, failed resumed Full retry and subsequent incremental recovery.
 - Forbidden work preserved: no Summary/Compaction, RequestAudit/Blob, inspection CLI, image path, general Manager/Router/Hook/database, Provider request, credential/login access, Codex source modification or Codex code port.
-- Result: `COMPLETE` locally; the full Cargo/Lean Gate passes and Luna xhigh returned final `APPROVE` with no unresolved P0/P1 after Terra implementation and main-agent schema/commit-boundary hardening. Remote PR/CI/merge evidence is pending.
+- Result: `COMPLETE`; the full Cargo/Lean Gate passes and Luna xhigh returned final `APPROVE` with no unresolved P0/P1 after Terra implementation and main-agent schema/commit-boundary hardening. PR-head and post-merge `main` CI both passed.
 - Dependencies and schemas: no dependency, Cargo feature, Provider DTO or envelope schema changed; Session payload schema v1 is the one new authoritative fact contract, while existing Receipt payload fields only gained strict unknown-field rejection.
-- Git: implementation is ready on the M3-S3a Slice branch; exact commit, PR, CI and Squash Merge identities will be added by the separate remote status seal.
+- Git: implementation commit `cc0c4ed`, PR `#31`, PR-head CI `32635754926`, Squash Merge `3154787` and post-merge `main` CI `32635865554`; this evidence is delivered by the separate status seal.
 - Live Test: `OFF`; the existing synthetic smoke remains ignored and no real credential or public Provider request was used.
 
 ## Current Authority
@@ -508,8 +508,8 @@ The current user instruction explicitly authorizes continued implementation with
 - None for M2-S5: implementation, stabilization and status PRs plus all post-merge `main` CI runs are complete.
 - None for M3-S1: implementation PR `#27`, status PR `#28` and all corresponding post-merge `main` Gates are complete.
 - None for M3-S2: implementation PR `#29`, status PR `#30` and all corresponding post-merge `main` Gates are complete.
-- None for M3-S3a local implementation; its PR, remote CI, Squash Merge, post-merge `main` Gate and separate status seal are pending.
-- M3-S3b cannot start before those M3-S3a remote boundaries complete, even though the current user instruction authorizes continued development afterward.
+- None for M3-S3a implementation; PR `#31`, its CI, Squash Merge and post-merge `main` Gate are complete. Only the separate status seal remains pending.
+- M3-S3b cannot start before the M3-S3a status seal merges and its post-merge `main` Gate passes, even though the current user instruction authorizes continued development afterward.
 - Live Provider compatibility remains unverified by design; missing live credentials do not block offline development and no Codex credential is an allowed substitute.
 
 ## Last Verification
@@ -518,7 +518,7 @@ The current user instruction explicitly authorizes continued implementation with
 - M3-S3a Session/Resume Gate: PASS; Session payload v1 is strict including nested fields, failed validation/append leaves State unchanged, duplicate append is a no-write result, existing Receipt/CacheHit/Recovery facts replay, used Primary IDs never recur, and only a durable Active/Resumed projection can restore normalized History and force `SessionResumed` Full delivery.
 - M3-S3a review: Terra xhigh implemented the bounded path; main review added existing-Session-event compatibility, permanent identity uniqueness, durable History restoration, duplicate-append sequence safety and strict nested payload checks. Luna xhigh returned final `APPROVE` with no P0/P1. Historical Context inspection labeling and the legacy `StreamRecovered` payload are recorded P2 for the later inspection/migration boundary.
 - M3-S3a Live Test: `OFF`; no credential, external model request, Codex login state, `~/.codex` or `CODEX_HOME` was read or modified.
-- M3-S3a remote Gate: pending implementation commit, PR, macOS CI, Squash Merge, post-merge `main` CI and separate status seal.
+- M3-S3a remote Gate: PASS for implementation commit `cc0c4ed`; PR `#31` was Squash Merged as `3154787`, PR-head run `32635754926` and post-merge `main` run `32635865554` passed the macOS Rust Gate before this status seal.
 - M3-S2 local Gate: PASS on Rust `1.93.1`; formatting, denied-warning Clippy, 211 offline/local tests plus one ignored existing synthetic Live Smoke, locked build, inline-test scan, forbidden Codex dependency scan, credential-isolation scan, Provider-wire and dependency-direction scans, one-AgentLoop/no-general-router review, `git diff --check` and `codex/`-unchanged check all passed.
 - M3-S2 runtime Gate: PASS; State Diff delivery is causal, fully selected and revalidated by the Context Planner against the actual cumulative rendered input. Overflow falls back to Full and a successful Full establishes a fresh incremental Baseline; failed requests do not promote derived state markers.
 - M3-S2 Tool/Profile Gate: PASS; only the sent Direct schemas can execute, `tool_search` sees only Deferred tools, Hidden tools remain undiscoverable, Exposure-directory changes force `TOOLS_CHANGED`, and Primary/secondary Profile identities never cross. Vision routing is capability-only and exhaustively tested.
