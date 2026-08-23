@@ -209,6 +209,19 @@ fn project_writer_lock_rejects_a_second_writer() {
 }
 
 #[test]
+fn project_writer_can_be_reacquired_immediately_after_drop() {
+    let root = TemporaryDirectory::new("writer-lock-reacquire");
+    let project = Project::initialize(root.path()).unwrap();
+
+    let first_writer = project.open_writer().unwrap();
+    drop(first_writer);
+
+    let second_writer = project.open_writer().unwrap();
+    drop(second_writer);
+    assert!(project.open_writer().is_ok());
+}
+
+#[test]
 fn subprocess_holds_project_writer_lock_until_released() {
     let Ok(root) = std::env::var("CYBER_AGENT_TEST_LOCK_HOLDER_ROOT") else {
         return;

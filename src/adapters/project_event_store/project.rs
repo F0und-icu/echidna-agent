@@ -267,6 +267,15 @@ pub struct ProjectWriter {
     _lock_file: File,
 }
 
+impl Drop for ProjectWriter {
+    fn drop(&mut self) {
+        // Release the advisory lock explicitly before the descriptor closes.
+        // This keeps the Writer lifecycle deterministic on every supported
+        // platform, including the macOS CI filesystem used by the Gate.
+        let _ = self._lock_file.unlock();
+    }
+}
+
 pub(crate) fn canonical_existing_path(path: &Path) -> Result<PathBuf, ProjectEventStoreError> {
     fs::canonicalize(path).map_err(|source| ProjectEventStoreError::Io {
         operation: "canonicalize project path",
