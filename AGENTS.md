@@ -25,7 +25,7 @@ If the user explicitly authorizes development sub-agents, every delegated agent 
 
 - Architecture v1.1 is sealed as an additive extension over the immutable v1 baseline.
 - M0-S1, M0-S2, M1a-S1, M1a-S2, M1a-S3, M1b-S1, M1b-S2, M1c-S1, M1c-S2, M1c-S3, M2-S1, M2-S2, M2-S3, M2-S4 and M2-S5 are complete.
-- M2-S5 is complete and remotely merged. M3-S1 Context Planner is the next authorized Slice and may start only after the M2-S5 status-seal PR merges and its post-merge `main` CI passes.
+- M2-S5 is complete and remotely sealed. M3-S1 Context Planner is `IN_PROGRESS` on `agent/m3-s1-context-planner` from status-seal base `206f142`.
 - Local Git is initialized and `main` tracks the private remote.
 - `codex/` is a clean, read-only upstream reference repository.
 

@@ -17,6 +17,36 @@ fn help_lists_m0_commands() {
     assert!(stdout.contains("init"));
     assert!(stdout.contains("chat"));
     assert!(stdout.contains("doctor"));
+    assert!(stdout.contains("inspect"));
+}
+
+#[test]
+fn inspect_context_in_a_standalone_process_reports_no_active_context() {
+    let directory = TemporaryDirectory::new("cli-inspect-context");
+    let initialized = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+        .current_dir(directory.path())
+        .arg("init")
+        .output()
+        .expect("cyber-agent init should run");
+    assert!(initialized.status.success());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+        .current_dir(directory.path())
+        .args(["inspect", "context"])
+        .output()
+        .expect("cyber-agent inspect context should run");
+
+    assert!(output.status.success());
+
+    let response: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("context inspection output should be JSON");
+    assert_eq!(response["command"], "inspect context");
+    assert_eq!(response["status"], "no_active_context");
+    assert_eq!(
+        response["message"],
+        "no active AgentLoop Context is available in this standalone process; RequestAudit persistence is deferred"
+    );
+    assert_eq!(response.as_object().map(|value| value.len()), Some(3));
 }
 
 #[test]

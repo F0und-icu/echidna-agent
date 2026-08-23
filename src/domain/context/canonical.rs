@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::domain::canonical_json::canonical_json;
+use crate::domain::canonical_json::{canonical_blake3_hash, canonical_json};
 use crate::domain::model::{ContentItem, ModelCapabilities, ModelInputIR};
 use crate::domain::tools::ToolSpec;
 
@@ -262,31 +262,60 @@ struct RequestToolSchema<'a> {
     exposure: crate::domain::tools::ToolExposure,
 }
 
-fn canonical_tool_schema_hash(specs: &[ToolSpec]) -> Result<RequestHash, ContextError> {
-    let mut request_tools = specs
+pub(super) fn canonical_tool_schema_hash(specs: &[ToolSpec]) -> Result<RequestHash, ContextError> {
+    Ok(canonical_tool_schemas(specs)?.hash)
+}
+
+pub(super) struct CanonicalToolSchemas {
+    pub(super) ordered_specs: Vec<ToolSpec>,
+    pub(super) hash: RequestHash,
+    pub(super) encoded_len: usize,
+}
+
+pub(super) fn canonical_tool_schemas(
+    specs: &[ToolSpec],
+) -> Result<CanonicalToolSchemas, ContextError> {
+    let mut ordered_specs = specs
         .iter()
         .map(|spec| {
-            let tool = RequestToolSchema {
-                name: &spec.name,
-                version: &spec.version,
-                description: &spec.description,
-                input_schema: canonical_json(&spec.input_schema),
-                output_schema: canonical_json(&spec.output_schema),
-                exposure: spec.exposure,
-            };
+            let tool = request_tool_schema(spec);
             let sort_key =
                 serde_json::to_vec(&tool).map_err(|error| ContextError::CanonicalEncoding {
                     message: error.to_string(),
                 })?;
-            Ok((sort_key, tool))
+            Ok((sort_key, spec.clone()))
         })
         .collect::<Result<Vec<_>, ContextError>>()?;
-    request_tools.sort_by(|left, right| left.0.cmp(&right.0));
-    let request_tools = request_tools
+    ordered_specs.sort_by(|left, right| left.0.cmp(&right.0));
+    let ordered_specs = ordered_specs
         .into_iter()
-        .map(|(_, tool)| tool)
+        .map(|(_, spec)| spec)
         .collect::<Vec<_>>();
-    hash_value(&request_tools)
+    let request_tools = ordered_specs
+        .iter()
+        .map(request_tool_schema)
+        .collect::<Vec<_>>();
+    let encoded_len = serde_json::to_vec(&request_tools)
+        .map_err(|error| ContextError::CanonicalEncoding {
+            message: error.to_string(),
+        })?
+        .len();
+    Ok(CanonicalToolSchemas {
+        hash: hash_value(&request_tools)?,
+        ordered_specs,
+        encoded_len,
+    })
+}
+
+fn request_tool_schema(spec: &ToolSpec) -> RequestToolSchema<'_> {
+    RequestToolSchema {
+        name: &spec.name,
+        version: &spec.version,
+        description: &spec.description,
+        input_schema: canonical_json(&spec.input_schema),
+        output_schema: canonical_json(&spec.output_schema),
+        exposure: spec.exposure,
+    }
 }
 
 fn canonical_content_item(item: &ContentItem) -> ContentItem {
@@ -321,13 +350,9 @@ fn canonical_content_item(item: &ContentItem) -> ContentItem {
 }
 
 fn hash_value(value: &impl Serialize) -> Result<RequestHash, ContextError> {
-    let value = serde_json::to_value(value).map_err(|error| ContextError::CanonicalEncoding {
-        message: error.to_string(),
-    })?;
-    let bytes = serde_json::to_vec(&canonical_json(&value)).map_err(|error| {
-        ContextError::CanonicalEncoding {
+    canonical_blake3_hash(value)
+        .map(RequestHash)
+        .map_err(|error| ContextError::CanonicalEncoding {
             message: error.to_string(),
-        }
-    })?;
-    Ok(RequestHash(blake3::hash(&bytes).to_hex().to_string()))
+        })
 }

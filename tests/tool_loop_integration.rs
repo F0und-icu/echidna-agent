@@ -2,18 +2,20 @@ use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
+use cyber_agent::adapters::fragment_cache::LocalFragmentCache;
 use cyber_agent::adapters::project_event_store::Project;
 use cyber_agent::adapters::tools::ToolRegistry;
 use cyber_agent::app::agent_loop::{AgentLoop, AgentLoopError, AgentTurnOutcome};
 use cyber_agent::app::cancellation::AgentCancellation;
 use cyber_agent::domain::artifacts::ArtifactId;
 use cyber_agent::domain::context::{
-    BaselineAssessment, BaselineInvalidationReason, ModelIdentity, ModelProfile, ProviderSession,
-    ProviderSessionId, ProviderSessionRole,
+    AppendOnlyCandidate, BaselineAssessment, BaselineInvalidationReason,
+    LogicalAppendOnlyRejection, ModelIdentity, ModelProfile, ProviderSession, ProviderSessionId,
+    ProviderSessionRole,
 };
 use cyber_agent::domain::events::{EventEnvelope, StreamId};
 use cyber_agent::domain::model::{
@@ -1169,6 +1171,126 @@ async fn incremental_delivery_uses_tool_result_then_next_user_as_strict_deltas()
         requests[2].input().content_items,
         vec![ContentItem::user_text("what changed?")]
     );
+}
+
+#[tokio::test]
+async fn context_planner_and_cache_feed_the_baseline_without_owning_delivery() {
+    let project_root = TestProject::new("context-planner-agent-loop");
+    let project = Project::initialize(&project_root.root).unwrap();
+    let provider = ScriptedProvider::with_capabilities(
+        incremental_capabilities(),
+        [
+            completed_response(
+                vec![ModelEvent::TextDelta {
+                    text: "first response".to_owned(),
+                }],
+                Some("context-first"),
+            ),
+            completed_response(
+                vec![ModelEvent::TextDelta {
+                    text: "second response".to_owned(),
+                }],
+                Some("context-second"),
+            ),
+        ],
+    );
+    let tools = ToolRegistry::for_project(&project_root.root);
+    let cache = Arc::new(LocalFragmentCache::for_project(&project));
+    let mut agent =
+        AgentLoop::new(&provider, &tools, "fixture instructions").with_fragment_cache(cache);
+
+    agent
+        .run_turn("first user", AgentCancellation::new())
+        .await
+        .unwrap();
+    let first = agent.last_successful_context().unwrap();
+    assert_eq!(first.plan().base_instructions(), "fixture instructions");
+    assert_eq!(
+        first.plan().input_items(),
+        &[ContentItem::user_text("first user")]
+    );
+    assert_eq!(first.cache_summary().misses, 1);
+    assert!(matches!(
+        first.baseline_assessment(),
+        BaselineAssessment::FullRequest {
+            reason: BaselineInvalidationReason::NoBaseline
+        }
+    ));
+
+    agent
+        .run_turn("second user", AgentCancellation::new())
+        .await
+        .unwrap();
+    let second = agent.last_successful_context().unwrap();
+    assert_eq!(second.cache_summary().hits, 1);
+    assert_eq!(
+        second.plan().input_items(),
+        &[
+            ContentItem::user_text("first user"),
+            ContentItem::assistant_text("first response"),
+            ContentItem::user_text("second user"),
+        ]
+    );
+    assert!(matches!(
+        second.plan().append_only_candidate(),
+        AppendOnlyCandidate::NotAppendOnly {
+            reason: LogicalAppendOnlyRejection::PriorFragmentChanged
+        }
+    ));
+    assert!(matches!(
+        second.baseline_assessment(),
+        BaselineAssessment::AppendOnlyCandidate { delta_items }
+            if delta_items == &[ContentItem::user_text("second user")]
+    ));
+    let requests = provider.requests();
+    assert!(!requests[0].is_incremental());
+    assert!(requests[1].is_incremental());
+    assert_eq!(
+        requests[1].input().content_items,
+        vec![ContentItem::user_text("second user")]
+    );
+}
+
+#[tokio::test]
+async fn failed_model_request_keeps_the_last_successful_context_inspection() {
+    let provider = ScriptedProvider::with_capabilities(
+        incremental_capabilities(),
+        [
+            completed_response(
+                vec![ModelEvent::TextDelta {
+                    text: "committed response".to_owned(),
+                }],
+                Some("context-committed"),
+            ),
+            failed_response(ModelProviderError::TransportFailure {
+                message: "fixture failure".to_owned(),
+            }),
+        ],
+    );
+    let tools = ToolRegistry::for_project(env!("CARGO_MANIFEST_DIR"));
+    let mut agent = AgentLoop::new(&provider, &tools, "fixture");
+    agent
+        .run_turn("committed user", AgentCancellation::new())
+        .await
+        .unwrap();
+    let committed = agent.last_successful_context().cloned().unwrap();
+
+    assert!(matches!(
+        agent
+            .run_turn("failed user", AgentCancellation::new())
+            .await,
+        Err(AgentLoopError::Model(
+            cyber_agent::app::model_streaming::ModelStreamingError::Provider(
+                ModelProviderError::TransportFailure { .. }
+            )
+        ))
+    ));
+    assert_ne!(
+        agent.last_context_plan().unwrap().context_fingerprint(),
+        committed.plan().context_fingerprint(),
+        "the failed attempt remains inspectable"
+    );
+    assert_eq!(agent.last_successful_context(), Some(&committed));
 }
 
 #[tokio::test]

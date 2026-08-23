@@ -1,25 +1,32 @@
 //! Bounded single-Agent Tool Call -> Tool Result -> full-resample loop.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use thiserror::Error;
 
 use crate::domain::context::{
-    BaselineAssessment, BaselineInvalidationReason, ContextError, InternalRequestMetadata,
-    ModelIdentity, ModelProfile, ProviderSession, ProviderSessionId, ProviderSessionRole,
-    StepSnapshot, TurnContext, TurnId,
+    BaselineAssessment, BaselineInvalidationReason, ContextBudget, ContextContentHash,
+    ContextError, ContextFragment, ContextFragmentContent, ContextFragmentId,
+    ContextFragmentPriority, ContextFragmentSource, ContextPlan, ContextPlanner,
+    FragmentCachePolicy, FullLogicalManifest, InternalRequestMetadata, ModelIdentity, ModelProfile,
+    ProviderSession, ProviderSessionId, ProviderSessionRole, StepSnapshot, TurnContext, TurnId,
 };
 use crate::domain::history::{ConversationHistory, HistoryError};
 use crate::domain::model::{ModelInputIR, ModelRequestRequirements};
 use crate::domain::tools::{
     ExecutionId, IdempotencyKey, ToolCall, ToolExecutionOutcome, ToolExposure, ToolResult,
 };
+use crate::ports::context::ContextFragmentCache;
 use crate::ports::model::{
     ModelProvider, ModelProviderError, ModelRequest, ModelResponseCompletion, ProviderResponseId,
 };
 use crate::ports::tool::ToolExecutor;
 
 use super::cancellation::AgentCancellation;
+use super::context_compilation::{
+    ContextCacheSummary, ContextCompilationError, resolve_context_fragment,
+};
 use super::model_sample::ModelSample;
 use super::model_streaming::{ModelStreamOutcome, ModelStreamingError, ModelStreamingService};
 use super::tool_scheduler::execute_batch;
@@ -36,8 +43,34 @@ pub struct AgentLoop<'provider, 'tools, Provider: ?Sized, Tools: ?Sized> {
     provider_session: ProviderSession,
     continuation: Option<CommittedContinuation>,
     completed_idempotency: BTreeMap<IdempotencyKey, ToolExecutionOutcome>,
+    context_planner: ContextPlanner,
+    fragment_cache: Option<Arc<dyn ContextFragmentCache>>,
+    committed_context_manifest: Option<FullLogicalManifest>,
+    last_context_plan: Option<ContextPlan>,
+    last_successful_context: Option<ContextInspection>,
     next_turn_sequence: u64,
     last_baseline_assessment: Option<BaselineAssessment>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContextInspection {
+    plan: ContextPlan,
+    baseline_assessment: BaselineAssessment,
+    cache_summary: ContextCacheSummary,
+}
+
+impl ContextInspection {
+    pub fn plan(&self) -> &ContextPlan {
+        &self.plan
+    }
+
+    pub fn baseline_assessment(&self) -> &BaselineAssessment {
+        &self.baseline_assessment
+    }
+
+    pub const fn cache_summary(&self) -> ContextCacheSummary {
+        self.cache_summary
+    }
 }
 
 impl<'provider, 'tools, Provider, Tools> AgentLoop<'provider, 'tools, Provider, Tools>
@@ -89,6 +122,11 @@ where
             provider_session,
             continuation: None,
             completed_idempotency: BTreeMap::new(),
+            context_planner: ContextPlanner::current(),
+            fragment_cache: None,
+            committed_context_manifest: None,
+            last_context_plan: None,
+            last_successful_context: None,
             next_turn_sequence: 0,
             last_baseline_assessment: None,
         })
@@ -96,6 +134,23 @@ where
 
     pub fn history(&self) -> &ConversationHistory {
         &self.history
+    }
+
+    pub fn with_fragment_cache(mut self, cache: Arc<dyn ContextFragmentCache>) -> Self {
+        self.fragment_cache = Some(cache);
+        self
+    }
+
+    /// The most recently compiled Context, including a request which later
+    /// failed before Provider completion.
+    pub fn last_context_plan(&self) -> Option<&ContextPlan> {
+        self.last_context_plan.as_ref()
+    }
+
+    /// Context state is promoted here only after the Provider response and
+    /// local History/Baseline commit both succeed.
+    pub fn last_successful_context(&self) -> Option<&ContextInspection> {
+        self.last_successful_context.as_ref()
     }
 
     /// Returns the local delivery decision for the most recent actual model
@@ -115,6 +170,7 @@ where
                 executions: Vec::new(),
             });
         }
+        let turn_history_start = self.history.items().len();
         self.history.append_user_text(user_text);
         let tool_specs = self
             .tools
@@ -123,6 +179,7 @@ where
             .filter(|spec| spec.exposure == ToolExposure::Direct)
             .collect::<Vec<_>>();
         let capabilities = self.provider.capabilities();
+        let context_budget = self.context_planner.default_budget(&capabilities)?;
         self.next_turn_sequence += 1;
         let turn = TurnContext::new(
             TurnId::new(format!("turn:{}", self.next_turn_sequence)),
@@ -137,12 +194,13 @@ where
 
         for request_index in 0..MAX_MODEL_REQUESTS_PER_TURN {
             self.history.ensure_all_tool_calls_paired()?;
-            let input = ModelInputIR::current(
-                self.instructions.clone(),
-                self.history.items().to_vec(),
-                ModelRequestRequirements::default(),
-            )
-            .with_tool_specs(tool_specs.clone());
+            let (plan, cache_summary) = self.compile_context(
+                turn_history_start,
+                context_budget,
+                &capabilities,
+                &tool_specs,
+            )?;
+            let input = plan.model_input();
             let snapshot = StepSnapshot::capture(
                 &turn,
                 request_index,
@@ -156,6 +214,7 @@ where
             self.last_baseline_assessment = Some(assessment.clone());
             let request = self.request_for_assessment(&input, &assessment)?;
             reserve_provider_request(&mut provider_requests)?;
+            self.last_context_plan = Some(plan.clone());
             let stream = match ModelStreamingService::new(self.provider)
                 .consume(request.clone(), cancellation.clone())
                 .await
@@ -197,6 +256,15 @@ where
             self.provider_session
                 .record_completed_sample(&snapshot, server_output_items)?;
             self.commit_continuation(&completion);
+            self.committed_context_manifest = Some(plan.full_logical_manifest().clone());
+            self.last_successful_context = Some(ContextInspection {
+                plan,
+                baseline_assessment: self
+                    .last_baseline_assessment
+                    .clone()
+                    .expect("the actual request always has a Baseline assessment"),
+                cache_summary,
+            });
 
             if tool_calls.is_empty() {
                 return Ok(AgentTurnOutcome::Completed {
@@ -219,6 +287,99 @@ where
         Err(AgentLoopError::ModelRequestLimit {
             limit: MAX_MODEL_REQUESTS_PER_TURN,
         })
+    }
+
+    fn compile_context(
+        &self,
+        turn_history_start: usize,
+        budget: ContextBudget,
+        capabilities: &crate::domain::model::ModelCapabilities,
+        tool_specs: &[crate::domain::tools::ToolSpec],
+    ) -> Result<(ContextPlan, ContextCacheSummary), AgentLoopError> {
+        let items = self.history.items();
+        if items.len() <= turn_history_start {
+            return Err(AgentLoopError::ContextStateMismatch);
+        }
+
+        let base_id = ContextFragmentId::new("prompt:base")?;
+        let base_content = ContextFragmentContent::Instructions {
+            text: self.instructions.clone(),
+        };
+        let base_content_hash = ContextContentHash::for_fragment(&base_content, None)?;
+        let base_key = self.context_planner.fragment_cache_key(
+            base_id.clone(),
+            ContextFragmentSource::BasePrompt,
+            ContextFragmentPriority::Required,
+            FragmentCachePolicy::ContentAddressed,
+            crate::domain::context::ContextSourceFingerprint::from_source(&self.instructions)?,
+            base_content_hash,
+            capabilities,
+            budget,
+        )?;
+        let resolved_base =
+            resolve_context_fragment(self.fragment_cache.as_deref(), &base_key, || {
+                ContextFragment::new(
+                    base_id,
+                    ContextFragmentSource::BasePrompt,
+                    ContextFragmentPriority::Required,
+                    FragmentCachePolicy::ContentAddressed,
+                    base_content,
+                )
+            })?;
+        let mut cache_summary = ContextCacheSummary::default();
+        cache_summary.record(resolved_base.cache_disposition);
+        let mut fragments = vec![resolved_base.fragment];
+        self.push_content_fragment(
+            &mut fragments,
+            "history:recent",
+            ContextFragmentSource::RecentHistory,
+            &items[..turn_history_start],
+        )?;
+        self.push_content_fragment(
+            &mut fragments,
+            "input:current-user",
+            ContextFragmentSource::UserInput,
+            &items[turn_history_start..=turn_history_start],
+        )?;
+        self.push_content_fragment(
+            &mut fragments,
+            "turn:local-updates",
+            ContextFragmentSource::TurnLocalUpdates,
+            &items[turn_history_start + 1..],
+        )?;
+
+        let plan = self.context_planner.compile(
+            fragments,
+            budget,
+            capabilities,
+            tool_specs.to_vec(),
+            ModelRequestRequirements::default(),
+            self.committed_context_manifest.as_ref(),
+        )?;
+        Ok((plan, cache_summary))
+    }
+
+    fn push_content_fragment(
+        &self,
+        fragments: &mut Vec<ContextFragment>,
+        id: &str,
+        source: ContextFragmentSource,
+        items: &[crate::domain::model::ContentItem],
+    ) -> Result<(), AgentLoopError> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        let content = ContextFragmentContent::ContentItems {
+            items: items.to_vec(),
+        };
+        fragments.push(ContextFragment::new(
+            ContextFragmentId::new(id)?,
+            source,
+            ContextFragmentPriority::Required,
+            FragmentCachePolicy::DoNotCache,
+            content,
+        )?);
+        Ok(())
     }
 
     fn request_for_assessment(
@@ -371,6 +532,12 @@ pub enum AgentLoopError {
     History(#[from] HistoryError),
     #[error(transparent)]
     Context(#[from] ContextError),
+    #[error(transparent)]
+    ContextCompilation(#[from] ContextCompilationError),
+    #[error(transparent)]
+    ContextPlanner(#[from] crate::domain::context::ContextPlannerError),
+    #[error("AgentLoop History does not contain the current Turn input")]
+    ContextStateMismatch,
     #[error("the model completed without text or a Tool Call")]
     EmptyModelResponse,
     #[error("an incremental-capable Provider completed without a continuation identity")]

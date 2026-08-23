@@ -100,6 +100,15 @@ pub struct ModelRequestRequirements {
     pub usage_reporting: bool,
 }
 
+impl ModelRequestRequirements {
+    pub(crate) fn normalized_for_tool_specs(mut self, has_tool_specs: bool) -> Self {
+        if has_tool_specs {
+            self.tool_call = true;
+        }
+        self
+    }
+}
+
 /// Provider-neutral semantic input for one model request.
 #[allow(clippy::upper_case_acronyms)]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -128,9 +137,9 @@ impl ModelInputIR {
     }
 
     pub fn with_tool_specs(mut self, tool_specs: Vec<ToolSpec>) -> Self {
-        if !tool_specs.is_empty() {
-            self.requirements.tool_call = true;
-        }
+        self.requirements = self
+            .requirements
+            .normalized_for_tool_specs(!tool_specs.is_empty());
         self.tool_specs = tool_specs;
         self
     }

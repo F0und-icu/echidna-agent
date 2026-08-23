@@ -31,6 +31,17 @@ enum CliCommand {
     Chat,
     /// Inspect local configuration and runtime readiness.
     Doctor,
+    /// Inspect locally available derived state.
+    Inspect {
+        #[command(subcommand)]
+        inspection: InspectCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum InspectCommand {
+    /// Inspect the most recently successful Context compilation.
+    Context,
 }
 
 #[derive(Debug, Error)]
@@ -106,6 +117,14 @@ fn print_shell_response(command: &'static str, message: &'static str) -> Result<
     })
 }
 
+fn print_no_active_context() -> Result<(), CliError> {
+    print_json(&ShellResponse {
+        command: "inspect context",
+        status: "no_active_context",
+        message: "no active AgentLoop Context is available in this standalone process; RequestAudit persistence is deferred",
+    })
+}
+
 fn initialize_current_project() -> Result<(), CliError> {
     let root = std::env::current_dir().map_err(CliError::WorkingDirectory)?;
     let project = Project::initialize(&root)?;
@@ -131,6 +150,9 @@ where
             "interactive chat is reserved for a later implementation slice",
         ),
         Some(CliCommand::Doctor) => print_json(&doctor_report()),
+        Some(CliCommand::Inspect {
+            inspection: InspectCommand::Context,
+        }) => print_no_active_context(),
         None => {
             let mut command = Cli::command();
             command.print_help()?;

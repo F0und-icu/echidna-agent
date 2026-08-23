@@ -2,6 +2,7 @@
 
 pub mod artifact_store;
 pub(crate) mod file_diff;
+pub mod fragment_cache;
 pub mod mock_model;
 pub mod openai;
 pub mod project_event_store;

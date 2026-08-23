@@ -85,6 +85,22 @@ impl ConversationHistory {
     }
 }
 
+/// Validates externally assembled Context items by replaying Tool pairing
+/// through the same History owner used by the AgentLoop.
+pub(crate) fn validate_content_items(items: &[ContentItem]) -> Result<(), HistoryError> {
+    let mut history = ConversationHistory::default();
+    for item in items {
+        match item {
+            ContentItem::ToolCall { call } => history.append_tool_call(call.clone())?,
+            ContentItem::ToolResult { result } => history.append_tool_result(result.clone())?,
+            ContentItem::Text { .. }
+            | ContentItem::ImageArtifact { .. }
+            | ContentItem::Unsupported { .. } => {}
+        }
+    }
+    history.ensure_all_tool_calls_paired()
+}
+
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum HistoryError {
     #[error("Tool Call `{call_id}` already exists in History")]

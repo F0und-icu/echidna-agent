@@ -6,29 +6,29 @@
 - Phase: `IMPLEMENTATION`
 - Implementation: `STARTED`
 - Current milestone: `M3`
-- Current slice: `M3-S1`
-- Slice state: `AUTHORIZED_PENDING_STATUS_SEAL`
-- Lean governance: `ACTIVE`; M2-S5 is complete and M3-S1 remains scope-locked to the Context Planner and Decision Manifest after this status seal is remotely merged
-- Local Git initialized: `yes`; the M2-S5 status seal is being prepared on `agent/m2-s5-merge-status`
-- Remote repository: `F0und-icu/cyber-agent` private; M2-S5 implementation PR `#24` and Writer-lock stabilization PR `#26` were Squash Merged
+- Current slice: `M3-S2`
+- Slice state: `READY_NOT_AUTHORIZED`; M3-S1 is locally complete but M3-S2 cannot start before the separate M3-S1 implementation merge and status seal
+- Lean governance: `ACTIVE`; M3-S1 passed its local Lean Gate with no unresolved P0/P1 and is awaiting remote sealing
+- Local Git initialized: `yes`; the completed M3-S1 implementation remains on `agent/m3-s1-context-planner` for PR delivery
+- Remote repository: `F0und-icu/cyber-agent` private; M2-S5 implementation PR `#24`, Writer-lock stabilization PR `#26` and status PR `#25` were Squash Merged
 - Documentation baseline commit: `55ff3be`
-- Current code base: M2-S5 stabilization merge commit `018d47a`
+- Current code base: locally complete M3-S1 branch based on M2-S5 status-seal merge commit `206f142`
 - Upstream Codex baseline: `3aae5d885bac39c1262491aa3fd100dfd8b3919f`
 
 ## Last Completed Slice
 
-- Slice: `M2-S5`
-- Delivery branch: `agent/m2-s5-file-writes-tool-cache`
-- Base commit: `01f6782`
-- Scope: auditable atomic single-file `write_file`, a Cyber Agent-owned UTF-8/LF `apply_patch` subset and a project/session-bound deterministic read-only Tool Result Cache.
-- Write behavior: project-relative path and whole-operation preimage validation precede a staged, synced atomic replacement; successful Receipts retain before/after BLAKE3, byte sizes, actual Diff and existing Unix permissions.
-- Cache behavior: only `read_only + deterministic + content_addressed` `research_get` results are eligible; source Receipt Events are durable before cache publication, and every hit returns a fresh Receipt only after its own hit Event is appended.
-- Test path: permanent external regressions cover file-write/patch evidence and failure atomicity plus cache eligibility, invalidation, corruption, deletion, project/session isolation, Event linkage, one AgentLoop cache-hit path and immediate Project Writer lock release.
-- Forbidden work preserved: no multi-file or binary Patch transaction, Context/Vision/Profile composition, Live request, Codex credential/login access, Codex source modification or Codex code port.
-- Result: `COMPLETE`; all local and remote Cargo/Lean Gates pass and Luna xhigh returned final `APPROVE` with no unresolved P0/P1 after Terra implementation and main-agent review fixes.
-- Dependencies and schemas: no dependency or Cargo feature changed; the strict versioned `ExecutionReceiptEventPayload` is the single owner of persisted Receipt payload semantics.
-- Git: implementation PR `#24` was Squash Merged as `a46ad33`; Writer-lock stabilization PR `#26` was Squash Merged as `018d47a`.
-- GitHub Actions: implementation runs `32598264243`/`32598378267` and stabilization runs `32614460762`/`32614845713` passed on macOS with Rust `1.93.1`; the current Gate covers formatting, production test layout, Clippy, 165 tests plus one ignored Live Smoke and locked build.
+- Slice: `M3-S1`
+- Delivery branch: `agent/m3-s1-context-planner`
+- Base commit: `206f142`
+- Scope: provider-neutral budgeted Context Planner, Full Logical Manifest, logical Append-only Candidate, ContextDecisionManifest, project-isolated Fragment Cache and the minimal `inspect context` CLI surface.
+- Planner behavior: one owner fixes the twelve-slot order, keeps Instructions/Content Items/Tool Specs separate, derives rendered token estimates, reserves output/tool-loop capacity and records stable include/truncate/artifact-ref/exclude decisions and Reason Codes.
+- Runtime behavior: AgentLoop creates its final `ModelInputIR` only through the Planner; History pairing remains owned by `ConversationHistory`, and only a successful Provider plus History/Baseline commit advances the committed logical manifest and successful Context inspection.
+- Cache behavior: `.cyber-agent/cache/context-fragments` stores only rebuildable, project-bound entries whose versioned key covers source/content identity, Planner/Estimator/Budget versions, capabilities and the complete budget; checksum, reconstruction and key revalidation make corruption or cross-project content a safe Miss.
+- Test path: permanent external regressions cover fixed ordering and channel isolation, every budget decision, UTF-8/wrapper overhead, stable fingerprints/reasons, logical append/replacement, cache hit/miss/corruption/deletion/tampering/project isolation and the AgentLoop success/failure commit boundary.
+- Forbidden work preserved: no M3-S2 WorldState/Tool Exposure/Mode/Profile/Vision work, Compaction/RequestAudit persistence, general Router/Hook/Plugin layer, Live request, Codex credential/login access, Codex source modification or Codex code port.
+- Result: `COMPLETE` locally; the full Cargo/Lean Gate passes and Luna xhigh returned final `APPROVE` with no unresolved P0/P1 after Terra xhigh implementation and review fixes. Remote PR/CI/merge evidence is pending.
+- Dependencies and schemas: no dependency or Cargo feature changed; Fragment Cache schema v2 is derived and deletable, and no authoritative Event/Research/Artifact schema changed.
+- Git: implementation is delivered through the M3-S1 Slice branch; exact commit, PR, CI and Squash Merge identities will be added by the separate remote status seal.
 - Live Test: `OFF`; the existing synthetic smoke remains ignored and no real credential or public Provider request was used.
 
 ## Current Authority
@@ -66,29 +66,29 @@
 - M2-S3 durable SHA-256 Blobs, versioned Artifact facts, provenance-preserving Lineage and the fixed Artifact tool.
 - M2-S4 audited Project Memory, two-level Project Fingerprints and rebuildable Snapshot/File Manifest/Tool Capability caches.
 - M2-S5 auditable atomic file writes, a constrained owned Patch Adapter and a project/session-bound deterministic read-only Tool Result Cache.
+- M3-S1 budgeted Context planning, explainable decisions, logical manifests, Fragment Cache and AgentLoop Context compilation.
 
-## Next Authorized Slice
+## Next Planned Slice
 
-- Slice: `M3-S1`
-- Planned delivery branch: `agent/m3-s1-context-planner`
-- Base commit: the M2-S5 status-seal merge commit, to be recorded after its remote Gate passes
-- Scope lock: add the provider-neutral Context Planner, Full Logical Manifest, Append-only Candidate, ContextDecisionManifest, Fragment Cache and `/context` inspection only.
-- Required behavior: fixed full-request assembly order; stable include/truncate/artifact-ref/exclude decisions and Reason Codes; unchanged Fragments reuse cached rendering; historical request audit is never rewritten by Context Recompile.
-- Intended production touch points: pure Context Domain contracts and planning/fingerprint owner, one project-isolated rebuildable Fragment Cache Adapter, the existing AgentLoop/Baseline integration and a minimal CLI `/context` view.
-- Intended permanent tests: stable ordering/fingerprints/reasons, every budget decision, cache hit/miss/corruption/deletion, append-only versus full-logical relations, and non-destructive recompile audit behavior.
-- Forbidden continuation: M3-S2 WorldState/Tool Exposure/Mode/Profile/Vision routing, Compaction/Request Audit, general database/index/watcher/hook/router/plugin abstractions, Live Provider requests and Codex credential/login access.
+- Slice: `M3-S2`
+- State: `READY_NOT_AUTHORIZED` until M3-S1 is Squash Merged, its post-merge `main` Gate passes and a separate status-seal PR records both remote identities.
+- Planned delivery branch: `agent/m3-s2-world-state-mode`
+- Base commit: to be resolved from the remotely sealed `main`; never branch from the unmerged M3-S1 head.
+- Scope lock: ResearchWorldState Full/Diff, Project Snapshot Diff, Direct/Deferred/Hidden Tool Exposure with `tool_search`, Mode Pack, Prompt/Model Profile, AgentModelProfile and the pure four-mode Vision Route Resolver plus `doctor` capability validation.
+- Required behavior: stable Section IDs/Hashes and bounded Full/Diff renderers; explicit Tool exposure without a dynamic plugin registry; explicit versioned capability mapping with no model-name, cost, latency or failure inference; one Primary and at most one scoped Vision Provider inside the same AgentLoop authority.
+- Intended permanent tests: state and prompt/tool fingerprints, Deferred exposure Baseline reset, Schema-token metrics, exhaustive VisionMode capability matrix, invalid forced-mode preflight failure and Primary/Vision identity separation.
+- Forbidden continuation: M3-S3 Compaction/Resume/RequestAudit persistence, M3-S4 image execution/VisionAnalysisService, general router/hook/plugin/database/watcher work, Live Provider requests and Codex credential/login access.
 
 ## Current Authorization
 
 The current user instruction explicitly authorizes continued implementation with delegated Terra/Luna development and normal version-controlled remote delivery until the first prototype reaches the separately authorized Live Provider validation boundary.
 
 - Run mode: `IMPLEMENT_TO_LIVE_BOUNDARY`
-- Slice ID: `M3-S1`; state `AUTHORIZED_PENDING_STATUS_SEAL`
+- Slice ID: `M3-S2`; state `READY_NOT_AUTHORIZED` while M3-S1 remote sealing is incomplete; the current user's continuing authorization may activate it only after that Gate
 - Git mode: `BRANCH_PR_REVIEW_MERGE`; commit, push, PR, CI review and merge are authorized when the Slice Gate passes
 - Delegation mode: `AUTHORIZED`; delegated implementation Agents must independently read the repository authority chain and stay inside the current Slice
 - Live test mode: `OFF`; no real Provider credential or public model request is authorized
-- Start condition: merge this M2-S5 status seal and pass its post-merge `main` CI before creating the M3-S1 delivery branch
-- Forbidden continuation inside M3-S1: M3-S2 WorldState/Tool Exposure/Mode/Profile/Vision, Compaction/Request Audit, general database/index/watcher/hook/router/plugin work, Codex source modification or Codex credentials/login access
+- Forbidden continuation before M3-S1 remote sealing: all M3-S2 production work, Compaction/Request Audit, general database/index/watcher/hook/router/plugin work, Codex source modification or Codex credentials/login access
 - Stop condition: complete and remotely seal each authorized Slice before advancing; stop at the first prototype's separately authorized Live Provider validation boundary without running a Live Test
 
 ## M2-S5 Slice Start
@@ -100,7 +100,45 @@ The current user instruction explicitly authorizes continued implementation with
 - Acceptance commands: the locked Cargo fmt/clippy/test/build Gate; production inline-test, forbidden Codex dependency, dedicated-credential and `codex/`-unchanged scans; `git diff --check`.
 - Live Test: `OFF`; this Slice uses only temporary local projects, fixtures and Mock Providers.
 
+## M3-S1 Slice Start
+
+- Delivery branch: `agent/m3-s1-context-planner`
+- Base commit: `206f142`
+- Intended production touch points: a pure Context Fragment/Planner/Manifest owner in Domain, a project-isolated rebuildable Fragment Cache Adapter, the existing AgentLoop/Baseline integration and one minimal CLI `/context` inspection path.
+- Intended permanent tests: fixed full-request order; stable include/truncate/artifact-ref/exclude decisions and Reason Codes; unchanged Fragment cache reuse; corruption/deletion rebuild; append-only Candidate correctness; and Context Recompile producing derived comparison data without mutating historical audit.
+- Acceptance commands: the locked Cargo fmt/clippy/test/build Gate; production inline-test, forbidden Codex dependency, dedicated-credential, architecture-direction and `codex/`-unchanged scans; `git diff --check`.
+- Live Test: `OFF`; this Slice uses only deterministic Domain tests, temporary local projects, Fixtures, Mock and Replay paths.
+
 ## Slice Lean Review
+
+### M3-S1 Lean Review
+
+#### Semantic Owners
+
+- `src/domain/context/planner.rs` and its narrowly named private modules are the only owners of fixed Context ordering, rendered-channel budgeting, selection, truncation, canonical Tool ordering, fingerprints, Full Logical Manifest and logical append-only comparison. `ContextPlan` cannot be deserialized into an invalid compiled state.
+- `src/domain/context/canonical.rs` remains the one canonical Tool-schema and request-hash owner; the Planner reuses its ordered Tool representation instead of introducing a second normalization rule.
+- `src/domain/history.rs` remains the only Tool Call/Result pairing owner. Context compilation validates externally assembled items through that owner and never repairs or drops an unsupported item silently.
+- `src/app/context_compilation.rs` owns cache-aware Fragment resolution at the App/Port boundary; it distrusts arbitrary Port hits and revalidates each Fragment against its requested key.
+- `src/adapters/fragment_cache.rs` owns the single local derived Fragment Cache representation and project-isolated durable path. `src/app/agent_loop.rs` remains the sole runtime consumer and `ProviderSession` remains the sole Full/incremental delivery authority.
+
+#### Reuse, API and Dependencies
+
+- Reused the existing `ModelInputIR`, `ModelCapabilities`, `ToolSpec`, `ConversationHistory`, Project writer/durable replacement, Serde, BLAKE3 and Canonical JSON stack. No second model input, pairing, hash, filesystem durability or Provider-session implementation was added.
+- Fragment construction derives its own content hash and token estimate. Tool-schema order used for budgeting is the same canonical order sent to the Provider, and the final rendered request is rechecked against the budget.
+- New public contracts are limited to the Context Fragment/Plan/Manifest inspection model, the narrow `ContextFragmentCache` Port, `LocalFragmentCache` Adapter and AgentLoop Context inspection/configuration path. The broader Context compilation visibility and standalone lowercase CLI status remain P2 cleanup candidates, not competing runtime semantics.
+- No Cargo dependency, Cargo feature, Provider DTO, Event type, authoritative schema or configuration source changed. Fragment Cache schema v2 is explicitly derived and deletable.
+
+#### Test Layout, Split Review and Codex Classification
+
+- Production `src/` contains no inline test module. Permanent Domain, Cache, CLI and AgentLoop regressions remain under top-level `tests/`; 192 tests pass and the one existing synthetic Live Smoke remains ignored.
+- The 383-line Fragment Cache Adapter was split-reviewed and retained as one cohesive persistence boundary: project path checks, private rebuildable DTO/checksum, durable store and typed Adapter errors change together and have no second consumer or reusable abstraction to extract. Large test files are permanent table/fixture coverage, not production modules.
+- Codex Context behavior remains `REFERENCE`; ordering, budgeting, truncation, cache identity and manifests are local `REIMPLEMENT`. No Codex source was copied, no forbidden dependency was added and no Upstream Port Ledger entry or license change is required.
+
+#### Removed and Deferred
+
+- Removed caller-supplied token estimates, byte-count-only budgeting, UTF-8-unsafe truncation, unchecked deserialization of compiled plans/cache fragments, weak cache identity, mismatched Port-hit trust and failure-path promotion of successful Context inspection.
+- Deferred exactly as scope-locked: ResearchWorldState/Project Diff production composition, Tool Exposure/Mode/Profile/Vision routing, RequestAudit persistence and offline historical recompile storage, Compaction/Resume, dynamic History Fragment caching, general Router/Hook/Plugin/database abstractions and Live Provider validation.
+- Retained P2: project-level rather than Session-level Fragment Cache isolation, Base Prompt as the only current runtime cached Fragment, public Context compilation surface and lowercase standalone CLI status. Each has a real current consumer or harmless inspection impact; none blocks the M3-S1 contract or duplicates a semantic owner.
 
 ### Semantic Owners
 
@@ -387,18 +425,24 @@ The current user instruction explicitly authorizes continued implementation with
 
 ## Blockers
 
-- None for M2-S5: implementation and Writer-lock stabilization PRs, PR CI and post-merge `main` CI are complete.
-- M3-S1 starts only after this independent status seal is merged and its post-merge `main` CI passes.
+- None for M2-S5: implementation, stabilization and status PRs plus all post-merge `main` CI runs are complete.
+- None for the M3-S1 local implementation: its Cargo/Lean Gate and final Luna review pass. Remote PR CI, Squash Merge, post-merge `main` CI and the separate status seal remain required delivery gates.
+- M3-S2 cannot start before the M3-S1 implementation merge and status seal, even though the current user instruction authorizes continued development afterward.
 - Live Provider compatibility remains unverified by design; missing live credentials do not block offline development and no Codex credential is an allowed substitute.
 
 ## Last Verification
 
+- M3-S1 local Gate: PASS on Rust `1.93.1`; formatting, denied-warning Clippy, 192 offline/local tests plus one ignored existing synthetic Live Smoke, locked build, inline-test scan, forbidden Codex dependency scan, dedicated-credential review, dependency-direction scan, secret-pattern scan, `git diff --check` and `codex/`-unchanged check all passed.
+- M3-S1 review: Terra xhigh implemented the bounded Context path and four P1 hardening rounds; Luna xhigh initially returned `REQUEST_CHANGES`, then returned final `APPROVE` after UTF-8/rendered-overhead budgeting, constructor-owned estimates, complete cache content identity/checksum and mismatched-hit revalidation gained permanent regressions. No unresolved P0/P1 remains.
+- M3-S1 runtime Gate: PASS; AgentLoop sends only the Planner's final `ModelInputIR`, successful Context state advances only after Provider/History/Baseline commit, and a failed request exposes its attempted plan without replacing the preceding successful inspection or committed logical manifest.
+- M3-S1 Live Test: `OFF`; no credential, external model request, Codex login state, `~/.codex` or `CODEX_HOME` was read or modified.
 - M2-S5 local Gate: PASS on Rust `1.93.1`; formatting, denied-warning Clippy, 164 offline/local tests plus one ignored existing synthetic Live Smoke, locked build, inline-test scan, forbidden Codex dependency scan, credential-isolation scan, `git diff --check` and `codex/`-unchanged check all passed. The Session sequence regression passed 30 additional consecutive runs.
 - M2-S5 review: Terra xhigh completed the bounded implementation; main review fixed the persistent Receipt/Event contract, long-held Project Writer, plan/outcome binding and duplicate Event source payload; final Luna xhigh review returned `APPROVE` with no unresolved P0/P1.
 - M2-S5 Live Test: `OFF`; no credential, external model request, Codex login state, `~/.codex` or `CODEX_HOME` was read or modified.
 - M2-S5 remote Gate: PASS; PR `#24` was Squash Merged as `a46ad33`, PR-head run `32598264243` passed, and post-merge `main` run `32598378267` passed the same Rust Gate.
 - M2-S5 status-seal correction: PR `#25` run `32601709085` exposed nondeterministic implicit macOS Writer-lock release on two attempts. The sole `ProjectWriter` owner now explicitly unlocks and a permanent immediate-reacquisition regression was added; the broader Tool-dispatch refactor was rejected as unnecessary.
 - M2-S5 stabilization Gate: PASS; local formatting, denied-warning Clippy, 165 offline/local tests plus one ignored Live Smoke and locked build passed. PR `#26` was Squash Merged as `018d47a`; PR-head run `32614460762` and post-merge `main` run `32614845713` passed.
+- M2-S5 status seal: PASS; PR `#25` was Squash Merged as `206f142`, final PR-head run `32615810257` and post-merge `main` run `32617170396` passed before M3-S1 started.
 - M2-S4 local Gate: PASS on Rust `1.93.1`; formatting, denied-warning Clippy, 148 offline/local tests plus one ignored existing synthetic Live Smoke, locked build, inline-test scan, forbidden Codex dependency scan, credential-pattern scan, dependency/architecture diff scans, `git diff --check` and `codex/`-unchanged check all passed. No Live Test was run.
 - M2-S4 review: Terra xhigh `REQUEST_CHANGES` findings for exact duplicate Memory replay and cached BLAKE3 reuse were fixed with permanent regressions; main review fixed repeated-dirty Git invalidation and split the oversized Snapshot Adapter; Luna xhigh returned final `APPROVE` after the explicit `core.md` bound gained pre-Blob, external-read and Schema coverage. No unresolved P0/P1 remains.
 - M2-S4 Live Test: `OFF`; no credential, external model request, Codex login state, `~/.codex` or `CODEX_HOME` was read or modified.
