@@ -7,12 +7,12 @@
 - Implementation: `STARTED`
 - Current milestone: `M3`
 - Current slice: `M3-S2`
-- Slice state: `READY_NOT_AUTHORIZED`; M3-S1 is locally complete but M3-S2 cannot start before the separate M3-S1 implementation merge and status seal
-- Lean governance: `ACTIVE`; M3-S1 passed its local Lean Gate with no unresolved P0/P1 and is awaiting remote sealing
-- Local Git initialized: `yes`; the completed M3-S1 implementation remains on `agent/m3-s1-context-planner` for PR delivery
-- Remote repository: `F0und-icu/cyber-agent` private; M2-S5 implementation PR `#24`, Writer-lock stabilization PR `#26` and status PR `#25` were Squash Merged
+- Slice state: `READY_NOT_AUTHORIZED`; M3-S1 implementation and both remote Cargo Gates are complete, and this status seal is the final boundary before M3-S2 starts
+- Lean governance: `ACTIVE`; M3-S1 passed its local and remote Lean/Cargo Gates with no unresolved P0/P1
+- Local Git initialized: `yes`; M3-S1 remote evidence is being sealed on `agent/m3-s1-status-seal`
+- Remote repository: `F0und-icu/cyber-agent` private; M3-S1 implementation PR `#27` was Squash Merged
 - Documentation baseline commit: `55ff3be`
-- Current code base: locally complete M3-S1 branch based on M2-S5 status-seal merge commit `206f142`
+- Current code base: M3-S1 Squash Merge commit `96fea6b` on `origin/main`
 - Upstream Codex baseline: `3aae5d885bac39c1262491aa3fd100dfd8b3919f`
 
 ## Last Completed Slice
@@ -26,9 +26,9 @@
 - Cache behavior: `.cyber-agent/cache/context-fragments` stores only rebuildable, project-bound entries whose versioned key covers source/content identity, Planner/Estimator/Budget versions, capabilities and the complete budget; checksum, reconstruction and key revalidation make corruption or cross-project content a safe Miss.
 - Test path: permanent external regressions cover fixed ordering and channel isolation, every budget decision, UTF-8/wrapper overhead, stable fingerprints/reasons, logical append/replacement, cache hit/miss/corruption/deletion/tampering/project isolation and the AgentLoop success/failure commit boundary.
 - Forbidden work preserved: no M3-S2 WorldState/Tool Exposure/Mode/Profile/Vision work, Compaction/RequestAudit persistence, general Router/Hook/Plugin layer, Live request, Codex credential/login access, Codex source modification or Codex code port.
-- Result: `COMPLETE` locally; the full Cargo/Lean Gate passes and Luna xhigh returned final `APPROVE` with no unresolved P0/P1 after Terra xhigh implementation and review fixes. Remote PR/CI/merge evidence is pending.
+- Result: `COMPLETE`; local and remote Cargo/Lean Gates pass and Luna xhigh returned final `APPROVE` with no unresolved P0/P1 after Terra xhigh implementation and review fixes.
 - Dependencies and schemas: no dependency or Cargo feature changed; Fragment Cache schema v2 is derived and deletable, and no authoritative Event/Research/Artifact schema changed.
-- Git: implementation is delivered through the M3-S1 Slice branch; exact commit, PR, CI and Squash Merge identities will be added by the separate remote status seal.
+- Git: implementation PR `#27` was Squash Merged as `96fea6b`; PR-head run `32625847959` and post-merge `main` run `32625961489` passed.
 - Live Test: `OFF`; the existing synthetic smoke remains ignored and no real credential or public Provider request was used.
 
 ## Current Authority
@@ -71,9 +71,9 @@
 ## Next Planned Slice
 
 - Slice: `M3-S2`
-- State: `READY_NOT_AUTHORIZED` until M3-S1 is Squash Merged, its post-merge `main` Gate passes and a separate status-seal PR records both remote identities.
+- State: `READY_NOT_AUTHORIZED`; M3-S1 implementation and post-merge `main` Gates pass, and M3-S2 may be activated from the merged status seal under the current user's continuing authorization.
 - Planned delivery branch: `agent/m3-s2-world-state-mode`
-- Base commit: to be resolved from the remotely sealed `main`; never branch from the unmerged M3-S1 head.
+- Base commit: resolve from `main` after this status seal merges; never branch from the old M3-S1 implementation head.
 - Scope lock: ResearchWorldState Full/Diff, Project Snapshot Diff, Direct/Deferred/Hidden Tool Exposure with `tool_search`, Mode Pack, Prompt/Model Profile, AgentModelProfile and the pure four-mode Vision Route Resolver plus `doctor` capability validation.
 - Required behavior: stable Section IDs/Hashes and bounded Full/Diff renderers; explicit Tool exposure without a dynamic plugin registry; explicit versioned capability mapping with no model-name, cost, latency or failure inference; one Primary and at most one scoped Vision Provider inside the same AgentLoop authority.
 - Intended permanent tests: state and prompt/tool fingerprints, Deferred exposure Baseline reset, Schema-token metrics, exhaustive VisionMode capability matrix, invalid forced-mode preflight failure and Primary/Vision identity separation.
@@ -84,7 +84,7 @@
 The current user instruction explicitly authorizes continued implementation with delegated Terra/Luna development and normal version-controlled remote delivery until the first prototype reaches the separately authorized Live Provider validation boundary.
 
 - Run mode: `IMPLEMENT_TO_LIVE_BOUNDARY`
-- Slice ID: `M3-S2`; state `READY_NOT_AUTHORIZED` while M3-S1 remote sealing is incomplete; the current user's continuing authorization may activate it only after that Gate
+- Slice ID: `M3-S2`; state `READY_NOT_AUTHORIZED` until this status seal merges; the current user's continuing authorization may then activate it
 - Git mode: `BRANCH_PR_REVIEW_MERGE`; commit, push, PR, CI review and merge are authorized when the Slice Gate passes
 - Delegation mode: `AUTHORIZED`; delegated implementation Agents must independently read the repository authority chain and stay inside the current Slice
 - Live test mode: `OFF`; no real Provider credential or public model request is authorized
@@ -426,8 +426,8 @@ The current user instruction explicitly authorizes continued implementation with
 ## Blockers
 
 - None for M2-S5: implementation, stabilization and status PRs plus all post-merge `main` CI runs are complete.
-- None for the M3-S1 local implementation: its Cargo/Lean Gate and final Luna review pass. Remote PR CI, Squash Merge, post-merge `main` CI and the separate status seal remain required delivery gates.
-- M3-S2 cannot start before the M3-S1 implementation merge and status seal, even though the current user instruction authorizes continued development afterward.
+- None for M3-S1: its implementation PR, PR-head Gate, Squash Merge and post-merge `main` Gate are complete; this documentation-only status seal records the completed boundary.
+- M3-S2 cannot start before this status seal merges, even though the current user instruction authorizes continued development afterward.
 - Live Provider compatibility remains unverified by design; missing live credentials do not block offline development and no Codex credential is an allowed substitute.
 
 ## Last Verification
@@ -436,6 +436,7 @@ The current user instruction explicitly authorizes continued implementation with
 - M3-S1 review: Terra xhigh implemented the bounded Context path and four P1 hardening rounds; Luna xhigh initially returned `REQUEST_CHANGES`, then returned final `APPROVE` after UTF-8/rendered-overhead budgeting, constructor-owned estimates, complete cache content identity/checksum and mismatched-hit revalidation gained permanent regressions. No unresolved P0/P1 remains.
 - M3-S1 runtime Gate: PASS; AgentLoop sends only the Planner's final `ModelInputIR`, successful Context state advances only after Provider/History/Baseline commit, and a failed request exposes its attempted plan without replacing the preceding successful inspection or committed logical manifest.
 - M3-S1 Live Test: `OFF`; no credential, external model request, Codex login state, `~/.codex` or `CODEX_HOME` was read or modified.
+- M3-S1 remote Gate: PASS; implementation PR `#27` was Squash Merged as `96fea6b`, PR-head run `32625847959` and post-merge `main` run `32625961489` passed the macOS Rust Gate before this status seal.
 - M2-S5 local Gate: PASS on Rust `1.93.1`; formatting, denied-warning Clippy, 164 offline/local tests plus one ignored existing synthetic Live Smoke, locked build, inline-test scan, forbidden Codex dependency scan, credential-isolation scan, `git diff --check` and `codex/`-unchanged check all passed. The Session sequence regression passed 30 additional consecutive runs.
 - M2-S5 review: Terra xhigh completed the bounded implementation; main review fixed the persistent Receipt/Event contract, long-held Project Writer, plan/outcome binding and duplicate Event source payload; final Luna xhigh review returned `APPROVE` with no unresolved P0/P1.
 - M2-S5 Live Test: `OFF`; no credential, external model request, Codex login state, `~/.codex` or `CODEX_HOME` was read or modified.
