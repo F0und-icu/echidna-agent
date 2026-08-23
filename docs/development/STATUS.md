@@ -7,12 +7,12 @@
 - Implementation: `STARTED`
 - Current milestone: `M3`
 - Current slice: `M3-S4`
-- Slice state: `READY_NOT_AUTHORIZED`; M3-S3d is locally complete but M3-S4 cannot start before the M3-S3d implementation merge and separate status seal
-- Lean governance: `ACTIVE`; M3-S3d passed its local Cargo/Lean Gate and Terra xhigh final review with no unresolved P0/P1
-- Local Git initialized: `yes`; the completed M3-S3d implementation remains on `agent/m3-s3d-inspection-cli` for PR delivery
-- Remote repository: `F0und-icu/cyber-agent` private; M3-S3c implementation PR `#35` and status PR `#36` were Squash Merged
+- Slice state: `READY_NOT_AUTHORIZED`; M3-S3d is remotely merged but M3-S4 cannot start before the separate M3-S3d status seal
+- Lean governance: `ACTIVE`; M3-S3d passed its local Cargo/Lean Gate, Terra xhigh final review and PR-head macOS Gate with no unresolved P0/P1
+- Local Git initialized: `yes`; M3-S3d status evidence is being sealed on `agent/m3-s3d-status`
+- Remote repository: `F0und-icu/cyber-agent` private; M3-S3d implementation PR `#37` was Squash Merged
 - Documentation baseline commit: `55ff3be`
-- Current code base: locally complete M3-S3d branch based on M3-S3c status-seal Squash Merge commit `96385f1`
+- Current code base: M3-S3d Squash Merge commit `a29187b`; its exact PR-head tree passed CI and the post-merge duplicate push Gate was intentionally skipped to conserve the remaining Actions quota
 - Upstream Codex baseline: `3aae5d885bac39c1262491aa3fd100dfd8b3919f`
 
 ## Last Completed Slice
@@ -26,9 +26,9 @@
 - Session/metrics behavior: one Session is selected automatically, multiple Sessions require explicit `--session`, and missing/corrupt/non-regular Session streams fail explicitly. Counts for requests, estimated Tokens, Full/incremental delivery, ProviderRejected fallback, Tool cache hits and Compaction derive only from replayed facts.
 - Test path: permanent subprocess regressions cover uninitialized/empty projects, normal and explicit Session selection, ambiguous/missing Sessions, current Snapshot Hit/Full behavior, historical incremental-cache provenance, missing Blob, corrupt Session JSONL, Session Event symlinks, stable output, secret/transport exclusion and no local mutation.
 - Forbidden work preserved: no Provider or Tool call, credential resolution, Snapshot rebuild, Event/Blob write, metrics store, image/Vision execution, new schema, general Manager/Router/Hook/database, second runtime Agent, Codex source change or Codex code port.
-- Result: `COMPLETE` locally; the full Cargo/Lean Gate passes 244 offline/local tests with one existing opt-in Live Smoke ignored. Terra xhigh returned final `APPROVE` with no P0/P1/P2 blocker after main-agent correctness and reuse hardening. Remote PR/CI/merge evidence is pending.
+- Result: `COMPLETE`; the full Cargo/Lean Gate passes 244 offline/local tests with one existing opt-in Live Smoke ignored. Terra xhigh returned final `APPROVE` with no P0/P1/P2 blocker after main-agent correctness and reuse hardening, and the PR-head macOS Gate passed.
 - Dependencies and schemas: no Cargo dependency, feature, Provider DTO, Port, credential source, persisted Event/Manifest schema or remote transport changed; all inspection reports are non-authoritative derived views.
-- Git: implementation is ready on the M3-S3d Slice branch; exact commit, PR, CI and Squash Merge identities will be added by the separate remote status seal.
+- Git: implementation commit `41546ba`, PR `#37`, PR-head CI `32649939090` and Squash Merge `a29187b`; the merge subject used `[skip ci]` so the already-proven tree did not consume a duplicate post-merge run.
 - Live Test: `OFF`; the existing synthetic smoke remains ignored and no real credential or public Provider request was used.
 
 ## Current Authority
@@ -76,7 +76,7 @@
 ## Next Planned Slice
 
 - Slice: `M3-S4`
-- State: `READY_NOT_AUTHORIZED` until M3-S3d is Squash Merged, its post-merge `main` Gate passes and a separate status-seal PR records both remote identities.
+- State: `READY_NOT_AUTHORIZED` until a separate status-seal PR records the M3-S3d implementation and PR-head Gate identities.
 - Planned delivery branch: `agent/m3-s4-multimodal`
 - Base commit: resolve from the remotely sealed `main`; never branch from the unmerged M3-S3d head.
 - Scope lock: one auditable local-image vertical path implementing the accepted Architecture v1.1/ADR-0002 Direct or Secondary vision composition inside the existing single AgentLoop and Session authority.
@@ -89,11 +89,11 @@
 The current user instruction explicitly authorizes continued implementation with delegated Terra/Luna development and normal version-controlled remote delivery until the first prototype reaches the separately authorized Live Provider validation boundary.
 
 - Run mode: `IMPLEMENT_TO_LIVE_BOUNDARY`
-- Slice ID: `M3-S4`; state `READY_NOT_AUTHORIZED` while M3-S3d remote sealing is incomplete; the current user's continuing authorization may activate it only after that Gate
+- Slice ID: `M3-S4`; state `READY_NOT_AUTHORIZED` while the M3-S3d status seal is incomplete; the current user's continuing authorization may activate it only after that seal
 - Git mode: `BRANCH_PR_REVIEW_MERGE`; commit, push, PR, CI review and merge are authorized when the Slice Gate passes
 - Delegation mode: `AUTHORIZED`; delegated implementation Agents must independently read the repository authority chain and stay inside the current Slice
 - Live test mode: `OFF`; no real Provider credential or public model request is authorized
-- Forbidden continuation before M3-S3d remote sealing: all M3-S4 image execution/VisionAnalysisService work, M4 work, general database/index/watcher/hook/router/plugin work, Codex source modification or Codex credentials/login access
+- Forbidden continuation before the M3-S3d status seal: all M3-S4 image execution/VisionAnalysisService work, M4 work, general database/index/watcher/hook/router/plugin work, Codex source modification or Codex credentials/login access
 - Stop condition: complete and remotely seal each authorized Slice before advancing; stop at the first prototype's separately authorized Live Provider validation boundary without running a Live Test
 
 ## M2-S5 Slice Start
@@ -627,7 +627,7 @@ The current user instruction explicitly authorizes continued implementation with
 - None for M3-S3a; implementation PR `#31`, status PR `#32` and all corresponding post-merge `main` Gates are complete.
 - None for M3-S3b; implementation PR `#33`, status PR `#34` and all corresponding post-merge `main` Gates are complete.
 - None for M3-S3c; implementation PR `#35`, status PR `#36` and all corresponding post-merge `main` Gates are complete.
-- None for M3-S3d offline implementation; remote implementation and status sealing are pending.
+- None for M3-S3d implementation; PR `#37` and its PR-head Gate are complete, while this documentation-only status seal remains pending.
 - Live Provider compatibility remains unverified by design; missing live credentials do not block offline development and no Codex credential is an allowed substitute.
 
 ## Last Verification
@@ -636,6 +636,7 @@ The current user instruction explicitly authorizes continued implementation with
 - M3-S3d inspection Gate: PASS; uninitialized/empty/normal/corrupt facts are stable, one Session auto-selects while ambiguity requires `--session`, all RequestAudit Blob references are revalidated through the existing service, current Snapshot disposition does not misreport historical refresh provenance, and inspections perform no local write, Provider call, Tool execution or credential resolution.
 - M3-S3d review: Luna xhigh implemented the bounded path; main review separated per-command reads, removed redundant aliases/abstractions, added explicit Session selection and strict filesystem handling, reused the RequestAudit/Token owners and fixed current-Hit semantics. Terra xhigh returned final `APPROVE` with no P0/P1/P2 blocker.
 - M3-S3d Live Test: `OFF`; no credential, external model request, Codex login state, `~/.codex` or `CODEX_HOME` was read or modified.
+- M3-S3d remote Gate: PASS; implementation commit `41546ba` was Squash Merged through PR `#37` as `a29187b`, and PR-head run `32649939090` passed the macOS Rust Gate. The merge used `[skip ci]` to avoid repeating the exact tree Gate on `main` after the user reported limited Actions quota.
 - M3-S3c remote Gate: PASS; implementation commit `c4a2cf9` was Squash Merged through PR `#35` as `cb6781e`, with PR-head run `32643924616` and post-merge `main` run `32644062157` passing the macOS Rust Gate.
 - M3-S3c status seal: PASS; PR `#36` was Squash Merged as `96385f1`, with PR-head run `32644218115` and post-merge `main` run `32644328650` passing before M3-S3d started.
 - M3-S3b local Gate: PASS on Rust `1.93.1`; formatting, denied-warning Clippy, 228 offline/local tests plus one ignored existing synthetic Live Smoke, locked build, inline-test scan, forbidden Codex dependency scan, credential isolation, Provider-wire and dependency-direction scans, one-AgentLoop/no-second-History-owner review, `git diff --check` and `codex/`-unchanged check all passed.
