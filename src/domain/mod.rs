@@ -10,10 +10,13 @@ pub mod context;
 pub mod events;
 pub mod history;
 pub mod memory;
+pub mod mode;
 pub mod model;
+pub mod profile;
 pub mod project;
 pub mod research;
 pub mod snapshot;
 pub mod tools;
+pub mod world_state;
 
 pub use artifacts::ArtifactId;

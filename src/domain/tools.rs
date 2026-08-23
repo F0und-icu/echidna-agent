@@ -1,5 +1,6 @@
 //! Provider-neutral Tool contracts and pure execution invariants.
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -53,6 +54,38 @@ pub enum ToolExposure {
     Direct,
     Deferred,
     Hidden,
+}
+
+/// A fixed Mode or local configuration override for named Tool exposure.
+///
+/// Unmentioned Tools retain the registry's built-in exposure. This is a
+/// bounded data contract, not a dynamic plugin or policy system.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ToolExposurePlan {
+    overrides: BTreeMap<ToolName, ToolExposure>,
+}
+
+impl ToolExposurePlan {
+    pub fn new(overrides: impl IntoIterator<Item = (ToolName, ToolExposure)>) -> Self {
+        Self {
+            overrides: overrides.into_iter().collect(),
+        }
+    }
+
+    pub fn exposure_for(&self, tool_name: &ToolName, default: ToolExposure) -> ToolExposure {
+        self.overrides.get(tool_name).copied().unwrap_or(default)
+    }
+
+    pub fn overrides(&self) -> &BTreeMap<ToolName, ToolExposure> {
+        &self.overrides
+    }
+
+    /// Applies the explicit override to a concrete schema while leaving all
+    /// model-facing schema fields under the existing ToolSpec owner.
+    pub fn apply_to_spec(&self, mut spec: ToolSpec) -> ToolSpec {
+        spec.exposure = self.exposure_for(&spec.name, spec.exposure);
+        spec
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

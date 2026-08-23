@@ -1,42 +1,48 @@
 //! Bounded single-Agent Tool Call -> Tool Result -> full-resample loop.
 
+mod context_state;
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use thiserror::Error;
 
 use crate::domain::context::{
-    BaselineAssessment, BaselineInvalidationReason, ContextBudget, ContextContentHash,
-    ContextError, ContextFragment, ContextFragmentContent, ContextFragmentId,
-    ContextFragmentPriority, ContextFragmentSource, ContextPlan, ContextPlanner,
-    FragmentCachePolicy, FullLogicalManifest, InternalRequestMetadata, ModelIdentity, ModelProfile,
-    ProviderSession, ProviderSessionId, ProviderSessionRole, StepSnapshot, TurnContext, TurnId,
+    BaselineAssessment, BaselineInvalidationReason, ContextError, ContextPlan, ContextPlanner,
+    FullLogicalManifest, InternalRequestMetadata, ModelIdentity, ModelProfile, ProviderSession,
+    ProviderSessionId, ProviderSessionRole, StepSnapshot, TurnContext, TurnId,
 };
 use crate::domain::history::{ConversationHistory, HistoryError};
-use crate::domain::model::{ModelInputIR, ModelRequestRequirements};
+use crate::domain::mode::{ModeError, PromptComposition};
+use crate::domain::model::ModelInputIR;
+use crate::domain::profile::{AgentModelProfile, AgentModelProfileError};
 use crate::domain::tools::{
-    ExecutionId, IdempotencyKey, ToolCall, ToolExecutionOutcome, ToolExposure, ToolResult,
+    ExecutionId, IdempotencyKey, ToolCall, ToolExecutionOutcome, ToolExposurePlan, ToolResult,
 };
+use crate::domain::world_state::{ProjectSnapshotContext, ResearchWorldState, WorldStateError};
 use crate::ports::context::ContextFragmentCache;
 use crate::ports::model::{
     ModelProvider, ModelProviderError, ModelRequest, ModelResponseCompletion, ProviderResponseId,
 };
-use crate::ports::tool::ToolExecutor;
+use crate::ports::tool::{ToolExecutor, ToolExecutorError};
 
 use super::cancellation::AgentCancellation;
-use super::context_compilation::{
-    ContextCacheSummary, ContextCompilationError, resolve_context_fragment,
-};
+use super::context_compilation::{ContextCacheSummary, ContextCompilationError};
 use super::model_sample::ModelSample;
 use super::model_streaming::{ModelStreamOutcome, ModelStreamingError, ModelStreamingService};
 use super::tool_scheduler::execute_batch;
 
 const MAX_MODEL_REQUESTS_PER_TURN: usize = 32;
+static NEXT_PRIMARY_RUNTIME_SESSION: AtomicU64 = AtomicU64::new(1);
 
 pub struct AgentLoop<'provider, 'tools, Provider: ?Sized, Tools: ?Sized> {
     provider: &'provider Provider,
     tools: &'tools Tools,
-    instructions: String,
+    prompt_composition: PromptComposition,
+    pending_prompt_composition: Option<PromptComposition>,
+    world_state: Option<ResearchWorldState>,
+    project_snapshot: Option<ProjectSnapshotContext>,
     history: ConversationHistory,
     model: ModelIdentity,
     profile: ModelProfile,
@@ -50,6 +56,13 @@ pub struct AgentLoop<'provider, 'tools, Provider: ?Sized, Tools: ?Sized> {
     last_successful_context: Option<ContextInspection>,
     next_turn_sequence: u64,
     last_baseline_assessment: Option<BaselineAssessment>,
+    active_agent_model_profile: Option<AgentModelProfile>,
+    pending_agent_model_profile: Option<AgentModelProfile>,
+    active_tool_exposure_plan: ToolExposurePlan,
+    committed_delivery_input: Option<ModelInputIR>,
+    committed_history_len: usize,
+    committed_world_state: Option<ResearchWorldState>,
+    committed_project_snapshot: Option<ProjectSnapshotContext>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -112,10 +125,14 @@ where
         if provider_session.reference().role != ProviderSessionRole::Primary {
             return Err(AgentLoopConfigurationError::PrimarySessionRequired);
         }
+        let prompt_composition = PromptComposition::new(instructions.into())?;
         Ok(Self {
             provider,
             tools,
-            instructions: instructions.into(),
+            prompt_composition,
+            pending_prompt_composition: None,
+            world_state: None,
+            project_snapshot: None,
             history: ConversationHistory::default(),
             model,
             profile,
@@ -129,6 +146,13 @@ where
             last_successful_context: None,
             next_turn_sequence: 0,
             last_baseline_assessment: None,
+            active_agent_model_profile: None,
+            pending_agent_model_profile: None,
+            active_tool_exposure_plan: ToolExposurePlan::default(),
+            committed_delivery_input: None,
+            committed_history_len: 0,
+            committed_world_state: None,
+            committed_project_snapshot: None,
         })
     }
 
@@ -139,6 +163,58 @@ where
     pub fn with_fragment_cache(mut self, cache: Arc<dyn ContextFragmentCache>) -> Self {
         self.fragment_cache = Some(cache);
         self
+    }
+
+    /// Sets a complete fixed prompt composition before the first Turn.
+    pub fn with_prompt_composition(mut self, composition: PromptComposition) -> Self {
+        self.pending_prompt_composition = Some(composition);
+        self
+    }
+
+    /// Queues a prompt/Mode change for the next Turn boundary.
+    pub fn queue_prompt_composition(&mut self, composition: PromptComposition) {
+        self.pending_prompt_composition = Some(composition);
+    }
+
+    /// Supplies the current derived research view for the next full Context
+    /// compilation. The Research ledger remains its sole fact owner.
+    pub fn with_world_state(mut self, world_state: ResearchWorldState) -> Self {
+        self.world_state = Some(world_state);
+        self
+    }
+
+    /// Replaces the derived research projection before the next sample. It
+    /// never mutates the authoritative Research ledger.
+    pub fn set_world_state(&mut self, world_state: ResearchWorldState) {
+        self.world_state = Some(world_state);
+    }
+
+    /// Supplies the current derived Project Snapshot for the fixed Context
+    /// slot. Request-audit/Diff persistence remains outside this Slice.
+    pub fn with_project_snapshot(mut self, project_snapshot: ProjectSnapshotContext) -> Self {
+        self.project_snapshot = Some(project_snapshot);
+        self
+    }
+
+    /// Replaces the derived project snapshot before the next sample. The
+    /// cache and snapshot fact owners remain outside this loop.
+    pub fn set_project_snapshot(&mut self, project_snapshot: ProjectSnapshotContext) {
+        self.project_snapshot = Some(project_snapshot);
+    }
+
+    /// Queues a named Agent profile for the next Turn. Validation happens now
+    /// and is rechecked before any user History mutation or Provider call.
+    pub fn queue_agent_model_profile(
+        &mut self,
+        profile: AgentModelProfile,
+    ) -> Result<(), AgentLoopConfigurationError> {
+        profile.validate()?;
+        self.pending_agent_model_profile = Some(profile);
+        Ok(())
+    }
+
+    pub fn agent_model_profile(&self) -> Option<&AgentModelProfile> {
+        self.active_agent_model_profile.as_ref()
     }
 
     /// The most recently compiled Context, including a request which later
@@ -164,6 +240,7 @@ where
         user_text: impl Into<String>,
         cancellation: AgentCancellation,
     ) -> Result<AgentTurnOutcome, AgentLoopError> {
+        self.apply_pending_configuration()?;
         if cancellation.is_cancelled() {
             return Ok(AgentTurnOutcome::Cancelled {
                 model_requests: 0,
@@ -172,47 +249,99 @@ where
         }
         let turn_history_start = self.history.items().len();
         self.history.append_user_text(user_text);
-        let tool_specs = self
-            .tools
-            .specs()
-            .into_iter()
-            .filter(|spec| spec.exposure == ToolExposure::Direct)
-            .collect::<Vec<_>>();
         let capabilities = self.provider.capabilities();
         let context_budget = self.context_planner.default_budget(&capabilities)?;
         self.next_turn_sequence += 1;
-        let turn = TurnContext::new(
-            TurnId::new(format!("turn:{}", self.next_turn_sequence)),
-            self.model.clone(),
-            self.profile.clone(),
-            self.provider_session.reference().clone(),
-            capabilities.context_window,
-            &tool_specs,
-        )?;
+        let turn_id = TurnId::new(format!("turn:{}", self.next_turn_sequence));
         let mut executions = Vec::new();
         let mut provider_requests = 0;
 
         for request_index in 0..MAX_MODEL_REQUESTS_PER_TURN {
             self.history.ensure_all_tool_calls_paired()?;
-            let (plan, cache_summary) = self.compile_context(
-                turn_history_start,
-                context_budget,
-                &capabilities,
+            // A successful tool_search changes the actual schema visible to
+            // the next sample, so direct specs are intentionally refreshed.
+            let tool_specs = self.current_tool_specs();
+            let turn = TurnContext::new(
+                turn_id.clone(),
+                self.model.clone(),
+                self.profile.clone(),
+                self.provider_session.reference().clone(),
+                capabilities.context_window,
                 &tool_specs,
             )?;
-            let input = plan.model_input();
-            let snapshot = StepSnapshot::capture(
+            let (plan, cache_summary) =
+                context_state::compile_context(context_state::ContextCompilationInput {
+                    prompt_composition: &self.prompt_composition,
+                    world_state: self.world_state.as_ref(),
+                    project_snapshot: self.project_snapshot.as_ref(),
+                    history: self.history.items(),
+                    turn_history_start,
+                    planner: &self.context_planner,
+                    cache: self.fragment_cache.as_deref(),
+                    budget: context_budget,
+                    capabilities: &capabilities,
+                    tool_specs: &tool_specs,
+                    prior_manifest: self.committed_context_manifest.as_ref(),
+                })?;
+            let full_input = plan.model_input();
+            let full_snapshot = StepSnapshot::capture(
                 &turn,
                 request_index,
-                &input,
+                &full_input,
                 &capabilities,
                 InternalRequestMetadata::default(),
             )?;
-            let assessment = self
+            let full_assessment = self
                 .provider_session
-                .assess_delivery(&snapshot, capabilities.incremental_input);
+                .assess_delivery(&full_snapshot, capabilities.incremental_input);
+            let (mut delivery_input, mut snapshot, assessment) = if matches!(
+                full_assessment,
+                BaselineAssessment::FullRequest {
+                    reason: BaselineInvalidationReason::InputNotAppendOnly
+                }
+            ) {
+                match context_state::state_diff_delivery_input(
+                    context_state::StateDiffDeliveryInput {
+                        full_input: &full_input,
+                        current_plan: &plan,
+                        planner: &self.context_planner,
+                        budget: context_budget,
+                        committed_input: self.committed_delivery_input.as_ref(),
+                        committed_history_len: self.committed_history_len,
+                        committed_manifest: self.committed_context_manifest.as_ref(),
+                        committed_world_state: self.committed_world_state.as_ref(),
+                        world_state: self.world_state.as_ref(),
+                        committed_project_snapshot: self.committed_project_snapshot.as_ref(),
+                        project_snapshot: self.project_snapshot.as_ref(),
+                        history: self.history.items(),
+                        turn_history_start,
+                    },
+                )? {
+                    Some(candidate_input) => {
+                        let candidate_snapshot = StepSnapshot::capture(
+                            &turn,
+                            request_index,
+                            &candidate_input,
+                            &capabilities,
+                            InternalRequestMetadata::default(),
+                        )?;
+                        let candidate_assessment = self
+                            .provider_session
+                            .assess_delivery(&candidate_snapshot, capabilities.incremental_input);
+                        match candidate_assessment {
+                            BaselineAssessment::AppendOnlyCandidate { .. } => {
+                                (candidate_input, candidate_snapshot, candidate_assessment)
+                            }
+                            _ => (full_input.clone(), full_snapshot, full_assessment),
+                        }
+                    }
+                    None => (full_input.clone(), full_snapshot, full_assessment),
+                }
+            } else {
+                (full_input.clone(), full_snapshot, full_assessment)
+            };
             self.last_baseline_assessment = Some(assessment.clone());
-            let request = self.request_for_assessment(&input, &assessment)?;
+            let request = self.request_for_assessment(&delivery_input, &assessment)?;
             reserve_provider_request(&mut provider_requests)?;
             self.last_context_plan = Some(plan.clone());
             let stream = match ModelStreamingService::new(self.provider)
@@ -228,9 +357,20 @@ where
                     self.last_baseline_assessment = Some(BaselineAssessment::FullRequest {
                         reason: BaselineInvalidationReason::ProviderRejected,
                     });
+                    delivery_input = full_input.clone();
+                    snapshot = StepSnapshot::capture(
+                        &turn,
+                        request_index,
+                        &delivery_input,
+                        &capabilities,
+                        InternalRequestMetadata::default(),
+                    )?;
                     reserve_provider_request(&mut provider_requests)?;
                     ModelStreamingService::new(self.provider)
-                        .consume(ModelRequest::full(input.clone()), cancellation.clone())
+                        .consume(
+                            ModelRequest::full(delivery_input.clone()),
+                            cancellation.clone(),
+                        )
                         .await
                 }
                 Err(error) => Err(error),
@@ -254,8 +394,13 @@ where
             let server_output_items = sample.content_items();
             sample.commit(&mut self.history)?;
             self.provider_session
-                .record_completed_sample(&snapshot, server_output_items)?;
+                .record_completed_sample(&snapshot, server_output_items.clone())?;
             self.commit_continuation(&completion);
+            delivery_input.content_items.extend(server_output_items);
+            self.committed_delivery_input = Some(delivery_input);
+            self.committed_history_len = self.history.items().len();
+            self.committed_world_state = self.world_state.clone();
+            self.committed_project_snapshot = self.project_snapshot.clone();
             self.committed_context_manifest = Some(plan.full_logical_manifest().clone());
             self.last_successful_context = Some(ContextInspection {
                 plan,
@@ -274,7 +419,10 @@ where
                 });
             }
 
-            let scheduled = self.execute_tool_calls(tool_calls, &cancellation).await?;
+            let exposed_tool_names = tool_specs.iter().map(|spec| spec.name.clone()).collect();
+            let scheduled = self
+                .execute_tool_calls(tool_calls, &exposed_tool_names, &cancellation)
+                .await?;
             executions.extend(scheduled.executions);
             if scheduled.cancelled {
                 return Ok(AgentTurnOutcome::Cancelled {
@@ -289,97 +437,69 @@ where
         })
     }
 
-    fn compile_context(
-        &self,
-        turn_history_start: usize,
-        budget: ContextBudget,
-        capabilities: &crate::domain::model::ModelCapabilities,
-        tool_specs: &[crate::domain::tools::ToolSpec],
-    ) -> Result<(ContextPlan, ContextCacheSummary), AgentLoopError> {
-        let items = self.history.items();
-        if items.len() <= turn_history_start {
-            return Err(AgentLoopError::ContextStateMismatch);
-        }
-
-        let base_id = ContextFragmentId::new("prompt:base")?;
-        let base_content = ContextFragmentContent::Instructions {
-            text: self.instructions.clone(),
-        };
-        let base_content_hash = ContextContentHash::for_fragment(&base_content, None)?;
-        let base_key = self.context_planner.fragment_cache_key(
-            base_id.clone(),
-            ContextFragmentSource::BasePrompt,
-            ContextFragmentPriority::Required,
-            FragmentCachePolicy::ContentAddressed,
-            crate::domain::context::ContextSourceFingerprint::from_source(&self.instructions)?,
-            base_content_hash,
-            capabilities,
-            budget,
-        )?;
-        let resolved_base =
-            resolve_context_fragment(self.fragment_cache.as_deref(), &base_key, || {
-                ContextFragment::new(
-                    base_id,
-                    ContextFragmentSource::BasePrompt,
-                    ContextFragmentPriority::Required,
-                    FragmentCachePolicy::ContentAddressed,
-                    base_content,
-                )
-            })?;
-        let mut cache_summary = ContextCacheSummary::default();
-        cache_summary.record(resolved_base.cache_disposition);
-        let mut fragments = vec![resolved_base.fragment];
-        self.push_content_fragment(
-            &mut fragments,
-            "history:recent",
-            ContextFragmentSource::RecentHistory,
-            &items[..turn_history_start],
-        )?;
-        self.push_content_fragment(
-            &mut fragments,
-            "input:current-user",
-            ContextFragmentSource::UserInput,
-            &items[turn_history_start..=turn_history_start],
-        )?;
-        self.push_content_fragment(
-            &mut fragments,
-            "turn:local-updates",
-            ContextFragmentSource::TurnLocalUpdates,
-            &items[turn_history_start + 1..],
-        )?;
-
-        let plan = self.context_planner.compile(
-            fragments,
-            budget,
-            capabilities,
-            tool_specs.to_vec(),
-            ModelRequestRequirements::default(),
-            self.committed_context_manifest.as_ref(),
-        )?;
-        Ok((plan, cache_summary))
+    fn current_tool_specs(&self) -> Vec<crate::domain::tools::ToolSpec> {
+        self.tools.specs()
     }
 
-    fn push_content_fragment(
-        &self,
-        fragments: &mut Vec<ContextFragment>,
-        id: &str,
-        source: ContextFragmentSource,
-        items: &[crate::domain::model::ContentItem],
-    ) -> Result<(), AgentLoopError> {
-        if items.is_empty() {
-            return Ok(());
+    fn apply_pending_configuration(&mut self) -> Result<(), AgentLoopConfigurationError> {
+        let pending_composition = self.pending_prompt_composition.as_ref();
+        let pending_profile = self.pending_agent_model_profile.as_ref();
+        if let Some(profile) = pending_profile {
+            profile.validate()?;
+            if profile.primary().model() != &self.model {
+                return Err(AgentLoopConfigurationError::PrimaryModelDoesNotMatchProvider);
+            }
+            if profile.primary().capabilities() != &self.provider.capabilities() {
+                return Err(AgentLoopConfigurationError::PrimaryCapabilitiesDoNotMatchProvider);
+            }
         }
-        let content = ContextFragmentContent::ContentItems {
-            items: items.to_vec(),
-        };
-        fragments.push(ContextFragment::new(
-            ContextFragmentId::new(id)?,
-            source,
-            ContextFragmentPriority::Required,
-            FragmentCachePolicy::DoNotCache,
-            content,
-        )?);
+        if let Some(composition) = pending_composition {
+            let exposure = composition
+                .mode()
+                .map(|mode| mode.tool_exposure().clone())
+                .unwrap_or_else(ToolExposurePlan::default);
+            if self.active_tool_exposure_plan != exposure {
+                self.tools.configure_exposure(exposure.clone())?;
+                self.active_tool_exposure_plan = exposure;
+                self.provider_session
+                    .reset(BaselineInvalidationReason::ToolsChanged);
+            }
+        }
+        if let Some(composition) = self.pending_prompt_composition.take() {
+            self.prompt_composition = composition;
+        }
+        if let Some(profile) = self.pending_agent_model_profile.take() {
+            let reset_primary = self.primary_semantics_changed(&profile);
+            self.model = profile.primary().model().clone();
+            self.profile = profile.primary().profile().clone();
+            if reset_primary {
+                let generation = NEXT_PRIMARY_RUNTIME_SESSION.fetch_add(1, Ordering::Relaxed);
+                let reset_id = format!(
+                    "{}:runtime-reset:{generation}",
+                    self.provider_session.reference().id
+                );
+                self.provider_session = ProviderSession::new(
+                    ProviderSessionId::new(reset_id),
+                    ProviderSessionRole::Primary,
+                    generation,
+                );
+                self.continuation = None;
+                self.committed_context_manifest = None;
+                self.committed_delivery_input = None;
+                self.committed_history_len = self.history.items().len();
+                self.committed_world_state = None;
+                self.committed_project_snapshot = None;
+            }
+            self.active_agent_model_profile = Some(profile);
+        }
         Ok(())
+    }
+
+    fn primary_semantics_changed(&self, next: &AgentModelProfile) -> bool {
+        let next_primary = next.primary();
+        self.profile != *next_primary.profile()
+            || self.model != *next_primary.model()
+            || self.provider.capabilities() != *next_primary.capabilities()
     }
 
     fn request_for_assessment(
@@ -428,13 +548,24 @@ where
     async fn execute_tool_calls(
         &mut self,
         calls: Vec<ToolCall>,
+        exposed_tool_names: &std::collections::BTreeSet<crate::domain::tools::ToolName>,
         cancellation: &AgentCancellation,
     ) -> Result<ScheduledCalls, AgentLoopError> {
         let mut prepared = Vec::with_capacity(calls.len());
         let mut plans = Vec::new();
         for call in calls {
             let execution_id = ExecutionId::new(format!("execution:{}", call.call_id));
-            match self.tools.plan(execution_id, call.clone()) {
+            if !exposed_tool_names.contains(&call.name) {
+                prepared.push(PreparedToolCall::PlanningFailure(ToolResult::failed(
+                    &call,
+                    ToolExecutorError::ToolNotExposed {
+                        tool_name: call.name.to_string(),
+                    }
+                    .to_string(),
+                )));
+                continue;
+            }
+            match self.tools.plan_exposed(execution_id, call.clone()) {
                 Ok(plan) => {
                     plans.push(plan);
                     prepared.push(PreparedToolCall::Planned);
@@ -505,10 +636,20 @@ fn reserve_provider_request(provider_requests: &mut usize) -> Result<(), AgentLo
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum AgentLoopConfigurationError {
     #[error("the AgentLoop requires a primary ProviderSession")]
     PrimarySessionRequired,
+    #[error(transparent)]
+    PromptComposition(#[from] ModeError),
+    #[error(transparent)]
+    AgentModelProfile(#[from] AgentModelProfileError),
+    #[error(transparent)]
+    Tool(#[from] crate::ports::tool::ToolExecutorError),
+    #[error("the selected primary profile capability mapping does not match the active Provider")]
+    PrimaryCapabilitiesDoNotMatchProvider,
+    #[error("the selected primary model does not match the Provider bound to this AgentLoop")]
+    PrimaryModelDoesNotMatchProvider,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -536,6 +677,12 @@ pub enum AgentLoopError {
     ContextCompilation(#[from] ContextCompilationError),
     #[error(transparent)]
     ContextPlanner(#[from] crate::domain::context::ContextPlannerError),
+    #[error(transparent)]
+    Mode(#[from] ModeError),
+    #[error(transparent)]
+    WorldState(#[from] WorldStateError),
+    #[error(transparent)]
+    Configuration(#[from] AgentLoopConfigurationError),
     #[error("AgentLoop History does not contain the current Turn input")]
     ContextStateMismatch,
     #[error("the model completed without text or a Tool Call")]

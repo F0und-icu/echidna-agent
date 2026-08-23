@@ -10,8 +10,8 @@ use cyber_agent::domain::research::{
     ResearchEvent,
 };
 use cyber_agent::domain::tools::{
-    ExecutionId, ToolCall, ToolCallId, ToolEffect, ToolName, ToolParallelism, ToolResultStatus,
-    ToolRetryPolicy,
+    ExecutionId, ToolCall, ToolCallId, ToolEffect, ToolExposure, ToolExposurePlan, ToolName,
+    ToolParallelism, ToolResultStatus, ToolRetryPolicy,
 };
 use cyber_agent::ports::EventSink;
 use cyber_agent::ports::tool::ToolExecutor;
@@ -754,6 +754,12 @@ async fn persisted_records_cannot_forge_merge_provenance() {
 fn research_tool_schemas_are_fixed_and_execution_metadata_is_exact() {
     let root = TemporaryDirectory::new("research-schemas");
     let tools = ToolRegistry::for_project(root.path());
+    tools
+        .configure_exposure(ToolExposurePlan::new([(
+            ToolName::new("research_update"),
+            ToolExposure::Direct,
+        )]))
+        .unwrap();
     let specs = tools.specs();
     let get = specs
         .iter()

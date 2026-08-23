@@ -12,7 +12,7 @@ mod selection;
 use serde::Serialize;
 
 use super::canonical::{RequestHash, canonical_tool_schemas};
-use crate::domain::model::{ModelCapabilities, ModelRequestRequirements};
+use crate::domain::model::{ModelCapabilities, ModelInputIR, ModelRequestRequirements};
 use crate::domain::tools::ToolSpec;
 
 pub use cache_key::{
@@ -109,11 +109,7 @@ impl ContextPlanner {
                 message: error.to_string(),
             }
         })?;
-        let fixed_input_tokens = if canonical_tools.ordered_specs.is_empty() {
-            0
-        } else {
-            estimator::estimate_encoded_tokens(canonical_tools.encoded_len)
-        };
+        let fixed_input_tokens = fixed_input_tokens(&canonical_tools);
         let requirements =
             requirements.normalized_for_tool_specs(!canonical_tools.ordered_specs.is_empty());
         ensure_unique_ids(&fragments)?;
@@ -156,17 +152,7 @@ impl ContextPlanner {
             canonical_tools.ordered_specs,
             requirements,
         )?;
-        let rendered_input_tokens =
-            fixed_input_tokens.saturating_add(estimator::estimate_rendered_channels_tokens(
-                &model_input.instructions,
-                &model_input.content_items,
-            )?);
-        if rendered_input_tokens > budget.input_token_limit() {
-            return Err(ContextPlannerError::RenderedInputExceedsBudget {
-                rendered_input_tokens,
-                input_token_limit: budget.input_token_limit(),
-            });
-        }
+        self.validate_rendered_model_input(&model_input, budget)?;
         Ok(ContextPlan {
             context_fingerprint: fingerprint.clone(),
             prompt_cache_key: hash(&(&self.versions.planner_version, &full_logical_manifest))?,
@@ -180,6 +166,45 @@ impl ContextPlanner {
             },
             model_input,
         })
+    }
+
+    /// Revalidates a concrete rendered Provider input with the same canonical
+    /// Tool-schema and channel estimator used by [`Self::compile`].
+    ///
+    /// The AgentLoop uses this only when it derives a delivery-only
+    /// Full-plus-Diff candidate from a previously compiled Full request. It
+    /// cannot authorize a request that exceeds the Planner's budget.
+    pub(crate) fn validate_rendered_model_input(
+        &self,
+        model_input: &ModelInputIR,
+        budget: ContextBudget,
+    ) -> Result<(), ContextPlannerError> {
+        let canonical_tools = canonical_tool_schemas(&model_input.tool_specs).map_err(|error| {
+            ContextPlannerError::CanonicalEncoding {
+                message: error.to_string(),
+            }
+        })?;
+        let rendered_input_tokens = fixed_input_tokens(&canonical_tools).saturating_add(
+            estimator::estimate_rendered_channels_tokens(
+                &model_input.instructions,
+                &model_input.content_items,
+            )?,
+        );
+        if rendered_input_tokens > budget.input_token_limit() {
+            return Err(ContextPlannerError::RenderedInputExceedsBudget {
+                rendered_input_tokens,
+                input_token_limit: budget.input_token_limit(),
+            });
+        }
+        Ok(())
+    }
+}
+
+fn fixed_input_tokens(canonical_tools: &super::canonical::CanonicalToolSchemas) -> u32 {
+    if canonical_tools.ordered_specs.is_empty() {
+        0
+    } else {
+        estimator::estimate_encoded_tokens(canonical_tools.encoded_len)
     }
 }
 

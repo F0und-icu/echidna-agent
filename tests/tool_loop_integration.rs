@@ -23,7 +23,7 @@ use cyber_agent::domain::model::{
 };
 use cyber_agent::domain::tools::{
     ExecutionId, ResourceKey, ToolCall, ToolCallId, ToolExecutionOutcome, ToolExecutionPlan,
-    ToolName, ToolResultStatus, ToolSpec,
+    ToolExposure, ToolExposurePlan, ToolName, ToolResultStatus, ToolSpec,
 };
 use cyber_agent::ports::model::{
     ModelEventStream, ModelProvider, ModelProviderError, ModelRequest, ModelResponseCompletion,
@@ -88,38 +88,33 @@ async fn builtin_tools_cover_files_search_argv_failures_and_bounded_output() {
     project.write("large.txt", "x".repeat(140 * 1024));
     let tools = ToolRegistry::for_project(&project.root);
 
-    let specs = tools.specs();
+    let default_specs = tools.specs();
     assert_eq!(
-        specs
+        default_specs
             .iter()
             .map(|spec| spec.name.as_str())
             .collect::<Vec<_>>(),
         vec![
             "apply_patch",
-            "artifact_store",
-            "input_job",
-            "input_pty",
             "inspect_project",
             "list_files",
-            "memory_read",
-            "memory_write",
-            "poll_job",
-            "poll_pty",
             "read_file",
             "read_files",
             "research_get",
             "research_update",
-            "resize_pty",
             "run_command",
             "run_commands",
             "search_files",
-            "start_job",
-            "start_pty",
-            "stop_job",
-            "stop_pty",
-            "write_file",
+            "tool_search",
         ]
     );
+    tools
+        .configure_exposure(ToolExposurePlan::new([
+            (ToolName::new("run_command"), ToolExposure::Direct),
+            (ToolName::new("run_commands"), ToolExposure::Direct),
+        ]))
+        .unwrap();
+    let specs = tools.specs();
     let run_spec = specs
         .iter()
         .find(|spec| spec.name.as_str() == "run_command")
@@ -675,7 +670,7 @@ async fn agent_loop_keeps_full_resampling_after_local_baseline_comparison() {
 
     let inputs = provider.inputs();
     assert_eq!(inputs.len(), 2);
-    assert_eq!(inputs[0].tool_specs.len(), 23);
+    assert_eq!(inputs[0].tool_specs.len(), 11);
     assert_eq!(inputs[0].content_items.len(), 1);
     assert_eq!(
         inputs[1].content_items[1],
@@ -732,6 +727,12 @@ async fn agent_loop_executes_research_update_through_the_fixed_registry() {
         }],
     ]);
     let tools = ToolRegistry::for_project(&project.root);
+    tools
+        .configure_exposure(ToolExposurePlan::new([(
+            ToolName::new("research_update"),
+            ToolExposure::Direct,
+        )]))
+        .unwrap();
     let mut agent = AgentLoop::new(&provider, &tools, "fixture");
 
     let outcome = agent
@@ -943,6 +944,12 @@ async fn agent_loop_executes_artifact_store_through_the_fixed_registry() {
             text: "Artifact was stored.".to_owned(),
         }],
     ]);
+    tools
+        .configure_exposure(ToolExposurePlan::new([(
+            ToolName::new("artifact_store"),
+            ToolExposure::Direct,
+        )]))
+        .unwrap();
     let mut agent = AgentLoop::new(&provider, &tools, "fixture");
 
     let outcome = agent
@@ -998,6 +1005,12 @@ async fn completed_start_job_receipt_prevents_a_duplicate_background_launch_acro
         }],
     ]);
     let tools = ToolRegistry::for_project(&project.root);
+    tools
+        .configure_exposure(ToolExposurePlan::new([(
+            ToolName::new("start_job"),
+            ToolExposure::Direct,
+        )]))
+        .unwrap();
     let mut agent = AgentLoop::new(&provider, &tools, "fixture");
 
     let first = agent

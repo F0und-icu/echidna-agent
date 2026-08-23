@@ -3,6 +3,7 @@
 pub mod agent_loop;
 pub mod cancellation;
 pub mod context_compilation;
+pub mod doctor;
 mod model_sample;
 pub mod model_streaming;
 mod tool_scheduler;

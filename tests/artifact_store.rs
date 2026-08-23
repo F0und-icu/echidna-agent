@@ -9,7 +9,7 @@ use cyber_agent::domain::events::{
 };
 use cyber_agent::domain::tools::{
     ExecutionId, ResourceKey, ToolCachePolicy, ToolCall, ToolCallId, ToolDeterminism, ToolEffect,
-    ToolExposure, ToolName, ToolParallelism, ToolResultStatus, ToolRetryPolicy,
+    ToolExposure, ToolExposurePlan, ToolName, ToolParallelism, ToolResultStatus, ToolRetryPolicy,
 };
 use cyber_agent::ports::tool::ToolExecutor;
 use serde_json::{Value, json};
@@ -156,11 +156,23 @@ fn artifact_store_schema_effect_retry_and_resources_are_fixed() {
     let (_directory, project) = initialized_project("artifact-tool-contract");
     let source = source_path(&project, "source.bin", b"source bytes");
     let tools = ToolRegistry::for_project(project.root());
+    assert!(
+        tools
+            .specs()
+            .iter()
+            .all(|spec| spec.name.as_str() != "artifact_store")
+    );
+    tools
+        .configure_exposure(ToolExposurePlan::new([(
+            ToolName::new("artifact_store"),
+            ToolExposure::Direct,
+        )]))
+        .unwrap();
     let spec = tools
         .specs()
         .into_iter()
         .find(|spec| spec.name.as_str() == "artifact_store")
-        .expect("artifact_store should be fixed and Direct");
+        .expect("artifact_store should be model-visible only after the Mode exposes it");
     assert_eq!(spec.version, "1");
     assert_eq!(spec.exposure, ToolExposure::Direct);
     assert_eq!(spec.parallelism, ToolParallelism::ResourceLocked);

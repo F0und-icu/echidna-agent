@@ -8,7 +8,7 @@ use std::time::Duration;
 use cyber_agent::adapters::tools::ToolRegistry;
 use cyber_agent::domain::tools::{
     ExecutionId, ResourceKey, ToolCall, ToolCallId, ToolExecutionOutcome, ToolExecutionPlan,
-    ToolName, ToolParallelism, ToolResultStatus, ToolRetryPolicy,
+    ToolExposure, ToolExposurePlan, ToolName, ToolParallelism, ToolResultStatus, ToolRetryPolicy,
 };
 use cyber_agent::ports::tool::{ToolExecutor, ToolExecutorError};
 use serde_json::{Value, json};
@@ -508,6 +508,15 @@ async fn active_job_and_pty_leases_share_conflict_and_release_rules() {
 fn pty_schemas_and_control_ids_are_exact_and_model_facing() {
     let project = TestProject::new("schemas");
     let tools = ToolRegistry::for_project(&project.root);
+    tools
+        .configure_exposure(ToolExposurePlan::new([
+            (ToolName::new("start_pty"), ToolExposure::Direct),
+            (ToolName::new("poll_pty"), ToolExposure::Direct),
+            (ToolName::new("input_pty"), ToolExposure::Direct),
+            (ToolName::new("resize_pty"), ToolExposure::Direct),
+            (ToolName::new("stop_pty"), ToolExposure::Direct),
+        ]))
+        .unwrap();
     let specs = tools.specs();
     for name in [
         "start_pty",

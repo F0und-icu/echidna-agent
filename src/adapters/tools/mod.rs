@@ -13,9 +13,11 @@ mod research;
 mod resources;
 mod search;
 mod snapshot;
+mod tool_search;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -26,8 +28,8 @@ use crate::adapters::tool_result_cache::LocalToolResultCache;
 use crate::domain::events::StreamId;
 use crate::domain::tools::{
     ExecutionId, ResourceKey, ToolCachePolicy, ToolCall, ToolDeterminism, ToolEffect,
-    ToolExecutionOutcome, ToolExecutionPlan, ToolExposure, ToolName, ToolOutputPolicy,
-    ToolParallelism, ToolRetryPolicy, ToolSpec, split_execution_control,
+    ToolExecutionOutcome, ToolExecutionPlan, ToolExposure, ToolExposurePlan, ToolName,
+    ToolOutputPolicy, ToolParallelism, ToolRetryPolicy, ToolSpec, split_execution_control,
 };
 use crate::ports::tool::{ToolExecutionFuture, ToolExecutor, ToolExecutorError};
 
@@ -61,6 +63,7 @@ enum BuiltinTool {
     InspectProject,
     ResearchGet,
     ResearchUpdate,
+    ToolSearch,
 }
 
 pub struct ToolRegistry {
@@ -70,10 +73,24 @@ pub struct ToolRegistry {
     ptys: pty::PtySessions,
     active_leases: ActiveProcessLeases,
     result_cache: Option<LocalToolResultCache>,
+    exposure: Mutex<ToolExposureState>,
+}
+
+struct ToolExposureState {
+    plan: ToolExposurePlan,
+    discovered_deferred: BTreeSet<ToolName>,
 }
 
 impl ToolRegistry {
     pub fn for_project(project_root: impl Into<PathBuf>) -> Self {
+        Self::for_project_with_exposure(project_root, ToolExposurePlan::default())
+            .expect("the built-in Tool catalog accepts its empty exposure plan")
+    }
+
+    pub fn for_project_with_exposure(
+        project_root: impl Into<PathBuf>,
+        exposure_plan: ToolExposurePlan,
+    ) -> Result<Self, ToolExecutorError> {
         let project_root = project_root.into();
         let tools = [
             (ToolName::new("read_file"), BuiltinTool::ReadFile),
@@ -105,17 +122,23 @@ impl ToolRegistry {
                 ToolName::new("research_update"),
                 BuiltinTool::ResearchUpdate,
             ),
+            (ToolName::new("tool_search"), BuiltinTool::ToolSearch),
         ]
         .into_iter()
         .collect();
-        Self {
+        validate_exposure_plan(&tools, &exposure_plan)?;
+        Ok(Self {
             result_cache: None,
             project_root,
             tools,
             jobs: job::BackgroundJobs::new(),
             ptys: pty::PtySessions::new(),
             active_leases: ActiveProcessLeases::new(),
-        }
+            exposure: Mutex::new(ToolExposureState {
+                plan: exposure_plan,
+                discovered_deferred: BTreeSet::new(),
+            }),
+        })
     }
 
     /// Enables the persistent Tool Result Cache only for one caller-bound
@@ -131,17 +154,59 @@ impl ToolRegistry {
         registry.result_cache = Some(result_cache);
         Ok(registry)
     }
-}
 
-impl ToolExecutor for ToolRegistry {
-    fn specs(&self) -> Vec<ToolSpec> {
-        self.tools.values().map(|tool| tool.spec()).collect()
+    fn configured_spec(&self, name: &ToolName, tool: BuiltinTool) -> ToolSpec {
+        let exposure = self
+            .exposure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Self::configured_spec_for_state(name, tool, &exposure)
     }
 
-    fn plan(
+    fn configured_spec_for_state(
+        name: &ToolName,
+        tool: BuiltinTool,
+        exposure: &ToolExposureState,
+    ) -> ToolSpec {
+        let mut builtin_spec = tool.spec();
+        builtin_spec.exposure = tool.default_exposure();
+        let mut spec = exposure.plan.apply_to_spec(builtin_spec);
+        let deferred_discovered =
+            spec.exposure == ToolExposure::Deferred && exposure.discovered_deferred.contains(name);
+        if deferred_discovered {
+            spec.exposure = ToolExposure::Direct;
+        }
+        spec
+    }
+
+    fn all_specs(&self) -> Vec<ToolSpec> {
+        let exposure = self
+            .exposure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.tools
+            .iter()
+            .map(|(name, tool)| Self::configured_spec_for_state(name, *tool, &exposure))
+            .collect()
+    }
+
+    fn deferred_specs(&self) -> Vec<ToolSpec> {
+        let exposure = self
+            .exposure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.tools
+            .iter()
+            .map(|(name, tool)| Self::configured_spec_for_state(name, *tool, &exposure))
+            .filter(|spec| spec.exposure == ToolExposure::Deferred)
+            .collect()
+    }
+
+    fn plan_with_exposure(
         &self,
         execution_id: ExecutionId,
         mut call: ToolCall,
+        require_direct: bool,
     ) -> Result<ToolExecutionPlan, ToolExecutorError> {
         let tool = self
             .tools
@@ -149,6 +214,12 @@ impl ToolExecutor for ToolRegistry {
             .ok_or_else(|| ToolExecutorError::UnknownTool {
                 tool_name: call.name.to_string(),
             })?;
+        let spec = self.configured_spec(&call.name, *tool);
+        if require_direct && spec.exposure != ToolExposure::Direct {
+            return Err(ToolExecutorError::ToolNotExposed {
+                tool_name: call.name.to_string(),
+            });
+        }
         let arguments = std::mem::take(&mut call.arguments);
         let (arguments, rerun_reason) = split_execution_control(arguments).map_err(|error| {
             ToolExecutorError::InvalidArguments {
@@ -159,7 +230,6 @@ impl ToolExecutor for ToolRegistry {
         let (normalized_arguments, resource_keys) =
             tool.normalize(&self.project_root, arguments)?;
         call.arguments = normalized_arguments;
-        let spec = tool.spec();
         let mut plan = ToolExecutionPlan::new_with_rerun_reason(
             execution_id,
             call,
@@ -181,6 +251,45 @@ impl ToolExecutor for ToolRegistry {
                 })?;
         }
         Ok(plan)
+    }
+}
+
+impl ToolExecutor for ToolRegistry {
+    fn specs(&self) -> Vec<ToolSpec> {
+        self.all_specs()
+            .into_iter()
+            .filter(|spec| spec.exposure == ToolExposure::Direct)
+            .collect()
+    }
+
+    fn plan(
+        &self,
+        execution_id: ExecutionId,
+        call: ToolCall,
+    ) -> Result<ToolExecutionPlan, ToolExecutorError> {
+        self.plan_with_exposure(execution_id, call, false)
+    }
+
+    fn plan_exposed(
+        &self,
+        execution_id: ExecutionId,
+        call: ToolCall,
+    ) -> Result<ToolExecutionPlan, ToolExecutorError> {
+        self.plan_with_exposure(execution_id, call, true)
+    }
+
+    fn configure_exposure(&self, plan: ToolExposurePlan) -> Result<(), ToolExecutorError> {
+        validate_exposure_plan(&self.tools, &plan)?;
+        let mut exposure = self
+            .exposure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if exposure.plan == plan {
+            return Ok(());
+        }
+        exposure.plan = plan;
+        exposure.discovered_deferred.clear();
+        Ok(())
     }
 
     fn execute(&self, plan: ToolExecutionPlan) -> ToolExecutionFuture<'_> {
@@ -214,6 +323,17 @@ impl ToolExecutor for ToolRegistry {
                 return outcome;
             }
             let timeout_plan = plan.clone();
+            if tool == BuiltinTool::ToolSearch {
+                let search = tool_search::execute(plan, &self.deferred_specs());
+                if !search.activated.is_empty() {
+                    self.exposure
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .discovered_deferred
+                        .extend(search.activated);
+                }
+                return search.outcome;
+            }
             let specs = if tool == BuiltinTool::InspectProject {
                 self.specs()
             } else {
@@ -241,6 +361,22 @@ impl ToolExecutor for ToolRegistry {
             outcome
         })
     }
+}
+
+fn validate_exposure_plan(
+    tools: &BTreeMap<ToolName, BuiltinTool>,
+    plan: &ToolExposurePlan,
+) -> Result<(), ToolExecutorError> {
+    if let Some(tool_name) = plan
+        .overrides()
+        .keys()
+        .find(|tool_name| !tools.contains_key(*tool_name))
+    {
+        return Err(ToolExecutorError::UnknownTool {
+            tool_name: tool_name.to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn is_process_lifecycle_tool(tool_name: &str) -> bool {
@@ -283,6 +419,35 @@ fn active_resource_busy(
 }
 
 impl BuiltinTool {
+    const fn default_exposure(self) -> ToolExposure {
+        match self {
+            Self::ReadFile
+            | Self::ReadFiles
+            | Self::ListFiles
+            | Self::SearchFiles
+            | Self::ApplyPatch
+            | Self::RunCommand
+            | Self::RunCommands
+            | Self::InspectProject
+            | Self::ResearchGet
+            | Self::ResearchUpdate
+            | Self::ToolSearch => ToolExposure::Direct,
+            Self::WriteFile
+            | Self::StartJob
+            | Self::PollJob
+            | Self::InputJob
+            | Self::StopJob
+            | Self::StartPty
+            | Self::PollPty
+            | Self::InputPty
+            | Self::ResizePty
+            | Self::StopPty
+            | Self::ArtifactStore
+            | Self::MemoryRead
+            | Self::MemoryWrite => ToolExposure::Deferred,
+        }
+    }
+
     fn normalize(
         self,
         project_root: &Path,
@@ -312,6 +477,7 @@ impl BuiltinTool {
             Self::InspectProject => snapshot::normalize(project_root, arguments),
             Self::ResearchGet => research::normalize_get(project_root, arguments),
             Self::ResearchUpdate => research::normalize_update(project_root, arguments),
+            Self::ToolSearch => tool_search::normalize(arguments),
         }
     }
 
@@ -348,6 +514,7 @@ impl BuiltinTool {
             Self::InspectProject => snapshot::execute(project_root, specs, plan).await,
             Self::ResearchGet => research::execute_get(project_root, plan).await,
             Self::ResearchUpdate => research::execute_update(project_root, plan).await,
+            Self::ToolSearch => unreachable!("Tool search executes through ToolRegistry state"),
         }
     }
 
@@ -784,6 +951,18 @@ impl BuiltinTool {
                 ToolRetryPolicy::NeverAutoRetry,
                 ToolDeterminism::EnvironmentDependent,
                 10_000,
+            ),
+            Self::ToolSearch => spec(
+                "tool_search",
+                "Discover matching currently Deferred Tools by name or description and expose their schemas for this Agent session.",
+                tool_search::input_schema(),
+                common_output,
+                ToolParallelism::Parallel,
+                None,
+                ToolEffect::ReadOnly,
+                ToolRetryPolicy::ReplaySafe,
+                ToolDeterminism::Deterministic,
+                5_000,
             ),
         }
     }

@@ -6,8 +6,8 @@ use std::process::Command;
 use cyber_agent::adapters::project_event_store::Project;
 use cyber_agent::adapters::tools::ToolRegistry;
 use cyber_agent::domain::tools::{
-    ExecutionId, ToolCall, ToolCallId, ToolEffect, ToolName, ToolParallelism, ToolResultStatus,
-    ToolRetryPolicy,
+    ExecutionId, ToolCall, ToolCallId, ToolEffect, ToolExposure, ToolExposurePlan, ToolName,
+    ToolParallelism, ToolResultStatus, ToolRetryPolicy,
 };
 use cyber_agent::ports::tool::ToolExecutor;
 use serde_json::{Value, json};
@@ -974,6 +974,12 @@ async fn project_memory_and_snapshot_caches_are_isolated() {
 fn memory_and_snapshot_tool_specs_are_fixed_and_non_cacheable() {
     let (_root, project) = initialized_project("memory-snapshot-tool-contract");
     let tools = ToolRegistry::for_project(project.root());
+    tools
+        .configure_exposure(ToolExposurePlan::new([
+            (ToolName::new("memory_read"), ToolExposure::Direct),
+            (ToolName::new("memory_write"), ToolExposure::Direct),
+        ]))
+        .unwrap();
     for name in ["memory_read", "memory_write", "inspect_project"] {
         let spec = tools
             .specs()
