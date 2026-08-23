@@ -10,9 +10,9 @@
 - Slice state: `READY_NOT_AUTHORIZED`; M3-S3c is locally complete but M3-S3d cannot start before the M3-S3c implementation merge and separate status seal
 - Lean governance: `ACTIVE`; M3-S3c passed its local Cargo/Lean Gate and Luna xhigh final review with no unresolved P0/P1
 - Local Git initialized: `yes`; the completed M3-S3c implementation remains on `agent/m3-s3c-request-audit` for PR delivery
-- Remote repository: `F0und-icu/cyber-agent` private; M3-S3b implementation PR `#33` and status PR `#34` were Squash Merged
+- Remote repository: `F0und-icu/cyber-agent` private; M3-S3c implementation PR `#35` was Squash Merged and its status seal is pending
 - Documentation baseline commit: `55ff3be`
-- Current code base: locally complete M3-S3c branch based on M3-S3b status-seal Squash Merge commit `d6639c5`
+- Current code base: M3-S3c Squash Merge commit `cb6781e`; post-merge `main` CI passed
 - Upstream Codex baseline: `3aae5d885bac39c1262491aa3fd100dfd8b3919f`
 
 ## Last Completed Slice
@@ -26,9 +26,9 @@
 - Reconstruction behavior: historical requests read only Manifest and same-handle hash-verified Blob bytes; current Prompt, Memory, project source, Provider, Tool, clock and credentials are not consulted. BLAKE3 semantic identities remain distinct from SHA-256 Blob identities.
 - Test path: permanent external regressions cover exact reconstruction after source mutation, same-content dedupe, Full/incremental/rejected-fallback attempts, real-service pre-stream commit, Project/Session isolation, preflight zero-Blob failures, duplicate Event conflicts, unknown Manifest/IR schema, component order/identity errors, missing/tampered content, Event/Blob failure atomicity and credential/transport exclusion.
 - Forbidden work preserved: no inspection CLI, image/Vision execution, raw HTTP snapshot, Provider wire change, Artifact provenance fact, general Manager/Router/Hook/database, second Blob/Event Store or AgentLoop, credential/login access, Codex source modification or Codex code port.
-- Result: `COMPLETE` locally; the full Cargo/Lean Gate passes 236 offline/local tests with one existing opt-in Live Smoke ignored, and Luna xhigh returned final `APPROVE` with no unresolved P0/P1 after Terra implementation and main-agent preflight/duplicate-identity hardening. Remote PR/CI/merge evidence is pending.
+- Result: `COMPLETE`; the full Cargo/Lean Gate passes 236 offline/local tests with one existing opt-in Live Smoke ignored, and Luna xhigh returned final `APPROVE` with no unresolved P0/P1 after Terra implementation and main-agent preflight/duplicate-identity hardening. PR-head and post-merge `main` CI both passed.
 - Dependencies and schemas: no dependency, Cargo feature, Provider DTO or envelope schema changed; `request_audit_manifest` v1 and `session.request_audit_recorded` payload v1 are the only new persisted contracts, while `ArtifactStore::read_blob` extends the existing Blob Port.
-- Git: implementation is ready on the M3-S3c Slice branch; exact commit, PR, CI and Squash Merge identities will be added by the separate remote status seal.
+- Git: implementation commit `c4a2cf9`, PR `#35`, PR-head CI `32643924616`, Squash Merge `cb6781e` and post-merge `main` CI `32644062157`; this evidence is delivered by the separate status seal.
 - Live Test: `OFF`; the existing synthetic smoke remains ignored and no real credential or public Provider request was used.
 
 ## Current Authority
