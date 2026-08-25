@@ -5,14 +5,14 @@
 - Architecture version: `1.1.0`
 - Phase: `IMPLEMENTATION`
 - Implementation: `STARTED`
-- Current milestone: `M3`; implementation remotely complete, status seal in progress
+- Current milestone: `M3`; `COMPLETE` and remotely sealed
 - Current slice: `M4-S1`
-- Slice state: `READY_NOT_AUTHORIZED`; M3-S4 implementation is merged and this status seal must complete before work stops without M4 or Live Test activity
+- Slice state: `READY_NOT_AUTHORIZED`; M3-S4 is remotely sealed and work is stopped without M4 or Live Test activity
 - Lean governance: `ACTIVE`; M3-S4 passed its full local Cargo/Lean Gate and the exact implementation PR head passed the macOS Gate with no unresolved main-review blocker
-- Local Git initialized: `yes`; M3-S4 status evidence is being sealed on `agent/m3-s4-status`
-- Remote repository: `F0und-icu/cyber-agent` private; M3-S4 implementation PR `#39` was Squash Merged without duplicate post-merge CI, and `[skip ci]` status PR `#40` is the final seal
+- Local Git initialized: `yes`; `main` tracks the private remote and the M3-S4 runtime tree is cleanly sealed
+- Remote repository: `F0und-icu/cyber-agent` private; M3-S4 implementation PR `#39` and `[skip ci]` status PR `#40` were Squash Merged without duplicate post-merge CI
 - Documentation baseline commit: `55ff3be`
-- Current code base: M3-S4 Squash Merge `35753a3`; its exact head `c8158c3` passed PR-head CI `32881009122`
+- Current code base: M3-S4 Squash Merge `35753a3` and status-seal Squash Merge `0995396`; exact implementation head `c8158c3` passed PR-head CI `32881009122`
 - Upstream Codex baseline: `3aae5d885bac39c1262491aa3fd100dfd8b3919f`
 
 ## Last Completed Slice
@@ -27,7 +27,7 @@
 - Adapter behavior: the OpenAI Responses Adapter resolves only project-isolated PNG/JPEG Artifact facts and immutable SHA-256 Blob bytes, encodes a real Data URL, and uses the minimal `json_object` output contract. Provider wire types remain inside the Adapter.
 - Result: `COMPLETE`; the full Cargo/Lean Gate passes 261 offline/local tests with one existing opt-in Live Smoke ignored. Main review fixed the budget-resize early exit, output-schema mismatch, informal Session composition, constructible Primary context, route/Profile/Capability/session identity gaps, replay Blob omission, project Artifact resolution and pre-decode image limit enforcement. The exact PR head then passed the same macOS Rust Gate; no unresolved blocker remains.
 - Dependencies and schemas: added `image` 0.25 with only PNG/JPEG features and `base64` 0.22 under accepted ADR-0005. Added strict Vision fact schema v1 and the three Session Event types; no new Port, credential source, database, cache, general router/hook, AgentLoop or remote service was added.
-- Git: implementation commit `c8158c3`, PR `#39`, sole PR-head CI `32881009122` and implementation Squash Merge `35753a3`; the merge subject used `[skip ci]`, and status PR `#40` is the separate `[skip ci]` seal.
+- Git: implementation commit `c8158c3`, PR `#39`, sole PR-head CI `32881009122`, implementation Squash Merge `35753a3`, status PR `#40` and status-seal Squash Merge `0995396`; all merge/status subjects used `[skip ci]` after the one proven runtime-tree Gate.
 - Live Test: `OFF`; no real credential, public Provider request, Codex login state, `~/.codex` or `CODEX_HOME` was read or modified.
 
 ## Current Authority
@@ -80,20 +80,20 @@
 - State: `READY_NOT_AUTHORIZED`; this status is planning only and does not start M4.
 - Planned delivery branch: resolve only after a new explicit user authorization from the remotely sealed M3-S4 `main`.
 - Scope: vulnerability-research Mode Profiles and controlled offline samples as already defined in the Implementation Plan.
-- Required prerequisite: M3-S4 implementation and status PRs remotely merged, followed by a new explicit Slice authorization.
+- Required prerequisite: a new explicit user authorization naming M4-S1; the M3-S4 implementation and status prerequisites are complete.
 - Forbidden continuation: all M4 implementation, Live Provider requests, general model router, autonomous Vision Agent, database/index/watcher/hook/plugin work and Codex credential/login access.
 
 ## Current Authorization
 
-The current user instruction authorizes only completion and remote sealing of M3-S4, then requires work to stop.
+The M3-S4 seal requested by the current user instruction is complete. No implementation or Git authorization remains.
 
-- Run mode: `SEAL_M3_S4_AND_STOP`
-- Slice ID: `M3-S4`; state `COMPLETE_IMPLEMENTATION_PENDING_STATUS_SEAL`
-- Git mode: `BRANCH_PR_REVIEW_MERGE`; only this separate `[skip ci]` status-seal commit/push/PR/Squash Merge remains authorized
-- Delegation mode: `INACTIVE`; prior delegated threads are stopped and are not required for the seal
+- Run mode: `REVIEW_ONLY`
+- Slice ID: `M4-S1`; state `READY_NOT_AUTHORIZED`
+- Git mode: `REVIEW_ONLY`; no further branch, commit, push, PR, merge, tag or release is authorized
+- Delegation mode: `INACTIVE`; prior delegated threads remain stopped
 - Live test mode: `OFF`; no real Provider credential or public model request is authorized
 - Forbidden continuation: all M4 work, Live Tests, general database/index/watcher/hook/router/plugin/model-router work, Codex source modification or Codex credentials/login access
-- Stop condition: after the M3-S4 status-seal PR is merged, stop without starting M4 or a Live Test
+- Stop condition: `SATISFIED`; remain stopped until a new explicit user request authorizes another bounded action
 
 ## M2-S5 Slice Start
 
