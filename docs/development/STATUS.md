@@ -5,29 +5,28 @@
 - Architecture version: `1.1.0`
 - Phase: `IMPLEMENTATION`
 - Implementation: `STARTED`
-- Current milestone: `M3`; `COMPLETE` and remotely sealed
-- Current slice: `M4-S1`
-- Slice state: `READY_NOT_AUTHORIZED`; M3-S4 is remotely sealed and work is stopped without M4 or Live Test activity
-- Lean governance: `ACTIVE`; M3-S4 passed its full local Cargo/Lean Gate and the exact implementation PR head passed the macOS Gate with no unresolved main-review blocker
-- Local Git initialized: `yes`; `main` tracks the private remote and the M3-S4 runtime tree is cleanly sealed
+- Current milestone: `M4`; M4-S1 is implementation-complete locally and remote sealing is pending
+- Current slice: `M4-S2`
+- Slice state: `READY_NOT_AUTHORIZED`; M4-S1 must be remotely sealed and work must then stop before Replay/Eval or Live Test activity
+- Lean governance: `ACTIVE`; M4-S1 passed its full local Cargo/Lean Gate and final Luna xhigh code review with no unresolved P0/P1
+- Local Git initialized: `yes`; M4-S1 implementation is complete on `agent/m4-s1-research-profiles`
 - Remote repository: `F0und-icu/cyber-agent` private; M3-S4 implementation PR `#39` and `[skip ci]` status PR `#40` were Squash Merged without duplicate post-merge CI
 - Documentation baseline commit: `55ff3be`
-- Current code base: M3-S4 Squash Merge `35753a3` and status-seal Squash Merge `0995396`; exact implementation head `c8158c3` passed PR-head CI `32881009122`
+- Current code base: M4-S1 local implementation candidate based on sealed M3-S4 `main` at `b635645`; implementation PR evidence is pending
 - Upstream Codex baseline: `3aae5d885bac39c1262491aa3fd100dfd8b3919f`
 
 ## Last Completed Slice
 
-- Slice: `M3-S4`
-- Delivery branch: `agent/m3-s4-multimodal`
-- Base commit: `1bdb19a`
-- Scope: one auditable local PNG/JPEG path through the existing Artifact, Session, RequestAudit, ModelProvider and single AgentLoop authorities, supporting mutually exclusive Direct Primary or scoped Secondary Vision composition.
-- Image behavior: the fixed `view_image` Tool rejects symlinks, non-regular/unsupported/corrupt/oversized input; validates declared dimensions before full pixel decode; preserves original SHA-256 Blob bytes; and creates a deterministic budgeted PNG derivative only when required, linked by `image_budget_v1` Lineage.
-- Model behavior: Direct sends one resolved image Artifact to the audited Primary and never calls Secondary. Secondary makes one Full, no-tool, structured Vision request in a fresh Vision ProviderSession, durably records Route -> RequestAudit -> Observation/Failure, then supplies only the unverified Observation and Artifact references to the audited Primary. Provider failure never changes route or falls back.
-- Audit/replay behavior: strict `vision.route_decided`, `vision.observation_recorded` and `vision.analysis_failed` Session facts bind source Artifact, Profile, Capability, scoped ProviderSession, RequestAudit and request hash. Mechanical Replay reads and validates the original model-reply Blob and performs zero Provider/Event/Blob writes.
-- Adapter behavior: the OpenAI Responses Adapter resolves only project-isolated PNG/JPEG Artifact facts and immutable SHA-256 Blob bytes, encodes a real Data URL, and uses the minimal `json_object` output contract. Provider wire types remain inside the Adapter.
-- Result: `COMPLETE`; the full Cargo/Lean Gate passes 261 offline/local tests with one existing opt-in Live Smoke ignored. Main review fixed the budget-resize early exit, output-schema mismatch, informal Session composition, constructible Primary context, route/Profile/Capability/session identity gaps, replay Blob omission, project Artifact resolution and pre-decode image limit enforcement. The exact PR head then passed the same macOS Rust Gate; no unresolved blocker remains.
-- Dependencies and schemas: added `image` 0.25 with only PNG/JPEG features and `base64` 0.22 under accepted ADR-0005. Added strict Vision fact schema v1 and the three Session Event types; no new Port, credential source, database, cache, general router/hook, AgentLoop or remote service was added.
-- Git: implementation commit `c8158c3`, PR `#39`, sole PR-head CI `32881009122`, implementation Squash Merge `35753a3`, status PR `#40` and status-seal Squash Merge `0995396`; all merge/status subjects used `[skip ci]` after the one proven runtime-tree Gate.
+- Slice: `M4-S1`
+- Delivery branch: `agent/m4-s1-research-profiles`
+- Base commit: `b635645`
+- Scope: four fixed source/web/mobile/binary vulnerability-research Prompt Profiles, one Turn-boundary selection path in the existing AgentLoop and twelve deterministic tests-only controlled offline cases.
+- Profile behavior: each Profile has one fixed ID, generation, compatible Research `TargetKind`, compiled Markdown prompt and bounded Tool exposure. Firmware remains unsupported. The prompts require Candidate/Reproduced/Confirmed separation, real target/version/environment evidence, positive and negative controls, explicit `research_update` and non-fabrication of Tool or evidence facts.
+- Context behavior: Mode generation now participates in `prompt:mode:<id>:<generation>` identity, and the existing Context Planner fingerprint remains the only semantic hash. Source defers low-frequency image inspection; Web/Mobile/Binary keep `view_image` Direct, while command tools remain Direct for all Profiles.
+- Fixture behavior: each Profile has one positive, one negative and one tampered/environment case with distinct synthetic source, HTTP, mobile or binary content. Per-file SHA-256 plus a fixed manifest anchor detect drift; positives collectively cover Candidate, Reproduced and Confirmed, while every control is `NoFinding`.
+- Result: `COMPLETE` locally; the full Cargo/Lean Gate passes 266 offline/local tests with one existing opt-in Live Smoke ignored. Main review removed an unconsumed independent Profile fingerprint, kept controlled-case types tests-only and corrected image Tool exposure; final Luna xhigh review returned code-level `APPROVE` with no unresolved P0/P1. Remote PR evidence is pending.
+- Dependencies and schemas: no Cargo dependency, feature, Event, Blob, Cache, persisted configuration, Provider DTO, Port, credential source or remote transport changed. No production controlled-case or Eval schema was added without a runtime consumer.
+- Git: implementation commit, final implementation PR, the single authorized PR-head CI run, Squash Merge and separate `[skip ci]` status seal are pending.
 - Live Test: `OFF`; no real credential, public Provider request, Codex login state, `~/.codex` or `CODEX_HOME` was read or modified.
 
 ## Current Authority
@@ -73,27 +72,27 @@
 - M3-S3c strict RequestAudit facts, deduplicated exact semantic component Blobs, pre-stream durable commit and historical reconstruction.
 - M3-S3d read-only prompt, Snapshot and local metrics CLI inspection over existing auditable facts.
 - M3-S4 auditable local images, fixed `view_image`, Direct/Secondary Vision composition, strict Vision Session facts and zero-request Mechanical Replay.
+- M4-S1 fixed vulnerability-research Prompt Profiles, Turn-boundary AgentLoop selection and deterministic tests-only controlled offline cases.
 
 ## Next Planned Slice
 
-- Slice: `M4-S1`
-- State: `READY_NOT_AUTHORIZED`; this status is planning only and does not start M4.
-- Planned delivery branch: resolve only after a new explicit user authorization from the remotely sealed M3-S4 `main`.
-- Scope: vulnerability-research Mode Profiles and controlled offline samples as already defined in the Implementation Plan.
-- Required prerequisite: a new explicit user authorization naming M4-S1; the M3-S4 implementation and status prerequisites are complete.
-- Forbidden continuation: all M4 implementation, Live Provider requests, general model router, autonomous Vision Agent, database/index/watcher/hook/plugin work and Codex credential/login access.
+- Slice: `M4-S2`
+- State: `READY_NOT_AUTHORIZED`; this status is planning only and does not start Replay/Eval work.
+- Planned delivery branch: resolve only after the M4-S1 implementation and status seal are remotely merged and a new explicit user instruction authorizes M4-S2.
+- Scope: Trace Replay and Shadow Eval as already bounded by the Implementation Plan.
+- Forbidden continuation: all M4-S2 implementation, M4-S3 Observation/TargetDelta, M4-S4 long-flow/Live Provider work, general Prompt DSL/loader/registry, dataset service, database, model router, Hook/plugin runtime and Codex credential/login access.
 
 ## Current Authorization
 
-The M3-S4 seal requested by the current user instruction is complete. No implementation or Git authorization remains.
+The current user instruction authorizes only completion and remote sealing of M4-S1, then requires work to stop.
 
-- Run mode: `REVIEW_ONLY`
-- Slice ID: `M4-S1`; state `READY_NOT_AUTHORIZED`
-- Git mode: `REVIEW_ONLY`; no further branch, commit, push, PR, merge, tag or release is authorized
-- Delegation mode: `INACTIVE`; prior delegated threads remain stopped
+- Run mode: `SEAL_M4_S1_AND_STOP`
+- Slice ID: `M4-S1`; state `COMPLETE_LOCAL_PENDING_REMOTE_SEAL`
+- Git mode: `BRANCH_PR_REVIEW_MERGE`; implementation commit/push/PR, one final PR-head CI run, Squash Merge and a separate `[skip ci]` status-seal PR are authorized
+- Delegation mode: `INACTIVE`; Terra xhigh implementation and Luna xhigh final review are complete
 - Live test mode: `OFF`; no real Provider credential or public model request is authorized
-- Forbidden continuation: all M4 work, Live Tests, general database/index/watcher/hook/router/plugin/model-router work, Codex source modification or Codex credentials/login access
-- Stop condition: `SATISFIED`; remain stopped until a new explicit user request authorizes another bounded action
+- Forbidden continuation: all M4-S2/M4-S3/M4-S4 work, Live Tests, general database/index/watcher/hook/router/plugin/model-router work, Codex source modification or Codex credentials/login access
+- Stop condition: after the M4-S1 status-seal PR is merged, stop without starting M4-S2 or a Live Test
 
 ## M2-S5 Slice Start
 
@@ -181,7 +180,48 @@ The M3-S4 seal requested by the current user instruction is complete. No impleme
 - Actions budget: local Gate is authoritative during implementation. No GitHub Workflow is triggered until the Slice reaches its final implementation PR, and all duplicate post-merge/status runs use `[skip ci]`.
 - Live Test: `OFF`; only local image fixtures, Mock/Fixture/Replay Providers and loopback-free offline tests are authorized.
 
+## M4-S1 Slice Start
+
+- Delivery branch: `agent/m4-s1-research-profiles`
+- Base commit: `b635645`
+- Intended production touch points: add four fixed vulnerability-research Profiles beside the existing pure `domain/mode` owner and consume them through the existing AgentLoop Turn boundary; reuse `PromptComposition`, `ToolExposurePlan`, Research `TargetKind`/Finding statuses and Context fingerprints. Controlled-case contracts and fixtures remain tests-only until an authorized Eval runtime becomes their production consumer.
+- Scope budget: no Prompt filesystem/TOML loader, dynamic registry, workflow DSL, Provider path, new Event/Blob/Cache store, Replay/Eval runtime, Observation/TargetDelta, external scanner, report generator or second AgentLoop.
+- Intended permanent tests: exact four-Profile catalog and target compatibility; stable rendered fragments/Context fingerprints; evidence-stage language; positive/negative/tampered-or-environment control matrix; fixture integrity/tamper detection; and proof that evaluation setup performs no network, Tool, Provider, credential or project write.
+- Acceptance commands: the locked Cargo fmt/clippy/test/build Gate; production inline-test, forbidden Codex dependency, credential isolation, architecture direction, one-AgentLoop/no-general-registry scans; `git diff --check`; clean fixed `codex/` check.
+- Delegation: Luna xhigh performs a read-only contract/reuse audit; Terra xhigh implements only the approved vertical path; the main agent owns schema/API decisions, corrections, Git and merge authority.
+- Live Test: `OFF`; only deterministic local fixtures and pure Domain/App composition tests are authorized.
+
 ## Slice Lean Review
+
+### M4-S1 Lean Review
+
+#### Semantic Owners
+
+- `src/domain/research_profile.rs` is the sole fixed source/web/mobile/binary Profile catalog. It owns Profile ID, generation, Research `TargetKind` compatibility, versioned compile-time Markdown selection and the minimum Tool-exposure override. Firmware remains a Research target kind but has no M4-S1 Profile.
+- `src/domain/mode.rs` remains the sole Mode/Prompt composition owner. Mode generation now participates in the fragment ID, so an explicit generation change invalidates the existing Context identity even when prompt text is unchanged. Context ordering, rendering, budgeting and fingerprinting remain exclusively in the existing Context Planner.
+- The existing `AgentLoop` Turn-boundary configuration path consumes `ResearchProfile`; it applies one `ModePack`, preserves pending Base/Personal/Project prompts and reuses the existing Tool exposure/Baseline transition. No second loop, Profile registry, router or configuration manager exists.
+- Controlled-case manifest/types/loaders live only in `tests/m4_research_profiles.rs`; the twelve synthetic files live only under `tests/fixtures/m4_profiles/`. They are test inputs, not Project/Research facts, runtime configuration or an Eval schema.
+
+#### Reuse, API and Dependencies
+
+- Reused `ModePack`, `PromptComposition`, `ToolExposurePlan`, `ToolRegistry`, Research `TargetKind`, the existing Candidate/Reproduced/Confirmed semantics, `ContextPlanner` and one AgentLoop. Tool schema validation remains owned by the fixed Registry; no Tool schema or Finding validator was copied into Profile code.
+- Public production growth is one fixed `ResearchProfile` enum plus the two AgentLoop selection entries. ID/generation/target compatibility and `ModePack` conversion are the bounded Profile contract; the AgentLoop is the current runtime consumer. Long prompt text stays in four versioned Markdown resources loaded with `include_str!`, with no runtime filesystem or TOML loader.
+- Main review deleted the independent Profile BLAKE3 fingerprint because it had no production consumer. Stable golden tests now use the existing Context Planner fingerprint with the Profile's actual direct Tool schemas; canonical hashing still has one owner.
+- No dependency, Cargo feature, Event, persisted schema, Cache, Port, Provider DTO, credential source, Adapter, database or remote service was added. Codex classification is `REIMPLEMENT`; no Codex source or implementation was copied, so the Upstream Port Ledger is unchanged.
+
+#### Test Layout and Verification
+
+- `tests/m4_research_profiles.rs` permanently covers the exact four-item catalog, Firmware exclusion, domain-specific prompt language, explicit `research_update` and evidence boundaries, stable generation-bound fragments, actual AgentLoop consumption, efficient command/image Tool exposure and stable unique Context fingerprints.
+- Twelve tests-only fixtures provide one positive, one negative and one tampered/environment control per Profile. Their content contains comparable synthetic source, HTTP, mobile or binary inputs rather than labels alone. Positives collectively cover Candidate, Reproduced and Confirmed; all controls are `NoFinding`; the Confirmed fixture binds target version, environment, reproducible impact and positive/negative case references.
+- Fixture paths and case IDs are unique, relationships stay inside the same Profile/Target, per-file SHA-256 is verified and the manifest has a fixed test-code SHA-256 anchor. In-memory byte tampering fails before decode. No fixture test calls a Provider, resolves a credential, executes a Tool, initializes a project, accesses a real target or uses public network.
+- Final local Gate passes on Rust `1.93.1`: formatting, denied-warning Clippy, 266 offline/local tests plus one ignored existing synthetic Live Smoke and locked build. Production inline-test, forbidden Codex dependency, credential, architecture/general-registry, `git diff --check` and clean fixed `codex/` scans pass. Terra xhigh implemented the bounded path; main review corrected Profile composition, controlled-case quality, Tool exposure and unused hash/API growth; Luna xhigh returned final code-level `APPROVE` with no unresolved P0/P1.
+
+#### Removed and Deferred
+
+- Did not add the proposed production ControlledCase contract or Loader because M4-S1 has no Eval runtime consumer. The controlled-case contract is intentionally tests-only; M4-S2 may promote only the minimum proven fields if an authorized Replay/Eval runtime genuinely consumes them. Main review removed only the unconsumed Profile metadata fingerprint API.
+- Removed redundant default Tool overrides, duplicate target compatibility mapping, duplicated AgentLoop builder/queue composition and the mutable manifest-digest sidecar. Source alone defers the low-frequency image Tool; Web/Mobile/Binary preserve direct multimodal access, and all Profiles preserve direct command access.
+- Deferred exactly as scope-locked: runtime Profile CLI/configuration, Prompt filesystem/TOML loading, TraceFixtureManifest, Replay/Shadow Eval, ObservationEnvelope, TargetDelta, external scanners, report generation, real targets, Live Provider compatibility and long-flow acceptance.
+- No M4-S2 implementation, Provider/network request, credential resolution, Codex login access, new fact store, general Hook/plugin/Prompt DSL, workflow engine or multi-Agent runtime exists in this Slice.
 
 ### M3-S4 Lean Review
 
@@ -670,10 +710,17 @@ The M3-S4 seal requested by the current user instruction is complete. No impleme
 - None for M3-S3b; implementation PR `#33`, status PR `#34` and all corresponding post-merge `main` Gates are complete.
 - None for M3-S3c; implementation PR `#35`, status PR `#36` and all corresponding post-merge `main` Gates are complete.
 - None for M3-S3d; implementation PR `#37`, status PR `#38` and the single required PR-head Gate are complete.
+- None for M3-S4; implementation PR `#39`, status PR `#40` and the single required PR-head Gate are complete.
+- None for M4-S1 implementation; the full local Gate and final review are complete, while implementation PR evidence and the separate status seal remain pending.
 - Live Provider compatibility remains unverified by design; missing live credentials do not block offline development and no Codex credential is an allowed substitute.
 
 ## Last Verification
 
+- M4-S1 local Gate: PASS on Rust `1.93.1`; formatting, denied-warning Clippy, 266 offline/local tests plus one ignored existing synthetic Live Smoke, locked build, inline-test scan, forbidden Codex dependency scan, credential/general-registry review, `git diff --check` and the clean fixed `codex/` reference check all passed.
+- M4-S1 Profile Gate: PASS; the exact four compile-time Markdown Profiles map one-to-one to Source/Web/Mobile/Binary, exclude Firmware, preserve direct command access, keep multimodal access direct where routinely relevant, compose through one Turn-boundary AgentLoop path and invalidate the existing Context identity when Mode generation changes.
+- M4-S1 controlled-case Gate: PASS; twelve synthetic offline fixtures form positive, negative and tampered/environment controls, bind unique same-Profile relationships, verify fixed manifest and per-file SHA-256 identities and cover Candidate/Reproduced/Confirmed without treating model output as fact.
+- M4-S1 review: Terra xhigh implemented the bounded path. Main review rejected a production Eval contract without a consumer, removed an independent fingerprint/API, made controlled samples substantive, corrected image Tool exposure and fixed the manifest anchor. Luna xhigh returned final code-level `APPROVE` with no unresolved P0/P1 after these changes and the explicit tests-only contract decision.
+- M4-S1 Live Test: `OFF`; no credential, public Provider request, real target, Codex login state, `~/.codex` or `CODEX_HOME` was read or modified.
 - M3-S3d local Gate: PASS on Rust `1.93.1`; formatting, denied-warning Clippy, 244 offline/local tests plus one ignored existing synthetic Live Smoke, locked build, inline-test scan, forbidden Codex dependency scan, credential/transport and `codex/`-unchanged scans, plus `git diff --check`, all passed.
 - M3-S3d inspection Gate: PASS; uninitialized/empty/normal/corrupt facts are stable, one Session auto-selects while ambiguity requires `--session`, all RequestAudit Blob references are revalidated through the existing service, current Snapshot disposition does not misreport historical refresh provenance, and inspections perform no local write, Provider call, Tool execution or credential resolution.
 - M3-S3d review: Luna xhigh implemented the bounded path; main review separated per-command reads, removed redundant aliases/abstractions, added explicit Session selection and strict filesystem handling, reused the RequestAudit/Token owners and fixed current-Hit semantics. Terra xhigh returned final `APPROVE` with no P0/P1/P2 blocker.

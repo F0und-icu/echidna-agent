@@ -1,0 +1,15 @@
+{
+  "case_id": "binary-positive-candidate",
+  "synthetic_target": "local-binary-fixture",
+  "environment": "offline-binary-v1",
+  "expected_stage": "candidate",
+  "model_output_is_fact": false,
+  "requires_research_update": true,
+  "sample": {
+    "kind": "binary",
+    "input_hex": "10 00 00 00 41 42 43 44",
+    "parser": "u32 length = read_u32(input); memcpy(stack_buffer, input + 4, length);",
+    "observed_result": "declared length exceeds remaining bytes; candidate requires controlled execution",
+    "decision": "unchecked_length_reaches_memory_copy_candidate"
+  }
+}

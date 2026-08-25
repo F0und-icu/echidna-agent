@@ -1,0 +1,17 @@
+{
+  "case_id": "source-positive-candidate",
+  "synthetic_target": "local-source-fixture",
+  "environment": "offline-source-v1",
+  "expected_stage": "candidate",
+  "model_output_is_fact": false,
+  "requires_research_update": true,
+  "sample": {
+    "kind": "source",
+    "input": "../../secrets.txt",
+    "file": {
+      "path": "src/router.rs",
+      "content": "fn open_user_file(input: &str) { root.join(input) } // unvalidated path reaches file sink"
+    },
+    "decision": "unvalidated_input_reaches_sink_candidate"
+  }
+}

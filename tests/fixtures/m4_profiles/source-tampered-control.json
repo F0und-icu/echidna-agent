@@ -1,0 +1,17 @@
+{
+  "case_id": "source-tampered-control",
+  "synthetic_target": "local-source-fixture",
+  "environment": "offline-source-tampered-v1",
+  "expected_stage": "no_finding",
+  "model_output_is_fact": false,
+  "requires_research_update": true,
+  "sample": {
+    "kind": "source",
+    "input": "..%2f..%2fsecrets.txt",
+    "file": {
+      "path": "src/router.rs",
+      "content": "fn open_user_file(input: &str) { let decoded = percent_decode(input)?; reject_parent_segments(decoded)?; root.join(decoded) }"
+    },
+    "decision": "tampered_encoded_input_rejected_control"
+  }
+}

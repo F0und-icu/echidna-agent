@@ -1,0 +1,17 @@
+{
+  "case_id": "source-negative-control",
+  "synthetic_target": "local-source-fixture",
+  "environment": "offline-source-v1",
+  "expected_stage": "no_finding",
+  "model_output_is_fact": false,
+  "requires_research_update": true,
+  "sample": {
+    "kind": "source",
+    "input": "../../secrets.txt",
+    "file": {
+      "path": "src/router.rs",
+      "content": "fn open_user_file(input: &str) { reject_parent_segments(input)?; root.join(input) }"
+    },
+    "decision": "parent_segment_rejected_negative_control"
+  }
+}

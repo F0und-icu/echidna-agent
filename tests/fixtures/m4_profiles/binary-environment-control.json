@@ -1,0 +1,15 @@
+{
+  "case_id": "binary-environment-control",
+  "synthetic_target": "local-binary-fixture",
+  "environment": "offline-binary-mitigated-v1",
+  "expected_stage": "no_finding",
+  "model_output_is_fact": false,
+  "requires_research_update": true,
+  "sample": {
+    "kind": "binary",
+    "input_hex": "10 00 00 00 41 42 43 44",
+    "parser": "u32 length = read_u32(input); guarded_copy(stack_buffer, input + 4, length);",
+    "observed_result": "synthetic hardened runtime terminates; crash alone is not security impact",
+    "decision": "crash_without_security_impact_environment_control"
+  }
+}

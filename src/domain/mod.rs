@@ -17,6 +17,7 @@ pub mod profile;
 pub mod project;
 pub mod request_audit;
 pub mod research;
+pub mod research_profile;
 pub mod session;
 pub mod snapshot;
 pub mod tools;

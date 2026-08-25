@@ -170,7 +170,7 @@ fn mode_prompt_fragments_and_tool_exposure_are_stable() {
             "prompt:base",
             "prompt:personal",
             "prompt:project",
-            "prompt:mode:android",
+            "prompt:mode:android:4",
         ]
     );
     assert_eq!(
@@ -209,7 +209,25 @@ fn mode_prompt_fragments_and_tool_exposure_are_stable() {
         .with_mode(changed_mode);
     assert_ne!(
         stable.0,
-        context_metrics(&changed_composition, mode_direct).0
+        context_metrics(&changed_composition, mode_direct.clone()).0
+    );
+
+    let changed_generation = PromptComposition::new("Base research guidance.")
+        .unwrap()
+        .with_personal("Prefer explicit evidence.")
+        .unwrap()
+        .with_project("Target only the fixture project.")
+        .unwrap()
+        .with_mode(
+            ModePack::new("android", 5, mode.prompt(), mode.tool_exposure().clone()).unwrap(),
+        );
+    assert_eq!(
+        changed_generation.fragments().unwrap()[3].id().as_str(),
+        "prompt:mode:android:5"
+    );
+    assert_ne!(
+        stable.0,
+        context_metrics(&changed_generation, mode_direct).0
     );
 }
 #[tokio::test]

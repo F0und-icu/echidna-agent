@@ -1,0 +1,15 @@
+{
+  "case_id": "binary-negative-control",
+  "synthetic_target": "local-binary-fixture",
+  "environment": "offline-binary-v1",
+  "expected_stage": "no_finding",
+  "model_output_is_fact": false,
+  "requires_research_update": true,
+  "sample": {
+    "kind": "binary",
+    "input_hex": "10 00 00 00 41 42 43 44",
+    "parser": "u32 length = read_u32(input); if (length > remaining(input, 4)) return ERR_TRUNCATED; memcpy(stack_buffer, input + 4, length);",
+    "observed_result": "malformed length is rejected before memory copy",
+    "decision": "length_validation_negative_control"
+  }
+}

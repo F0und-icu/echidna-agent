@@ -1,0 +1,22 @@
+{
+  "case_id": "mobile-positive-confirmed",
+  "synthetic_target": "local-mobile-fixture",
+  "environment": "offline-mobile-v1",
+  "expected_stage": "confirmed",
+  "model_output_is_fact": false,
+  "requires_research_update": true,
+  "sample": {
+    "kind": "mobile",
+    "manifest": "<activity android:name=\".ExportedPreview\" android:exported=\"true\" />",
+    "intent": "fixture://preview?uri=content://fixture.private/secret",
+    "observed_result": "unprivileged fixture caller receives synthetic private preview bytes",
+    "impact_proof": {
+      "target_version": "fixture-mobile-1.0.0",
+      "environment": "offline-android-api-35",
+      "positive_case_id": "mobile-positive-confirmed",
+      "negative_control_case_id": "mobile-negative-control",
+      "reproducible_impact": "cross-app read of synthetic private content"
+    },
+    "decision": "exported_intent_cross_app_read_confirmed"
+  }
+}

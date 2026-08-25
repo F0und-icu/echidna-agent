@@ -130,7 +130,7 @@ impl PromptComposition {
         }
         if let Some(mode) = &self.mode {
             fragments.push(instruction_fragment(
-                &format!("prompt:mode:{}", mode.id()),
+                &format!("prompt:mode:{}:{}", mode.id(), mode.generation()),
                 ContextFragmentSource::ModePrompt,
                 ContextFragmentPriority::High,
                 mode.prompt(),

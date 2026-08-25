@@ -1,0 +1,128 @@
+{
+  "schema_version": 1,
+  "suite_id": "m4-fixed-research-profiles-v1",
+  "provenance": "synthetic-local-offline",
+  "network_access": "disabled",
+  "cases": [
+    {
+      "id": "source-positive-candidate",
+      "profile_id": "source",
+      "target_kind": "source",
+      "role": "positive",
+      "expected_stage": "candidate",
+      "fixture": "source-positive-candidate.json",
+      "sha256": "74ef1679002cc483ecefbf59ad5542c2f9c528f44309e6f1ca8eaad98045dae7",
+      "relationship": { "positive_case_id": "source-positive-candidate" }
+    },
+    {
+      "id": "source-negative-control",
+      "profile_id": "source",
+      "target_kind": "source",
+      "role": "negative_control",
+      "expected_stage": "no_finding",
+      "fixture": "source-negative-control.json",
+      "sha256": "b45c511a09cd421115121c32770aa29ca3d0c8431a94dc55096943113abf81f8",
+      "relationship": { "positive_case_id": "source-positive-candidate" }
+    },
+    {
+      "id": "source-tampered-control",
+      "profile_id": "source",
+      "target_kind": "source",
+      "role": "tampered_control",
+      "expected_stage": "no_finding",
+      "fixture": "source-tampered-control.json",
+      "sha256": "25a77e7257bb9e1bed02dbe03db7b49df791fc0c110f7b3e8d95f77a5777ebbc",
+      "relationship": { "positive_case_id": "source-positive-candidate" }
+    },
+    {
+      "id": "web-positive-reproduced",
+      "profile_id": "web",
+      "target_kind": "web",
+      "role": "positive",
+      "expected_stage": "reproduced",
+      "fixture": "web-positive-reproduced.json",
+      "sha256": "69568907032f8967451247e38d24f3099cd964a55577473cf17adc5a8a9c07d5",
+      "relationship": { "positive_case_id": "web-positive-reproduced" }
+    },
+    {
+      "id": "web-negative-control",
+      "profile_id": "web",
+      "target_kind": "web",
+      "role": "negative_control",
+      "expected_stage": "no_finding",
+      "fixture": "web-negative-control.json",
+      "sha256": "a81e8ca25c6dd7ed9f4ae70170fc070ec401f09e11ce0765aaa866a5fd592214",
+      "relationship": { "positive_case_id": "web-positive-reproduced" }
+    },
+    {
+      "id": "web-environment-control",
+      "profile_id": "web",
+      "target_kind": "web",
+      "role": "environment_control",
+      "expected_stage": "no_finding",
+      "fixture": "web-environment-control.json",
+      "sha256": "39b2b7976e4558711e4eae28eaae749a3c41ed54e562a0c6f47649c77f3a8a59",
+      "relationship": { "positive_case_id": "web-positive-reproduced" }
+    },
+    {
+      "id": "mobile-positive-confirmed",
+      "profile_id": "mobile",
+      "target_kind": "mobile",
+      "role": "positive",
+      "expected_stage": "confirmed",
+      "fixture": "mobile-positive-confirmed.json",
+      "sha256": "9be672f926420302adb9ce742fecc95f2d43934219c52ef114547399b9442793",
+      "relationship": { "positive_case_id": "mobile-positive-confirmed" }
+    },
+    {
+      "id": "mobile-negative-control",
+      "profile_id": "mobile",
+      "target_kind": "mobile",
+      "role": "negative_control",
+      "expected_stage": "no_finding",
+      "fixture": "mobile-negative-control.json",
+      "sha256": "716337809570d6c0ef11660e308e4de5a040984cbcba0ebfaa662d3b6efde653",
+      "relationship": { "positive_case_id": "mobile-positive-confirmed" }
+    },
+    {
+      "id": "mobile-tampered-control",
+      "profile_id": "mobile",
+      "target_kind": "mobile",
+      "role": "tampered_control",
+      "expected_stage": "no_finding",
+      "fixture": "mobile-tampered-control.json",
+      "sha256": "8b0191c64c9bf3375a1554f4c77980928697af7fd8ef4af40343bdc919c08f2a",
+      "relationship": { "positive_case_id": "mobile-positive-confirmed" }
+    },
+    {
+      "id": "binary-positive-candidate",
+      "profile_id": "binary",
+      "target_kind": "binary",
+      "role": "positive",
+      "expected_stage": "candidate",
+      "fixture": "binary-positive-candidate.json",
+      "sha256": "a2ed2cb5d7a882fb39099e3cf56e49397511f4682d99d4ffb33a657dcb2c0a1b",
+      "relationship": { "positive_case_id": "binary-positive-candidate" }
+    },
+    {
+      "id": "binary-negative-control",
+      "profile_id": "binary",
+      "target_kind": "binary",
+      "role": "negative_control",
+      "expected_stage": "no_finding",
+      "fixture": "binary-negative-control.json",
+      "sha256": "0fc85f929548fbdb1e2527e0391907d97609ca681fc6ec45058ab21002e884aa",
+      "relationship": { "positive_case_id": "binary-positive-candidate" }
+    },
+    {
+      "id": "binary-environment-control",
+      "profile_id": "binary",
+      "target_kind": "binary",
+      "role": "environment_control",
+      "expected_stage": "no_finding",
+      "fixture": "binary-environment-control.json",
+      "sha256": "1d0b452d533f980e6e4a55607ca7febf9bcf2939a0b20d27a641d60051d0e7b0",
+      "relationship": { "positive_case_id": "binary-positive-candidate" }
+    }
+  ]
+}

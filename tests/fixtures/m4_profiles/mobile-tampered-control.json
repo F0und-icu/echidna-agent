@@ -1,0 +1,15 @@
+{
+  "case_id": "mobile-tampered-control",
+  "synthetic_target": "local-mobile-fixture",
+  "environment": "offline-mobile-tampered-v1",
+  "expected_stage": "no_finding",
+  "model_output_is_fact": false,
+  "requires_research_update": true,
+  "sample": {
+    "kind": "mobile",
+    "manifest": "<activity android:name=\".ExportedPreview\" android:exported=\"true\" android:permission=\"fixture.SIGNATURE\" />",
+    "intent": "fixture://preview?uri=content://fixture.private/secret&caller=untrusted",
+    "observed_result": "signature permission check rejects tampered caller",
+    "decision": "tampered_untrusted_intent_denied_control"
+  }
+}

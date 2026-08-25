@@ -25,6 +25,7 @@ use crate::domain::profile::{AgentModelProfile, AgentModelProfileError};
 use crate::domain::request_audit::{
     RequestAuditAttempt, RequestAuditError, RequestAuditRunContext,
 };
+use crate::domain::research_profile::ResearchProfile;
 use crate::domain::session::{SessionError, SessionState, SessionSummary, SessionSummaryDraft};
 use crate::domain::tools::{
     ExecutionId, IdempotencyKey, ToolCall, ToolExecutionOutcome, ToolExposurePlan, ToolResult,
@@ -311,9 +312,26 @@ where
         self
     }
 
+    /// Selects one fixed vulnerability-research Profile before the first
+    /// Turn. Its ModePack remains part of the existing prompt/tool boundary.
+    pub fn with_research_profile(mut self, profile: ResearchProfile) -> Self {
+        self.queue_research_profile(profile);
+        self
+    }
+
     /// Queues a prompt/Mode change for the next Turn boundary.
     pub fn queue_prompt_composition(&mut self, composition: PromptComposition) {
         self.pending_prompt_composition = Some(composition);
+    }
+
+    /// Queues a fixed vulnerability-research Profile for the next Turn
+    /// boundary, preserving any pending base/personal/project composition.
+    pub fn queue_research_profile(&mut self, profile: ResearchProfile) {
+        let composition = self
+            .pending_prompt_composition
+            .clone()
+            .unwrap_or_else(|| self.prompt_composition.clone());
+        self.pending_prompt_composition = Some(profile.apply_to(composition));
     }
 
     /// Supplies the current derived research view for the next full Context
