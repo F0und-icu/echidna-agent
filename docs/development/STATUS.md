@@ -5,14 +5,14 @@
 - Architecture version: `1.1.0`
 - Phase: `IMPLEMENTATION`
 - Implementation: `STARTED`
-- Current milestone: `M4`; M4-S1 is implementation-complete locally and remote sealing is pending
+- Current milestone: `M4`; M4-S1 is `COMPLETE` and remotely sealed
 - Current slice: `M4-S2`
-- Slice state: `READY_NOT_AUTHORIZED`; M4-S1 must be remotely sealed and work must then stop before Replay/Eval or Live Test activity
-- Lean governance: `ACTIVE`; M4-S1 passed its full local Cargo/Lean Gate and final Luna xhigh code review with no unresolved P0/P1
-- Local Git initialized: `yes`; M4-S1 implementation is complete on `agent/m4-s1-research-profiles`
-- Remote repository: `F0und-icu/cyber-agent` private; M3-S4 implementation PR `#39` and `[skip ci]` status PR `#40` were Squash Merged without duplicate post-merge CI
+- Slice state: `READY_NOT_AUTHORIZED`; M4-S1 is remotely sealed and work is stopped without Replay/Eval or Live Test activity
+- Lean governance: `ACTIVE`; M4-S1 passed its full local Cargo/Lean Gate, final Luna xhigh review and exact-head macOS Gate with no unresolved P0/P1
+- Local Git initialized: `yes`; `main` tracks the private remote and the M4-S1 runtime tree is cleanly sealed
+- Remote repository: `F0und-icu/cyber-agent` private; M4-S1 implementation PR `#42` and `[skip ci]` status PR `#43` form the remote seal without duplicate post-merge CI
 - Documentation baseline commit: `55ff3be`
-- Current code base: M4-S1 local implementation candidate based on sealed M3-S4 `main` at `b635645`; implementation PR evidence is pending
+- Current code base: M4-S1 runtime Squash Merge `7631709`; exact implementation head `b9cb3f9` passed PR-head CI `32885992788`, and status evidence is recorded by PR `#43`
 - Upstream Codex baseline: `3aae5d885bac39c1262491aa3fd100dfd8b3919f`
 
 ## Last Completed Slice
@@ -24,9 +24,9 @@
 - Profile behavior: each Profile has one fixed ID, generation, compatible Research `TargetKind`, compiled Markdown prompt and bounded Tool exposure. Firmware remains unsupported. The prompts require Candidate/Reproduced/Confirmed separation, real target/version/environment evidence, positive and negative controls, explicit `research_update` and non-fabrication of Tool or evidence facts.
 - Context behavior: Mode generation now participates in `prompt:mode:<id>:<generation>` identity, and the existing Context Planner fingerprint remains the only semantic hash. Source defers low-frequency image inspection; Web/Mobile/Binary keep `view_image` Direct, while command tools remain Direct for all Profiles.
 - Fixture behavior: each Profile has one positive, one negative and one tampered/environment case with distinct synthetic source, HTTP, mobile or binary content. Per-file SHA-256 plus a fixed manifest anchor detect drift; positives collectively cover Candidate, Reproduced and Confirmed, while every control is `NoFinding`.
-- Result: `COMPLETE` locally; the full Cargo/Lean Gate passes 266 offline/local tests with one existing opt-in Live Smoke ignored. Main review removed an unconsumed independent Profile fingerprint, kept controlled-case types tests-only and corrected image Tool exposure; final Luna xhigh review returned code-level `APPROVE` with no unresolved P0/P1. Remote PR evidence is pending.
+- Result: `COMPLETE`; the full Cargo/Lean Gate passes 266 offline/local tests with one existing opt-in Live Smoke ignored. Main review removed an unconsumed independent Profile fingerprint, kept controlled-case types tests-only and corrected image Tool exposure; final Luna xhigh review returned code-level `APPROVE` with no unresolved P0/P1. The exact implementation head then passed the same macOS Gate.
 - Dependencies and schemas: no Cargo dependency, feature, Event, Blob, Cache, persisted configuration, Provider DTO, Port, credential source or remote transport changed. No production controlled-case or Eval schema was added without a runtime consumer.
-- Git: implementation commit, final implementation PR, the single authorized PR-head CI run, Squash Merge and separate `[skip ci]` status seal are pending.
+- Git: implementation commit `b9cb3f9`, PR `#42`, sole PR-head CI `32885992788`, implementation Squash Merge `7631709` and separate status PR `#43`; all merge/status subjects use `[skip ci]` after the one proven runtime-tree Gate.
 - Live Test: `OFF`; no real credential, public Provider request, Codex login state, `~/.codex` or `CODEX_HOME` was read or modified.
 
 ## Current Authority
@@ -78,21 +78,21 @@
 
 - Slice: `M4-S2`
 - State: `READY_NOT_AUTHORIZED`; this status is planning only and does not start Replay/Eval work.
-- Planned delivery branch: resolve only after the M4-S1 implementation and status seal are remotely merged and a new explicit user instruction authorizes M4-S2.
+- Planned delivery branch: resolve only after a new explicit user instruction authorizes M4-S2; the M4-S1 implementation and status prerequisites are complete.
 - Scope: Trace Replay and Shadow Eval as already bounded by the Implementation Plan.
 - Forbidden continuation: all M4-S2 implementation, M4-S3 Observation/TargetDelta, M4-S4 long-flow/Live Provider work, general Prompt DSL/loader/registry, dataset service, database, model router, Hook/plugin runtime and Codex credential/login access.
 
 ## Current Authorization
 
-The current user instruction authorizes only completion and remote sealing of M4-S1, then requires work to stop.
+The M4-S1 seal requested by the current user instruction is complete. No implementation or Git authorization remains.
 
-- Run mode: `SEAL_M4_S1_AND_STOP`
-- Slice ID: `M4-S1`; state `COMPLETE_LOCAL_PENDING_REMOTE_SEAL`
-- Git mode: `BRANCH_PR_REVIEW_MERGE`; implementation commit/push/PR, one final PR-head CI run, Squash Merge and a separate `[skip ci]` status-seal PR are authorized
-- Delegation mode: `INACTIVE`; Terra xhigh implementation and Luna xhigh final review are complete
+- Run mode: `REVIEW_ONLY`
+- Slice ID: `M4-S2`; state `READY_NOT_AUTHORIZED`
+- Git mode: `REVIEW_ONLY`; no further branch, commit, push, PR, merge, tag or release is authorized
+- Delegation mode: `INACTIVE`; prior implementation/review threads remain stopped
 - Live test mode: `OFF`; no real Provider credential or public model request is authorized
 - Forbidden continuation: all M4-S2/M4-S3/M4-S4 work, Live Tests, general database/index/watcher/hook/router/plugin/model-router work, Codex source modification or Codex credentials/login access
-- Stop condition: after the M4-S1 status-seal PR is merged, stop without starting M4-S2 or a Live Test
+- Stop condition: `SATISFIED`; remain stopped without starting M4-S2 or a Live Test until a new explicit user request
 
 ## M2-S5 Slice Start
 
@@ -214,7 +214,7 @@ The current user instruction authorizes only completion and remote sealing of M4
 - `tests/m4_research_profiles.rs` permanently covers the exact four-item catalog, Firmware exclusion, domain-specific prompt language, explicit `research_update` and evidence boundaries, stable generation-bound fragments, actual AgentLoop consumption, efficient command/image Tool exposure and stable unique Context fingerprints.
 - Twelve tests-only fixtures provide one positive, one negative and one tampered/environment control per Profile. Their content contains comparable synthetic source, HTTP, mobile or binary inputs rather than labels alone. Positives collectively cover Candidate, Reproduced and Confirmed; all controls are `NoFinding`; the Confirmed fixture binds target version, environment, reproducible impact and positive/negative case references.
 - Fixture paths and case IDs are unique, relationships stay inside the same Profile/Target, per-file SHA-256 is verified and the manifest has a fixed test-code SHA-256 anchor. In-memory byte tampering fails before decode. No fixture test calls a Provider, resolves a credential, executes a Tool, initializes a project, accesses a real target or uses public network.
-- Final local Gate passes on Rust `1.93.1`: formatting, denied-warning Clippy, 266 offline/local tests plus one ignored existing synthetic Live Smoke and locked build. Production inline-test, forbidden Codex dependency, credential, architecture/general-registry, `git diff --check` and clean fixed `codex/` scans pass. Terra xhigh implemented the bounded path; main review corrected Profile composition, controlled-case quality, Tool exposure and unused hash/API growth; Luna xhigh returned final code-level `APPROVE` with no unresolved P0/P1.
+- Final local Gate passes on Rust `1.93.1`: formatting, denied-warning Clippy, 266 offline/local tests plus one ignored existing synthetic Live Smoke and locked build. Production inline-test, forbidden Codex dependency, credential, architecture/general-registry, `git diff --check` and clean fixed `codex/` scans pass. Exact implementation head `b9cb3f9` passed the macOS PR-head Gate in run `32885992788`; `[skip ci]` Squash Merge `7631709` intentionally produced no duplicate main run. Terra xhigh implemented the bounded path; main review corrected Profile composition, controlled-case quality, Tool exposure and unused hash/API growth; Luna xhigh returned final code-level `APPROVE` with no unresolved P0/P1.
 
 #### Removed and Deferred
 
@@ -711,7 +711,7 @@ The current user instruction authorizes only completion and remote sealing of M4
 - None for M3-S3c; implementation PR `#35`, status PR `#36` and all corresponding post-merge `main` Gates are complete.
 - None for M3-S3d; implementation PR `#37`, status PR `#38` and the single required PR-head Gate are complete.
 - None for M3-S4; implementation PR `#39`, status PR `#40` and the single required PR-head Gate are complete.
-- None for M4-S1 implementation; the full local Gate and final review are complete, while implementation PR evidence and the separate status seal remain pending.
+- None for M4-S1; implementation PR `#42`, exact-head CI, implementation merge and separate status PR `#43` complete the remote seal.
 - Live Provider compatibility remains unverified by design; missing live credentials do not block offline development and no Codex credential is an allowed substitute.
 
 ## Last Verification
@@ -721,6 +721,8 @@ The current user instruction authorizes only completion and remote sealing of M4
 - M4-S1 controlled-case Gate: PASS; twelve synthetic offline fixtures form positive, negative and tampered/environment controls, bind unique same-Profile relationships, verify fixed manifest and per-file SHA-256 identities and cover Candidate/Reproduced/Confirmed without treating model output as fact.
 - M4-S1 review: Terra xhigh implemented the bounded path. Main review rejected a production Eval contract without a consumer, removed an independent fingerprint/API, made controlled samples substantive, corrected image Tool exposure and fixed the manifest anchor. Luna xhigh returned final code-level `APPROVE` with no unresolved P0/P1 after these changes and the explicit tests-only contract decision.
 - M4-S1 Live Test: `OFF`; no credential, public Provider request, real target, Codex login state, `~/.codex` or `CODEX_HOME` was read or modified.
+- M4-S1 remote Gate: PASS; exact implementation head `b9cb3f9` was Squash Merged through PR `#42` as `7631709`, and sole PR-head run `32885992788` passed the macOS Rust Gate. The merge used `[skip ci]`, so no duplicate main Workflow was created.
+- M4-S1 status seal: PASS; status-only PR `#43` records the implementation identities and final stopped state. Its commits and merge use `[skip ci]` and start no M4-S2 or Live Test work.
 - M3-S3d local Gate: PASS on Rust `1.93.1`; formatting, denied-warning Clippy, 244 offline/local tests plus one ignored existing synthetic Live Smoke, locked build, inline-test scan, forbidden Codex dependency scan, credential/transport and `codex/`-unchanged scans, plus `git diff --check`, all passed.
 - M3-S3d inspection Gate: PASS; uninitialized/empty/normal/corrupt facts are stable, one Session auto-selects while ambiguity requires `--session`, all RequestAudit Blob references are revalidated through the existing service, current Snapshot disposition does not misreport historical refresh provenance, and inspections perform no local write, Provider call, Tool execution or credential resolution.
 - M3-S3d review: Luna xhigh implemented the bounded path; main review separated per-command reads, removed redundant aliases/abstractions, added explicit Session selection and strict filesystem handling, reused the RequestAudit/Token owners and fixed current-Hit semantics. Terra xhigh returned final `APPROVE` with no P0/P1/P2 blocker.
