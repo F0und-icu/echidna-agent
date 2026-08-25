@@ -43,4 +43,8 @@ impl ArtifactState {
     pub(crate) fn insert(&mut self, record: ArtifactRecord) {
         self.records.insert(record.id.clone(), record);
     }
+
+    pub(crate) fn get(&self, id: &ArtifactId) -> Option<&ArtifactRecord> {
+        self.records.get(id)
+    }
 }

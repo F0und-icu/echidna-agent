@@ -14,6 +14,7 @@ mod resources;
 mod search;
 mod snapshot;
 mod tool_search;
+mod view_image;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -58,6 +59,7 @@ enum BuiltinTool {
     ResizePty,
     StopPty,
     ArtifactStore,
+    ViewImage,
     MemoryRead,
     MemoryWrite,
     InspectProject,
@@ -111,6 +113,7 @@ impl ToolRegistry {
             (ToolName::new("resize_pty"), BuiltinTool::ResizePty),
             (ToolName::new("stop_pty"), BuiltinTool::StopPty),
             (ToolName::new("artifact_store"), BuiltinTool::ArtifactStore),
+            (ToolName::new("view_image"), BuiltinTool::ViewImage),
             (ToolName::new("memory_read"), BuiltinTool::MemoryRead),
             (ToolName::new("memory_write"), BuiltinTool::MemoryWrite),
             (
@@ -445,6 +448,7 @@ impl BuiltinTool {
             | Self::ArtifactStore
             | Self::MemoryRead
             | Self::MemoryWrite => ToolExposure::Deferred,
+            Self::ViewImage => ToolExposure::Direct,
         }
     }
 
@@ -472,6 +476,7 @@ impl BuiltinTool {
             Self::ResizePty => pty::normalize_resize(arguments),
             Self::StopPty => pty::normalize_stop(arguments),
             Self::ArtifactStore => artifact::normalize(project_root, arguments),
+            Self::ViewImage => view_image::normalize(project_root, arguments),
             Self::MemoryRead => memory::normalize_read(project_root, arguments),
             Self::MemoryWrite => memory::normalize_write(project_root, arguments),
             Self::InspectProject => snapshot::normalize(project_root, arguments),
@@ -509,6 +514,7 @@ impl BuiltinTool {
             Self::ResizePty => pty::execute_resize(ptys, plan).await,
             Self::StopPty => pty::execute_stop(ptys, plan).await,
             Self::ArtifactStore => artifact::execute(project_root, plan).await,
+            Self::ViewImage => view_image::execute(project_root, plan).await,
             Self::MemoryRead => memory::execute_read(project_root, plan).await,
             Self::MemoryWrite => memory::execute_write(project_root, plan).await,
             Self::InspectProject => snapshot::execute(project_root, specs, plan).await,
@@ -885,6 +891,18 @@ impl BuiltinTool {
                 "Store one local regular file as a SHA-256 Blob and append a provenance-preserving Artifact fact.",
                 artifact::input_schema(),
                 artifact::output_schema(),
+                ToolParallelism::ResourceLocked,
+                Some("file:{source_path},file:.cyber-agent/research.jsonl"),
+                ToolEffect::LocalMutation,
+                ToolRetryPolicy::NeverAutoRetry,
+                ToolDeterminism::EnvironmentDependent,
+                120_000,
+            ),
+            Self::ViewImage => spec(
+                "view_image",
+                "Validate one local PNG or JPEG, publish its original Artifact and any budgeted PNG derivative, and return the selected image Artifact reference.",
+                view_image::input_schema(),
+                view_image::output_schema(),
                 ToolParallelism::ResourceLocked,
                 Some("file:{source_path},file:.cyber-agent/research.jsonl"),
                 ToolEffect::LocalMutation,

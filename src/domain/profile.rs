@@ -1,13 +1,13 @@
 //! Pure named Provider composition and capability-driven Vision resolution.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::domain::context::{ModelIdentity, ModelProfile};
 use crate::domain::model::ModelCapabilities;
 
 /// The only supported image-routing modes for one Agent profile.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VisionMode {
     Auto,
@@ -18,7 +18,7 @@ pub enum VisionMode {
 
 /// The resolved destination for image input. `SecondaryTool` remains a
 /// configuration decision until the separately scoped Vision service exists.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VisionRoute {
     NoImage,
@@ -28,7 +28,7 @@ pub enum VisionRoute {
 }
 
 /// Stable explanations for a pure Vision route decision.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum VisionRouteReason {
     PrimaryImageCapable,
@@ -40,7 +40,7 @@ pub enum VisionRouteReason {
 }
 
 /// The deterministic result of capability-only Vision routing.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct VisionRouteDecision {
     pub route: VisionRoute,
     pub reason: Option<VisionRouteReason>,

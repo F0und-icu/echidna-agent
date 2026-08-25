@@ -14,7 +14,7 @@ use crate::domain::events::{EventEnvelope, EventId, EventType, OccurredAt};
 use crate::domain::research::{ResearchEvent, ResearchReducer, TargetSnapshotId};
 use crate::domain::tools::{ResourceKey, ToolCallId, ToolExecutionOutcome, ToolExecutionPlan};
 use crate::ports::EventSink;
-use crate::ports::artifact::ArtifactStore;
+use crate::ports::artifact::{ArtifactStore, StoredBlob};
 use crate::ports::tool::ToolExecutorError;
 
 use super::filesystem::resolve_path;
@@ -24,18 +24,32 @@ use super::{decode_arguments, invalid_plan};
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct ArtifactStoreArgs {
-    event_id: String,
-    occurred_at: String,
-    artifact_id: String,
-    source_path: String,
-    media_type: String,
-    target_snapshot_id: String,
-    toolchain_fingerprint: String,
+pub(crate) struct ArtifactStoreArgs {
+    pub(crate) event_id: String,
+    pub(crate) occurred_at: String,
+    pub(crate) artifact_id: String,
+    pub(crate) source_path: String,
+    pub(crate) media_type: String,
+    pub(crate) target_snapshot_id: String,
+    pub(crate) toolchain_fingerprint: String,
     #[serde(default)]
-    parent_artifact_ids: Vec<String>,
+    pub(crate) parent_artifact_ids: Vec<String>,
     #[serde(default)]
-    transform: Option<String>,
+    pub(crate) transform: Option<String>,
+}
+
+/// One successful Artifact publication through the sole Blob/preflight/Event
+/// owner. Tools may format different result JSON but must not reimplement
+/// Blob provenance validation or append-before-apply.
+pub(crate) struct PublishedArtifact {
+    pub(crate) record: ArtifactRecord,
+    pub(crate) blob: StoredBlob,
+    pub(crate) research_event_count: usize,
+}
+
+pub(crate) struct ArtifactPublicationError {
+    pub(crate) code: &'static str,
+    pub(crate) message: String,
 }
 
 pub(super) fn normalize(
@@ -64,107 +78,109 @@ pub(super) async fn execute(project_root: &Path, plan: ToolExecutionPlan) -> Too
         return invalid_plan(plan, error);
     }
 
-    let project = match Project::discover(project_root) {
-        Ok(project) => project,
-        Err(error) => return artifact_failure(plan, "artifact_project_unavailable", error),
-    };
-    let mut writer = match project.open_writer() {
-        Ok(writer) => writer,
-        Err(error) => return artifact_failure(plan, "artifact_writer_unavailable", error),
-    };
-    let mut store = match writer.open_research(None) {
-        Ok(store) => store,
-        Err(error) => return artifact_failure(plan, "artifact_stream_unavailable", error),
-    };
+    let source_path = arguments.source_path.clone();
+    let publication = publish_artifact(project_root, &plan, &arguments, move |project| {
+        let source = resolve_path(project.root(), &source_path);
+        LocalArtifactStore::for_project(project).publish_file(&source)
+    });
+    match publication {
+        Ok(publication) => ToolExecutionOutcome::succeeded_with_artifacts(
+            plan,
+            json!({
+                "status": "recorded",
+                "event_appended": true,
+                "event_type": if publication.record.parent_artifact_ids.is_empty() { "artifact.created" } else { "artifact.derived" },
+                "event_id": arguments.event_id,
+                "blob": {
+                    "blob_id": publication.blob.blob_id,
+                    "size_bytes": publication.blob.size_bytes,
+                    "already_present": publication.blob.already_present,
+                },
+                "artifact": publication.record,
+                "research_event_count": publication.research_event_count,
+            }),
+            vec![publication.record.id],
+        ),
+        Err(error) => artifact_failure(plan, error.code, error.message),
+    }
+}
+
+/// The only local path allowed to turn immutable Blob bytes into a durable
+/// Artifact Research fact. Preflight occurs before byte publication; the
+/// Event is appended before the replayed state is promoted.
+pub(crate) fn publish_artifact<Publish, PublishError>(
+    project_root: &Path,
+    plan: &ToolExecutionPlan,
+    arguments: &ArtifactStoreArgs,
+    publish_blob: Publish,
+) -> Result<PublishedArtifact, ArtifactPublicationError>
+where
+    Publish: FnOnce(&Project) -> Result<StoredBlob, PublishError>,
+    PublishError: std::fmt::Display,
+{
+    let project = Project::discover(project_root)
+        .map_err(|error| publication_error("artifact_project_unavailable", error))?;
+    let mut writer = project
+        .open_writer()
+        .map_err(|error| publication_error("artifact_writer_unavailable", error))?;
+    let mut store = writer
+        .open_research(None)
+        .map_err(|error| publication_error("artifact_stream_unavailable", error))?;
     let reducer = ResearchReducer;
-    let mut state = match reduce_store(&store, &reducer) {
-        Ok(state) => state,
-        Err(error) => return artifact_failure(plan, "artifact_state_invalid", error),
-    };
+    let mut state = reduce_store(&store, &reducer)
+        .map_err(|error| publication_error("artifact_state_invalid", error))?;
     let event_id = EventId::new(arguments.event_id.clone());
     if state.has_event_id(&event_id) {
-        return ToolExecutionOutcome::failed(
-            plan,
-            "artifact_event_id_duplicate",
-            json!({
-                "error_code": "artifact_event_id_duplicate",
-                "event_id": event_id,
-                "message": "event_id already exists in the Research stream; no Blob or Event was created"
-            }),
-        );
+        return Err(ArtifactPublicationError {
+            code: "artifact_event_id_duplicate",
+            message: "event_id already exists in the Research stream; no Blob or Event was created"
+                .to_owned(),
+        });
     }
-
-    let source = resolve_path(project.root(), &arguments.source_path);
-    let preflight = artifact_event(&arguments, &plan, zero_blob_id(), 0);
-    if let Err(error) = reducer.validate_event(&state, &preflight) {
-        return artifact_failure(plan, "artifact_provenance_rejected", error);
-    }
-
-    let stored_blob = match LocalArtifactStore::for_project(&project).publish_file(&source) {
-        Ok(blob) => blob,
-        Err(error) => return artifact_failure(plan, "artifact_blob_publish_failed", error),
-    };
-    let event = artifact_event(
-        &arguments,
-        &plan,
-        stored_blob.blob_id.clone(),
-        stored_blob.size_bytes,
-    );
-    if let Err(error) = reducer.validate_event(&state, &event) {
-        return artifact_failure(plan, "artifact_provenance_rejected", error);
-    }
-    let sequence = match store.next_sequence() {
-        Ok(sequence) => sequence,
-        Err(error) => return artifact_failure(plan, "artifact_sequence_unavailable", error),
-    };
-    let payload = match event.encode_payload() {
-        Ok(payload) => payload,
-        Err(error) => return artifact_failure(plan, "artifact_payload_encode_failed", error),
-    };
+    let preflight = artifact_event(arguments, plan, zero_blob_id(), 0);
+    reducer
+        .validate_event(&state, &preflight)
+        .map_err(|error| publication_error("artifact_provenance_rejected", error))?;
+    let blob = publish_blob(&project)
+        .map_err(|error| publication_error("artifact_blob_publish_failed", error))?;
+    let event = artifact_event(arguments, plan, blob.blob_id.clone(), blob.size_bytes);
+    reducer
+        .validate_event(&state, &event)
+        .map_err(|error| publication_error("artifact_provenance_rejected", error))?;
+    let sequence = store
+        .next_sequence()
+        .map_err(|error| publication_error("artifact_sequence_unavailable", error))?;
+    let payload = event
+        .encode_payload()
+        .map_err(|error| publication_error("artifact_payload_encode_failed", error))?;
     let envelope = EventEnvelope::current(
-        event_id.clone(),
+        event_id,
         ProjectEventStream::Research.stream_id(),
         sequence,
-        OccurredAt::new(arguments.occurred_at),
+        OccurredAt::new(arguments.occurred_at.clone()),
         EventType::new(event.event_type().as_str()),
         payload,
     );
-    if let Err(error) = EventSink::append_event(&mut store, &envelope) {
-        return artifact_failure(plan, "artifact_append_failed", error);
-    }
-    if let Err(error) = reducer.apply(&mut state, envelope) {
-        return ToolExecutionOutcome::failed(
-            plan,
-            "artifact_apply_after_append_failed",
-            json!({
-                "error_code": "artifact_apply_after_append_failed",
-                "error": error.to_string(),
-                "message": "the Artifact Event is durable but could not be reduced in memory"
-            }),
-        );
-    }
-
-    let ResearchEvent::Artifact(artifact_event) = &event else {
-        unreachable!("artifact_store only builds Artifact Events")
+    EventSink::append_event(&mut store, &envelope)
+        .map_err(|error| publication_error("artifact_append_failed", error))?;
+    reducer
+        .apply(&mut state, envelope)
+        .map_err(|error| publication_error("artifact_apply_after_append_failed", error))?;
+    let ResearchEvent::Artifact(artifact_event) = event else {
+        unreachable!("Artifact publisher receives Artifact Events")
     };
-    let output_artifact_id = artifact_event.record().id.clone();
-    ToolExecutionOutcome::succeeded_with_artifacts(
-        plan,
-        json!({
-            "status": "recorded",
-            "event_appended": true,
-            "event_type": event.event_type().as_str(),
-            "event_id": event_id,
-            "blob": {
-                "blob_id": stored_blob.blob_id,
-                "size_bytes": stored_blob.size_bytes,
-                "already_present": stored_blob.already_present,
-            },
-            "artifact": artifact_event.record(),
-            "research_event_count": state.applied_event_count(),
-        }),
-        vec![output_artifact_id],
-    )
+    Ok(PublishedArtifact {
+        record: artifact_event.record().clone(),
+        blob,
+        research_event_count: state.applied_event_count(),
+    })
+}
+
+fn publication_error(code: &'static str, error: impl ToString) -> ArtifactPublicationError {
+    ArtifactPublicationError {
+        code,
+        message: error.to_string(),
+    }
 }
 
 fn artifact_event(
@@ -203,7 +219,9 @@ fn zero_blob_id() -> BlobId {
     BlobId::new("0".repeat(64)).expect("zero SHA-256 digest is valid syntax")
 }
 
-fn require_nonempty_arguments(arguments: &ArtifactStoreArgs) -> Result<(), ToolExecutorError> {
+pub(crate) fn require_nonempty_arguments(
+    arguments: &ArtifactStoreArgs,
+) -> Result<(), ToolExecutorError> {
     for (name, value) in [
         ("event_id", &arguments.event_id),
         ("occurred_at", &arguments.occurred_at),

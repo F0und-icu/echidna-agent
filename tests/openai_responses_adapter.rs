@@ -1,11 +1,15 @@
 use std::collections::BTreeMap;
+use std::fs;
+use std::io::Cursor;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use base64::Engine;
 use cyber_agent::adapters::openai::{
     OPENAI_API_KEY_REFERENCE, OpenAiCredentialSource, OpenAiCredentialSourceError,
     OpenAiResponsesAdapter, OpenAiResponsesConfig, ProcessEnvironmentCredentialSource,
 };
+use cyber_agent::adapters::project_event_store::Project;
 use cyber_agent::adapters::tools::ToolRegistry;
 use cyber_agent::app::agent_loop::{AgentLoop, AgentTurnOutcome};
 use cyber_agent::app::cancellation::AgentCancellation;
@@ -17,7 +21,9 @@ use cyber_agent::domain::model::{
     CapabilityMappingVersion, ContentItem, MessageRole, ModelCapabilities, ModelEvent,
     ModelInputIR, ModelRequestRequirements, ModelUsage,
 };
-use cyber_agent::domain::tools::{ToolCall, ToolCallId, ToolName, ToolResult, ToolResultStatus};
+use cyber_agent::domain::tools::{
+    ExecutionId, ToolCall, ToolCallId, ToolExecutionOutcome, ToolName, ToolResult, ToolResultStatus,
+};
 use cyber_agent::ports::model::{
     ModelProvider, ModelProviderError, ModelRequest, ModelResponseCompletion, ProviderResponseId,
 };
@@ -28,6 +34,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
+
+mod support;
 
 const FIXTURE_SECRET: &str = "fixture-secret";
 
@@ -134,6 +142,69 @@ fn adapter(
     )
 }
 
+async fn execute_tool(
+    tools: &ToolRegistry,
+    execution_id: &str,
+    name: &str,
+    arguments: Value,
+) -> ToolExecutionOutcome {
+    let call = ToolCall::new(
+        ToolCallId::new(format!("call-{execution_id}")),
+        ToolName::new(name),
+        arguments,
+    );
+    let plan = tools.plan(ExecutionId::new(execution_id), call).unwrap();
+    tools.execute(plan).await
+}
+
+async fn publish_image_fixture(project: &Project) -> (ArtifactId, Vec<u8>) {
+    let tools = ToolRegistry::for_project(project.root());
+    let target = execute_tool(
+        &tools,
+        "openai-image-target",
+        "research_update",
+        json!({
+            "event_id": "event-openai-image-target",
+            "occurred_at": "2026-08-26T00:00:00Z",
+            "operation": {"kind": "record_target_snapshot", "record": {
+                "id": "snapshot-openai-image", "target_id": "fixture", "kind": "source",
+                "locator": "fixture/openai-image", "version": "1", "build_id": "1",
+                "target_artifact_ids": ["artifact-openai-image-root"],
+                "environment_fingerprint": "env", "device_fingerprint": "device",
+                "captured_at": "2026-08-26T00:00:00Z"
+            }}
+        }),
+    )
+    .await;
+    assert_eq!(target.result.status, ToolResultStatus::Succeeded);
+
+    let mut png = Vec::new();
+    image::DynamicImage::new_rgba8(2, 2)
+        .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    let path = project.root().join("openai-image.png");
+    fs::write(&path, &png).unwrap();
+    let image = execute_tool(
+        &tools,
+        "openai-image-view",
+        "view_image",
+        json!({
+            "event_id": "event-openai-image-view",
+            "occurred_at": "2026-08-26T00:00:01Z",
+            "artifact_id": "artifact-openai-image",
+            "source_path": path.display().to_string(),
+            "target_snapshot_id": "snapshot-openai-image",
+            "toolchain_fingerprint": "openai-image-fixture-v1"
+        }),
+    )
+    .await;
+    assert_eq!(image.result.status, ToolResultStatus::Succeeded);
+    (
+        ArtifactId::new(image.result.output["image_artifact_ref"].as_str().unwrap()),
+        png,
+    )
+}
+
 fn assert_stream_error(
     result: Result<cyber_agent::ports::model::ModelEventStream, ModelProviderError>,
     expected: ModelProviderError,
@@ -210,39 +281,98 @@ fn invalid_authorization_header_is_rejected_before_network() {
 
 #[test]
 fn deferred_request_features_fail_explicitly() {
-    let cases = [
-        (
-            fixture_input(ModelRequestRequirements {
-                structured_output: true,
-                ..ModelRequestRequirements::default()
-            }),
-            "output contract",
-        ),
-        (
-            ModelInputIR::current(
-                "Inspect the image.",
-                vec![ContentItem::ImageArtifact {
-                    role: MessageRole::User,
-                    artifact_id: ArtifactId::new("artifact-fixture"),
-                }],
-                ModelRequestRequirements::default(),
-            ),
-            "deferred Artifact resolver",
-        ),
-    ];
-
-    for (input, message_fragment) in cases {
-        let provider = adapter(
-            "http://127.0.0.1:1/v1",
-            FakeCredentialSource::value(Some(FIXTURE_SECRET)),
-        );
-        match provider.stream(full(input)) {
-            Err(ModelProviderError::RequestEncodingFailure { message }) => {
-                assert!(message.contains(message_fragment));
-            }
-            Err(error) => panic!("unexpected error: {error}"),
-            Ok(_) => panic!("deferred request input must not be silently accepted"),
+    let input = ModelInputIR::current(
+        "Inspect the image.",
+        vec![ContentItem::ImageArtifact {
+            role: MessageRole::User,
+            artifact_id: ArtifactId::new("artifact-fixture"),
+        }],
+        ModelRequestRequirements::default(),
+    );
+    let provider = adapter(
+        "http://127.0.0.1:1/v1",
+        FakeCredentialSource::value(Some(FIXTURE_SECRET)),
+    );
+    match provider.stream(full(input)) {
+        Err(ModelProviderError::RequestEncodingFailure { message }) => {
+            assert!(message.contains("configured Artifact resolver"));
         }
+        Err(error) => panic!("unexpected error: {error}"),
+        Ok(_) => panic!("unresolved image input must not be silently accepted"),
+    }
+}
+
+#[tokio::test]
+async fn resolved_image_uses_real_responses_data_url_and_fixed_json_object_output() {
+    let body = concat!(
+        "data: {\"type\":\"response.completed\",\"response\":{",
+        "\"id\":\"response_image_fixture\"}}\n\n"
+    );
+    let (base_url, request_receiver, server) = spawn_sse_server(200, body).await;
+    let directory = support::TemporaryDirectory::new("openai-project-image-resolver");
+    let project = Project::initialize(directory.path()).unwrap();
+    let (artifact_id, expected_png) = publish_image_fixture(&project).await;
+    let provider = adapter(base_url, FakeCredentialSource::value(Some(FIXTURE_SECRET)))
+        .with_project_image_resolver(project);
+    let input = ModelInputIR::current(
+        "Inspect the screenshot.",
+        vec![ContentItem::ImageArtifact {
+            role: MessageRole::User,
+            artifact_id,
+        }],
+        ModelRequestRequirements {
+            structured_output: true,
+            ..ModelRequestRequirements::default()
+        },
+    );
+    let outcome = ModelStreamingService::new(&provider)
+        .consume(full(input), ModelStreamCancellation::new())
+        .await
+        .unwrap();
+    assert!(matches!(outcome, ModelStreamOutcome::Completed { .. }));
+    let request = request_receiver.await.unwrap();
+    server.await.unwrap();
+    let body: Value = serde_json::from_str(&request.body).unwrap();
+    assert_eq!(body["text"]["format"]["type"], "json_object");
+    assert_eq!(body["input"][0]["content"][0]["type"], "input_image");
+    let image_url = body["input"][0]["content"][0]["image_url"]
+        .as_str()
+        .unwrap();
+    let encoded = image_url.strip_prefix("data:image/png;base64,").unwrap();
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .unwrap(),
+        expected_png
+    );
+}
+
+#[tokio::test]
+async fn project_image_resolver_never_crosses_project_artifact_facts() {
+    let first_directory = support::TemporaryDirectory::new("openai-image-project-a");
+    let first_project = Project::initialize(first_directory.path()).unwrap();
+    let (artifact_id, _) = publish_image_fixture(&first_project).await;
+    let second_directory = support::TemporaryDirectory::new("openai-image-project-b");
+    let second_project = Project::initialize(second_directory.path()).unwrap();
+    let provider = adapter(
+        "http://127.0.0.1:1/v1",
+        FakeCredentialSource::value(Some(FIXTURE_SECRET)),
+    )
+    .with_project_image_resolver(second_project);
+    let input = ModelInputIR::current(
+        "Inspect the screenshot.",
+        vec![ContentItem::ImageArtifact {
+            role: MessageRole::User,
+            artifact_id,
+        }],
+        ModelRequestRequirements::default(),
+    );
+    match provider.stream(full(input)) {
+        Err(ModelProviderError::RequestEncodingFailure { message }) => {
+            assert!(message.contains("not present in the selected project"));
+        }
+        Err(error) => panic!("unexpected error: {error}"),
+        Ok(_) => panic!("a different project's Artifact must not be resolved"),
     }
 }
 

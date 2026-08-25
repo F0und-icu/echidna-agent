@@ -21,6 +21,10 @@ use super::history::{ConversationHistory, HistoryError, normalize_content_items}
 use super::model::ContentItem;
 use super::request_audit::{RequestAuditError, RequestAuditManifest};
 use super::tools::{ExecutionReceipt, ExecutionReceiptEventPayload, ExecutionReceiptPayloadError};
+use super::vision::{
+    VisionAnalysisFailure, VisionFactError, VisionObservation, VisionObservationId,
+    VisionRouteRecord,
+};
 
 const SESSION_STREAM_PREFIX: &str = "session:";
 const SESSION_STARTED_EVENT_TYPE: &str = "session.started";
@@ -32,6 +36,9 @@ const STREAM_RECOVERED_EVENT_TYPE: &str = "StreamRecovered";
 const HISTORY_ITEM_RECORDED_EVENT_TYPE: &str = "session.history_item_recorded";
 pub(super) const COMPACTION_CREATED_EVENT_TYPE: &str = "session.compaction_created";
 pub(super) const REQUEST_AUDIT_RECORDED_EVENT_TYPE: &str = "session.request_audit_recorded";
+const VISION_ROUTE_DECIDED_EVENT_TYPE: &str = "vision.route_decided";
+const VISION_OBSERVATION_RECORDED_EVENT_TYPE: &str = "vision.observation_recorded";
+const VISION_ANALYSIS_FAILED_EVENT_TYPE: &str = "vision.analysis_failed";
 pub(super) const CURRENT_SESSION_PAYLOAD_SCHEMA_VERSION: u16 = 1;
 
 mod compaction;
@@ -79,6 +86,15 @@ pub enum SessionEvent {
     RequestAuditRecorded {
         manifest: RequestAuditManifest,
     },
+    VisionRouteDecided {
+        route: VisionRouteRecord,
+    },
+    VisionObservationRecorded {
+        observation: VisionObservation,
+    },
+    VisionAnalysisFailed {
+        failure: VisionAnalysisFailure,
+    },
 }
 
 impl SessionEvent {
@@ -114,6 +130,11 @@ impl SessionEvent {
             Self::HistoryItemRecorded { .. } => EventType::new(HISTORY_ITEM_RECORDED_EVENT_TYPE),
             Self::CompactionCreated { .. } => EventType::new(COMPACTION_CREATED_EVENT_TYPE),
             Self::RequestAuditRecorded { .. } => EventType::new(REQUEST_AUDIT_RECORDED_EVENT_TYPE),
+            Self::VisionRouteDecided { .. } => EventType::new(VISION_ROUTE_DECIDED_EVENT_TYPE),
+            Self::VisionObservationRecorded { .. } => {
+                EventType::new(VISION_OBSERVATION_RECORDED_EVENT_TYPE)
+            }
+            Self::VisionAnalysisFailed { .. } => EventType::new(VISION_ANALYSIS_FAILED_EVENT_TYPE),
         }
     }
 
@@ -145,6 +166,9 @@ impl SessionEvent {
             }
             Self::CompactionCreated { compaction } => serde_json::to_value(compaction),
             Self::RequestAuditRecorded { manifest } => serde_json::to_value(manifest),
+            Self::VisionRouteDecided { route } => serde_json::to_value(route),
+            Self::VisionObservationRecorded { observation } => serde_json::to_value(observation),
+            Self::VisionAnalysisFailed { failure } => serde_json::to_value(failure),
         };
         payload.map_err(|error| SessionError::PayloadEncode {
             event_type: event_type.clone(),
@@ -211,6 +235,25 @@ impl SessionEvent {
                     })?;
                 Ok(Self::RequestAuditRecorded { manifest })
             }
+            VISION_ROUTE_DECIDED_EVENT_TYPE => {
+                let route: VisionRouteRecord = decode_strict_payload(event_type, payload)?;
+                route.validate().map_err(vision_payload_error(event_type))?;
+                Ok(Self::VisionRouteDecided { route })
+            }
+            VISION_OBSERVATION_RECORDED_EVENT_TYPE => {
+                let observation: VisionObservation = decode_strict_payload(event_type, payload)?;
+                observation
+                    .validate()
+                    .map_err(vision_payload_error(event_type))?;
+                Ok(Self::VisionObservationRecorded { observation })
+            }
+            VISION_ANALYSIS_FAILED_EVENT_TYPE => {
+                let failure: VisionAnalysisFailure = decode_strict_payload(event_type, payload)?;
+                failure
+                    .validate()
+                    .map_err(vision_payload_error(event_type))?;
+                Ok(Self::VisionAnalysisFailed { failure })
+            }
             _ => Err(SessionError::UnknownEventType {
                 event_type: event_type.clone(),
             }),
@@ -233,6 +276,9 @@ pub struct SessionState {
     recovery_count: u64,
     latest_compaction: Option<SessionCompaction>,
     request_audits: Vec<RequestAuditManifest>,
+    vision_routes: Vec<VisionRouteRecord>,
+    vision_observations: Vec<VisionObservation>,
+    vision_failures: Vec<VisionAnalysisFailure>,
 }
 
 impl Default for SessionState {
@@ -250,6 +296,9 @@ impl Default for SessionState {
             recovery_count: 0,
             latest_compaction: None,
             request_audits: Vec::new(),
+            vision_routes: Vec::new(),
+            vision_observations: Vec::new(),
+            vision_failures: Vec::new(),
         }
     }
 }
@@ -349,6 +398,20 @@ impl SessionState {
     /// append order. Blob reconstruction remains outside the pure reducer.
     pub fn request_audits(&self) -> &[RequestAuditManifest] {
         &self.request_audits
+    }
+
+    /// Ordered, durable decisions made before an image could enter a Provider request.
+    pub fn vision_routes(&self) -> &[VisionRouteRecord] {
+        &self.vision_routes
+    }
+
+    /// Ordered model-derived observations. These remain distinct from Research evidence.
+    pub fn vision_observations(&self) -> &[VisionObservation] {
+        &self.vision_observations
+    }
+
+    pub fn vision_failures(&self) -> &[VisionAnalysisFailure] {
+        &self.vision_failures
     }
 
     /// Returns the precise next Session Event sequence without allocating or
@@ -599,8 +662,209 @@ fn apply_session_event(
             }
             state.request_audits.push(manifest);
         }
+        SessionEvent::VisionRouteDecided { route } => {
+            require_transition(
+                state.lifecycle,
+                VISION_ROUTE_DECIDED_EVENT_TYPE,
+                SessionLifecycle::Active,
+            )?;
+            route.validate().map_err(SessionError::Vision)?;
+            if route.route_event_id != *event_id {
+                return Err(SessionError::VisionRouteEventIdentityMismatch {
+                    expected: event_id.clone(),
+                    received: route.route_event_id,
+                });
+            }
+            if state
+                .vision_routes
+                .iter()
+                .any(|existing| existing.route_event_id == *event_id)
+            {
+                return Err(SessionError::VisionRouteDuplicate {
+                    event_id: event_id.clone(),
+                });
+            }
+            state.vision_routes.push(route);
+        }
+        SessionEvent::VisionObservationRecorded { observation } => {
+            require_transition(
+                state.lifecycle,
+                VISION_OBSERVATION_RECORDED_EVENT_TYPE,
+                SessionLifecycle::Active,
+            )?;
+            observation.validate().map_err(SessionError::Vision)?;
+            require_vision_terminal_references(
+                state,
+                VisionTerminalReferences {
+                    route_event_id: &observation.route_event_id,
+                    source_artifact_id: &observation.source_artifact_id,
+                    provider_profile: &observation.provider_profile,
+                    capability_hash: &observation.capability_hash,
+                    provider_session: &observation.provider_session,
+                    request_audit_event_id: &observation.request_audit_event_id,
+                    request_input_hash: &observation.request_input_hash,
+                },
+            )?;
+            require_unused_vision_audit(state, &observation.request_audit_event_id)?;
+            require_unused_vision_session(state, &observation.provider_session)?;
+            if state
+                .vision_observations
+                .iter()
+                .any(|existing| existing.id == observation.id)
+            {
+                return Err(SessionError::VisionObservationDuplicate {
+                    observation_id: observation.id,
+                });
+            }
+            state.vision_observations.push(observation);
+        }
+        SessionEvent::VisionAnalysisFailed { failure } => {
+            require_transition(
+                state.lifecycle,
+                VISION_ANALYSIS_FAILED_EVENT_TYPE,
+                SessionLifecycle::Active,
+            )?;
+            failure.validate().map_err(SessionError::Vision)?;
+            require_vision_terminal_references(
+                state,
+                VisionTerminalReferences {
+                    route_event_id: &failure.route_event_id,
+                    source_artifact_id: &failure.source_artifact_id,
+                    provider_profile: &failure.provider_profile,
+                    capability_hash: &failure.capability_hash,
+                    provider_session: &failure.provider_session,
+                    request_audit_event_id: &failure.request_audit_event_id,
+                    request_input_hash: &failure.request_input_hash,
+                },
+            )?;
+            require_unused_vision_audit(state, &failure.request_audit_event_id)?;
+            require_unused_vision_session(state, &failure.provider_session)?;
+            state.vision_failures.push(failure);
+        }
     }
     Ok(())
+}
+
+struct VisionTerminalReferences<'fact> {
+    route_event_id: &'fact EventId,
+    source_artifact_id: &'fact crate::domain::artifacts::ArtifactId,
+    provider_profile: &'fact crate::domain::context::ModelProfile,
+    capability_hash: &'fact str,
+    provider_session: &'fact crate::domain::context::ProviderSessionRef,
+    request_audit_event_id: &'fact EventId,
+    request_input_hash: &'fact str,
+}
+
+fn require_vision_terminal_references(
+    state: &SessionState,
+    references: VisionTerminalReferences<'_>,
+) -> Result<(), SessionError> {
+    if state
+        .primary_provider_session
+        .as_ref()
+        .is_some_and(|primary| primary.id == references.provider_session.id)
+    {
+        return Err(SessionError::VisionPrimarySessionIdentityCollision {
+            event_id: references.request_audit_event_id.clone(),
+        });
+    }
+    let route = state
+        .vision_routes
+        .iter()
+        .find(|route| &route.route_event_id == references.route_event_id)
+        .ok_or_else(|| SessionError::VisionRouteReferenceMissing {
+            event_id: references.route_event_id.clone(),
+        })?;
+    if route.route != crate::domain::profile::VisionRoute::SecondaryTool {
+        return Err(SessionError::VisionTerminalRequiresSecondaryRoute {
+            event_id: references.route_event_id.clone(),
+        });
+    }
+    if !route
+        .source_artifact_ids
+        .contains(references.source_artifact_id)
+    {
+        return Err(SessionError::VisionSourceArtifactNotRouted {
+            route_event_id: references.route_event_id.clone(),
+            artifact_id: references.source_artifact_id.clone(),
+        });
+    }
+    if route.vision_profile.as_ref() != Some(references.provider_profile)
+        || route.vision_capability_hash.as_deref() != Some(references.capability_hash)
+    {
+        return Err(SessionError::VisionRouteProviderIdentityMismatch {
+            route_event_id: references.route_event_id.clone(),
+        });
+    }
+    let audit = state
+        .request_audits
+        .iter()
+        .find(|audit| audit.audit_event_id() == references.request_audit_event_id)
+        .ok_or_else(|| SessionError::VisionRequestAuditReferenceMissing {
+            event_id: references.request_audit_event_id.clone(),
+        })?;
+    if audit.profile() != references.provider_profile
+        || audit.capability_mapping().semantic_hash().as_str() != references.capability_hash
+    {
+        return Err(SessionError::VisionRequestAuditIdentityMismatch {
+            event_id: references.request_audit_event_id.clone(),
+        });
+    }
+    if audit.full_logical_input().semantic_hash().as_str() != references.request_input_hash {
+        return Err(SessionError::VisionRequestAuditInputMismatch {
+            event_id: references.request_audit_event_id.clone(),
+        });
+    }
+    Ok(())
+}
+
+fn require_unused_vision_session(
+    state: &SessionState,
+    provider_session: &crate::domain::context::ProviderSessionRef,
+) -> Result<(), SessionError> {
+    let reused = state
+        .vision_observations
+        .iter()
+        .any(|existing| existing.provider_session.id == provider_session.id)
+        || state
+            .vision_failures
+            .iter()
+            .any(|existing| existing.provider_session.id == provider_session.id);
+    if reused {
+        return Err(SessionError::VisionSessionIdentityReused {
+            session_id: provider_session.id.clone(),
+        });
+    }
+    Ok(())
+}
+
+fn require_unused_vision_audit(
+    state: &SessionState,
+    request_audit_event_id: &EventId,
+) -> Result<(), SessionError> {
+    if state
+        .vision_observations
+        .iter()
+        .any(|existing| &existing.request_audit_event_id == request_audit_event_id)
+        || state
+            .vision_failures
+            .iter()
+            .any(|existing| &existing.request_audit_event_id == request_audit_event_id)
+    {
+        return Err(SessionError::VisionRequestAlreadyTerminated {
+            event_id: request_audit_event_id.clone(),
+        });
+    }
+    Ok(())
+}
+
+fn vision_payload_error(
+    event_type: &EventType,
+) -> impl FnOnce(VisionFactError) -> SessionError + '_ {
+    |error| SessionError::MalformedPayload {
+        event_type: event_type.clone(),
+        message: error.to_string(),
+    }
 }
 
 fn increment(field: &'static str, value: u64) -> Result<u64, SessionError> {
@@ -755,6 +1019,8 @@ pub enum SessionError {
     History(#[from] HistoryError),
     #[error(transparent)]
     RequestAudit(#[from] RequestAuditError),
+    #[error(transparent)]
+    Vision(#[from] VisionFactError),
     #[error("Session Event stream `{stream_id}` must use the `session:` namespace")]
     UnexpectedStream { stream_id: StreamId },
     #[error("Session Event stream changed from `{expected}` to `{received}` during reduction")]
@@ -835,4 +1101,44 @@ pub enum SessionError {
     CompactionRetentionMismatch,
     #[error("Session Compaction revision mismatch: expected {expected}, received {received}")]
     CompactionRevisionMismatch { expected: u64, received: u64 },
+    #[error("Vision route event ID `{received}` does not match Session envelope `{expected}`")]
+    VisionRouteEventIdentityMismatch {
+        expected: EventId,
+        received: EventId,
+    },
+    #[error("Vision route event `{event_id}` is duplicated")]
+    VisionRouteDuplicate { event_id: EventId },
+    #[error("Vision observation `{observation_id:?}` is duplicated")]
+    VisionObservationDuplicate { observation_id: VisionObservationId },
+    #[error("Vision route Event `{event_id}` has not been recorded")]
+    VisionRouteReferenceMissing { event_id: EventId },
+    #[error("Vision RequestAudit Event `{event_id}` has not been recorded")]
+    VisionRequestAuditReferenceMissing { event_id: EventId },
+    #[error("Vision terminal fact requires secondary route Event `{event_id}`")]
+    VisionTerminalRequiresSecondaryRoute { event_id: EventId },
+    #[error(
+        "Vision source Artifact `{artifact_id}` was not selected by route Event `{route_event_id}`"
+    )]
+    VisionSourceArtifactNotRouted {
+        route_event_id: EventId,
+        artifact_id: crate::domain::artifacts::ArtifactId,
+    },
+    #[error("Vision terminal provider identity does not match route Event `{route_event_id}`")]
+    VisionRouteProviderIdentityMismatch { route_event_id: EventId },
+    #[error(
+        "Vision ProviderSession identity collides with the active Primary Session for RequestAudit Event `{event_id}`"
+    )]
+    VisionPrimarySessionIdentityCollision { event_id: EventId },
+    #[error("Vision terminal provider identity does not match RequestAudit Event `{event_id}`")]
+    VisionRequestAuditIdentityMismatch { event_id: EventId },
+    #[error("Vision terminal request input does not match RequestAudit Event `{event_id}`")]
+    VisionRequestAuditInputMismatch { event_id: EventId },
+    #[error(
+        "Vision RequestAudit Event `{event_id}` already has an observation or failure terminal fact"
+    )]
+    VisionRequestAlreadyTerminated { event_id: EventId },
+    #[error("Vision scoped ProviderSession `{session_id}` was already used by another request")]
+    VisionSessionIdentityReused {
+        session_id: crate::domain::context::ProviderSessionId,
+    },
 }

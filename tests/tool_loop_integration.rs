@@ -106,6 +106,7 @@ async fn builtin_tools_cover_files_search_argv_failures_and_bounded_output() {
             "run_commands",
             "search_files",
             "tool_search",
+            "view_image",
         ]
     );
     tools
@@ -670,7 +671,7 @@ async fn agent_loop_keeps_full_resampling_after_local_baseline_comparison() {
 
     let inputs = provider.inputs();
     assert_eq!(inputs.len(), 2);
-    assert_eq!(inputs[0].tool_specs.len(), 11);
+    assert_eq!(inputs[0].tool_specs.len(), 12);
     assert_eq!(inputs[0].content_items.len(), 1);
     assert_eq!(
         inputs[1].content_items[1],

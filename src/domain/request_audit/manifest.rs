@@ -324,6 +324,16 @@ impl RequestAuditManifest {
         &self.binding
     }
 
+    /// The configured model identity selected for the audited Provider call.
+    pub fn model(&self) -> &ModelIdentity {
+        &self.model
+    }
+
+    /// The named profile selected for the audited Provider call.
+    pub fn profile(&self) -> &ModelProfile {
+        &self.profile
+    }
+
     pub fn adapter_version(&self) -> &RequestAdapterVersion {
         &self.adapter_version
     }

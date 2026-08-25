@@ -9,6 +9,7 @@ pub(crate) mod canonical_json;
 pub mod context;
 pub mod events;
 pub mod history;
+pub mod image;
 pub mod memory;
 pub mod mode;
 pub mod model;
@@ -19,6 +20,7 @@ pub mod research;
 pub mod session;
 pub mod snapshot;
 pub mod tools;
+pub mod vision;
 pub mod world_state;
 
 pub use artifacts::ArtifactId;

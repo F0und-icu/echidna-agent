@@ -161,6 +161,14 @@ pub struct ModelCapabilities {
 }
 
 impl ModelCapabilities {
+    /// Returns the canonical, versioned capability-map identity used by
+    /// profile routing and durable request facts. The complete mapping,
+    /// including its explicit version, remains the sole hash input.
+    pub fn semantic_hash(&self) -> String {
+        crate::domain::canonical_json::canonical_blake3_hash(self)
+            .expect("ModelCapabilities is always JSON serializable")
+    }
+
     /// Validates every semantic requirement without inferring from model names.
     pub fn validate_input(&self, input: &ModelInputIR) -> Result<(), ModelCapabilityError> {
         if !self.streaming {

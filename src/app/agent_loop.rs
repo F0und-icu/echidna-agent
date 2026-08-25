@@ -5,6 +5,8 @@ mod context_state;
 mod request_audit;
 
 use std::collections::BTreeMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -18,7 +20,7 @@ use crate::domain::context::{
 use crate::domain::events::StreamId;
 use crate::domain::history::{ConversationHistory, HistoryError};
 use crate::domain::mode::{ModeError, PromptComposition};
-use crate::domain::model::ModelInputIR;
+use crate::domain::model::{ContentItem, MessageRole, ModelInputIR};
 use crate::domain::profile::{AgentModelProfile, AgentModelProfileError};
 use crate::domain::request_audit::{
     RequestAuditAttempt, RequestAuditError, RequestAuditRunContext,
@@ -28,6 +30,10 @@ use crate::domain::tools::{
     ExecutionId, IdempotencyKey, ToolCall, ToolExecutionOutcome, ToolExposurePlan, ToolResult,
 };
 use crate::domain::world_state::{ProjectSnapshotContext, ResearchWorldState, WorldStateError};
+use crate::domain::{
+    ArtifactId,
+    vision::{ViewImageSelection, VisionObservation},
+};
 use crate::ports::context::ContextFragmentCache;
 use crate::ports::model::{
     ModelProvider, ModelProviderError, ModelRequest, ModelResponseCompletion, ProviderResponseId,
@@ -44,6 +50,76 @@ use request_audit::RequestAuditStage;
 
 const MAX_MODEL_REQUESTS_PER_TURN: usize = 32;
 static NEXT_PRIMARY_RUNTIME_SESSION: AtomicU64 = AtomicU64::new(1);
+
+/// Opaque proof that the Vision Session service durably prepared exactly one
+/// Direct image or one Secondary observation for the selected Primary.
+/// Callers cannot construct this token without the fixed App composition.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InitialImagePrimaryContext {
+    content_item: ContentItem,
+    primary_profile: ModelProfile,
+    primary_capability_hash: String,
+}
+
+impl InitialImagePrimaryContext {
+    pub(crate) fn direct(
+        artifact_id: ArtifactId,
+        primary_profile: ModelProfile,
+        primary_capability_hash: String,
+    ) -> Self {
+        Self {
+            content_item: ContentItem::ImageArtifact {
+                role: MessageRole::User,
+                artifact_id,
+            },
+            primary_profile,
+            primary_capability_hash,
+        }
+    }
+
+    pub(crate) fn secondary(
+        observation: &VisionObservation,
+        primary_profile: ModelProfile,
+        primary_capability_hash: String,
+    ) -> Result<Self, AgentLoopError> {
+        let text = observation.primary_context_text().map_err(|error| {
+            AgentLoopError::InitialImageContext {
+                message: error.to_string(),
+            }
+        })?;
+        Ok(Self {
+            content_item: ContentItem::Text {
+                role: MessageRole::User,
+                text,
+            },
+            primary_profile,
+            primary_capability_hash,
+        })
+    }
+
+    fn into_content_item(
+        self,
+        primary_profile: &ModelProfile,
+        primary_capability_hash: &str,
+    ) -> Result<ContentItem, AgentLoopError> {
+        if &self.primary_profile != primary_profile
+            || self.primary_capability_hash != primary_capability_hash
+        {
+            return Err(AgentLoopError::InitialImagePrimaryIdentityMismatch);
+        }
+        Ok(self.content_item)
+    }
+}
+
+/// The one fixed post-`view_image` stage. This is deliberately a typed
+/// boundary rather than a general Hook registry: the stage receives only a
+/// validated local-image selection and must return exactly one mutually
+/// exclusive Primary context (direct Artifact or secondary observation).
+pub type ViewImageFollowUp<'a> = dyn FnMut(ViewImageSelection) -> ViewImageFollowUpFuture<'a> + 'a;
+
+/// The asynchronous result shape for the fixed [`ViewImageFollowUp`] stage.
+pub type ViewImageFollowUpFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<InitialImagePrimaryContext, AgentLoopError>> + 'a>>;
 
 pub struct AgentLoop<'provider, 'tools, Provider: ?Sized, Tools: ?Sized> {
     provider: &'provider Provider,
@@ -310,7 +386,8 @@ where
         user_text: impl Into<String>,
         cancellation: AgentCancellation,
     ) -> Result<AgentTurnOutcome, AgentLoopError> {
-        self.run_turn_inner(user_text, cancellation, None).await
+        self.run_turn_inner(user_text, cancellation, None, None, None)
+            .await
     }
 
     /// Runs one Turn through an explicitly supplied request-audit stage. The
@@ -328,6 +405,56 @@ where
             user_text,
             cancellation,
             Some((audit_context, record_attempt)),
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// Runs the existing audited Primary path with one initial image context.
+    /// Direct inserts the Artifact exactly once; secondary injects only the
+    /// durable observation and Artifact references after scoped Vision has
+    /// completed. It does not create another AgentLoop or Provider session.
+    pub async fn run_turn_audited_with_initial_image(
+        &mut self,
+        user_text: impl Into<String>,
+        initial_image: InitialImagePrimaryContext,
+        cancellation: AgentCancellation,
+        audit_context: &RequestAuditRunContext,
+        record_attempt: &mut dyn FnMut(RequestAuditAttempt) -> Result<(), AgentLoopError>,
+    ) -> Result<AgentTurnOutcome, AgentLoopError> {
+        let primary_capability_hash = self.provider.capabilities().semantic_hash();
+        let initial_image =
+            initial_image.into_content_item(&self.profile, &primary_capability_hash)?;
+        self.run_turn_inner(
+            user_text,
+            cancellation,
+            Some((audit_context, record_attempt)),
+            Some(initial_image),
+            None,
+        )
+        .await
+    }
+
+    /// Runs the audited Primary path and handles each successful local
+    /// `view_image` Tool Result before the next Primary sample. The caller's
+    /// one typed stage owns route persistence and, for a secondary route, the
+    /// scoped Vision request; this loop never infers an image from any other
+    /// Tool Result and never sends both representations to Primary.
+    pub async fn run_turn_audited_with_view_image_follow_up(
+        &mut self,
+        user_text: impl Into<String>,
+        cancellation: AgentCancellation,
+        audit_context: &RequestAuditRunContext,
+        record_attempt: &mut dyn FnMut(RequestAuditAttempt) -> Result<(), AgentLoopError>,
+        follow_up: &mut ViewImageFollowUp<'_>,
+    ) -> Result<AgentTurnOutcome, AgentLoopError> {
+        self.run_turn_inner(
+            user_text,
+            cancellation,
+            Some((audit_context, record_attempt)),
+            None,
+            Some(follow_up),
         )
         .await
     }
@@ -337,6 +464,8 @@ where
         user_text: impl Into<String>,
         cancellation: AgentCancellation,
         mut audit: Option<RequestAuditStage<'_>>,
+        initial_image: Option<ContentItem>,
+        mut view_image_follow_up: Option<&mut ViewImageFollowUp<'_>>,
     ) -> Result<AgentTurnOutcome, AgentLoopError> {
         self.apply_pending_configuration()?;
         if cancellation.is_cancelled() {
@@ -347,6 +476,9 @@ where
         }
         let turn_history_start = self.history.items().len();
         self.history.append_user_text(user_text);
+        if let Some(initial_image) = initial_image {
+            self.history.append_content_item(initial_image)?;
+        }
         let capabilities = self.provider.capabilities();
         let context_budget = self.context_planner.default_budget(&capabilities)?;
         self.next_turn_sequence += 1;
@@ -535,6 +667,8 @@ where
             let scheduled = self
                 .execute_tool_calls(tool_calls, &exposed_tool_names, &cancellation)
                 .await?;
+            self.append_view_image_contexts(&scheduled.executions, &mut view_image_follow_up)
+                .await?;
             executions.extend(scheduled.executions);
             if scheduled.cancelled {
                 return Ok(AgentTurnOutcome::Cancelled {
@@ -547,6 +681,34 @@ where
         Err(AgentLoopError::ModelRequestLimit {
             limit: MAX_MODEL_REQUESTS_PER_TURN,
         })
+    }
+
+    async fn append_view_image_contexts(
+        &mut self,
+        executions: &[ToolExecutionOutcome],
+        follow_up: &mut Option<&mut ViewImageFollowUp<'_>>,
+    ) -> Result<(), AgentLoopError> {
+        for execution in executions {
+            let Some(selection) =
+                ViewImageSelection::from_tool_result(&execution.result).map_err(|error| {
+                    AgentLoopError::ViewImageResult {
+                        message: error.to_string(),
+                    }
+                })?
+            else {
+                continue;
+            };
+            let stage = follow_up.as_deref_mut().ok_or_else(|| {
+                AgentLoopError::ViewImageFollowUpRequired {
+                    call_id: execution.result.call_id.clone(),
+                }
+            })?;
+            let context = stage(selection).await?;
+            let primary_capability_hash = self.provider.capabilities().semantic_hash();
+            let content = context.into_content_item(&self.profile, &primary_capability_hash)?;
+            self.history.append_content_item(content)?;
+        }
+        Ok(())
     }
 
     fn current_tool_specs(&self) -> Vec<crate::domain::tools::ToolSpec> {
@@ -861,6 +1023,18 @@ pub enum AgentLoopError {
     RequestAuditDeliveryMismatch,
     #[error("RequestAudit commit failed: {message}")]
     RequestAuditCommit { message: String },
+    #[error("initial image context is invalid: {message}")]
+    InitialImageContext { message: String },
+    #[error("initial image route identity does not match the active Primary provider")]
+    InitialImagePrimaryIdentityMismatch,
+    #[error("successful view_image Tool Result is malformed: {message}")]
+    ViewImageResult { message: String },
+    #[error(
+        "successful view_image Tool Call `{call_id}` requires the fixed image follow-up stage before the next model sample"
+    )]
+    ViewImageFollowUpRequired {
+        call_id: crate::domain::tools::ToolCallId,
+    },
     #[error("the Agent reached the per-Turn model-request limit of {limit}")]
     ModelRequestLimit { limit: usize },
     #[error("the Tool scheduler returned fewer outcomes than staged plans")]

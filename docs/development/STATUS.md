@@ -5,31 +5,30 @@
 - Architecture version: `1.1.0`
 - Phase: `IMPLEMENTATION`
 - Implementation: `STARTED`
-- Current milestone: `M3`
-- Current slice: `M3-S4`
-- Slice state: `READY_NOT_AUTHORIZED`; M3-S3d is remotely merged but M3-S4 cannot start before the separate M3-S3d status seal
-- Lean governance: `ACTIVE`; M3-S3d passed its local Cargo/Lean Gate, Terra xhigh final review and PR-head macOS Gate with no unresolved P0/P1
-- Local Git initialized: `yes`; M3-S3d status evidence is being sealed on `agent/m3-s3d-status`
-- Remote repository: `F0und-icu/cyber-agent` private; M3-S3d implementation PR `#37` was Squash Merged
+- Current milestone: `M3`; implementation-complete locally, remote seal pending
+- Current slice: `M4-S1`
+- Slice state: `READY_NOT_AUTHORIZED`; M3-S4 must be remotely sealed and work must then stop before any M4 or Live Test activity
+- Lean governance: `ACTIVE`; M3-S4 passed its full local Cargo/Lean Gate with no unresolved main-review blocker
+- Local Git initialized: `yes`; M3-S4 implementation is complete on `agent/m3-s4-multimodal`
+- Remote repository: `F0und-icu/cyber-agent` private; M3-S3d implementation PR `#37` and status PR `#38` were Squash Merged without duplicate post-merge CI
 - Documentation baseline commit: `55ff3be`
-- Current code base: M3-S3d Squash Merge commit `a29187b`; its exact PR-head tree passed CI and the post-merge duplicate push Gate was intentionally skipped to conserve the remaining Actions quota
+- Current code base: M3-S4 local implementation candidate based on M3-S3d status-seal Squash Merge `1bdb19a`; implementation PR evidence is pending
 - Upstream Codex baseline: `3aae5d885bac39c1262491aa3fd100dfd8b3919f`
 
 ## Last Completed Slice
 
-- Slice: `M3-S3d`
-- Delivery branch: `agent/m3-s3d-inspection-cli`
-- Base commit: `96385f1`
-- Scope: deterministic read-only `prompt inspect`, `snapshot` and `metrics` CLI projections over the existing Project, Session Event, RequestAudit Blob and Project Snapshot facts.
-- Prompt behavior: the selected Session's latest committed request exposes ordered component identity/source, Blob and audit Event references, Manifest/IR/Adapter/Capability versions and hashes, delivery mode/reason and the existing Context estimator's conservative Token estimate; Provider usage remains explicitly unavailable.
-- Snapshot behavior: the command validates the existing cache and current source fingerprint without rebuilding or writing it. A currently valid cache is reported as `hit` even when its historical build used an incremental explicit-path refresh; a missing, stale or invalid cache reports the stable Full-rebuild reason.
-- Session/metrics behavior: one Session is selected automatically, multiple Sessions require explicit `--session`, and missing/corrupt/non-regular Session streams fail explicitly. Counts for requests, estimated Tokens, Full/incremental delivery, ProviderRejected fallback, Tool cache hits and Compaction derive only from replayed facts.
-- Test path: permanent subprocess regressions cover uninitialized/empty projects, normal and explicit Session selection, ambiguous/missing Sessions, current Snapshot Hit/Full behavior, historical incremental-cache provenance, missing Blob, corrupt Session JSONL, Session Event symlinks, stable output, secret/transport exclusion and no local mutation.
-- Forbidden work preserved: no Provider or Tool call, credential resolution, Snapshot rebuild, Event/Blob write, metrics store, image/Vision execution, new schema, general Manager/Router/Hook/database, second runtime Agent, Codex source change or Codex code port.
-- Result: `COMPLETE`; the full Cargo/Lean Gate passes 244 offline/local tests with one existing opt-in Live Smoke ignored. Terra xhigh returned final `APPROVE` with no P0/P1/P2 blocker after main-agent correctness and reuse hardening, and the PR-head macOS Gate passed.
-- Dependencies and schemas: no Cargo dependency, feature, Provider DTO, Port, credential source, persisted Event/Manifest schema or remote transport changed; all inspection reports are non-authoritative derived views.
-- Git: implementation commit `41546ba`, PR `#37`, PR-head CI `32649939090` and Squash Merge `a29187b`; the merge subject used `[skip ci]` so the already-proven tree did not consume a duplicate post-merge run.
-- Live Test: `OFF`; the existing synthetic smoke remains ignored and no real credential or public Provider request was used.
+- Slice: `M3-S4`
+- Delivery branch: `agent/m3-s4-multimodal`
+- Base commit: `1bdb19a`
+- Scope: one auditable local PNG/JPEG path through the existing Artifact, Session, RequestAudit, ModelProvider and single AgentLoop authorities, supporting mutually exclusive Direct Primary or scoped Secondary Vision composition.
+- Image behavior: the fixed `view_image` Tool rejects symlinks, non-regular/unsupported/corrupt/oversized input; validates declared dimensions before full pixel decode; preserves original SHA-256 Blob bytes; and creates a deterministic budgeted PNG derivative only when required, linked by `image_budget_v1` Lineage.
+- Model behavior: Direct sends one resolved image Artifact to the audited Primary and never calls Secondary. Secondary makes one Full, no-tool, structured Vision request in a fresh Vision ProviderSession, durably records Route -> RequestAudit -> Observation/Failure, then supplies only the unverified Observation and Artifact references to the audited Primary. Provider failure never changes route or falls back.
+- Audit/replay behavior: strict `vision.route_decided`, `vision.observation_recorded` and `vision.analysis_failed` Session facts bind source Artifact, Profile, Capability, scoped ProviderSession, RequestAudit and request hash. Mechanical Replay reads and validates the original model-reply Blob and performs zero Provider/Event/Blob writes.
+- Adapter behavior: the OpenAI Responses Adapter resolves only project-isolated PNG/JPEG Artifact facts and immutable SHA-256 Blob bytes, encodes a real Data URL, and uses the minimal `json_object` output contract. Provider wire types remain inside the Adapter.
+- Result: `COMPLETE` locally; the full Cargo/Lean Gate passes 261 offline/local tests with one existing opt-in Live Smoke ignored. Main review fixed the budget-resize early exit, output-schema mismatch, informal Session composition, constructible Primary context, route/Profile/Capability/session identity gaps, replay Blob omission, project Artifact resolution and pre-decode image limit enforcement. No unresolved blocker remains; remote PR evidence is pending.
+- Dependencies and schemas: added `image` 0.25 with only PNG/JPEG features and `base64` 0.22 under accepted ADR-0005. Added strict Vision fact schema v1 and the three Session Event types; no new Port, credential source, database, cache, general router/hook, AgentLoop or remote service was added.
+- Git: implementation commit, final implementation PR, the single authorized PR-head CI run, Squash Merge and separate `[skip ci]` status seal are pending.
+- Live Test: `OFF`; no real credential, public Provider request, Codex login state, `~/.codex` or `CODEX_HOME` was read or modified.
 
 ## Current Authority
 
@@ -43,6 +42,7 @@
 8. `docs/adr/ADR-0002-capability-driven-primary-vision-models.md`
 9. `docs/adr/ADR-0003-minimal-openai-http-sse-stack.md`
 10. `docs/adr/ADR-0004-sha256-artifact-blob-identity.md`
+11. `docs/adr/ADR-0005-minimal-local-image-stack.md`
 
 ## Completed
 
@@ -72,29 +72,28 @@
 - M3-S3b bounded typed SessionSummary, strict Compaction facts, pair-safe retained History and Compaction-first Full delivery.
 - M3-S3c strict RequestAudit facts, deduplicated exact semantic component Blobs, pre-stream durable commit and historical reconstruction.
 - M3-S3d read-only prompt, Snapshot and local metrics CLI inspection over existing auditable facts.
+- M3-S4 auditable local images, fixed `view_image`, Direct/Secondary Vision composition, strict Vision Session facts and zero-request Mechanical Replay.
 
 ## Next Planned Slice
 
-- Slice: `M3-S4`
-- State: `READY_NOT_AUTHORIZED` until a separate status-seal PR records the M3-S3d implementation and PR-head Gate identities.
-- Planned delivery branch: `agent/m3-s4-multimodal`
-- Base commit: resolve from the remotely sealed `main`; never branch from the unmerged M3-S3d head.
-- Scope lock: one auditable local-image vertical path implementing the accepted Architecture v1.1/ADR-0002 Direct or Secondary vision composition inside the existing single AgentLoop and Session authority.
-- Required behavior: validate/store original and derived image Artifacts, resolve the pure capability-driven Vision route, keep Primary/Vision request identities isolated, persist route/observation provenance, and support zero-request Mechanical Replay. Formal Primary composition must use `run_turn_audited` before prototype exit.
-- Intended permanent tests: supported/corrupt/oversized images, deterministic budgeted derivation and Lineage, exhaustive route matrix, direct-versus-secondary call separation, initial-image non-omission, Primary/Vision identity isolation, structured uncertainty and zero-request replay.
-- Forbidden continuation: M4 vulnerability Profiles/Eval/TargetDelta/long-flow work, general model router, autonomous vision Agent, database/index/watcher/hook/plugin work, Live Provider requests and Codex credential/login access.
+- Slice: `M4-S1`
+- State: `READY_NOT_AUTHORIZED`; this status is planning only and does not start M4.
+- Planned delivery branch: resolve only after a new explicit user authorization from the remotely sealed M3-S4 `main`.
+- Scope: vulnerability-research Mode Profiles and controlled offline samples as already defined in the Implementation Plan.
+- Required prerequisite: M3-S4 implementation and status PRs remotely merged, followed by a new explicit Slice authorization.
+- Forbidden continuation: all M4 implementation, Live Provider requests, general model router, autonomous Vision Agent, database/index/watcher/hook/plugin work and Codex credential/login access.
 
 ## Current Authorization
 
-The current user instruction explicitly authorizes continued implementation with delegated Terra/Luna development and normal version-controlled remote delivery until the first prototype reaches the separately authorized Live Provider validation boundary.
+The current user instruction authorizes only completion and remote sealing of M3-S4, then requires work to stop.
 
-- Run mode: `IMPLEMENT_TO_LIVE_BOUNDARY`
-- Slice ID: `M3-S4`; state `READY_NOT_AUTHORIZED` while the M3-S3d status seal is incomplete; the current user's continuing authorization may activate it only after that seal
-- Git mode: `BRANCH_PR_REVIEW_MERGE`; commit, push, PR, CI review and merge are authorized when the Slice Gate passes
-- Delegation mode: `AUTHORIZED`; delegated implementation Agents must independently read the repository authority chain and stay inside the current Slice
+- Run mode: `SEAL_M3_S4_AND_STOP`
+- Slice ID: `M3-S4`; state `COMPLETE_LOCAL_PENDING_REMOTE_SEAL`
+- Git mode: `BRANCH_PR_REVIEW_MERGE`; implementation commit/push/PR, one final PR-head CI run, Squash Merge and a separate `[skip ci]` status-seal PR are authorized
+- Delegation mode: `INACTIVE`; prior delegated threads are stopped and are not required for the seal
 - Live test mode: `OFF`; no real Provider credential or public model request is authorized
-- Forbidden continuation before the M3-S3d status seal: all M3-S4 image execution/VisionAnalysisService work, M4 work, general database/index/watcher/hook/router/plugin work, Codex source modification or Codex credentials/login access
-- Stop condition: complete and remotely seal each authorized Slice before advancing; stop at the first prototype's separately authorized Live Provider validation boundary without running a Live Test
+- Forbidden continuation: all M4 work, Live Tests, general database/index/watcher/hook/router/plugin/model-router work, Codex source modification or Codex credentials/login access
+- Stop condition: after the M3-S4 status-seal PR is merged, stop without starting M4 or a Live Test
 
 ## M2-S5 Slice Start
 
@@ -170,7 +169,50 @@ The current user instruction explicitly authorizes continued implementation with
 - Delegation: Luna xhigh owns the bounded implementation; the main agent owns contract decisions, corrections, Git and merge authority, with Terra review only if cross-layer risk remains after the local Gate.
 - Live Test: `OFF`; this Slice uses only local Event/Blob fixtures and subprocess CLI tests.
 
+## M3-S4 Slice Start
+
+- Delivery branch: `agent/m3-s4-multimodal`
+- Base commit: `1bdb19a`
+- Intended production touch points: one pure image validation/budget contract; reuse the existing Artifact Blob and Lineage owners; one fixed `VisionAnalysisService`; one strict versioned Session route/observation fact; direct Primary image delivery and one scoped Secondary Provider path inside the existing AgentLoop authority.
+- Scope budget: no second AgentLoop, autonomous vision Agent, general model router, Provider fallback, image-generation stack, video/audio, database, image cache service, dynamic plugin/hook registry or new remote service. Reuse existing ModelInputIR image items, AgentModelProfile/VisionMode resolver, ModelProvider Port, Artifact Store, Session Projection and RequestAudit service.
+- Intended permanent tests: supported/corrupt/oversized inputs, deterministic budgeted derived image and Lineage, route matrix integration, direct path with zero Secondary calls, Secondary observation before Primary sampling, Primary/Vision identity isolation, uncertainty/evidence boundary, target re-analysis and zero-request replay.
+- Acceptance commands: the locked Cargo fmt/clippy/test/build Gate; production inline-test, forbidden Codex dependency, credential isolation, Provider-wire/dependency-direction, one-AgentLoop/no-general-router and `codex/`-unchanged scans; `git diff --check`.
+- Delegation: Luna xhigh performs the contract/reuse audit; Terra xhigh owns one bounded implementation after the audit; Luna xhigh performs final read-only review. The main agent owns scope, schema, corrections, Git and merge authority.
+- Actions budget: local Gate is authoritative during implementation. No GitHub Workflow is triggered until the Slice reaches its final implementation PR, and all duplicate post-merge/status runs use `[skip ci]`.
+- Live Test: `OFF`; only local image fixtures, Mock/Fixture/Replay Providers and loopback-free offline tests are authorized.
+
 ## Slice Lean Review
+
+### M3-S4 Lean Review
+
+#### Semantic Owners
+
+- `src/domain/image.rs` is the sole pure owner of accepted image formats, original-input limits, delivery budgets, validated metadata and aspect-ratio-preserving target dimensions. `src/adapters/image.rs` alone owns filesystem inspection, signature/decoder validation, pre-decode dimension enforcement, resize and deterministic PNG bytes; it never publishes facts itself.
+- `src/adapters/tools/view_image.rs` is the only fixed local-image Tool. It reuses the existing Artifact Tool publication boundary for original/derived SHA-256 Blobs and Research Events, emits the fixed typed selection shape and never gives the ordinary generic Artifact Tool image semantics. `domain::vision::ViewImageSelection` is the single strict bridge from that successful Tool Result into model follow-up.
+- `src/domain/vision/facts.rs` owns Vision Route, Observation, Failure, identity and evidence-boundary validation. `src/domain/session.rs` remains the only Session Event/reducer owner and enforces Route -> RequestAudit -> exactly one Observation/Failure, source/Profile/Capability/request binding, terminal uniqueness and Primary/Vision ProviderSession isolation.
+- `src/app/vision/analysis.rs` owns one Full, no-tool, structured Secondary request and raw-reply publication. `session.rs` owns append-before-apply route/audit/terminal composition; `replay.rs` owns read-only Observation/Blob replay. `InitialImagePrimaryContext` and the fixed post-`view_image` stage are opaque typed stages inside the existing AgentLoop, not a Hook registry or another Agent.
+- The OpenAI Responses Adapter remains the sole OpenAI wire owner. Its project resolver replays strict Artifact facts and reads their verified immutable Blobs; request encoding alone creates PNG/JPEG Data URLs and the minimal `json_object` output configuration.
+
+#### Reuse, API and Dependencies
+
+- Reused `ModelInputIR`, explicit `ModelCapabilities`, the M3-S2 Vision resolver/Profile contracts, one `ModelProvider` Port, `ConversationHistory`, RequestAuditService, SessionProjection, Research/Artifact reducers, LocalArtifactStore and the fixed Tool Registry. No second Capability map, Artifact/Blob/Event Store, History owner, AgentLoop, model router, retry/fallback policy or evidence type was introduced.
+- Public contract growth is limited to the image Domain contract, strict Vision facts, scoped Vision App composition/Replay services, the opaque initial-image/fixed-follow-up AgentLoop entries and the OpenAI project image-resolver constructor. They have current Direct, Secondary, Tool-follow-up, Replay and Adapter consumers; test access did not create a generic extension interface.
+- ADR-0005 accepts manifest dependency `image` 0.25 with default features disabled and only `png`/`jpeg` enabled (locked to 0.25.10), plus `base64` 0.22 for Adapter-only Data URLs. No SDK, multimedia stack, system image command, feature flag, Provider credential, configuration service or remote transport was added.
+- Persisted growth is exactly Vision fact schema v1 and `vision.route_decided`, `vision.observation_recorded`, `vision.analysis_failed` in the existing Session stream. Raw model JSON is an immutable Blob; Observation remains a derived, unverified model statement and cannot satisfy a Research Finding evidence contract.
+
+#### Test Layout, Split Review and Codex Classification
+
+- Permanent regressions live in `tests/m3_multimodal.rs`, `tests/view_image_tool.rs`, `tests/vision_flow.rs` and the existing OpenAI/AgentLoop integration suites. They cover PNG/JPEG, unsupported/corrupt/symlink/byte/dimension/pixel boundaries, pre-decode oversized-header rejection, deterministic byte-budget retries and Lineage; real project-isolated Data URLs; Direct/Secondary non-omission and non-duplication; route/audit/terminal ordering; identity isolation; Provider failure; targeted re-analysis; malformed/reused facts; and zero-write/zero-request replay with missing, corrupt and mismatched raw Blobs.
+- Production `src/` contains no inline test module. The final full Gate on Rust 1.93.1 passes formatting, denied-warning Clippy, 261 offline/local tests with one existing opt-in Live Smoke ignored, locked build, forbidden-dependency/credential/general-router/second-AgentLoop scans, `git diff --check` and the clean fixed `codex/` reference check.
+- Image/Vision patterns in Codex remain `REFERENCE`; the bounded local contracts, adapters and tests are independent `REIMPLEMENT`. No upstream line, crate, workspace dependency or test framework was copied, so no Upstream Port Ledger or license update is required.
+- `analysis.rs`, `session.rs` and `facts.rs` remain slightly above the 300-line review signal after being split by request execution, durable composition/replay and persisted-fact ownership. A further mechanical split would separate validation from the fact/request it protects; the next split trigger is a genuinely different reply contract, event version/upcaster or replay consumer, not line count alone.
+
+#### Removed and Deferred
+
+- Main review removed the first-encode byte-budget early return, manually assembled event-only tests, constructible Primary image context, unchecked Primary/Vision Profile/Capability combinations, reusable scoped Vision Sessions, replay that trusted only projected Observation fields and test-only image resolvers. It corrected the `view_image` output schema, made project Artifact lookup real and added header-first limit rejection before full pixel decode.
+- Deferred exactly as scope-locked: Live Provider compatibility, a user-facing configured Profile/credential composition for the CLI, vulnerability Mode Profiles and controlled samples, Trace Replay/Shadow Eval, TargetDelta and long-flow acceptance. The current OpenAI structured contract is intentionally the smallest `json_object`; richer JSON Schema negotiation requires measured Provider behavior and a later decision.
+- The project resolver currently replays the small local Research stream per encoded image, and image preparation/publication remains synchronous. These are explicit single-user prototype costs, not justification for a database, image cache service, detached worker or general resolver abstraction before profiling.
+- No M4 implementation, Live Test, real key resolution, public Provider request, Codex login read, image generation, audio/video, Provider fallback, database, dynamic plugin/hook or remote service exists in this Slice.
 
 ### M3-S3d Lean Review
 
@@ -627,7 +669,7 @@ The current user instruction explicitly authorizes continued implementation with
 - None for M3-S3a; implementation PR `#31`, status PR `#32` and all corresponding post-merge `main` Gates are complete.
 - None for M3-S3b; implementation PR `#33`, status PR `#34` and all corresponding post-merge `main` Gates are complete.
 - None for M3-S3c; implementation PR `#35`, status PR `#36` and all corresponding post-merge `main` Gates are complete.
-- None for M3-S3d implementation; PR `#37` and its PR-head Gate are complete, while this documentation-only status seal remains pending.
+- None for M3-S3d; implementation PR `#37`, status PR `#38` and the single required PR-head Gate are complete.
 - Live Provider compatibility remains unverified by design; missing live credentials do not block offline development and no Codex credential is an allowed substitute.
 
 ## Last Verification
@@ -637,6 +679,7 @@ The current user instruction explicitly authorizes continued implementation with
 - M3-S3d review: Luna xhigh implemented the bounded path; main review separated per-command reads, removed redundant aliases/abstractions, added explicit Session selection and strict filesystem handling, reused the RequestAudit/Token owners and fixed current-Hit semantics. Terra xhigh returned final `APPROVE` with no P0/P1/P2 blocker.
 - M3-S3d Live Test: `OFF`; no credential, external model request, Codex login state, `~/.codex` or `CODEX_HOME` was read or modified.
 - M3-S3d remote Gate: PASS; implementation commit `41546ba` was Squash Merged through PR `#37` as `a29187b`, and PR-head run `32649939090` passed the macOS Rust Gate. The merge used `[skip ci]` to avoid repeating the exact tree Gate on `main` after the user reported limited Actions quota.
+- M3-S3d status seal: PASS; documentation commit `e4be415` was Squash Merged through PR `#38` as `1bdb19a`. The status-only PR and merge used `[skip ci]` and triggered no Workflow.
 - M3-S3c remote Gate: PASS; implementation commit `c4a2cf9` was Squash Merged through PR `#35` as `cb6781e`, with PR-head run `32643924616` and post-merge `main` run `32644062157` passing the macOS Rust Gate.
 - M3-S3c status seal: PASS; PR `#36` was Squash Merged as `96385f1`, with PR-head run `32644218115` and post-merge `main` run `32644328650` passing before M3-S3d started.
 - M3-S3b local Gate: PASS on Rust `1.93.1`; formatting, denied-warning Clippy, 228 offline/local tests plus one ignored existing synthetic Live Smoke, locked build, inline-test scan, forbidden Codex dependency scan, credential isolation, Provider-wire and dependency-direction scans, one-AgentLoop/no-second-History-owner review, `git diff --check` and `codex/`-unchanged check all passed.

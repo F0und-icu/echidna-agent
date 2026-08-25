@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::domain::artifacts::{ArtifactEvent, ArtifactEventError, ArtifactState};
+use crate::domain::artifacts::{
+    ArtifactEvent, ArtifactEventError, ArtifactId, ArtifactRecord, ArtifactState,
+};
 use crate::domain::canonical_json::canonical_json;
 use crate::domain::events::{EventEnvelope, EventId, OccurredAt};
 use crate::domain::memory::{
@@ -411,6 +413,12 @@ impl ResearchState {
 
     pub fn has_event_id(&self, event_id: &EventId) -> bool {
         self.applied_event_digests.contains_key(event_id)
+    }
+
+    /// Resolves one immutable Artifact fact from the strict Research replay.
+    /// Blob bytes remain owned by the Artifact Store Adapter.
+    pub(crate) fn artifact(&self, id: &ArtifactId) -> Option<&ArtifactRecord> {
+        self.artifacts.get(id)
     }
 
     pub fn target_snapshot_by_fingerprint(
