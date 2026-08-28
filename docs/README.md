@@ -79,7 +79,7 @@ Codex Luna xhigh 或其他高推理 Codex 执行开发任务时，必须按顺�
 
 ## 6. 当前状态
 
-M0 至 M4-S2 已完成并远端封存。F1a/F1b/F1c/F1d 已在本地完成 Config v1、唯一 Provider Composition Root、协议优先 Responses HTTP/SSE Adapter、第一版 AgentLoop Chat，以及内联 `api_key`/引用式 `credential_ref` 二选一配置，并通过一次合成 DeepSeek Live Chat；集成远端封存已获授权并正在进行。
+M0 至 M4-S2 以及 F1a/F1b/F1c/F1d 集成交付均已远端封存。当前已具备 Config v1、唯一 Provider Composition Root、协议优先 Responses HTTP/SSE Adapter、第一版 AgentLoop Chat，以及内联 `api_key`/引用式 `credential_ref` 二选一配置，并通过一次合成 DeepSeek Live Chat。
 
 M4-S3 Observation/TargetDelta 没有开始，`codex/` 仍是固定提交的只读参考。
 

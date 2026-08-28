@@ -5,17 +5,27 @@
 - Architecture version: `1.1.0`
 - Phase: `IMPLEMENTATION`
 - Implementation: `STARTED`
-- Current milestone: `FIX`; M4-S2 remains `COMPLETE` and remotely sealed
+- Current milestone: `FIX` integration complete; M4-S3 remains deferred
 - Current slice: `F1d`
-- Slice state: `READY_FOR_REMOTE_SEAL`; F1a/F1b/F1c/F1d form one locally verified integration delivery
+- Slice state: `COMPLETE_REMOTE_SEALED`; F1a/F1b/F1c/F1d are merged as one verified integration delivery
 - Lean governance: `PASSED`; F1d extends the one Config/Composition credential owner without adding a second Provider path or exposing the inline value to diagnostics or facts
-- Local Git initialized: `yes`; delivery branch `fix/f1-provider-chat-integration` is based on the M4-S2 remote seal
-- Remote repository: `F0und-icu/cyber-agent` private; M4-S2 implementation PR `#44` and `[skip ci]` status PR `#45` form the remote seal without a duplicate post-merge CI
+- Local Git initialized: `yes`; `main` matches the F1a-F1d remote delivery
+- Remote repository: `F0und-icu/cyber-agent` private; F1a-F1d implementation PR `#46` passed its one exact PR-head CI and merged with `[skip ci]`
 - Documentation baseline commit: `55ff3be`
-- Current code base: remote base `08e9025` plus the locally verified F1a/F1b/F1c/F1d integration delivery
+- Current code base: F1a-F1d Squash Merge `6eb4959` on `main`
 - Upstream Codex baseline: `3aae5d885bac39c1262491aa3fd100dfd8b3919f`
 
-## Last Remotely Sealed Slice
+## Last Remote Delivery
+
+- Delivery: integrated `F1a` through `F1d`.
+- Base commit: `08e9025`.
+- Scope: strict Provider Config v1 and one Composition Root; one protocol-first Responses HTTP/SSE Adapter; first-version CLI Chat through the existing AgentLoop and durable Project/Session/RequestAudit/Tool authorities; optional local inline `api_key` or referenced `credential_ref` per Provider.
+- Result: `COMPLETE_REMOTE_SEALED`; the local Gate and exact PR head both pass formatting, denied-warning Clippy, all default-enabled tests and locked build. The final suite discovers 312 tests, passes 310 by default and keeps two explicit Live Smokes ignored.
+- Lean result: one package, binary, AgentLoop, Provider Composition Root and Responses wire owner remain. No new crate, persisted fact schema, Provider router/registry, vendor Adapter, Codex dependency or real credential entered the delivery.
+- Live evidence: the separately authorized synthetic DeepSeek Responses smoke and first-version Chat both passed before publication; F1d added no new Live request. Codex login state remained untouched.
+- Git: implementation commit `98e1094`, PR `#46`, sole PR-head CI `33182963979` and `[skip ci]` Squash Merge `6eb4959` form the implementation seal without a duplicate main CI.
+
+## Prior Remotely Sealed Milestone Slice
 
 - Slice: `M4-S2`
 - Delivery branch: `agent/m4-s2-trace-replay-eval`
@@ -78,24 +88,24 @@
 - M3-S4 auditable local images, fixed `view_image`, Direct/Secondary Vision composition, strict Vision Session facts and zero-request Mechanical Replay.
 - M4-S1 fixed vulnerability-research Prompt Profiles, Turn-boundary AgentLoop selection and deterministic tests-only controlled offline cases.
 - M4-S2 strict Trace fixtures, full-only Replay Model/Tool Adapters, Mechanical Replay, Context Recompile and isolated non-evidence Shadow Eval.
-- F1a strict Provider Config v1, one Provider Composition Root, shared credential source and configuration-driven generic Live Smokes (local Gate complete; not remotely sealed).
-- F1b one protocol-first Responses HTTP/SSE Adapter, provider-neutral reasoning events and configuration-only conforming-service selection (local Gate complete; not remotely sealed).
-- F1c first-version CLI Chat through the existing AgentLoop, durable Session/RequestAudit/Tool facts and one synthetic DeepSeek Live Chat (local Gate complete; not remotely sealed).
-- F1d compatible Config v1 inline `api_key` or referenced `credential_ref` selection through the existing Composition Root and Adapter boundary (local Gate complete; not remotely sealed).
+- F1a strict Provider Config v1, one Provider Composition Root, shared credential source and configuration-driven generic Live Smokes (remotely sealed in integrated PR `#46`).
+- F1b one protocol-first Responses HTTP/SSE Adapter, provider-neutral reasoning events and configuration-only conforming-service selection (remotely sealed in integrated PR `#46`).
+- F1c first-version CLI Chat through the existing AgentLoop, durable Session/RequestAudit/Tool facts and one synthetic DeepSeek Live Chat (remotely sealed in integrated PR `#46`).
+- F1d compatible Config v1 inline `api_key` or referenced `credential_ref` selection through the existing Composition Root and Adapter boundary (remotely sealed in integrated PR `#46`).
 
 ## Prior Fix Slice
 
 - Slice: `F1a`
-- State: `COMPLETE_WORKTREE_UNCOMMITTED`
+- State: `COMPLETE_REMOTE_SEALED` through integrated PR `#46`.
 - Scope: add the one strict Provider Config v1 and one Composition Root; make `chat`, `doctor` and both ignored Live Smokes consume that path; keep credentials lazy and explicit; remove generic runtime endpoint/model hard-coding.
 - Protocol boundary: this Slice keeps the existing OpenAI Responses binding but makes selection configuration-driven. A later, separately authorized binding Slice may extract shared Responses wire code when the second real Provider proves the exact common contract; it must not duplicate request encoding, HTTP/SSE transport, response decoding or the ModelProvider Contract Suite.
 - Scope budget: no DeepSeek binding, no real Live Test, no first-version Chat loop, no Provider router/registry/plugin, no fallback, no new dependency, no Event or fact store, and no M4-S3 Observation/TargetDelta work.
-- Git/remote: local source and documentation changes only; no branch, commit, push, PR, merge, tag, release or GitHub Actions run is authorized.
+- Git/remote: the Slice later shipped with F1b/F1c/F1d through integrated PR `#46` and Squash Merge `6eb4959`.
 
 ## Prior Completed Fix Slice
 
 - Slice: `F1c`
-- State: `COMPLETE_WORKTREE_UNCOMMITTED`.
+- State: `COMPLETE_REMOTE_SEALED` through integrated PR `#46`.
 - Delivered scope: `chat --config <path>` now reaches the one Composition Root and one existing AgentLoop for an initialized local Project. It supports fixed Prompt Profiles, durable new/resumed Sessions, RequestAudit, FullAccess Tools, ordered text deltas, Ctrl-C cancellation and explicit exit without a second loop, Provider construction or fact authority.
 - Durable safety: one project-scoped advisory Chat runtime lease prevents concurrent Chat processes while ordinary Writer locks remain short-lived. AgentLoop appends every real Tool Result and verifies complete Tool pairing before invoking receipt persistence; a receipt-stage failure therefore cannot replace successful results with synthetic cancellations.
 - Verification: loopback end-to-end tests cover new/resumed/profiled Chat, audit/history/receipt persistence, lease isolation, cancellation, continuation rejection/Full fallback and PID-bearing Session identities. The final locked Cargo/Lean Gate passes with 308 discovered tests, 306 default-enabled tests passing and two opt-in Live Smokes ignored.
@@ -104,7 +114,7 @@
 ## Last Completed Fix Slice
 
 - Slice: `F1d`
-- State: `COMPLETE_WORKTREE_UNCOMMITTED`.
+- State: `COMPLETE_REMOTE_SEALED` through integrated PR `#46`.
 - Delivered scope: each Config v1 Provider selects exactly one local inline `api_key` or existing `credential_ref`; both route through the one Provider Composition Root and existing Adapter credential interface.
 - Compatibility: existing `credential_ref` configurations remain valid. Inline credentials are explicit local configuration data, do not create a Provider binding and are not written to Session, RequestAudit, Artifact, logs or diagnostic output.
 - Scope budget: no Keychain, encrypted vault, config discovery, credential manager, schema database, Provider router, Codex credential source, Live request, Git operation or M4-S3/M4-S4 work.
@@ -119,14 +129,14 @@
 
 ## Current Authorization
 
-The user explicitly authorized remote publication of the completed F1a/F1b/F1c/F1d integration. F1c/F1d implementation and synthetic Live authorizations remain consumed.
+The user's F1a/F1b/F1c/F1d remote-publication authorization is consumed. F1c/F1d implementation and synthetic Live authorizations also remain consumed.
 
-- Run mode: `STOP_AFTER_COMPLETED_SLICE`; F1d is complete and no later Slice is authorized
-- Git mode: `REMOTE_SEAL_AUTHORIZED`; create one short delivery branch, commit and push it, run one exact PR-head CI, Squash Merge with `[skip ci]`, then record the remote evidence without a duplicate CI
+- Run mode: `STOP_AFTER_REMOTE_SEAL`; F1a-F1d are remotely sealed and no later Slice is authorized
+- Git mode: `REMOTE_SEAL_CONSUMED`; PR `#46`, CI `33182963979` and Squash Merge `6eb4959` complete the delivery; no further Git write, tag or release is authorized
 - Delegation mode: `OFF`; the current request does not authorize development sub-agents
 - Live test mode: `OFF`; F1d uses fake/loopback credentials only
 - Configuration rule: Provider binding, model, Base URL and Capability Mapping remain Config v1 data. A Provider selects exactly one inline `api_key` or dedicated `credential_ref`; neither may infer Provider/model identity or use Codex login state.
-- Stop condition: stop after the integration is remotely sealed and the local `main` is synchronized; do not start M4-S3/M4-S4 or a new Live Test
+- Stop condition: satisfied after the remote-evidence status seal; do not start M4-S3/M4-S4 or a new Live Test
 
 ## F1d Lean Review
 
@@ -149,7 +159,7 @@ The user explicitly authorized remote publication of the completed F1a/F1b/F1c/F
 - Permanent regressions under top-level `tests/` cover inline/reference composition, both/neither/empty rejection, malformed-TOML redaction, `doctor` non-disclosure and loopback Chat proof that the inline Key alone reaches Authorization while stdout, stderr and `.cyber-agent` facts do not contain it.
 - Full local Gate passes on Rust `1.93.1`: formatting, denied-warning Clippy, 312 discovered tests with 310 default-enabled tests passing and two opt-in Live Smokes ignored, plus locked build.
 - One-package/one-binary, production inline-test, credential-like literal, generic Provider literal, single Responses owner, forbidden Codex dependency, one-AgentLoop/one-Composition, `git diff --check` and clean fixed `codex/` scans pass. No real API Key exists in the worktree.
-- Live Test: `NOT_RUN`; only synthetic and loopback credentials were used. Git: remote publication is authorized on `fix/f1-provider-chat-integration`; exact commit, PR, CI and merge evidence are pending.
+- Live Test: `NOT_RUN`; F1d used only synthetic and loopback credentials. Git: F1a-F1d implementation commit `98e1094`, PR `#46`, CI `33182963979` and `[skip ci]` Squash Merge `6eb4959` are complete.
 
 ### Removed and Deferred
 

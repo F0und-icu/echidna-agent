@@ -25,7 +25,7 @@ If the user explicitly authorizes development sub-agents, every delegated agent 
 
 - Architecture v1.1 is sealed as an additive extension over the immutable v1 baseline.
 - M0 through M4-S2 are complete and remotely sealed.
-- F1a Config/Composition Root, F1b protocol-first Responses HTTP/SSE Adapter, F1c first-version CLI Chat and F1d local inline Provider credentials are locally complete on delivery branch `fix/f1-provider-chat-integration` over remote base `08e9025`; one synthetic F1c DeepSeek Live Chat passed.
+- F1a Config/Composition Root, F1b protocol-first Responses HTTP/SSE Adapter, F1c first-version CLI Chat and F1d local inline Provider credentials are complete and remotely sealed by PR `#46` at Squash Merge `6eb4959`; one synthetic F1c DeepSeek Live Chat passed.
 - F1d preserves one configuration and Adapter path: Config v1 may select exactly one inline `api_key` or existing `credential_ref` per Provider. M4-S3 remains `DEFERRED_NOT_AUTHORIZED`.
 - Local Git is initialized and `main` tracks the private remote.
 - `codex/` is a clean, read-only upstream reference repository.
