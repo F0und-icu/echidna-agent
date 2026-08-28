@@ -5,14 +5,14 @@
 - Architecture version: `1.1.0`
 - Phase: `IMPLEMENTATION`
 - Implementation: `STARTED`
-- Current milestone: `M4`; M4-S2 is implementation-complete locally and remote sealing is pending
+- Current milestone: `M4`; M4-S2 is `COMPLETE` and remotely sealed
 - Current slice: `M4-S3`
-- Slice state: `READY_NOT_AUTHORIZED`; M4-S2 must be remotely sealed and work must then stop before Observation/TargetDelta implementation
+- Slice state: `READY_NOT_AUTHORIZED`; M4-S2 is remotely sealed and work is stopped before Observation/TargetDelta implementation
 - Lean governance: `ACTIVE`; M4-S2 passed its full local Cargo/Lean Gate and final Luna xhigh review with no unresolved P0/P1
-- Local Git initialized: `yes`; M4-S2 implementation is complete on `agent/m4-s2-trace-replay-eval` from sealed base `fea1433`
-- Remote repository: `F0und-icu/cyber-agent` private; M4-S1 implementation PR `#42` and `[skip ci]` status PR `#43` form the remote seal without duplicate post-merge CI
+- Local Git initialized: `yes`; `main` contains the M4-S2 implementation Squash Merge and its separate status seal
+- Remote repository: `F0und-icu/cyber-agent` private; M4-S2 implementation PR `#44` and `[skip ci]` status PR `#45` form the remote seal without a duplicate post-merge CI
 - Documentation baseline commit: `55ff3be`
-- Current code base: M4-S2 local implementation candidate based on sealed M4-S1 `main` at `fea1433`; implementation PR evidence is pending
+- Current code base: M4-S2 implementation commit `d99f395`, PR `#44`, PR-head CI `33165972124`, Squash Merge `2afe900` and separate status PR `#45`
 - Upstream Codex baseline: `3aae5d885bac39c1262491aa3fd100dfd8b3919f`
 
 ## Last Completed Slice
@@ -25,9 +25,9 @@
 - Replay behavior: source requests are Full semantic samples. Replay narrows an incremental-capable source mapping to a truthful Full-only effective capability, consumes only exact recorded Model/Tool steps, honors current fixed Tool exposure and terminates `UNMATCHED_TOOL_CALL` before any later Provider or Tool action. Complete source Receipts remain distinct from derived replay Receipts, so historical Artifact/cache/file-mutation claims are retained as provenance but never forged as current execution effects.
 - Eval behavior: `EvalSource` binds every result to Trace ID, source Session and source-stream hash; Context Recompile additionally binds one exact RequestAudit Event. Mechanical/Context/Shadow outputs have the closed `NonEvidence` state and no Event, Research, Memory, Artifact or Project writer.
 - Fixture behavior: `tests/fixtures/m4_trace/` contains one controlled full-request Session plus immutable RequestAudit Blobs. Per-file SHA-256 and a fixed `suite.json` anchor detect drift; Replay performs zero real Provider/Tool actions.
-- Result: `COMPLETE` locally; the full Cargo/Lean Gate passes 288 discovered tests, including two ignored opt-in OpenAI Live smokes, with all 286 default-enabled tests passing. Main review closed exact source identity, complete Receipt provenance, Blob validation, exposure, Full-only capability, frozen field naming and multi-Tool ordering; final Luna xhigh review returned `APPROVE` with no unresolved P0/P1. Remote PR evidence is pending.
+- Result: `COMPLETE`; the full Cargo/Lean Gate passes 288 discovered tests, including two ignored opt-in OpenAI Live smokes, with all 286 default-enabled tests passing. Main review closed exact source identity, complete Receipt provenance, Blob validation, exposure, Full-only capability, frozen field naming and multi-Tool ordering; final Luna xhigh review returned `APPROVE` with no unresolved P0/P1. The exact implementation head passed its sole remote macOS Gate and is merged.
 - Dependencies and schemas: no Cargo dependency, feature, persisted Event/Blob/Cache/configuration, Provider DTO, credential source or remote transport was added. New production surface is the non-persisted Trace/Eval schema, fixed Replay Adapters/composition and one terminal Tool Port error; existing `sha2`, Session/Research reducers, RequestAudit, ArtifactStore, ContextPlanner and AgentLoop are reused.
-- Git: implementation commit, final implementation PR, the single authorized PR-head CI run, Squash Merge and separate `[skip ci]` status seal are pending.
+- Git: implementation commit `d99f395`, PR `#44`, sole PR-head CI `33165972124`, `[skip ci]` Squash Merge `2afe900` and separate `[skip ci]` status PR `#45` complete the remote seal.
 - Live Test: `NOT_RUN`; the available dedicated credential targets a different Provider protocol from the sole production OpenAI Responses Adapter. It was not read, persisted, logged or aliased to the OpenAI credential reference, and no Codex login state was accessed.
 
 ## Current Authority
@@ -80,21 +80,21 @@
 
 - Slice: `M4-S3`
 - State: `READY_NOT_AUTHORIZED`; this status is planning only and does not start Observation/TargetDelta work.
-- Planned delivery branch: resolve only after the M4-S2 implementation and status seal are remotely merged and a new explicit user instruction authorizes M4-S3.
+- Planned delivery branch: resolve only after a new explicit user instruction authorizes M4-S3; all M4-S2 implementation and status prerequisites are complete.
 - Scope: provider-neutral structured Observations, one bounded external Extractor example and TargetDelta as already bounded by the Implementation Plan.
 - Forbidden continuation: all M4-S3/M4-S4 production work, CLI Chat composition, new Provider Adapter, general Prompt DSL/loader/registry, dataset service, database, model router, Hook/plugin runtime and Codex credential/login access.
 
 ## Current Authorization
 
-The user authorized implementation and remote sealing of M4-S2. Its local implementation, full Gate and final independent review are complete; only the bounded remote seal remains.
+The M4-S2 implementation and remote seal requested by the current user instruction are complete. No implementation or Git authorization remains.
 
-- Run mode: `SEAL_M4_S2_AND_STOP`
-- Slice ID: `M4-S2`; state `COMPLETE_LOCAL_PENDING_REMOTE_SEAL`
-- Git mode: `BRANCH_COMMIT_PUSH_PR_MERGE_STATUS_SEAL`; the main agent owns the implementation commit/push/PR, one PR-head CI run, Squash Merge and separate `[skip ci]` status seal
+- Run mode: `REVIEW_ONLY`
+- Slice ID: `M4-S3`; state `READY_NOT_AUTHORIZED`
+- Git mode: `REVIEW_ONLY`; no further branch, commit, push, PR, merge, tag or release is authorized
 - Delegation mode: `INACTIVE`; Terra xhigh implementation and Luna xhigh final review are complete
-- Live test mode: `NOT_RUN_INCOMPATIBLE_PROVIDER`; M4-S2 does not authorize adding or impersonating a new Provider protocol, and no compatible dedicated OpenAI test credential was supplied
+- Live test mode: `OFF`; M4-S2 recorded the incompatible-Provider reason without adding or impersonating a new protocol, and no further public model request is authorized
 - Forbidden continuation: all M4-S3/M4-S4 production work, general database/index/watcher/hook/router/plugin/model-router work, Codex source modification, Codex credentials/login access or credential persistence in repository/logs/shell profiles
-- Stop condition: after the M4-S2 status-seal PR is merged, stop without starting M4-S3, M4-S4 CLI Chat or another Live Test
+- Stop condition: `SATISFIED`; remain stopped on clean `main` without starting M4-S3, M4-S4 CLI Chat or another Live Test
 
 ## M4-S2 Slice Start
 
@@ -755,7 +755,7 @@ The user authorized implementation and remote sealing of M4-S2. Its local implem
 - None for M3-S3d; implementation PR `#37`, status PR `#38` and the single required PR-head Gate are complete.
 - None for M3-S4; implementation PR `#39`, status PR `#40` and the single required PR-head Gate are complete.
 - None for M4-S1; implementation PR `#42`, exact-head CI, implementation merge and separate status PR `#43` complete the remote seal.
-- None for M4-S2 local implementation: the complete Cargo/Lean Gate and final independent review pass. The implementation PR, sole PR-head CI, Squash Merge and separate status seal are pending as the remaining authorized delivery work.
+- None for M4-S2; implementation commit `d99f395`, PR `#44`, sole PR-head CI `33165972124`, Squash Merge `2afe900` and separate status PR `#45` complete the remote seal.
 - Live Provider compatibility remains unverified by design; missing live credentials do not block offline development and no Codex credential is an allowed substitute.
 
 ## Last Verification
@@ -766,7 +766,8 @@ The user authorized implementation and remote sealing of M4-S2. Its local implem
 - M4-S2 Context/Shadow Gate: PASS; Context Recompile compares a current candidate to one exact historical RequestAudit without mutation. Shadow Eval accepts only a caller-supplied model plus ReplayToolExecutor, requires complete Tool-step consumption and returns an EvalSource-bound `NonEvidence` result with no formal fact writer.
 - M4-S2 review: Terra xhigh implemented the bounded path. Main review fixed exact source/Eval identity, Receipt provenance, required Blob verification, exposure, Full-only capability truthfulness, frozen field naming and multi-Tool order. Luna xhigh returned final `APPROVE` with no unresolved P0/P1.
 - M4-S2 Live Test: `NOT_RUN_INCOMPATIBLE_PROVIDER`; the only production live Adapter is OpenAI Responses while the available dedicated key targets another Provider protocol. No credential was read, logged, persisted, aliased across Provider roles or sourced from Codex login state.
-- M4-S2 remote Gate: PENDING; implementation commit/PR, sole PR-head macOS Gate, Squash Merge and separate `[skip ci]` status seal have not yet run.
+- M4-S2 remote Gate: PASS; exact implementation head `d99f395` was Squash Merged through PR `#44` as `2afe900`, and sole PR-head run `33165972124` passed the macOS Rust Gate. The merge used `[skip ci]`, so no duplicate `main` Workflow was created.
+- M4-S2 status seal: PASS; status-only PR `#45` records the implementation identities and final stopped state. Its commits and merge use `[skip ci]` and start no M4-S3, M4-S4 or Live Test work.
 - M4-S1 local Gate: PASS on Rust `1.93.1`; formatting, denied-warning Clippy, 266 offline/local tests plus one ignored existing synthetic Live Smoke, locked build, inline-test scan, forbidden Codex dependency scan, credential/general-registry review, `git diff --check` and the clean fixed `codex/` reference check all passed.
 - M4-S1 Profile Gate: PASS; the exact four compile-time Markdown Profiles map one-to-one to Source/Web/Mobile/Binary, exclude Firmware, preserve direct command access, keep multimodal access direct where routinely relevant, compose through one Turn-boundary AgentLoop path and invalidate the existing Context identity when Mode generation changes.
 - M4-S1 controlled-case Gate: PASS; twelve synthetic offline fixtures form positive, negative and tampered/environment controls, bind unique same-Profile relationships, verify fixed manifest and per-file SHA-256 identities and cover Candidate/Reproduced/Confirmed without treating model output as fact.
