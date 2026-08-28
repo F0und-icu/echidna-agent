@@ -604,11 +604,22 @@ impl ToolExecutionOutcome {
 
     pub fn cancelled(plan: ToolExecutionPlan, reason: impl Into<String>) -> Self {
         let reason = reason.into();
+        Self::cancelled_with_output(plan, reason.clone(), serde_json::json!({"error": reason}))
+    }
+
+    /// Produces a cancelled paired outcome while retaining a previously
+    /// recorded semantic Tool output. Replay uses this instead of rebuilding
+    /// the output from the cancellation reason.
+    pub(crate) fn cancelled_with_output(
+        plan: ToolExecutionPlan,
+        reason: impl Into<String>,
+        output: Value,
+    ) -> Self {
         Self::from_plan(
             plan,
             ToolResultStatus::Cancelled,
-            Some(reason.clone()),
-            serde_json::json!({"error": reason}),
+            Some(reason.into()),
+            output,
         )
     }
 

@@ -444,7 +444,7 @@ impl ResearchState {
             .collect()
     }
 
-    fn target_snapshot(&self, id: &TargetSnapshotId) -> Option<&TargetSnapshotRecord> {
+    pub(crate) fn target_snapshot(&self, id: &TargetSnapshotId) -> Option<&TargetSnapshotRecord> {
         self.target_snapshots.get(id)
     }
 

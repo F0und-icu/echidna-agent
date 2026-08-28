@@ -14,4 +14,5 @@ pub mod model_streaming;
 pub mod request_audit;
 pub mod session;
 mod tool_scheduler;
+pub mod trace_eval;
 pub mod vision;

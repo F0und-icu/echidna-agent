@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "trace_id": "m4-trace-fixture",
+  "source_session_id": "session:m4-trace",
+  "event_range": {
+    "start": 1,
+    "end": 7
+  },
+  "source_stream_hash": "758de533f7f4dada35a0088bd302bc3620a9453e9ccd88cbc47c45b1f1ba85e6",
+  "target_snapshot_ids": [],
+  "required_artifact_ids": [],
+  "provider_event_refs": [
+    {
+      "request_audit_event_id": "audit-one",
+      "history_event_ids": [
+        "model-call-one"
+      ]
+    },
+    {
+      "request_audit_event_id": "audit-two",
+      "history_event_ids": [
+        "model-text-two"
+      ]
+    }
+  ],
+  "tool_receipt_refs": [
+    "receipt-one"
+  ],
+  "expected_invariants": [
+    "full_request_semantic_replay",
+    "tool_pairing",
+    "zero_external_actions",
+    "non_evidence"
+  ]
+}

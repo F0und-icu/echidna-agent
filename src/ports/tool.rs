@@ -44,6 +44,11 @@ pub trait ToolExecutor: Send + Sync {
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum ToolExecutorError {
+    /// A fixed Replay Tool has no matching historical step. The AgentLoop
+    /// treats this boundary as terminal so it cannot issue another Provider
+    /// request or fall back to a real Tool.
+    #[error("UNMATCHED_TOOL_CALL: Tool `{tool_name}` is not present in the Replay trace")]
+    UnmatchedToolCall { tool_name: String },
     #[error("Tool `{tool_name}` is not registered")]
     UnknownTool { tool_name: String },
     #[error("Tool `{tool_name}` is not exposed for the current Mode")]

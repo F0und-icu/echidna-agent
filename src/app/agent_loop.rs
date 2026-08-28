@@ -852,20 +852,23 @@ where
         let mut plans = Vec::new();
         for call in calls {
             let execution_id = ExecutionId::new(format!("execution:{}", call.call_id));
-            if !exposed_tool_names.contains(&call.name) {
-                prepared.push(PreparedToolCall::PlanningFailure(ToolResult::failed(
-                    &call,
-                    ToolExecutorError::ToolNotExposed {
-                        tool_name: call.name.to_string(),
-                    }
-                    .to_string(),
-                )));
-                continue;
-            }
             match self.tools.plan_exposed(execution_id, call.clone()) {
                 Ok(plan) => {
-                    plans.push(plan);
-                    prepared.push(PreparedToolCall::Planned);
+                    if exposed_tool_names.contains(&call.name) {
+                        plans.push(plan);
+                        prepared.push(PreparedToolCall::Planned);
+                    } else {
+                        prepared.push(PreparedToolCall::PlanningFailure(ToolResult::failed(
+                            &call,
+                            ToolExecutorError::ToolNotExposed {
+                                tool_name: call.name.to_string(),
+                            }
+                            .to_string(),
+                        )));
+                    }
+                }
+                Err(ToolExecutorError::UnmatchedToolCall { tool_name }) => {
+                    return Err(AgentLoopError::UnmatchedToolCall { tool_name });
                 }
                 Err(error) => prepared.push(PreparedToolCall::PlanningFailure(ToolResult::failed(
                     &call,
@@ -1059,4 +1062,6 @@ pub enum AgentLoopError {
     SchedulerResultMissing,
     #[error("the Tool scheduler returned more outcomes than staged plans")]
     SchedulerResultCountMismatch,
+    #[error("UNMATCHED_TOOL_CALL: Tool `{tool_name}` is not present in the Replay trace")]
+    UnmatchedToolCall { tool_name: String },
 }

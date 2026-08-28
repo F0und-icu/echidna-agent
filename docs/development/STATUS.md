@@ -5,29 +5,30 @@
 - Architecture version: `1.1.0`
 - Phase: `IMPLEMENTATION`
 - Implementation: `STARTED`
-- Current milestone: `M4`; M4-S1 is `COMPLETE` and remotely sealed
-- Current slice: `M4-S2`
-- Slice state: `READY_NOT_AUTHORIZED`; M4-S1 is remotely sealed and work is stopped without Replay/Eval or Live Test activity
-- Lean governance: `ACTIVE`; M4-S1 passed its full local Cargo/Lean Gate, final Luna xhigh review and exact-head macOS Gate with no unresolved P0/P1
-- Local Git initialized: `yes`; `main` tracks the private remote and the M4-S1 runtime tree is cleanly sealed
+- Current milestone: `M4`; M4-S2 is implementation-complete locally and remote sealing is pending
+- Current slice: `M4-S3`
+- Slice state: `READY_NOT_AUTHORIZED`; M4-S2 must be remotely sealed and work must then stop before Observation/TargetDelta implementation
+- Lean governance: `ACTIVE`; M4-S2 passed its full local Cargo/Lean Gate and final Luna xhigh review with no unresolved P0/P1
+- Local Git initialized: `yes`; M4-S2 implementation is complete on `agent/m4-s2-trace-replay-eval` from sealed base `fea1433`
 - Remote repository: `F0und-icu/cyber-agent` private; M4-S1 implementation PR `#42` and `[skip ci]` status PR `#43` form the remote seal without duplicate post-merge CI
 - Documentation baseline commit: `55ff3be`
-- Current code base: M4-S1 runtime Squash Merge `7631709`; exact implementation head `b9cb3f9` passed PR-head CI `32885992788`, and status evidence is recorded by PR `#43`
+- Current code base: M4-S2 local implementation candidate based on sealed M4-S1 `main` at `fea1433`; implementation PR evidence is pending
 - Upstream Codex baseline: `3aae5d885bac39c1262491aa3fd100dfd8b3919f`
 
 ## Last Completed Slice
 
-- Slice: `M4-S1`
-- Delivery branch: `agent/m4-s1-research-profiles`
-- Base commit: `b635645`
-- Scope: four fixed source/web/mobile/binary vulnerability-research Prompt Profiles, one Turn-boundary selection path in the existing AgentLoop and twelve deterministic tests-only controlled offline cases.
-- Profile behavior: each Profile has one fixed ID, generation, compatible Research `TargetKind`, compiled Markdown prompt and bounded Tool exposure. Firmware remains unsupported. The prompts require Candidate/Reproduced/Confirmed separation, real target/version/environment evidence, positive and negative controls, explicit `research_update` and non-fabrication of Tool or evidence facts.
-- Context behavior: Mode generation now participates in `prompt:mode:<id>:<generation>` identity, and the existing Context Planner fingerprint remains the only semantic hash. Source defers low-frequency image inspection; Web/Mobile/Binary keep `view_image` Direct, while command tools remain Direct for all Profiles.
-- Fixture behavior: each Profile has one positive, one negative and one tampered/environment case with distinct synthetic source, HTTP, mobile or binary content. Per-file SHA-256 plus a fixed manifest anchor detect drift; positives collectively cover Candidate, Reproduced and Confirmed, while every control is `NoFinding`.
-- Result: `COMPLETE`; the full Cargo/Lean Gate passes 266 offline/local tests with one existing opt-in Live Smoke ignored. Main review removed an unconsumed independent Profile fingerprint, kept controlled-case types tests-only and corrected image Tool exposure; final Luna xhigh review returned code-level `APPROVE` with no unresolved P0/P1. The exact implementation head then passed the same macOS Gate.
-- Dependencies and schemas: no Cargo dependency, feature, Event, Blob, Cache, persisted configuration, Provider DTO, Port, credential source or remote transport changed. No production controlled-case or Eval schema was added without a runtime consumer.
-- Git: implementation commit `b9cb3f9`, PR `#42`, sole PR-head CI `32885992788`, implementation Squash Merge `7631709` and separate status PR `#43`; all merge/status subjects use `[skip ci]` after the one proven runtime-tree Gate.
-- Live Test: `OFF`; no real credential, public Provider request, Codex login state, `~/.codex` or `CODEX_HOME` was read or modified.
+- Slice: `M4-S2`
+- Delivery branch: `agent/m4-s2-trace-replay-eval`
+- Base commit: `fea1433`
+- Scope: one strict reference-only Trace fixture, fixed Replay Model/Tool Adapters, Mechanical Replay, Context Recompile and explicitly invoked Shadow Model Eval over the existing one AgentLoop and fact authorities.
+- Source behavior: `TraceFixtureManifest` binds `trace_id`, exact source Session, inclusive Event range, full-stream BLAKE3 hash, Target/Artifact references, ordered RequestAudit/History samples, source-call-ordered Receipt references and the fixed M4-S2 invariant set. The supplied Session projection must equal a fresh reduction of the complete source Event stream; required Artifact bytes are reread and verified by exact SHA-256 Blob ID and size.
+- Replay behavior: source requests are Full semantic samples. Replay narrows an incremental-capable source mapping to a truthful Full-only effective capability, consumes only exact recorded Model/Tool steps, honors current fixed Tool exposure and terminates `UNMATCHED_TOOL_CALL` before any later Provider or Tool action. Complete source Receipts remain distinct from derived replay Receipts, so historical Artifact/cache/file-mutation claims are retained as provenance but never forged as current execution effects.
+- Eval behavior: `EvalSource` binds every result to Trace ID, source Session and source-stream hash; Context Recompile additionally binds one exact RequestAudit Event. Mechanical/Context/Shadow outputs have the closed `NonEvidence` state and no Event, Research, Memory, Artifact or Project writer.
+- Fixture behavior: `tests/fixtures/m4_trace/` contains one controlled full-request Session plus immutable RequestAudit Blobs. Per-file SHA-256 and a fixed `suite.json` anchor detect drift; Replay performs zero real Provider/Tool actions.
+- Result: `COMPLETE` locally; the full Cargo/Lean Gate passes 288 discovered tests, including two ignored opt-in OpenAI Live smokes, with all 286 default-enabled tests passing. Main review closed exact source identity, complete Receipt provenance, Blob validation, exposure, Full-only capability, frozen field naming and multi-Tool ordering; final Luna xhigh review returned `APPROVE` with no unresolved P0/P1. Remote PR evidence is pending.
+- Dependencies and schemas: no Cargo dependency, feature, persisted Event/Blob/Cache/configuration, Provider DTO, credential source or remote transport was added. New production surface is the non-persisted Trace/Eval schema, fixed Replay Adapters/composition and one terminal Tool Port error; existing `sha2`, Session/Research reducers, RequestAudit, ArtifactStore, ContextPlanner and AgentLoop are reused.
+- Git: implementation commit, final implementation PR, the single authorized PR-head CI run, Squash Merge and separate `[skip ci]` status seal are pending.
+- Live Test: `NOT_RUN`; the available dedicated credential targets a different Provider protocol from the sole production OpenAI Responses Adapter. It was not read, persisted, logged or aliased to the OpenAI credential reference, and no Codex login state was accessed.
 
 ## Current Authority
 
@@ -73,26 +74,38 @@
 - M3-S3d read-only prompt, Snapshot and local metrics CLI inspection over existing auditable facts.
 - M3-S4 auditable local images, fixed `view_image`, Direct/Secondary Vision composition, strict Vision Session facts and zero-request Mechanical Replay.
 - M4-S1 fixed vulnerability-research Prompt Profiles, Turn-boundary AgentLoop selection and deterministic tests-only controlled offline cases.
+- M4-S2 strict Trace fixtures, full-only Replay Model/Tool Adapters, Mechanical Replay, Context Recompile and isolated non-evidence Shadow Eval.
 
 ## Next Planned Slice
 
-- Slice: `M4-S2`
-- State: `READY_NOT_AUTHORIZED`; this status is planning only and does not start Replay/Eval work.
-- Planned delivery branch: resolve only after a new explicit user instruction authorizes M4-S2; the M4-S1 implementation and status prerequisites are complete.
-- Scope: Trace Replay and Shadow Eval as already bounded by the Implementation Plan.
-- Forbidden continuation: all M4-S2 implementation, M4-S3 Observation/TargetDelta, M4-S4 long-flow/Live Provider work, general Prompt DSL/loader/registry, dataset service, database, model router, Hook/plugin runtime and Codex credential/login access.
+- Slice: `M4-S3`
+- State: `READY_NOT_AUTHORIZED`; this status is planning only and does not start Observation/TargetDelta work.
+- Planned delivery branch: resolve only after the M4-S2 implementation and status seal are remotely merged and a new explicit user instruction authorizes M4-S3.
+- Scope: provider-neutral structured Observations, one bounded external Extractor example and TargetDelta as already bounded by the Implementation Plan.
+- Forbidden continuation: all M4-S3/M4-S4 production work, CLI Chat composition, new Provider Adapter, general Prompt DSL/loader/registry, dataset service, database, model router, Hook/plugin runtime and Codex credential/login access.
 
 ## Current Authorization
 
-The M4-S1 seal requested by the current user instruction is complete. No implementation or Git authorization remains.
+The user authorized implementation and remote sealing of M4-S2. Its local implementation, full Gate and final independent review are complete; only the bounded remote seal remains.
 
-- Run mode: `REVIEW_ONLY`
-- Slice ID: `M4-S2`; state `READY_NOT_AUTHORIZED`
-- Git mode: `REVIEW_ONLY`; no further branch, commit, push, PR, merge, tag or release is authorized
-- Delegation mode: `INACTIVE`; prior implementation/review threads remain stopped
-- Live test mode: `OFF`; no real Provider credential or public model request is authorized
-- Forbidden continuation: all M4-S2/M4-S3/M4-S4 work, Live Tests, general database/index/watcher/hook/router/plugin/model-router work, Codex source modification or Codex credentials/login access
-- Stop condition: `SATISFIED`; remain stopped without starting M4-S2 or a Live Test until a new explicit user request
+- Run mode: `SEAL_M4_S2_AND_STOP`
+- Slice ID: `M4-S2`; state `COMPLETE_LOCAL_PENDING_REMOTE_SEAL`
+- Git mode: `BRANCH_COMMIT_PUSH_PR_MERGE_STATUS_SEAL`; the main agent owns the implementation commit/push/PR, one PR-head CI run, Squash Merge and separate `[skip ci]` status seal
+- Delegation mode: `INACTIVE`; Terra xhigh implementation and Luna xhigh final review are complete
+- Live test mode: `NOT_RUN_INCOMPATIBLE_PROVIDER`; M4-S2 does not authorize adding or impersonating a new Provider protocol, and no compatible dedicated OpenAI test credential was supplied
+- Forbidden continuation: all M4-S3/M4-S4 production work, general database/index/watcher/hook/router/plugin/model-router work, Codex source modification, Codex credentials/login access or credential persistence in repository/logs/shell profiles
+- Stop condition: after the M4-S2 status-seal PR is merged, stop without starting M4-S3, M4-S4 CLI Chat or another Live Test
+
+## M4-S2 Slice Start
+
+- Delivery branch: `agent/m4-s2-trace-replay-eval`
+- Base commit: `fea1433`
+- Intended production touch points: one pure Trace/Eval contract beside the existing request-audit and Session facts; fixed Replay Model and Tool adapters consuming validated trace steps; one narrowly named App composition for Mechanical Replay, Context Recompile and explicitly triggered Shadow Model Eval. Reuse the existing ModelProvider/ToolExecutor Ports, AgentLoop, Context Planner, RequestAudit reconstruction, Session History/Receipts and Artifact Blob authority.
+- Scope budget: no second Trace/Event/Blob/Research/Memory store, no Eval database or dataset service, no Provider router/fallback, no new Provider wire protocol, no general Hook/Manager/Registry, no second AgentLoop and no M4-S3 Observation/TargetDelta or M4-S4 CLI Chat composition. Replay/Shadow results remain isolated derived data and cannot satisfy Finding evidence.
+- Intended permanent tests: strict TraceFixtureManifest validation against exact Session/Event/Artifact/Receipt references; deterministic Mechanical Replay with zero network and zero real Tool side effects; immediate `UNMATCHED_TOOL_CALL`; Context Recompile comparison without historical Manifest mutation; Shadow Eval with a real/Mock Provider and Replay-only Tools; proof that every Eval mode leaves formal Project Memory/Research/Event facts unchanged and labels outputs as non-evidence.
+- Acceptance commands: locked Cargo fmt/clippy/test/build Gate; production inline-test, forbidden Codex dependency, credential isolation, Provider-wire/dependency-direction, one-AgentLoop/no-second-fact-store scans; `git diff --check`; clean fixed `codex/` check.
+- Delegation: Luna xhigh performs the read-only contract/reuse audit; Terra xhigh implements only the approved vertical path; Luna xhigh performs final read-only review. The main agent owns contracts, corrections, Git and merge authority.
+- Live Test: explicitly authorized for one bounded synthetic Shadow request only after offline gates. A dedicated Provider environment reference is required; no secret may be committed, printed, passed through Codex credentials or persisted in shell profiles. Provider incompatibility is recorded as a test result rather than bypassed through credential aliasing.
 
 ## M2-S5 Slice Start
 
@@ -192,6 +205,36 @@ The M4-S1 seal requested by the current user instruction is complete. No impleme
 - Live Test: `OFF`; only deterministic local fixtures and pure Domain/App composition tests are authorized.
 
 ## Slice Lean Review
+
+### M4-S2 Lean Review
+
+#### Semantic Owners
+
+- `src/domain/trace_eval/manifest.rs` and `source_validation.rs` are the sole Trace fixture contract and source-reference validators. `TraceFixtureManifest` stores only exact Session/Event/Target/Artifact/Receipt references plus the full source-stream hash and closed invariant set; the existing Session and Research reducers remain authoritative for every referenced fact.
+- `src/domain/trace_eval/plan.rs` owns the provider-neutral derived Replay plan and the distinction between complete historical `source_receipt` provenance and the side-effect-free `replay_receipt`. `result.rs` owns the closed `EvalSource`, Mechanical/Context/Shadow provenance and `NonEvidence` label; it has no conversion into Research Finding evidence.
+- `src/adapters/replay/model.rs` and `tool.rs` are the only fixed Replay Port implementations. The Model adapter consumes exact Full semantic requests; the Tool adapter consumes exact call-ordered steps under current fixed exposure and has no real Provider/Tool fallback. The existing AgentLoop owns Tool planning, pairing, scheduling and the terminal `UNMATCHED_TOOL_CALL` boundary.
+- `src/app/trace_eval/service.rs` is the sole read-only Trace preparation and Context Recompile service. It composes existing RequestAudit reconstruction, Session/Research projections and immutable Artifact Blob reads. `src/trace_eval_runtime.rs` is the only concrete Replay/Shadow wiring root and contains no Event, Research, Memory, Artifact or Project writer.
+
+#### Reuse, API, Dependencies and Split Review
+
+- Reused the existing one AgentLoop, ModelProvider/ToolExecutor Ports, Session Reducer and strict History pairing, RequestAudit reconstruction, Research reducer, ArtifactStore, ContextPlanner, Tool exposure and canonical BLAKE3/SHA-256 owners. Session gained crate-private Event-ID/Receipt projections only so Trace validation can reference existing facts without parsing payloads or creating another reducer.
+- Public production growth is limited to the versioned Trace fixture, derived Replay/Eval result contracts, fixed Replay Adapters, App service and one concrete composition root. Each has a current Mechanical Replay, Context Recompile, Shadow Eval or integration-test consumer; internal source projections, plan parts and replay-only cancelled-output construction remain `pub(crate)`.
+- No Cargo dependency, feature, persisted Event/Blob/Cache/configuration, Provider DTO, credential reference, database, remote service or second store was added. The implementation reuses the existing `sha2` dependency for required Artifact Blob verification and the existing canonical BLAKE3 owner for source identity.
+- `service.rs` is 337 lines and was split-reviewed. Its single change reason is read-only preparation from validated facts; Artifact verification and Tool-step pairing remain private stages because extracting them would expose internal plans or create a service without another consumer. Split when a second Trace source or preparation consumer proves a distinct boundary. `manifest.rs` is 309 lines after source validation was already separated; it remains one cohesive versioned schema, accessors and structural validation owner. Neither file mixes filesystem/network/process I/O with Domain rules.
+- Codex classification is `REIMPLEMENT`: no Codex source, test framework or workspace dependency was copied, so `UPSTREAM_PORT_LEDGER.md` and license notices are unchanged.
+
+#### Test Layout and Verification
+
+- Permanent regressions live in `tests/trace_replay.rs`; fixed source Events, audit Blobs, required Artifact bytes and manifest anchors live once under `tests/fixtures/m4_trace/`. The suite covers schema/reference/hash/range/order failures, fresh Session reduction equality, required Blob read/size/SHA-256 validation, Full-only capabilities, exact requests, fixed exposure, multi-Tool ordering, complete source versus derived Replay Receipts, cache-hit Receipts and complete step consumption.
+- Mechanical Replay proves zero real Provider/Tool action; Context Recompile proves historical RequestAudit immutability; Shadow Eval uses a caller-supplied Provider with Replay-only Tools, terminates unmatched calls before later action and keeps every result `NonEvidence`. One synthetic OpenAI Shadow smoke remains ignored and requires both the existing live-test switch and dedicated Cyber Agent OpenAI credential path.
+- Final local Gate passes on Rust `1.93.1`: formatting, denied-warning Clippy, 288 discovered tests with 286 default-enabled tests passing and two OpenAI Live smokes ignored, locked build, production inline-test, forbidden Codex dependency, credential/key, Provider-wire/dependency-direction, one-AgentLoop/no-second-store, `git diff --check` and clean fixed `codex/` scans. Terra xhigh implemented the bounded path; main review closed source identity, Receipt provenance, Blob validation, exposure, capability and ordering gaps; Luna xhigh returned final `APPROVE` with no unresolved P0/P1.
+
+#### Removed and Deferred
+
+- Rejected a second Trace/Event/Eval fact store, dataset database, general model router, Hook/Registry, real Tool fallback and independent pairing/hash/capability owners. Replay Plans and results remain in-memory derived values, and historical Receipts are never rewritten as current execution effects.
+- Removed or corrected the earlier source-session-only Eval identity, derived Receipts that could imply historical Artifact/cache/file mutations, trust in Artifact metadata without reading the Blob, Replay exposure that could consume hidden steps, incremental capability claims without continuation identity, mutable manifest field naming and unordered Receipt matching.
+- Deferred exactly as scope-locked: persisted Eval datasets/results, incremental semantic Replay, alternate Provider Adapters, M4-S3 Observation/TargetDelta, M4-S4 CLI Chat/long-flow composition, real target research and live compatibility for the supplied non-OpenAI credential. A future Full/Incremental Trace format requires a new proven contract rather than silently widening v1.
+- No M4-S3/M4-S4 production code, Prompt loader/DSL, general workflow engine, database, telemetry, cloud service, multi-Agent runtime, Codex source change or Codex credential/login access exists in this Slice.
 
 ### M4-S1 Lean Review
 
@@ -712,10 +755,18 @@ The M4-S1 seal requested by the current user instruction is complete. No impleme
 - None for M3-S3d; implementation PR `#37`, status PR `#38` and the single required PR-head Gate are complete.
 - None for M3-S4; implementation PR `#39`, status PR `#40` and the single required PR-head Gate are complete.
 - None for M4-S1; implementation PR `#42`, exact-head CI, implementation merge and separate status PR `#43` complete the remote seal.
+- None for M4-S2 local implementation: the complete Cargo/Lean Gate and final independent review pass. The implementation PR, sole PR-head CI, Squash Merge and separate status seal are pending as the remaining authorized delivery work.
 - Live Provider compatibility remains unverified by design; missing live credentials do not block offline development and no Codex credential is an allowed substitute.
 
 ## Last Verification
 
+- M4-S2 local Gate: PASS on Rust `1.93.1`; formatting, denied-warning Clippy, 288 discovered tests with 286 default-enabled tests passing and two ignored OpenAI Live smokes, locked build, inline-test, forbidden Codex dependency, credential/key, Provider-wire/dependency-direction, one-AgentLoop/no-second-store, `git diff --check` and clean fixed `codex/` scans all passed.
+- M4-S2 Trace Gate: PASS; one reference-only fixture is bound to the complete source Session hash, fresh reduced projection, exact Event range, Target/Artifact facts, ordered full RequestAudit/History samples and source-call-ordered Receipts. Required Artifact bytes are reread from the existing store and checked by size and SHA-256.
+- M4-S2 Replay Gate: PASS; Mechanical Replay consumes exact Full model requests and fixed Replay Tool steps with zero external action. Tool exposure is honored without consuming hidden/delayed steps, unmatched calls terminate immediately, complete historical Receipts remain source provenance and derived replay Receipts assert only current replay effects.
+- M4-S2 Context/Shadow Gate: PASS; Context Recompile compares a current candidate to one exact historical RequestAudit without mutation. Shadow Eval accepts only a caller-supplied model plus ReplayToolExecutor, requires complete Tool-step consumption and returns an EvalSource-bound `NonEvidence` result with no formal fact writer.
+- M4-S2 review: Terra xhigh implemented the bounded path. Main review fixed exact source/Eval identity, Receipt provenance, required Blob verification, exposure, Full-only capability truthfulness, frozen field naming and multi-Tool order. Luna xhigh returned final `APPROVE` with no unresolved P0/P1.
+- M4-S2 Live Test: `NOT_RUN_INCOMPATIBLE_PROVIDER`; the only production live Adapter is OpenAI Responses while the available dedicated key targets another Provider protocol. No credential was read, logged, persisted, aliased across Provider roles or sourced from Codex login state.
+- M4-S2 remote Gate: PENDING; implementation commit/PR, sole PR-head macOS Gate, Squash Merge and separate `[skip ci]` status seal have not yet run.
 - M4-S1 local Gate: PASS on Rust `1.93.1`; formatting, denied-warning Clippy, 266 offline/local tests plus one ignored existing synthetic Live Smoke, locked build, inline-test scan, forbidden Codex dependency scan, credential/general-registry review, `git diff --check` and the clean fixed `codex/` reference check all passed.
 - M4-S1 Profile Gate: PASS; the exact four compile-time Markdown Profiles map one-to-one to Source/Web/Mobile/Binary, exclude Firmware, preserve direct command access, keep multimodal access direct where routinely relevant, compose through one Turn-boundary AgentLoop path and invalidate the existing Context identity when Mode generation changes.
 - M4-S1 controlled-case Gate: PASS; twelve synthetic offline fixtures form positive, negative and tampered/environment controls, bind unique same-Profile relationships, verify fixed manifest and per-file SHA-256 identities and cover Candidate/Reproduced/Confirmed without treating model output as fact.

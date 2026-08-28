@@ -47,6 +47,15 @@ pub use compaction::{
     SessionCompaction, SessionSummary, SessionSummaryDraft, UnfinishedExecutionRef,
 };
 
+/// A read-only projection of one existing Receipt fact. It deliberately
+/// retains the original Event identity instead of introducing another Receipt
+/// schema for replay consumers.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SessionExecutionReceiptRecord {
+    pub(crate) event_id: EventId,
+    pub(crate) receipt: ExecutionReceipt,
+}
+
 /// The distinct lifecycle state reconstructed from a Session stream.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SessionLifecycle {
@@ -270,8 +279,10 @@ pub struct SessionState {
     primary_provider_session: Option<ProviderSessionRef>,
     used_primary_provider_session_ids: BTreeSet<ProviderSessionId>,
     history: ConversationHistory,
+    history_event_ids: Vec<EventId>,
     resume_count: u64,
     execution_receipt_count: u64,
+    execution_receipts: Vec<SessionExecutionReceiptRecord>,
     cache_hit_count: u64,
     recovery_count: u64,
     latest_compaction: Option<SessionCompaction>,
@@ -290,8 +301,10 @@ impl Default for SessionState {
             primary_provider_session: None,
             used_primary_provider_session_ids: BTreeSet::new(),
             history: ConversationHistory::default(),
+            history_event_ids: Vec::new(),
             resume_count: 0,
             execution_receipt_count: 0,
+            execution_receipts: Vec::new(),
             cache_hit_count: 0,
             recovery_count: 0,
             latest_compaction: None,
@@ -344,6 +357,20 @@ impl SessionState {
 
     pub const fn execution_receipt_count(&self) -> u64 {
         self.execution_receipt_count
+    }
+
+    /// Existing Receipt facts in append order, with their authoritative Event
+    /// identities. This is derived strictly through the Session reducer.
+    pub(crate) fn execution_receipts(&self) -> &[SessionExecutionReceiptRecord] {
+        &self.execution_receipts
+    }
+
+    /// Existing History facts in append order paired with their authoritative
+    /// Event identities, without duplicating the stored ContentItems.
+    pub(crate) fn history_items_with_event_ids(
+        &self,
+    ) -> impl Iterator<Item = (&EventId, &ContentItem)> {
+        self.history_event_ids.iter().zip(self.history.items())
     }
 
     pub const fn cache_hit_count(&self) -> u64 {
@@ -585,12 +612,24 @@ fn apply_session_event(
             require_transition(state.lifecycle, "session.ended", SessionLifecycle::Active)?;
             state.lifecycle = SessionLifecycle::Ended;
         }
-        SessionEvent::ExecutionReceiptRecorded { .. } => {
+        SessionEvent::ExecutionReceiptRecorded { receipt } => {
             state.execution_receipt_count =
                 increment("execution receipt count", state.execution_receipt_count)?;
+            state
+                .execution_receipts
+                .push(SessionExecutionReceiptRecord {
+                    event_id: event_id.clone(),
+                    receipt,
+                });
         }
-        SessionEvent::ToolResultCacheHit { .. } => {
+        SessionEvent::ToolResultCacheHit { receipt } => {
             state.cache_hit_count = increment("cache hit count", state.cache_hit_count)?;
+            state
+                .execution_receipts
+                .push(SessionExecutionReceiptRecord {
+                    event_id: event_id.clone(),
+                    receipt,
+                });
         }
         SessionEvent::StreamRecovered { .. } => {
             state.recovery_count = increment("recovery count", state.recovery_count)?;
@@ -602,6 +641,7 @@ fn apply_session_event(
                 SessionLifecycle::Active,
             )?;
             state.history.append_content_item(item)?;
+            state.history_event_ids.push(event_id.clone());
             if state.latest_compaction.is_some() {
                 state.normalized_history_items()?;
             }

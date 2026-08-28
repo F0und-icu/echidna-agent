@@ -21,6 +21,7 @@ pub mod research_profile;
 pub mod session;
 pub mod snapshot;
 pub mod tools;
+pub mod trace_eval;
 pub mod vision;
 pub mod world_state;
 

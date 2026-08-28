@@ -1,0 +1,303 @@
+[
+  {
+    "schema_family": "cyber-agent.event",
+    "schema_version": 1,
+    "event_id": "started",
+    "stream_id": "session:m4-trace",
+    "sequence": 1,
+    "occurred_at": "2026-08-28T00:00:00Z",
+    "event_type": "session.started",
+    "payload": {
+      "primary_provider_session": {
+        "generation": 1,
+        "id": "primary-trace",
+        "role": "primary"
+      },
+      "schema_version": 1
+    }
+  },
+  {
+    "schema_family": "cyber-agent.event",
+    "schema_version": 1,
+    "event_id": "audit-one",
+    "stream_id": "session:m4-trace",
+    "sequence": 2,
+    "occurred_at": "2026-08-28T00:00:01Z",
+    "event_type": "session.request_audit_recorded",
+    "payload": {
+      "adapter_version": "fixture-adapter-v1",
+      "audit_event_id": "audit-one",
+      "binding": {
+        "project_id": "trace-project",
+        "session_stream_id": "session:m4-trace"
+      },
+      "capability_mapping": {
+        "semantic_hash": "8d03b9f1d04dc65efb882aa4d8e47b5f9b4b06ba81b0e33da0b16b15900d7027",
+        "version": 1
+      },
+      "components": [
+        {
+          "blob_id": "d9e6ceb9af335bcf4ed75530515c9f0983ee309c4abd417b1885d5569d965de4",
+          "identity": {
+            "kind": "instructions"
+          },
+          "position": 0,
+          "semantic_hash": "b92fd9c2f5ea0dcf935fec8c782ee95ebfd35067f1eb8dfa50397572dabcb4cd",
+          "size_bytes": 18,
+          "source": "rendered_instructions"
+        },
+        {
+          "blob_id": "6feef62881297d1eb4daf426898d0587fad0e024e1f00432b9bef7cc99fa39e1",
+          "identity": {
+            "index": 0,
+            "kind": "content_item"
+          },
+          "position": 1,
+          "semantic_hash": "a41f784c689b42827fdb567d940712cc7cc568b46f3acee61d7bdb36bd628f1d",
+          "size_bytes": 54,
+          "source": "rendered_content_item"
+        },
+        {
+          "blob_id": "fa1b5ee4f18206a296494ef369e8334e2c7b4bf866ed25c77360e71bda200102",
+          "identity": {
+            "index": 0,
+            "kind": "tool_spec"
+          },
+          "position": 2,
+          "semantic_hash": "a6ab1640244c75eb2a8f3024ea2f8268a8064c88c48c0270b673152434b86653",
+          "size_bytes": 390,
+          "source": "rendered_tool_spec"
+        },
+        {
+          "blob_id": "17033fa8253b1fdb5db7c8ce53952bc47eb75156c98bbc0b638f11ea88dfabdc",
+          "identity": {
+            "kind": "request_requirements"
+          },
+          "position": 3,
+          "semantic_hash": "300a808def73d22a086afabf3bd0d3ece345a787b9a318d3fbc42679f9979cf7",
+          "size_bytes": 94,
+          "source": "rendered_request_requirements"
+        }
+      ],
+      "delivered_input": {
+        "schema_version": 2,
+        "semantic_hash": "4e33e2ec5847bedab8809c13e1aeda478e9687eb9f7236db19b0cbfdc5d37ca3"
+      },
+      "delivery": {
+        "mode": "full",
+        "reason": {
+          "full": "NO_BASELINE"
+        }
+      },
+      "full_logical_input": {
+        "schema_version": 2,
+        "semantic_hash": "4e33e2ec5847bedab8809c13e1aeda478e9687eb9f7236db19b0cbfdc5d37ca3"
+      },
+      "model": {
+        "model_id": "model",
+        "provider_id": "fixture"
+      },
+      "profile": {
+        "generation": 1,
+        "id": "fixture-profile"
+      },
+      "schema_version": 1
+    }
+  },
+  {
+    "schema_family": "cyber-agent.event",
+    "schema_version": 1,
+    "event_id": "model-call-one",
+    "stream_id": "session:m4-trace",
+    "sequence": 3,
+    "occurred_at": "2026-08-28T00:00:00Z",
+    "event_type": "session.history_item_recorded",
+    "payload": {
+      "item": {
+        "call": {
+          "arguments": {
+            "path": "fixture.txt"
+          },
+          "call_id": "call-read",
+          "name": "replay_read"
+        },
+        "kind": "tool_call"
+      },
+      "schema_version": 1
+    }
+  },
+  {
+    "schema_family": "cyber-agent.event",
+    "schema_version": 1,
+    "event_id": "receipt-one",
+    "stream_id": "session:m4-trace",
+    "sequence": 4,
+    "occurred_at": "2026-08-28T00:00:00Z",
+    "event_type": "tool.execution_receipt_recorded",
+    "payload": {
+      "receipt": {
+        "cache_source": null,
+        "cache_validation": null,
+        "environment_change": null,
+        "execution_id": "execution:call-read",
+        "exit_reason": null,
+        "file_mutations": [],
+        "output_artifact_ids": [],
+        "plan_fingerprint": "source-plan-fingerprint",
+        "rerun_reason": null,
+        "status": "succeeded"
+      },
+      "schema_version": 1
+    }
+  },
+  {
+    "schema_family": "cyber-agent.event",
+    "schema_version": 1,
+    "event_id": "tool-result-one",
+    "stream_id": "session:m4-trace",
+    "sequence": 5,
+    "occurred_at": "2026-08-28T00:00:00Z",
+    "event_type": "session.history_item_recorded",
+    "payload": {
+      "item": {
+        "kind": "tool_result",
+        "result": {
+          "call_id": "call-read",
+          "output": {
+            "content": "fixed historical output"
+          },
+          "status": "succeeded",
+          "tool_name": "replay_read"
+        }
+      },
+      "schema_version": 1
+    }
+  },
+  {
+    "schema_family": "cyber-agent.event",
+    "schema_version": 1,
+    "event_id": "audit-two",
+    "stream_id": "session:m4-trace",
+    "sequence": 6,
+    "occurred_at": "2026-08-28T00:00:02Z",
+    "event_type": "session.request_audit_recorded",
+    "payload": {
+      "adapter_version": "fixture-adapter-v1",
+      "audit_event_id": "audit-two",
+      "binding": {
+        "project_id": "trace-project",
+        "session_stream_id": "session:m4-trace"
+      },
+      "capability_mapping": {
+        "semantic_hash": "8d03b9f1d04dc65efb882aa4d8e47b5f9b4b06ba81b0e33da0b16b15900d7027",
+        "version": 1
+      },
+      "components": [
+        {
+          "blob_id": "d9e6ceb9af335bcf4ed75530515c9f0983ee309c4abd417b1885d5569d965de4",
+          "identity": {
+            "kind": "instructions"
+          },
+          "position": 0,
+          "semantic_hash": "b92fd9c2f5ea0dcf935fec8c782ee95ebfd35067f1eb8dfa50397572dabcb4cd",
+          "size_bytes": 18,
+          "source": "rendered_instructions"
+        },
+        {
+          "blob_id": "6feef62881297d1eb4daf426898d0587fad0e024e1f00432b9bef7cc99fa39e1",
+          "identity": {
+            "index": 0,
+            "kind": "content_item"
+          },
+          "position": 1,
+          "semantic_hash": "a41f784c689b42827fdb567d940712cc7cc568b46f3acee61d7bdb36bd628f1d",
+          "size_bytes": 54,
+          "source": "rendered_content_item"
+        },
+        {
+          "blob_id": "1b4c9b094f7bdc48c6ce4dd43e98ba6296d9439fe29b5febe01b4cb42afae902",
+          "identity": {
+            "index": 1,
+            "kind": "content_item"
+          },
+          "position": 2,
+          "semantic_hash": "a9c3e86897c87127230ad3c743271dc91b95660eece4d71269a804e87b2e2ca0",
+          "size_bytes": 107,
+          "source": "rendered_content_item"
+        },
+        {
+          "blob_id": "46e182643c3380737f818a3383b1cc936315a764dbd20031fa60796db6aeecaa",
+          "identity": {
+            "index": 2,
+            "kind": "content_item"
+          },
+          "position": 3,
+          "semantic_hash": "018f6aaf76b7881d89c110fef6f3b703c91e5fa0f5b08b40cc7b5e9ce6b0838b",
+          "size_bytes": 149,
+          "source": "rendered_content_item"
+        },
+        {
+          "blob_id": "fa1b5ee4f18206a296494ef369e8334e2c7b4bf866ed25c77360e71bda200102",
+          "identity": {
+            "index": 0,
+            "kind": "tool_spec"
+          },
+          "position": 4,
+          "semantic_hash": "a6ab1640244c75eb2a8f3024ea2f8268a8064c88c48c0270b673152434b86653",
+          "size_bytes": 390,
+          "source": "rendered_tool_spec"
+        },
+        {
+          "blob_id": "17033fa8253b1fdb5db7c8ce53952bc47eb75156c98bbc0b638f11ea88dfabdc",
+          "identity": {
+            "kind": "request_requirements"
+          },
+          "position": 5,
+          "semantic_hash": "300a808def73d22a086afabf3bd0d3ece345a787b9a318d3fbc42679f9979cf7",
+          "size_bytes": 94,
+          "source": "rendered_request_requirements"
+        }
+      ],
+      "delivered_input": {
+        "schema_version": 2,
+        "semantic_hash": "53ceab4aec66f304db96ee79cdb0520104a71769e402210c694c1c8eaff56f18"
+      },
+      "delivery": {
+        "mode": "full",
+        "reason": {
+          "full": "NO_BASELINE"
+        }
+      },
+      "full_logical_input": {
+        "schema_version": 2,
+        "semantic_hash": "53ceab4aec66f304db96ee79cdb0520104a71769e402210c694c1c8eaff56f18"
+      },
+      "model": {
+        "model_id": "model",
+        "provider_id": "fixture"
+      },
+      "profile": {
+        "generation": 1,
+        "id": "fixture-profile"
+      },
+      "schema_version": 1
+    }
+  },
+  {
+    "schema_family": "cyber-agent.event",
+    "schema_version": 1,
+    "event_id": "model-text-two",
+    "stream_id": "session:m4-trace",
+    "sequence": 7,
+    "occurred_at": "2026-08-28T00:00:00Z",
+    "event_type": "session.history_item_recorded",
+    "payload": {
+      "item": {
+        "kind": "text",
+        "role": "assistant",
+        "text": "fixed replay conclusion"
+      },
+      "schema_version": 1
+    }
+  }
+]
