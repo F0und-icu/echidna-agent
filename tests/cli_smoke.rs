@@ -1,6 +1,9 @@
+#[path = "support/provider_config.rs"]
+mod provider_config;
 mod support;
 
 use std::process::Command;
+use std::{fs, path::Path};
 
 use support::TemporaryDirectory;
 
@@ -63,6 +66,132 @@ fn doctor_without_configuration_returns_structured_diagnostics() {
     assert_eq!(report["command"], "doctor");
     assert_eq!(report["status"], "not_ready");
     assert_eq!(report["diagnostics"].as_array().map(Vec::len), Some(2));
+}
+
+fn write_provider_config(directory: &Path) -> std::path::PathBuf {
+    let path = directory.join("provider-config.toml");
+    fs::write(&path, provider_config::fixture()).unwrap();
+    path
+}
+
+#[test]
+fn doctor_accepts_an_inline_api_key_without_displaying_it() {
+    let directory = TemporaryDirectory::new("cli-provider-inline-api-key");
+    let secret = "fixture-inline-doctor-secret";
+    let config = directory.path().join("provider-config.toml");
+    fs::write(
+        &config,
+        provider_config::fixture().replacen(
+            "credential_ref = \"CYBER_AGENT_PRIMARY_API_KEY\"",
+            &format!("api_key = \"{secret}\""),
+            1,
+        ),
+    )
+    .unwrap();
+
+    let doctor = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+        .args(["--config", config.to_str().unwrap(), "doctor"])
+        .env_remove("CYBER_AGENT_PRIMARY_API_KEY")
+        .output()
+        .unwrap();
+    assert!(doctor.status.success());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&doctor.stdout).unwrap()["status"],
+        "ready"
+    );
+    assert!(!String::from_utf8_lossy(&doctor.stdout).contains(secret));
+    assert!(!String::from_utf8_lossy(&doctor.stderr).contains(secret));
+}
+
+#[test]
+fn doctor_and_chat_share_the_explicit_provider_configuration_path_without_a_credential() {
+    let directory = TemporaryDirectory::new("cli-provider-config");
+    let config = write_provider_config(directory.path());
+
+    let doctor = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+        .args(["--config", config.to_str().unwrap(), "doctor"])
+        .env_remove("CYBER_AGENT_PRIMARY_API_KEY")
+        .env("OPENAI_API_KEY", "must-not-be-read")
+        .output()
+        .expect("configured doctor should run");
+    assert!(doctor.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&doctor.stdout).unwrap();
+    assert_eq!(report["status"], "ready");
+    assert_eq!(report["diagnostics"], serde_json::json!([]));
+    assert_eq!(report["agent_profile"]["profile_id"], "default");
+    assert_eq!(report["agent_profile"]["primary_profile_id"], "primary");
+    assert_eq!(report["agent_profile"]["vision_profile_id"], "vision");
+
+    let initialized = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+        .current_dir(directory.path())
+        .arg("init")
+        .output()
+        .expect("cyber-agent init should run");
+    assert!(initialized.status.success());
+
+    let chat = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+        .current_dir(directory.path())
+        .args(["chat", "--config", config.to_str().unwrap()])
+        .env_remove("CYBER_AGENT_PRIMARY_API_KEY")
+        .env("OPENAI_API_KEY", "must-not-be-read")
+        .output()
+        .expect("configured shell-only chat should run");
+    assert!(chat.status.success());
+    let output = String::from_utf8(chat.stdout).unwrap();
+    assert!(output.contains("Started session"));
+    assert!(output.contains("EOF received"));
+    assert!(directory.path().join(".cyber-agent/project.toml").is_file());
+}
+
+#[test]
+fn chat_requires_an_initialized_project_and_does_not_create_one() {
+    let directory = TemporaryDirectory::new("cli-chat-project-required");
+    let config = write_provider_config(directory.path());
+
+    let chat = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+        .current_dir(directory.path())
+        .args(["chat", "--config", config.to_str().unwrap()])
+        .output()
+        .expect("cyber-agent chat should run");
+
+    assert!(!chat.status.success());
+    assert!(
+        String::from_utf8(chat.stderr)
+            .unwrap()
+            .contains("no Cyber Agent project was found")
+    );
+    assert!(!directory.path().join(".cyber-agent").exists());
+}
+
+#[test]
+fn doctor_and_chat_reject_the_same_invalid_provider_configuration() {
+    let directory = TemporaryDirectory::new("cli-invalid-provider-config");
+    let config = directory.path().join("provider-config.toml");
+    fs::write(
+        &config,
+        provider_config::fixture().replacen(
+            "generation = 1",
+            "generation = 1\nunknown_setting = true",
+            1,
+        ),
+    )
+    .unwrap();
+
+    for command in ["doctor", "chat"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+            .args([command, "--config", config.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success(),
+            "{command} accepted invalid config"
+        );
+        assert!(
+            String::from_utf8(output.stderr)
+                .unwrap()
+                .contains("unknown field")
+        );
+    }
 }
 
 #[test]

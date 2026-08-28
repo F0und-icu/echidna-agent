@@ -47,6 +47,12 @@ pub enum ProjectEventStoreError {
         #[source]
         source: io::Error,
     },
+    #[error("Chat runtime is already active for `{project_root}`: {source}")]
+    ChatRuntimeLocked {
+        project_root: PathBuf,
+        #[source]
+        source: io::Error,
+    },
     #[error("initialized project Research Event stream `{path}` is missing")]
     MissingResearchStream { path: PathBuf },
     #[error("initialized project Research Event stream `{path}` is not a regular file")]

@@ -85,10 +85,9 @@ pub(super) async fn execute_batch<Tools: ToolExecutor + ?Sized>(
                     completed_receipts.insert(key, outcome.clone());
                 }
                 for follower in &followers[index] {
-                    outcomes[*follower] = Some(ToolExecutionOutcome::deduplicated_for(
-                        &plans[*follower],
-                        &outcome,
-                    ));
+                    let follower_outcome =
+                        ToolExecutionOutcome::deduplicated_for(&plans[*follower], &outcome);
+                    outcomes[*follower] = Some(follower_outcome);
                 }
                 outcomes[index] = Some(outcome);
             }
@@ -103,22 +102,16 @@ pub(super) async fn execute_batch<Tools: ToolExecutor + ?Sized>(
         // still paired before the AgentLoop returns its cancellation outcome.
         for (index, outcome) in outcomes.iter_mut().enumerate() {
             if outcome.is_none() {
-                *outcome = Some(ToolExecutionOutcome::cancelled(
-                    plans[index].clone(),
-                    "agent_cancelled",
-                ));
+                let cancelled =
+                    ToolExecutionOutcome::cancelled(plans[index].clone(), "agent_cancelled");
+                *outcome = Some(cancelled);
             }
         }
     }
 
     let outcomes = outcomes
         .into_iter()
-        .enumerate()
-        .map(|(index, outcome)| {
-            outcome.unwrap_or_else(|| {
-                ToolExecutionOutcome::cancelled(plans[index].clone(), "scheduler_incomplete")
-            })
-        })
+        .map(|outcome| outcome.expect("the scheduler completes or cancels every staged Tool plan"))
         .collect();
     ScheduledToolBatch {
         outcomes,

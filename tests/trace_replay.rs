@@ -1,12 +1,12 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::path::{Component, Path};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
+
+#[path = "support/live_provider.rs"]
+mod live_provider;
 
 use base64::Engine;
-use cyber_agent::adapters::openai::{
-    OpenAiResponsesAdapter, OpenAiResponsesConfig, ProcessEnvironmentCredentialSource,
-};
 use cyber_agent::adapters::replay::{
     ReplayAdapterError, ReplayModelProvider, ReplayModelStep, ReplayToolExecutor, ReplayToolStep,
 };
@@ -44,7 +44,7 @@ use cyber_agent::domain::tools::{
 };
 use cyber_agent::domain::trace_eval::{
     EvalEvidence, EvalSource, TraceEventRange, TraceExpectedInvariant, TraceFixtureError,
-    TraceFixtureManifest, TraceProviderEventReference,
+    TraceFixtureManifest, TraceProviderEventReference, TraceReplayModelStep, TraceReplayPlanError,
 };
 use cyber_agent::ports::artifact::{ArtifactStore, StoredBlob};
 use cyber_agent::ports::model::{
@@ -62,6 +62,24 @@ const SESSION_ID: &str = "session:m4-trace";
 const FIXTURE_DIRECTORY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/m4_trace");
 const FIXTURE_SUITE_SHA256: &str =
     "6c300dec946e83729175babae7d2633dc1cba5ae8eb56fcac8d6cbfd3fbf54a6";
+
+#[test]
+fn reasoning_without_assistant_output_is_not_a_replay_semantic_sample() {
+    let input = ModelInputIR::current(
+        "fixed replay input",
+        vec![ContentItem::user_text("inspect fixture")],
+        ModelRequestRequirements::default(),
+    );
+    assert_eq!(
+        TraceReplayModelStep::new(
+            input,
+            vec![ModelEvent::ReasoningDelta {
+                text: "private working text".to_owned(),
+            }],
+        ),
+        Err(TraceReplayPlanError::ModelStepHasNoSemanticOutput)
+    );
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum BlobFailure {
@@ -1369,28 +1387,16 @@ async fn replay_use_keeps_complete_source_receipt_separate_from_derived_receipt(
 }
 
 #[tokio::test]
-#[ignore = "requires explicit CYBER_AGENT_LIVE_TESTS=1 and a dedicated OpenAI test key"]
-async fn synthetic_openai_shadow_live_smoke_uses_only_fixed_replay_tools() {
+#[ignore = "requires explicit CYBER_AGENT_LIVE_TESTS=1 and a configured dedicated test key"]
+async fn synthetic_shadow_live_smoke_uses_composition_and_only_fixed_replay_tools() {
     if std::env::var("CYBER_AGENT_LIVE_TESTS").as_deref() != Ok("1") {
         return;
     }
-    let model = std::env::var("CYBER_AGENT_OPENAI_LIVE_MODEL")
-        .expect("CYBER_AGENT_OPENAI_LIVE_MODEL must select the Shadow live-test model");
     let fixture = load_fixed_source_fixture();
     let prepared = prepare_fixture(&fixture);
-    let provider = OpenAiResponsesAdapter::new(
-        OpenAiResponsesConfig::new(
-            "https://api.openai.com/v1",
-            model,
-            ModelCapabilities {
-                usage_reporting: true,
-                ..capabilities()
-            },
-        ),
-        Arc::new(ProcessEnvironmentCredentialSource),
-    );
+    let composition = live_provider::load();
     let mut agent = AgentLoop::new(
-        &provider,
+        composition.primary_provider(),
         prepared.tool_executor(),
         "This is an isolated protocol test. First call replay_read exactly once with the JSON arguments {\"path\":\"fixture.txt\"}. After its result, reply with LIVE_SHADOW_OK. Do not call any other Tool.",
     );

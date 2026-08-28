@@ -1,18 +1,25 @@
 use std::ffi::OsString;
 use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 use thiserror::Error;
 
 use crate::adapters::project_event_store::{Project, ProjectEventStoreError};
+use crate::app::doctor::{AgentProfileDoctorReport, inspect_agent_model_profile};
+use crate::domain::research_profile::ResearchProfile;
+use crate::provider_composition::{ProviderComposition, ProviderCompositionError};
 
 pub mod adapters;
 pub mod app;
 pub mod domain;
 pub mod ports;
+pub mod provider_composition;
 pub mod trace_eval_runtime;
 
+mod cli_chat;
 mod cli_inspection;
 
 #[derive(Debug, Parser)]
@@ -22,6 +29,9 @@ mod cli_inspection;
     about = "Local-first vulnerability research agent"
 )]
 pub struct Cli {
+    /// Load the explicit Cyber Agent Provider configuration from this path.
+    #[arg(long, global = true, value_name = "PATH")]
+    config: Option<PathBuf>,
     #[command(subcommand)]
     command: Option<CliCommand>,
 }
@@ -31,7 +41,14 @@ enum CliCommand {
     /// Initialize the current directory as a Cyber Agent project.
     Init,
     /// Start an interactive research session.
-    Chat,
+    Chat {
+        /// Explicitly resume this durable Session instead of starting a new one.
+        #[arg(long, value_name = "SESSION_ID")]
+        session: Option<String>,
+        /// Fixed vulnerability-research prompt Profile for this Chat process.
+        #[arg(long, value_enum, default_value_t = CliResearchProfile::Source)]
+        profile: CliResearchProfile,
+    },
     /// Inspect local configuration and runtime readiness.
     Doctor,
     /// Inspect the most recently committed audited request.
@@ -52,6 +69,25 @@ enum CliCommand {
         #[command(subcommand)]
         inspection: InspectCommand,
     },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum CliResearchProfile {
+    Source,
+    Web,
+    Mobile,
+    Binary,
+}
+
+impl From<CliResearchProfile> for ResearchProfile {
+    fn from(value: CliResearchProfile) -> Self {
+        match value {
+            CliResearchProfile::Source => Self::Source,
+            CliResearchProfile::Web => Self::Web,
+            CliResearchProfile::Mobile => Self::Mobile,
+            CliResearchProfile::Binary => Self::Binary,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -80,6 +116,14 @@ pub enum CliError {
     WorkingDirectory(#[source] io::Error),
     #[error(transparent)]
     Project(#[from] ProjectEventStoreError),
+    #[error(transparent)]
+    ProviderComposition(#[from] ProviderCompositionError),
+    #[error("chat requires one explicit --config <path> Provider configuration")]
+    ChatConfigurationRequired,
+    #[error("failed to build the local chat runtime: {0}")]
+    ChatRuntime(#[source] io::Error),
+    #[error("chat failed: {message}")]
+    Chat { message: String },
     #[error("Session `{session_id}` does not exist in the current project")]
     SessionNotFound { session_id: String },
     #[error(
@@ -100,6 +144,8 @@ struct DoctorReport {
     command: &'static str,
     status: &'static str,
     diagnostics: Vec<Diagnostic>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_profile: Option<AgentProfileDoctorReport>,
 }
 
 #[derive(Debug, Serialize)]
@@ -117,36 +163,49 @@ struct InitResponse {
     project_root: String,
 }
 
-fn doctor_report() -> DoctorReport {
-    DoctorReport {
-        command: "doctor",
-        status: "not_ready",
-        diagnostics: vec![
-            Diagnostic {
-                code: "PROJECT_NOT_INITIALIZED",
-                severity: "info",
-                message: "no .cyber-agent/project.toml is configured for this project",
-            },
-            Diagnostic {
-                code: "PROVIDER_NOT_CONFIGURED",
-                severity: "info",
-                message: "no Cyber Agent ModelProvider profile is configured",
-            },
-        ],
+fn doctor_report(composition: Option<&ProviderComposition>) -> DoctorReport {
+    match composition {
+        Some(composition) => DoctorReport {
+            command: "doctor",
+            status: "ready",
+            diagnostics: Vec::new(),
+            agent_profile: Some(inspect_agent_model_profile(composition.agent_profile())),
+        },
+        None => DoctorReport {
+            command: "doctor",
+            status: "not_ready",
+            diagnostics: vec![
+                Diagnostic {
+                    code: "PROJECT_NOT_INITIALIZED",
+                    severity: "info",
+                    message: "no .cyber-agent/project.toml is configured for this project",
+                },
+                Diagnostic {
+                    code: "PROVIDER_NOT_CONFIGURED",
+                    severity: "info",
+                    message: "no explicit Provider configuration path was selected",
+                },
+            ],
+            agent_profile: None,
+        },
     }
+}
+
+fn load_provider_composition(
+    path: Option<&Path>,
+) -> Result<Option<ProviderComposition>, ProviderCompositionError> {
+    path.map(|path| {
+        ProviderComposition::load(
+            path,
+            Arc::new(adapters::credentials::ProcessEnvironmentCredentialSource),
+        )
+    })
+    .transpose()
 }
 
 fn print_json<T: Serialize>(value: &T) -> Result<(), CliError> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
-}
-
-fn print_shell_response(command: &'static str, message: &'static str) -> Result<(), CliError> {
-    print_json(&ShellResponse {
-        command,
-        status: "shell_only",
-        message,
-    })
 }
 
 fn print_no_active_context() -> Result<(), CliError> {
@@ -168,6 +227,37 @@ fn initialize_current_project() -> Result<(), CliError> {
     })
 }
 
+fn discover_current_project() -> Result<Project, CliError> {
+    let root = std::env::current_dir().map_err(CliError::WorkingDirectory)?;
+    Project::discover(&root).map_err(CliError::from)
+}
+
+fn run_chat(
+    config: Option<&Path>,
+    session: Option<String>,
+    profile: CliResearchProfile,
+) -> Result<(), CliError> {
+    let config = config.ok_or(CliError::ChatConfigurationRequired)?;
+    let composition = load_provider_composition(Some(config))?
+        .expect("an explicit chat configuration always composes one Provider");
+    let project = discover_current_project()?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .map_err(CliError::ChatRuntime)?;
+    runtime
+        .block_on(cli_chat::run(
+            project,
+            &composition,
+            session,
+            profile.into(),
+        ))
+        .map_err(|error| CliError::Chat {
+            message: error.to_string(),
+        })
+}
+
 pub fn run<I, T>(args: I) -> Result<(), CliError>
 where
     I: IntoIterator<Item = T>,
@@ -177,11 +267,13 @@ where
 
     match cli.command {
         Some(CliCommand::Init) => initialize_current_project(),
-        Some(CliCommand::Chat) => print_shell_response(
-            "chat",
-            "interactive chat is reserved for a later implementation slice",
-        ),
-        Some(CliCommand::Doctor) => print_json(&doctor_report()),
+        Some(CliCommand::Chat { session, profile }) => {
+            run_chat(cli.config.as_deref(), session, profile)
+        }
+        Some(CliCommand::Doctor) => {
+            let composition = load_provider_composition(cli.config.as_deref())?;
+            print_json(&doctor_report(composition.as_ref()))
+        }
         Some(CliCommand::Prompt {
             inspection: PromptCommand::Inspect { session },
         }) => cli_inspection::print_prompt_inspection(session.as_deref()),

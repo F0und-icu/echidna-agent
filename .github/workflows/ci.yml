@@ -38,6 +38,23 @@ jobs:
             exit 1
           fi
 
+      - name: Check generic Provider composition literals
+        run: |
+          if rg -n 'api\.(openai|deepseek)\.com|CYBER_AGENT_[A-Z0-9_]*MODEL' src tests; then
+            echo 'generic runtime and Live Smoke paths must obtain endpoint and model from Config v1' >&2
+            exit 1
+          fi
+
+      - name: Check one Responses protocol owner
+        run: |
+          if rg -n 'OpenAiResponses|DeepSeekResponses|adapters::(openai|deepseek)' src tests; then
+            echo 'Responses support is protocol-first; vendor Adapter bindings are forbidden' >&2
+            exit 1
+          fi
+          test "$(rg -l '\.bytes_stream\(\)\.eventsource\(\)' src/adapters --glob '*.rs' | wc -l | tr -d ' ')" = 1
+          test "$(rg -l 'struct ResponsesRequest' src/adapters --glob '*.rs' | wc -l | tr -d ' ')" = 1
+          test "$(rg -l 'fn decode_stream_event' src/adapters --glob '*.rs' | wc -l | tr -d ' ')" = 1
+
       - name: Lint
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
 

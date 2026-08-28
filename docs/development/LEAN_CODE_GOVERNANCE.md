@@ -25,7 +25,7 @@
 | `ModelInputIR`、`ModelEvent`、`ModelCapabilities` | `domain/model` | Adapter 只做 wire 编解码并调用统一校验 |
 | Provider-neutral Model Port 与通用 Provider 错误 | `ports/model` | Adapter 私有错误只在边界映射一次 |
 | Streaming 完成、断流和应用级取消 | `app/model_streaming` 或后续唯一 AgentLoop 服务 | Transport 只提供流、释放和协议错误 |
-| OpenAI/DeepSeek 请求、响应和 SSE DTO | 对应 `adapters/<provider>` | 不得进入 Domain 或 App 契约 |
+| Responses 请求、响应和 SSE DTO | `adapters/responses` | 不得进入 Domain 或 App 契约；Provider 配置不得复制协议类型 |
 | Tool 类型、Effect 和执行收据 | `domain/tools` | Tool Adapter 只执行并返回结果 |
 | Tool Call/Result 配对和 History 修复 | 一个纯 History Normalizer | AgentLoop、Context Planner、Adapter 不各自修复 |
 | Prompt Fragment、排序和上下文预算 | 一个 Context Compiler/Planner | Provider Adapter 只序列化最终 IR |
@@ -101,6 +101,17 @@ if rg -n '#\[cfg\(test\)\]|^[[:space:]]*mod[[:space:]]+tests[[:space:]]*[;{]' sr
   exit 1
 fi
 ```
+
+### 5.3 Provider 装配与 Live Test
+
+- `chat`、`doctor` 和每个通用 Live Smoke 必须调用同一个配置解析与 Provider Composition Root；不得各自创建 Adapter。
+- 通用运行路径不得出现 Provider 官方 URL、模型环境变量或隐式默认模型。协议专属离线 wire/contract fixture 可固定对应协议端点形状。
+- 协议 Adapter Contract Test 可以直接构造 Adapter；该例外不能扩展到 Live Smoke、CLI 或 App 服务。
+- Provider 配置必须且只能选择内联 `api_key` 或 `credential_ref`。引用式真实凭据只在显式 live `ModelProvider::stream` 路径惰性解析；内联值随配置解析进入进程，但 `doctor`、Mock、Fixture 和 Replay 不得发送或显示它。
+- 相同 Wire API 只有一个 request encoding、HTTP/SSE transport 和 response decoding 所有者，并复用同一 ModelProvider Contract Suite。
+- Provider URL、Model、凭据来源和 Capability Mapping 是配置数据，不构成厂商 binding。不得按品牌复制或包裹同一协议 Adapter；新代码必须由 fixture 证明真实 wire 差异。
+- 固定 Binding/Wire 枚举只能列出已经实现的协议路径；不得以未来扩展为理由加入动态 Registry、Router、Factory 插件或未消费配置。
+- Slice Lean Review 必须分别列出新增和删除的生产代码/装配点；协议泛化时必须删除被替代的厂商装配和命名。
 
 ## 6. Codex 借鉴和 PORT 准入
 

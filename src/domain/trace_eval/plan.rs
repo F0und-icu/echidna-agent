@@ -73,10 +73,12 @@ impl TraceReplayModelStep {
         expected_input: ModelInputIR,
         events: Vec<ModelEvent>,
     ) -> Result<Self, TraceReplayPlanError> {
-        if events
-            .iter()
-            .all(|event| matches!(event, ModelEvent::Usage { .. }))
-        {
+        if !events.iter().any(|event| {
+            matches!(
+                event,
+                ModelEvent::TextDelta { .. } | ModelEvent::ToolCall { .. }
+            )
+        }) {
             return Err(TraceReplayPlanError::ModelStepHasNoSemanticOutput);
         }
         Ok(Self {

@@ -109,49 +109,54 @@ Cargo.lock 必须提交，因为项目交付二进制。
 
 ### 6.1 应用级配置
 
-使用操作系统标准配置目录，保存：
+F1a 首先实现显式配置文件路径：CLI 使用 `--config <path>`，通用 Live Smoke 使用 `CYBER_AGENT_LIVE_CONFIG=<path>` 指向同一个 Config v1。操作系统标准配置目录的自动发现保持 Deferred，不能在不同入口各实现一套搜索规则。
+
+配置保存：
 
 - Provider Profile。
-- API Key 的环境变量名称或 Keychain 引用，不保存明文到仓库。
+- API Key 的本地内联值或环境变量引用；个人配置可保存明文，但不得提交真实 Key。
 - 默认 Prompt/Profile。
 - 个人偏好。
 
-配置示例：
+当前可被实现接受的最小配置示例：
 
 ```toml
-[providers.multimodal_primary]
-adapter = "openai_responses"
-base_url = "https://api.openai.com/v1"
-api_key_env = "CYBER_AGENT_OPENAI_API_KEY"
+schema_version = 1
+active_agent_profile = "default"
+
+[providers.primary]
+binding = "http_sse"
+wire_api = "responses"
+base_url = "<responses-service-base-url>"
 model = "<user-selected-model>"
-context_window = 0
+api_key = "<user-selected-api-key>"
+capability_mapping = "primary-v1"
+generation = 1
 
-[agent_profiles.direct]
-primary = "multimodal_primary"
-vision_mode = "primary_direct"
+[capability_mappings.primary-v1]
+version = 1
+text_input = true
+image_input = false
+streaming = true
+tool_call = true
+structured_output = true
+incremental_input = false
+usage_reporting = true
+context_window = 32768
 
-[providers.text_primary]
-adapter = "compatible_chat"
-base_url = "<provider-base-url>"
-api_key_env = "CYBER_AGENT_TEXT_API_KEY"
-model = "<text-model>"
-context_window = 0
-
-[providers.vision_secondary]
-adapter = "<vision-provider-adapter>"
-base_url = "<vision-provider-base-url>"
-api_key_env = "CYBER_AGENT_VISION_API_KEY"
-model = "<vision-model>"
-context_window = 0
-
-[agent_profiles.mixed]
-primary = "text_primary"
-vision = "vision_secondary"
-vision_mode = "auto"
+[agent_profiles.default]
+primary = "primary"
+vision_mode = "disabled"
+generation = 1
 ```
 
-`context_window = 0` 表示必须由 Capability 配置或明确探测填充，不能由代码猜测当前模型限制。
-`compatible_chat` 只是未来非 Responses Provider 的配置形态；对应 Adapter 未在获批 Slice 实现前，配置校验必须明确报“不支持”，不能假装兼容。
+示例中的 Base URL、模型名和 Capability 值必须由用户按目标服务的真实契约填写；每个 Provider 必须且只能配置内联 `api_key` 或 `credential_ref = "CYBER_AGENT_*_API_KEY"`。配置拒绝 `context_window = 0`，也不会从 URL、Model slug 或凭据来源猜测能力。当前实现只接受 `binding = "http_sse"` 与 `wire_api = "responses"` 组合。任何实现该协议的服务都复用同一个 Adapter；仅修改 URL、Model、凭据来源或 Capability Mapping 不需要新增厂商 binding。Chat Completions 或改变 wire 语义的“兼容”接口仍明确不支持。
+
+`doctor` 不发起 Provider 请求，也不显示 Key；内联配置会被正常解析：
+
+```sh
+cargo run --locked -- --config /absolute/path/to/cyber-agent.toml doctor
+```
 
 ### 6.2 项目级配置
 
@@ -163,10 +168,10 @@ vision_mode = "auto"
 
 | 变量 | 用途 | 默认 |
 |---|---|---|
-| `CYBER_AGENT_OPENAI_API_KEY` | Cyber Agent 专用 OpenAI Provider 凭据 | 未设置 |
-| `CYBER_AGENT_TEXT_API_KEY` | 可选文本 Primary 的专用凭据 | 未设置 |
+| `CYBER_AGENT_PRIMARY_API_KEY` | 示例 Primary Profile 的专用凭据；实际名称由 `credential_ref` 精确选择 | 未设置 |
+| `CYBER_AGENT_TEXT_API_KEY` | 可选文本 Primary 的另一独立凭据引用 | 未设置 |
 | `CYBER_AGENT_VISION_API_KEY` | 可选 Vision Provider 的专用凭据 | 未设置 |
-| `CYBER_AGENT_CONFIG_DIR` | 测试或便携运行覆盖配置目录 | OS 默认 |
+| `CYBER_AGENT_LIVE_CONFIG` | 通用 Live Smoke 使用的显式 Config v1 路径 | 未设置 |
 | `CYBER_AGENT_LIVE_TESTS` | 显式启用 live provider test | `0` |
 | `CYBER_AGENT_TEST_TMP_ROOT` | 测试临时目录覆盖 | 系统 temp |
 | `RUST_LOG` | 本地开发日志过滤 | 关闭或 warn |
@@ -180,28 +185,31 @@ Cyber Agent 的 Provider 身份和当前 Codex CLI/ChatGPT 登录是两条互不
 
 - 不读取或修改 `~/.codex`、`CODEX_HOME`、Codex OAuth/session data 或 Codex CLI 登录状态。
 - 不调用 `codex login`、`codex logout`，也不把 Codex CLI 当作 credential helper。
-- 每个 Provider Adapter 只解析其 Profile 明确指定且以 `CYBER_AGENT_` 命名空间隔离的凭据引用；不存在时返回“未配置”或跳过对应 live test。
+- Responses Adapter 只接收 Composition Root 为该 Provider 解析的显式凭据：本地内联 `api_key` 或以 `CYBER_AGENT_` 命名空间隔离的引用。两者都不标识模型或厂商；引用不存在时返回“未配置”或跳过对应 live test。
 - 不自动读取通用 `OPENAI_API_KEY`。即使开发机设置了该变量，也不能成为 Cyber Agent 的隐式凭据。
-- 凭据按需解析：Mock、Fixture、Replay、编译和普通测试不触发真实 Key 读取；只有显式 live Provider 路径读取。
+- 引用式凭据按需解析：Mock、Fixture、Replay、编译和普通测试不触发真实环境 Key 读取；内联 Key 随显式配置文件解析进入本地进程，但只有 Provider stream 会把它用于请求。
 - 本地开发 Key 与 GitHub Actions CI Key 分开创建、轮换和撤销。Primary 与 Vision 可以使用不同 Provider/Key；同一 Provider 承担两个角色时也允许分别配置可撤销 Key。
 
-本地配置只保存环境变量名或 Keychain 引用。后续如接入 macOS Keychain，使用独立 service 名称，例如 `cyber-agent-dev-openai`，不得查询 Codex 使用的 Keychain 项。真实 Key 不写入 `.env`、Shell Profile、项目 TOML、命令脚本或测试 fixture。
+个人本地 Provider 配置可以直接保存 `api_key`，不强制文件权限、Keychain 或环境变量中转；该文件的存放和备份由用户负责，但不得作为真实仓库 fixture 提交。引用式配置仍可用于 CI。后续如接入 macOS Keychain，必须使用独立 service 名称且不得查询 Codex 使用的 Keychain 项。
 
 Live Test 的子进程注入形式为：
 
 ```sh
 env \
-  CYBER_AGENT_OPENAI_API_KEY='<injected-by-local-secret-source>' \
+  CYBER_AGENT_LIVE_CONFIG='/absolute/path/to/cyber-agent.toml' \
+  CYBER_AGENT_PRIMARY_API_KEY='<injected-by-local-secret-source>' \
   CYBER_AGENT_LIVE_TESTS=1 \
-  cargo test --test live_provider -- --ignored
+  cargo test --locked --test responses_http_adapter \
+    synthetic_primary_live_smoke_uses_provider_composition -- --ignored --exact
 ```
 
 占位符由本地秘密存储在执行时注入；不得把真实值保存到命令示例或仓库。对子进程的临时注入不修改父进程或当前 Codex 的登录状态。
 
-混合模型 Live Test 按角色分别注入，缺少 Vision Key 不阻塞文本 Primary 测试：
+未来混合模型 Live Test 仍按角色分别注入，且必须复用同一个 `CYBER_AGENT_LIVE_CONFIG` 装配入口；缺少 Vision Key 不阻塞文本 Primary 测试：
 
 ```sh
 env \
+  CYBER_AGENT_LIVE_CONFIG='/absolute/path/to/cyber-agent.toml' \
   CYBER_AGENT_TEXT_API_KEY='<injected-text-test-key>' \
   CYBER_AGENT_VISION_API_KEY='<injected-vision-test-key>' \
   CYBER_AGENT_LIVE_TESTS=1 \

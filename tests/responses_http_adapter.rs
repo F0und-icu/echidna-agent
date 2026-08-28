@@ -5,11 +5,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use base64::Engine;
-use cyber_agent::adapters::openai::{
-    OPENAI_API_KEY_REFERENCE, OpenAiCredentialSource, OpenAiCredentialSourceError,
-    OpenAiResponsesAdapter, OpenAiResponsesConfig, ProcessEnvironmentCredentialSource,
-};
+use cyber_agent::adapters::credentials::{CredentialSource, CredentialSourceError};
 use cyber_agent::adapters::project_event_store::Project;
+use cyber_agent::adapters::responses::{ResponsesHttpAdapter, ResponsesHttpConfig};
 use cyber_agent::adapters::tools::ToolRegistry;
 use cyber_agent::app::agent_loop::{AgentLoop, AgentTurnOutcome};
 use cyber_agent::app::cancellation::AgentCancellation;
@@ -35,9 +33,12 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
+#[path = "support/live_provider.rs"]
+mod live_provider;
 mod support;
 
 const FIXTURE_SECRET: &str = "fixture-secret";
+const FIXTURE_CREDENTIAL_REFERENCE: &str = "CYBER_AGENT_FIXTURE_API_KEY";
 
 #[derive(Clone)]
 enum FakeCredentialResult {
@@ -81,8 +82,8 @@ impl FakeCredentialSource {
     }
 }
 
-impl OpenAiCredentialSource for FakeCredentialSource {
-    fn read(&self, reference: &str) -> Result<Option<String>, OpenAiCredentialSourceError> {
+impl CredentialSource for FakeCredentialSource {
+    fn read(&self, reference: &str) -> Result<Option<String>, CredentialSourceError> {
         self.references
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -90,11 +91,9 @@ impl OpenAiCredentialSource for FakeCredentialSource {
 
         match &self.result {
             FakeCredentialResult::Value(value) => Ok(value.clone()),
-            FakeCredentialResult::Failure(message) => {
-                Err(OpenAiCredentialSourceError::ReadFailed {
-                    message: message.clone(),
-                })
-            }
+            FakeCredentialResult::Failure(message) => Err(CredentialSourceError::ReadFailed {
+                message: message.clone(),
+            }),
             FakeCredentialResult::GenericOnly(value) if reference == "OPENAI_API_KEY" => {
                 Ok(Some(value.clone()))
             }
@@ -134,10 +133,15 @@ fn full(input: ModelInputIR) -> ModelRequest {
 
 fn adapter(
     base_url: impl Into<String>,
-    credential_source: Arc<dyn OpenAiCredentialSource>,
-) -> OpenAiResponsesAdapter {
-    OpenAiResponsesAdapter::new(
-        OpenAiResponsesConfig::new(base_url, "fixture-model", capabilities()),
+    credential_source: Arc<dyn CredentialSource>,
+) -> ResponsesHttpAdapter {
+    ResponsesHttpAdapter::new(
+        ResponsesHttpConfig::new(
+            base_url,
+            "fixture-model",
+            FIXTURE_CREDENTIAL_REFERENCE,
+            capabilities(),
+        ),
         credential_source,
     )
 }
@@ -161,15 +165,15 @@ async fn publish_image_fixture(project: &Project) -> (ArtifactId, Vec<u8>) {
     let tools = ToolRegistry::for_project(project.root());
     let target = execute_tool(
         &tools,
-        "openai-image-target",
+        "responses-image-target",
         "research_update",
         json!({
-            "event_id": "event-openai-image-target",
+            "event_id": "event-responses-image-target",
             "occurred_at": "2026-08-26T00:00:00Z",
             "operation": {"kind": "record_target_snapshot", "record": {
-                "id": "snapshot-openai-image", "target_id": "fixture", "kind": "source",
-                "locator": "fixture/openai-image", "version": "1", "build_id": "1",
-                "target_artifact_ids": ["artifact-openai-image-root"],
+                "id": "snapshot-responses-image", "target_id": "fixture", "kind": "source",
+                "locator": "fixture/responses-image", "version": "1", "build_id": "1",
+                "target_artifact_ids": ["artifact-responses-image-root"],
                 "environment_fingerprint": "env", "device_fingerprint": "device",
                 "captured_at": "2026-08-26T00:00:00Z"
             }}
@@ -182,19 +186,19 @@ async fn publish_image_fixture(project: &Project) -> (ArtifactId, Vec<u8>) {
     image::DynamicImage::new_rgba8(2, 2)
         .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
         .unwrap();
-    let path = project.root().join("openai-image.png");
+    let path = project.root().join("responses-image.png");
     fs::write(&path, &png).unwrap();
     let image = execute_tool(
         &tools,
-        "openai-image-view",
+        "responses-image-view",
         "view_image",
         json!({
-            "event_id": "event-openai-image-view",
+            "event_id": "event-responses-image-view",
             "occurred_at": "2026-08-26T00:00:01Z",
-            "artifact_id": "artifact-openai-image",
+            "artifact_id": "artifact-responses-image",
             "source_path": path.display().to_string(),
-            "target_snapshot_id": "snapshot-openai-image",
-            "toolchain_fingerprint": "openai-image-fixture-v1"
+            "target_snapshot_id": "snapshot-responses-image",
+            "toolchain_fingerprint": "responses-image-fixture-v1"
         }),
     )
     .await;
@@ -224,7 +228,7 @@ fn credential_source_uses_only_the_dedicated_reference() {
         Ok(_) => {}
         Err(error) => panic!("fixture credential should be accepted: {error}"),
     }
-    assert_eq!(source.references(), vec![OPENAI_API_KEY_REFERENCE]);
+    assert_eq!(source.references(), vec![FIXTURE_CREDENTIAL_REFERENCE]);
 }
 
 #[test]
@@ -233,7 +237,7 @@ fn credential_source_reports_missing_and_source_failure_without_network() {
     assert_stream_error(
         missing.stream(full(fixture_input(ModelRequestRequirements::default()))),
         ModelProviderError::CredentialUnavailable {
-            credential_ref: OPENAI_API_KEY_REFERENCE.to_owned(),
+            credential_ref: FIXTURE_CREDENTIAL_REFERENCE.to_owned(),
         },
     );
 
@@ -244,24 +248,24 @@ fn credential_source_reports_missing_and_source_failure_without_network() {
     assert_stream_error(
         failed.stream(full(fixture_input(ModelRequestRequirements::default()))),
         ModelProviderError::CredentialSourceFailure {
-            credential_ref: OPENAI_API_KEY_REFERENCE.to_owned(),
+            credential_ref: FIXTURE_CREDENTIAL_REFERENCE.to_owned(),
             message: "credential source failed: fixture source unavailable".to_owned(),
         },
     );
 }
 
 #[test]
-fn generic_openai_key_is_not_a_credential_fallback() {
+fn generic_provider_key_is_not_a_credential_fallback() {
     let source = FakeCredentialSource::generic_only("must-not-be-used");
     let provider = adapter("http://127.0.0.1:1/v1", source.clone());
 
     assert_stream_error(
         provider.stream(full(fixture_input(ModelRequestRequirements::default()))),
         ModelProviderError::CredentialUnavailable {
-            credential_ref: OPENAI_API_KEY_REFERENCE.to_owned(),
+            credential_ref: FIXTURE_CREDENTIAL_REFERENCE.to_owned(),
         },
     );
-    assert_eq!(source.references(), vec![OPENAI_API_KEY_REFERENCE]);
+    assert_eq!(source.references(), vec![FIXTURE_CREDENTIAL_REFERENCE]);
 }
 
 #[test]
@@ -274,7 +278,7 @@ fn invalid_authorization_header_is_rejected_before_network() {
     assert_stream_error(
         provider.stream(full(fixture_input(ModelRequestRequirements::default()))),
         ModelProviderError::CredentialInvalid {
-            credential_ref: OPENAI_API_KEY_REFERENCE.to_owned(),
+            credential_ref: FIXTURE_CREDENTIAL_REFERENCE.to_owned(),
         },
     );
 }
@@ -309,7 +313,7 @@ async fn resolved_image_uses_real_responses_data_url_and_fixed_json_object_outpu
         "\"id\":\"response_image_fixture\"}}\n\n"
     );
     let (base_url, request_receiver, server) = spawn_sse_server(200, body).await;
-    let directory = support::TemporaryDirectory::new("openai-project-image-resolver");
+    let directory = support::TemporaryDirectory::new("responses-project-image-resolver");
     let project = Project::initialize(directory.path()).unwrap();
     let (artifact_id, expected_png) = publish_image_fixture(&project).await;
     let provider = adapter(base_url, FakeCredentialSource::value(Some(FIXTURE_SECRET)))
@@ -349,10 +353,10 @@ async fn resolved_image_uses_real_responses_data_url_and_fixed_json_object_outpu
 
 #[tokio::test]
 async fn project_image_resolver_never_crosses_project_artifact_facts() {
-    let first_directory = support::TemporaryDirectory::new("openai-image-project-a");
+    let first_directory = support::TemporaryDirectory::new("responses-image-project-a");
     let first_project = Project::initialize(first_directory.path()).unwrap();
     let (artifact_id, _) = publish_image_fixture(&first_project).await;
-    let second_directory = support::TemporaryDirectory::new("openai-image-project-b");
+    let second_directory = support::TemporaryDirectory::new("responses-image-project-b");
     let second_project = Project::initialize(second_directory.path()).unwrap();
     let provider = adapter(
         "http://127.0.0.1:1/v1",
@@ -519,7 +523,7 @@ async fn read_http_request(socket: &mut TcpStream) -> CapturedRequest {
 #[tokio::test]
 async fn full_request_and_chunked_sse_decode_to_ordered_model_events() {
     let (base_url, request_receiver, server) =
-        spawn_sse_server(200, include_str!("fixtures/openai/success.sse")).await;
+        spawn_sse_server(200, include_str!("fixtures/responses/success.sse")).await;
     let provider = adapter(base_url, FakeCredentialSource::value(Some(FIXTURE_SECRET)));
     let service = ModelStreamingService::new(&provider);
 
@@ -572,8 +576,74 @@ async fn full_request_and_chunked_sse_decode_to_ordered_model_events() {
     );
     let actual: Value = serde_json::from_str(&request.body).unwrap();
     let expected: Value =
-        serde_json::from_str(include_str!("fixtures/openai/full_request.json")).unwrap();
+        serde_json::from_str(include_str!("fixtures/responses/full_request.json")).unwrap();
     assert_eq!(actual, expected);
+}
+
+#[tokio::test]
+async fn reasoning_extension_tool_usage_and_full_only_completion_share_one_decoder() {
+    let (base_url, request_receiver, server) = spawn_sse_server(
+        200,
+        include_str!("fixtures/responses/reasoning_success.sse"),
+    )
+    .await;
+    let mut full_only_capabilities = capabilities();
+    full_only_capabilities.incremental_input = false;
+    let provider = ResponsesHttpAdapter::new(
+        ResponsesHttpConfig::new(
+            base_url,
+            "fixture-reasoning-model",
+            FIXTURE_CREDENTIAL_REFERENCE,
+            full_only_capabilities,
+        ),
+        FakeCredentialSource::value(Some(FIXTURE_SECRET)),
+    );
+
+    let outcome = ModelStreamingService::new(&provider)
+        .consume(
+            full(fixture_input(ModelRequestRequirements {
+                usage_reporting: true,
+                ..ModelRequestRequirements::default()
+            })),
+            ModelStreamCancellation::new(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        outcome,
+        ModelStreamOutcome::Completed {
+            events: vec![
+                ModelEvent::ReasoningDelta {
+                    text: "check the manifest first".to_owned(),
+                },
+                ModelEvent::ToolCall {
+                    call: ToolCall::new(
+                        ToolCallId::new("call_reasoning_fixture"),
+                        ToolName::new("inspect_manifest"),
+                        json!({"path": "AndroidManifest.xml"}),
+                    ),
+                },
+                ModelEvent::TextDelta {
+                    text: "reproducible result".to_owned(),
+                },
+                ModelEvent::Usage {
+                    usage: ModelUsage {
+                        input_tokens: 13,
+                        output_tokens: 21,
+                    },
+                },
+            ],
+            completion: ModelResponseCompletion::without_response_id(),
+        }
+    );
+
+    let request = request_receiver.await.unwrap();
+    server.await.unwrap();
+    assert_eq!(request.request_line, "POST /v1/responses HTTP/1.1");
+    let actual: Value = serde_json::from_str(&request.body).unwrap();
+    assert_eq!(actual["model"], json!("fixture-reasoning-model"));
+    assert!(actual.get("previous_response_id").is_none());
 }
 
 #[tokio::test]
@@ -624,7 +694,7 @@ async fn tool_schema_call_and_result_encode_in_full_history_order() {
     server.await.unwrap();
     let actual: Value = serde_json::from_str(&request.body).unwrap();
     let expected: Value =
-        serde_json::from_str(include_str!("fixtures/openai/tool_request.json")).unwrap();
+        serde_json::from_str(include_str!("fixtures/responses/tool_request.json")).unwrap();
     assert_eq!(actual, expected);
 }
 
@@ -922,6 +992,10 @@ async fn malformed_unknown_and_uncompleted_streams_are_protocol_errors() {
             "unsupported Responses event `response.future`",
         ),
         (
+            "data: {\"type\":\"response.reasoning_text.delta\"}\n\n",
+            "reasoning text delta event omitted `delta`",
+        ),
+        (
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
             "ended before `response.completed`",
         ),
@@ -981,32 +1055,13 @@ async fn cancelling_a_pending_http_request_drops_the_adapter_stream() {
 }
 
 #[tokio::test]
-#[ignore = "requires explicit CYBER_AGENT_LIVE_TESTS=1 and a dedicated OpenAI test key"]
-async fn synthetic_openai_live_smoke() {
+#[ignore = "requires explicit CYBER_AGENT_LIVE_TESTS=1 and a configured dedicated test key"]
+async fn synthetic_primary_live_smoke_uses_provider_composition() {
     if std::env::var("CYBER_AGENT_LIVE_TESTS").as_deref() != Ok("1") {
         return;
     }
-    let model = std::env::var("CYBER_AGENT_OPENAI_LIVE_MODEL")
-        .expect("CYBER_AGENT_OPENAI_LIVE_MODEL must select the synthetic live-test model");
-    let provider = OpenAiResponsesAdapter::new(
-        OpenAiResponsesConfig::new(
-            "https://api.openai.com/v1",
-            model,
-            ModelCapabilities {
-                text_input: true,
-                image_input: false,
-                streaming: true,
-                tool_call: false,
-                structured_output: false,
-                incremental_input: false,
-                usage_reporting: true,
-                context_window: 1,
-                capability_mapping_version: CapabilityMappingVersion::new(1),
-            },
-        ),
-        Arc::new(ProcessEnvironmentCredentialSource),
-    );
-    let service = ModelStreamingService::new(&provider);
+    let composition = live_provider::load();
+    let service = ModelStreamingService::new(composition.primary_provider());
     let outcome = service
         .consume(
             full(ModelInputIR::current(
@@ -1036,7 +1091,13 @@ async fn synthetic_openai_live_smoke() {
                     .iter()
                     .any(|event| matches!(event, ModelEvent::Usage { .. }))
             );
-            assert!(completion.response_id().is_some());
+            if composition
+                .primary_provider()
+                .capabilities()
+                .incremental_input
+            {
+                assert!(completion.response_id().is_some());
+            }
         }
         ModelStreamOutcome::Cancelled { .. } => panic!("live smoke was unexpectedly cancelled"),
     }

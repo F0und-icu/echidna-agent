@@ -15,6 +15,7 @@ pub(crate) const RESEARCH_FILE: &str = "research.jsonl";
 pub(crate) const SESSIONS_DIRECTORY: &str = "sessions";
 pub(crate) const RECOVERY_DIRECTORY: &str = "artifacts/recovery";
 const WRITER_LOCK_FILE: &str = "writer.lock";
+const CHAT_RUNTIME_LEASE_FILE: &str = "chat.runtime.lock";
 const RESEARCH_STREAM_ID: &str = "research";
 
 /// One initialized, canonicalized Cyber Agent project root.
@@ -22,6 +23,14 @@ const RESEARCH_STREAM_ID: &str = "research";
 pub struct Project {
     root: PathBuf,
     project_id: ProjectId,
+}
+
+/// An advisory, process-scoped Chat runtime lease. It does not own Event
+/// writes or Session facts; its only purpose is to prevent two Chat processes
+/// from driving the same project concurrently while ordinary Writer leases
+/// remain short-lived for Tool/Cache persistence.
+pub(crate) struct ProjectChatRuntimeLease {
+    _lock_file: File,
 }
 
 impl Project {
@@ -175,6 +184,43 @@ impl Project {
             project: self.clone(),
             _lock_file: lock_file,
         })
+    }
+
+    /// Acquires the one advisory Chat runtime lease for this initialized
+    /// Project. It is deliberately separate from the Event Writer lease: Chat
+    /// holds it for its process lifetime while each durable write acquires and
+    /// releases the Writer independently.
+    pub(crate) fn acquire_chat_runtime_lease(
+        &self,
+    ) -> Result<ProjectChatRuntimeLease, ProjectEventStoreError> {
+        let lock_path = self.control_directory().join(CHAT_RUNTIME_LEASE_FILE);
+        let lock_file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(|source| ProjectEventStoreError::Io {
+                operation: "open Chat runtime lease",
+                path: lock_path.clone(),
+                source,
+            })?;
+        match lock_file.try_lock() {
+            Ok(()) => Ok(ProjectChatRuntimeLease {
+                _lock_file: lock_file,
+            }),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                Err(ProjectEventStoreError::ChatRuntimeLocked {
+                    project_root: self.root.clone(),
+                    source: io::Error::new(io::ErrorKind::WouldBlock, "Chat runtime lease is held"),
+                })
+            }
+            Err(std::fs::TryLockError::Error(source)) => Err(ProjectEventStoreError::Io {
+                operation: "acquire Chat runtime lease",
+                path: lock_path,
+                source,
+            }),
+        }
     }
 
     pub(crate) fn control_directory(&self) -> PathBuf {

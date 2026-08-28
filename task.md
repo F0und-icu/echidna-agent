@@ -11,6 +11,7 @@
 - 分析文档：`Codex架构与漏洞挖掘Agent复用评估.md`
 - 冻结架构：`docs/architecture/CYBER_AGENT_ARCHITECTURE_V1.md` + `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_1.md`
 - 模型组合决策：`docs/adr/ADR-0002-capability-driven-primary-vision-models.md`
+- 唯一 Provider 装配决策：`docs/adr/ADR-0006-single-provider-composition-root.md`
 - 开发计划：`docs/development/IMPLEMENTATION_PLAN.md`
 - 精简代码治理：`docs/development/LEAN_CODE_GOVERNANCE.md`
 - 当前状态：`docs/development/STATUS.md`
@@ -1166,10 +1167,10 @@ Provider 接口保持最小：
         fn capabilities(&self) -> ModelCapabilities;
     }
 
-- `OpenAIResponsesAdapter` 将 ModelInputIR 编码为 Responses HTTP Streaming 请求，并把 Provider Event 解码回通用 ModelEvent。
-- Provider-specific request/response 类型只存在于对应 Adapter 内，不能泄漏到 `domain`、Context Planner、Research Ledger 或 Tool Runtime。
+- `ResponsesHttpAdapter` 将 ModelInputIR 编码为 Responses HTTP Streaming 请求，并把 Provider Event 解码回通用 ModelEvent。
+- Responses request/response 类型只存在于协议 Adapter 内，不能泄漏到 `domain`、Context Planner、Research Ledger 或 Tool Runtime。
 - Adapter 必须显式校验文本、图片、Tool、Output Contract、Usage 和增量能力；不支持的 ContentItem 直接返回能力错误，不静默丢弃或隐式降级。
-- 后续 Local/OpenAI-compatible Provider 只增加 Adapter 和 capability mapping，不建设模型路由 Server，也不修改 AgentLoop 语义。
+- 后续符合已实现 Responses 契约的服务只增加配置和 capability mapping，不增加厂商 Adapter，不建设模型路由 Server，也不修改 AgentLoop 语义。
 - Capability Mapping 是带版本的显式配置；不能根据 Model slug、Provider 品牌或字符串前缀猜测图片、Tool、Streaming 和增量能力。
 
 AgentLoop 只拥有一个 Primary Provider；可选 Vision Provider 通过同一个 `ModelProvider` Port 被 `VisionAnalysisService` 受限调用：
@@ -1198,8 +1199,8 @@ AgentLoop 只拥有一个 Primary Provider；可选 Vision Provider 通过同一
 
 MVP：
 
-- 一个 OpenAI Responses HTTP Streaming Provider。
-- 配置 Base URL、Cyber Agent 专用 API Key 引用、Model 和 Context Window。
+- 一个协议优先的 Responses HTTP/SSE Provider Adapter，可由配置指向任意符合已实现协议契约的服务。
+- 配置 Base URL、显式 API Key 来源（内联值或 Cyber Agent 专用环境变量引用）、Model 和 Context Window。
 - Adapter 支持文本、图片、Function Tool Call 和 Usage，但实际 Profile 必须以显式 Capability Mapping 为准；Primary 不强制具备图片能力。
 - 同一运行 Session 内连续工具调用和跨 Turn 追加用户 Input。
 - `previous_response_id + incremental input` 增量请求。
@@ -1210,10 +1211,10 @@ MVP：
 
 Provider 凭据边界属于 Adapter/Composition Root 配置，不进入 Domain：
 
-- 默认 OpenAI 凭据引用为 `CYBER_AGENT_OPENAI_API_KEY`，不回退读取通用 `OPENAI_API_KEY`。
+- Provider Config 为每个 Provider 显式指定且只指定一个内联 `api_key` 或 `CYBER_AGENT_*_API_KEY` `credential_ref`；两种形式都只提供 Secret，不标识或推断 Provider/Model，也不回退读取通用厂商变量。
 - 不读取或修改 `~/.codex`、`CODEX_HOME`、Codex OAuth/session data，不调用 Codex CLI 获取凭据。
 - Mock、Fixture 和 Replay 路径无凭据、无公网即可运行；真实 Provider 测试默认 ignored，必须由 `CYBER_AGENT_LIVE_TESTS=1` 显式开启。
-- 本地开发与 GitHub Actions 使用可分别撤销的测试 Key，不共享当前 Codex 登录，也不把 Key 写入 Event、Artifact、Snapshot、日志或仓库配置。
+- 本地个人配置允许直接保存 Key；GitHub Actions 仍使用可单独撤销的引用式测试 Key。两者都不共享当前 Codex 登录，也不把 Key 写入 Event、Artifact、Snapshot、日志或被提交的仓库配置。
 
 WebSocket 和 HTTP/SSE 连接复用在 HTTP Streaming 稳定后评估；这是 Transport 优化，不阻塞 MVP 的 `previous_response_id` 增量语义。
 
@@ -1285,12 +1286,18 @@ WebSocket 和 HTTP/SSE 连接复用在 HTTP Streaming 稳定后评估；这是 T
     vision = "multimodal_primary"
     vision_mode = "auto"
 
-- Provider Profile 定义 Adapter、Model、Capability Mapping、凭据引用和请求属性。
+- Provider Profile 定义 Adapter、Model、Capability Mapping、显式凭据来源和请求属性。
 - Agent Profile 只组合一个 Primary、可选 Vision 和 VisionMode，不包含通用路由规则。
 - 用户可用 `/profile <agent-profile-name>` 切换组合 Profile。
 - Mode Pack 可声明默认 Profile，但不在单个 Turn 中隐式频繁切换模型。
 - `/profile` 或 `/vision mode` 在当前 Turn 结束后生效；改变 Primary 请求语义时重建 ProviderSession 和 Baseline。
-- `doctor` 检查 Mode 与显式 Capability 是否匹配，但不读取或显示 Secret。
+- `doctor` 检查 Mode 与显式 Capability 是否匹配；它会解析内联配置但不显示 Secret，也不发起 Provider 请求。
+
+Provider Config v1 使用显式 `schema_version`、`active_agent_profile`、命名 `providers`、命名 `capability_mappings` 和命名 `agent_profiles`。Provider 条目分别声明固定 binding、Wire API、Base URL、Model、二选一的内联 `api_key` 或专用 `CYBER_AGENT_*_API_KEY` 引用、Capability Mapping 引用和 generation；未知字段、凭据缺失/冲突、悬空引用、零版本和非法能力组合必须在网络活动前失败。
+
+`chat`、`doctor` 和通用 Live Smoke 只能经过同一个 Provider Composition Root。通用路径不包含 Provider 官方 URL、模型环境变量或直接 Adapter 构造。协议专属离线 wire/contract test 可以直接构造其 Adapter。
+
+协议实现按 Wire API 复用：`binding = "http_sse"` 与 `wire_api = "responses"` 只有一个 request encoding、HTTP/SSE transport 和 response decoding 所有者。URL、Model、凭据来源和 Capability Mapping 只产生配置实例，不产生厂商 binding；只有 fixture 证明的真实 wire 差异才允许扩展协议实现。不建设动态 Registry、通用 Router、自动 fallback 或插件系统。具体决策见 ADR-0006、ADR-0007 与 ADR-0008。
 
 ## 15. 交互界面
 
@@ -1402,6 +1409,7 @@ Web 不进入 MVP。CLI 稳定后，如果图片、Markdown 和长输出的展�
     │   │   ├── store/markdown.rs
     │   │   └── store/artifacts.rs
     │   ├── ui/cli.rs
+    │   ├── provider_composition/          # 唯一 Config v1 校验与 Provider 装配入口
     │   └── support/
     │       ├── hashing.rs
     │       └── metrics.rs
@@ -1803,7 +1811,9 @@ M1 总完成标准：M1a、M1b、M1c 分别有可运行集成测试，任一后�
 - 能通过 `run_command` 调用的漏洞研究工具，不重写客户端。
 - 每增加一个长期依赖，都记录它解决的具体问题。
 - 每个新事件类型、配置项和 Prompt 片段必须有消费方和测试。
-- Provider Adapter 只负责 ModelInputIR 编解码和能力映射；Provider-specific 类型不得上浮到 Domain。
+- `chat`、`doctor` 和 Live Smoke 必须复用唯一 Provider Composition Root；通用运行路径禁止写死 Provider URL 或模型环境变量。
+- Provider Adapter 只负责 ModelInputIR 编解码和能力映射；wire-specific 类型不得上浮到 Domain。
+- 相同 Wire API 的请求编码、Transport 和响应解码不得因新增 Provider 配置而复制，厂商名称本身不构成 binding。
 - 每个 Tool Cache 必须证明 Tool Version、TargetSnapshot、Input、Environment 和 Effect/Determinism 都进入 Key。
 - 每个 Artifact 派生操作必须保留 Parent、Transform、Producer 和 TargetSnapshot，Lineage 只作为派生视图。
 - Replay、Observation 和 TargetDelta 优先使用现有 Event/Artifact，不新增权威数据库。
@@ -1874,12 +1884,6 @@ M1 总完成标准：M1a、M1b、M1c 分别有可运行集成测试，任一后�
 
 ## 25. 下一步
 
-下一具体动作是 M1b-S1：
+具体状态始终以 `docs/development/STATUS.md` 为准。F1b 已在本地完成：唯一 Composition Root 下只有一个协议优先的 Responses HTTP/SSE Adapter，任意符合协议的服务只通过配置接入，不增加厂商 binding。下一候选是 F1c 第一版 CLI Chat，仍需单独授权。
 
-1. 读取 `AGENTS.md`、`docs/development/STATUS.md` 和开发计划中的 `M1b-S1`。
-2. 获得当前 Slice 的明确实现授权后，将 M1b-S1 标记为 `IN_PROGRESS`。
-3. 定义 TurnContext、StepSnapshot、ProviderSession、IncrementalBaseline 和稳定 Canonical Request 比较；本 Slice仍只发送全量请求。
-4. 覆盖 Model/Profile/Prompt/Tool/Output/IR/Capability 变化、内部 metadata 和非 append-only History 的失效矩阵。
-5. 通过 Gate 并更新 STATUS 后停止，不自动进入 M1b-S2 或发送 `previous_response_id`。
-
-M1b-S1 当前为 `READY_NOT_AUTHORIZED`；M1a 的完成不自动授权下一 Slice。
+F1b 不实现第一版 Chat。F1c 才把 CLI Chat 接入现有 AgentLoop；M4-S3 Observation/TargetDelta 在这些原型修复 Slice 期间保持 Deferred。

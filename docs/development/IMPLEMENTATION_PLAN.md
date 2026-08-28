@@ -590,6 +590,100 @@ Gate：在临时项目目录完成一次真实文件分析闭环。
 
 Gate：差分每项都能回到 Tool Call、Artifact 和 Snapshot。
 
+### F1a：唯一配置驱动 Provider 装配路径（M4-S2 后置修复）
+
+目标：在真实 Provider 测试和第一版 Chat 之前，消除通用运行入口中的 Provider 手工装配和端点/模型硬编码。
+
+交付：
+
+- 严格、显式版本化的 Provider Config v1，包含命名 Provider Profile、Capability Mapping 和 Agent Profile。
+- 唯一 Provider Composition Root；`chat`、`doctor` 和所有 Live Smoke 只通过该路径取得相同配置语义。
+- 凭据引用只保存专用 `CYBER_AGENT_*_API_KEY` 名称；真实值保持惰性解析，`doctor` 和 shell-only `chat` 不读取凭据。
+- 当前 Responses binding 先保持单一实现；通用 Live 路径不出现 Provider 官方 URL或模型环境变量。
+
+协议复用规则：
+
+- Wire API 是显式配置，不根据 Provider/Model 名推断。
+- 同一 Wire API 的请求编码、HTTP/SSE Transport 和响应解码只能有一个语义所有者。
+- 第二个真实 Responses Provider 出现时先提取共享 Responses wire；仅 URL、Model、凭据引用或 Capability 不构成新 binding，不得复制 Adapter、Contract Suite 或 Live 装配。
+- 新 Wire API 仅实现其可复用协议边界，不在 `chat`、`doctor` 或 Live Test 内写厂商特制流程。
+- 不建设动态 Registry、通用 Router、自动 fallback 或插件系统；固定枚举只覆盖已经存在的 binding。
+
+测试：
+
+- 未知 Schema/字段、空值、悬空 Profile/Capability 引用和非法能力组合明确失败。
+- Capability 只来自显式版本化 Mapping；Model 名不改变能力。
+- Primary 与可选 Vision 通过同一 Composition Root 构造并保持身份隔离。
+- Fake Credential Source 证明只解析配置声明的精确引用；静态检查和 `doctor` 不解析凭据。
+- 协议专属离线 Contract/Golden Test 可直接构造 Adapter；通用 Live Smoke 必须使用 Composition Root。
+
+禁止：
+
+- 不实现 DeepSeek 或其他厂商 binding。
+- 不运行真实 Live Test，不实现第一版 Chat AgentLoop。
+- 不增加 Cargo 依赖、新事实源、Provider Router/Registry、Feature 或未来占位抽象。
+- 不把端点、模型或 Key 写入 Event、Artifact、Snapshot、日志、Fixture 或仓库配置。
+
+Gate：完整 locked Cargo/Lean Gate，加上通用运行路径 Provider URL/专用模型环境变量扫描，以及 Live Smoke 直接 Adapter 构造扫描。
+
+### F1b：协议优先的共享 Responses HTTP/SSE Adapter
+
+目标：让任意明确配置且符合已实现 Responses HTTP/SSE 契约的服务复用唯一 Adapter，不按厂商品牌复制代码。
+
+交付：
+
+- 提取唯一 `ResponsesHttpAdapter`，统一拥有 request encoding、HTTP/SSE transport 和 response decoding；删除厂商命名的生产 Adapter。
+- Config v1 使用固定 `binding = "http_sse"` 与 `wire_api = "responses"`；Base URL、Model、`CYBER_AGENT_*_API_KEY` 引用和 Capability Mapping 都是显式数据，不产生厂商分支。
+- `response.reasoning_text.delta` / `response.reasoning_text.done` 作为 fixture 证明的 Responses 扩展显式解码；Reasoning 与 assistant output 分离，未知事件不得静默丢弃。
+- 无状态 Responses 服务通过 Capability Mapping 显式声明 `incremental_input = false`；AgentLoop 发送完整 History，不伪造 `previous_response_id`。不得根据 URL、模型名或凭据名推断该能力。
+- `chat`、`doctor`、两个通用 Live Smoke 和所有已配置 Responses 服务复用同一 Composition Root 与同一 ModelProvider Contract Suite。
+
+禁止：
+
+- 不复制 Adapter、HTTP Client、SSE Loop、Request DTO、通用错误映射或 Contract Suite，也不为厂商名称增加薄 binding。
+- 不把任何 Provider URL、Model 或 Key 写入通用 CLI/Live Test；只通过 Config v1 的 Base URL、Model 和精确凭据引用选择。
+- 不实现 Chat Completions、第一版 Chat UI、自动 fallback、Router/Registry/Plugin 或 M4-S3。
+- 未获得当前 Live Test 授权时只运行 loopback/fixture/Mock Gate。
+
+Gate：完整 locked Cargo/Lean Gate；既有 Responses 回归不变；协议 fixture 覆盖 reasoning text、Tool Call、Usage、Completed 和未知事件；静态证明只有一个 Responses transport/decoder；如单独授权，再用明确配置执行一次固定合成 Live Smoke。
+
+### F1c：第一版 Chat 接入现有 AgentLoop
+
+目标：让 CLI `chat --config <path>` 通过同一 Composition Root 进入现有一个 AgentLoop，并完成第一版真实文本交互。
+
+交付：
+
+- `config -> AgentModelProfile -> ProviderComposition -> AgentLoop` 唯一路径。
+- 复用已有 Project/Session、Prompt Profile、Context Planner、Tool Registry、RequestAudit 和 Full/Incremental 语义；不创建第二套轻量 Chat loop。
+- 最小交互输入、Streaming 输出、Ctrl-C 取消和清晰终止；更完整行编辑/历史 UI 单独评估。
+- `doctor`、Chat 和 Live Smoke 对同一配置给出一致 binding/capability 结果。
+
+禁止：
+
+- 不建设 TUI/Web、通用命令框架、第二 AgentLoop、模型 Router、团队/云服务或 M4-S3。
+- 不以 Chat 为理由复制 Tool、History、Prompt、Context、Session 或 RequestAudit 所有者。
+
+Gate：Mock/loopback 端到端 Chat 回归、项目隔离和审计回归、完整 locked Cargo/Lean Gate；真实 Chat 仅在用户单独授权 Live Test 时运行。
+
+### F1d：本地配置内联 Provider API Key
+
+目标：允许个人用户直接在显式 Provider Config v1 中保存 API Key，同时保留环境变量引用方式，不复制 Provider、Adapter 或 Chat 装配路径。
+
+交付：
+
+- 每个 Provider 必须且只能配置一个 `api_key` 或 `credential_ref`；既有 `credential_ref` 配置保持兼容。
+- `api_key` 由唯一 Composition Root 绑定到该 Provider 的现有 CredentialSource 边界；Adapter、AgentLoop、CLI 和 Live Smoke 不增加内联凭据分支。
+- `doctor` 可验证含内联 Key 的配置但不显示 Key；配置解析、校验、Provider 错误、Session、RequestAudit、Artifact 和 CLI 输出均不得复制 Key。
+- 不强制权限、Keychain、加密 Vault 或环境变量中转；个人配置文件的保存位置和备份由用户负责。
+
+禁止：
+
+- 不允许同时配置 `api_key` 与 `credential_ref`，不允许缺少两者或使用空内联值。
+- 不读取通用厂商变量，不回退到 Codex/ChatGPT 登录状态，不跨 Primary/Vision Provider 借用 Key。
+- 不新增 Credential Manager、Secret Service、Provider Router/Registry、厂商 Adapter、Cargo 依赖、Live 请求或 M4-S3。
+
+Gate：配置与 Composition 单测、CLI `doctor` 防泄漏、loopback Chat Authorization 与 Session/RequestAudit 非泄漏回归，以及完整 locked Cargo/Lean Gate。
+
 ### M4-S4：真实长流程验收
 
 目标：完成一个授权、可控的长流程漏洞研究任务。

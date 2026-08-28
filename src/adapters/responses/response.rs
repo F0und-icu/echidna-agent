@@ -1,4 +1,4 @@
-//! Private OpenAI Responses streaming-event wire decoding.
+//! Shared Responses streaming-event wire decoding.
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -48,6 +48,12 @@ pub(super) fn decode_stream_event(
                 .ok_or_else(|| protocol_error("text delta event omitted `delta`"))?;
             Ok(decoded(vec![ModelEvent::TextDelta { text }]))
         }
+        "response.reasoning_text.delta" => {
+            let text = event
+                .delta
+                .ok_or_else(|| protocol_error("reasoning text delta event omitted `delta`"))?;
+            Ok(decoded(vec![ModelEvent::ReasoningDelta { text }]))
+        }
         "response.output_item.done" => {
             let item = event
                 .item
@@ -73,7 +79,8 @@ pub(super) fn decode_stream_event(
         | "response.reasoning_summary_part.added"
         | "response.reasoning_summary_part.done"
         | "response.reasoning_summary_text.delta"
-        | "response.reasoning_summary_text.done" => Ok(decoded(Vec::new())),
+        | "response.reasoning_summary_text.done"
+        | "response.reasoning_text.done" => Ok(decoded(Vec::new())),
         unknown => Err(protocol_error(format!(
             "unsupported Responses event `{unknown}`"
         ))),
@@ -191,7 +198,7 @@ fn decode_provider_failure(
         message: error
             .and_then(|error| error.message)
             .filter(|message| !message.trim().is_empty())
-            .unwrap_or_else(|| "OpenAI response failed without an error message".to_string()),
+            .unwrap_or_else(|| "Responses provider failed without an error message".to_string()),
     }
 }
 
@@ -205,7 +212,7 @@ fn decode_incomplete(response: Option<Value>) -> ModelProviderError {
 
     ModelProviderError::ProviderFailure {
         code: Some("response_incomplete".to_string()),
-        message: format!("OpenAI response was incomplete: {reason}"),
+        message: format!("Responses provider response was incomplete: {reason}"),
     }
 }
 

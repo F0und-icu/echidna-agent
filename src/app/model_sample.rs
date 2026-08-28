@@ -20,6 +20,7 @@ impl ModelSample {
         for event in events {
             match event {
                 ModelEvent::TextDelta { text: delta } => text.push_str(&delta),
+                ModelEvent::ReasoningDelta { .. } => {}
                 ModelEvent::ToolCall { call } => {
                     if !text.is_empty() {
                         items.push(SampleItem::AssistantText(std::mem::take(&mut text)));

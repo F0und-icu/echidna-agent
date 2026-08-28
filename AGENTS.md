@@ -24,9 +24,9 @@ If the user explicitly authorizes development sub-agents, every delegated agent 
 ## Current Phase
 
 - Architecture v1.1 is sealed as an additive extension over the immutable v1 baseline.
-- M0-S1, M0-S2, M1a-S1, M1a-S2, M1a-S3, M1b-S1, M1b-S2, M1c-S1, M1c-S2, M1c-S3, M2-S1, M2-S2, M2-S3, M2-S4, M2-S5, M3-S1 and M3-S2 are complete and remotely sealed.
-- The former M3-S3 was split before production implementation into M3-S3a through M3-S3d so each fact boundary can be independently reviewed and remotely sealed.
-- M3-S3a History, strict Session Reducer and Resume-first Full is locally complete on `agent/m3-s3a-session-resume` from status-seal base `48c8cb1`; M3-S3b remains `READY_NOT_AUTHORIZED` until the implementation merge and separate status seal pass remotely.
+- M0 through M4-S2 are complete and remotely sealed.
+- F1a Config/Composition Root, F1b protocol-first Responses HTTP/SSE Adapter, F1c first-version CLI Chat and F1d local inline Provider credentials are locally complete on delivery branch `fix/f1-provider-chat-integration` over remote base `08e9025`; one synthetic F1c DeepSeek Live Chat passed.
+- F1d preserves one configuration and Adapter path: Config v1 may select exactly one inline `api_key` or existing `credential_ref` per Provider. M4-S3 remains `DEFERRED_NOT_AUTHORIZED`.
 - Local Git is initialized and `main` tracks the private remote.
 - `codex/` is a clean, read-only upstream reference repository.
 
@@ -50,7 +50,7 @@ Do not use multi-agent development orchestration unless the current user explici
 - No Cargo workspace unless an accepted ADR changes this.
 - Internal direction: `ui/main -> app -> ports -> domain`; adapters implement ports and do not depend on app.
 - Domain contains no filesystem, network, process, clock or Provider-specific I/O.
-- OpenAI Responses types stay inside the OpenAI Adapter; Core uses ModelInputIR.
+- Responses wire types stay inside the protocol Adapter; Core uses ModelInputIR.
 - Runtime has one primary ModelProvider and at most one optional vision ModelProvider; both remain inside one AgentLoop and one Session authority.
 - Vision routing is capability-driven and limited to `auto`, `primary_direct`, `secondary_tool` or `disabled`; do not build a general model router.
 - JSONL/Markdown/Artifact Blob are facts; Cache/Summary/Snapshot/Replay are derived.
@@ -60,6 +60,8 @@ Do not use multi-agent development orchestration unless the current user explici
 - Runtime defaults to FullAccess; do not add Sandbox, Policy or confirmation systems.
 - No telemetry, analytics, feedback or remote audit.
 - Provider credentials are explicit Cyber Agent inputs; Codex/ChatGPT login state is never a credential source.
+- `chat`, `doctor` and generic Live Smokes use the one configuration-driven Provider Composition Root; generic runtime paths do not own Provider URLs, models or Adapter construction.
+- One Wire API has one request encoding, transport and response-decoding owner. The fixed `http_sse + responses` binding is protocol-first: URL, model and credential reference never create a vendor binding. Add a wire-level extension only when fixtures prove a real reusable protocol difference.
 - CLI first; Web remains optional.
 
 ## Forbidden Dependencies and Scope
@@ -124,10 +126,10 @@ If these conditions are not met, use REFERENCE or REIMPLEMENT instead of PORT.
 
 - Never read or modify `~/.codex`, `CODEX_HOME`, Codex OAuth/session data or Codex CLI login state.
 - Never invoke `codex login`, `codex logout` or Codex CLI as a credential helper.
-- The default OpenAI credential reference is `CYBER_AGENT_OPENAI_API_KEY`; do not fall back to `OPENAI_API_KEY`.
-- Every additional Provider credential reference must use a dedicated `CYBER_AGENT_*_API_KEY` name and must not fall back across Primary/Vision roles.
-- Resolve a real credential only when a user explicitly starts a live Provider path. Mock, Fixture and Replay paths require no credential.
-- Keep local-development and GitHub Actions live-test keys separately revocable. Do not commit a real `.env` or place credentials in shell profiles.
+- Every live Provider credential is explicit Config v1 data: either a local inline `api_key` or a `credential_ref` in the `CYBER_AGENT_*_API_KEY` namespace. Never infer Provider/model identity from either form or fall back to generic vendor variables such as `OPENAI_API_KEY`.
+- Every additional referenced Provider credential must use a dedicated `CYBER_AGENT_*_API_KEY` name and must not fall back across Primary/Vision roles. Inline credentials remain bound to their exact Provider entry.
+- Use a real credential in a Provider request only when the user explicitly starts a live path. Loading an inline-key config parses the value, but `doctor`, Mock, Fixture and Replay do not send or display it.
+- Keep local-development and GitHub Actions live-test keys separately revocable. A personal local Provider config may contain `api_key`; never commit that real config, a real `.env`, or credentials in shell profiles.
 - Tests for credential resolution use an injected fake environment or credential source; they must not mutate the developer's real process environment.
 
 ## Tests and Commands
@@ -142,6 +144,8 @@ cargo build --locked
 ```
 
 Use Mock/Fixture/Replay Providers by default. Live Provider tests must be explicit, ignored by default and gated by `CYBER_AGENT_LIVE_TESTS=1` plus a Cyber Agent-specific credential.
+
+Generic Live Smokes select one explicit Config v1 through `CYBER_AGENT_LIVE_CONFIG`; they must not select a Provider endpoint or model through test code or model environment variables.
 
 New behavior requires tests at the narrowest layer plus an integration test when it crosses Ports.
 

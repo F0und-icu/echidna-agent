@@ -1,6 +1,6 @@
-//! Minimal OpenAI Responses HTTP Streaming Adapter.
+//! One provider-neutral Responses HTTP/SSE implementation selected entirely
+//! by explicit configuration.
 
-mod credentials;
 mod request;
 mod response;
 
@@ -11,37 +11,35 @@ use eventsource_stream::Eventsource;
 use futures_util::StreamExt;
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderValue};
 
-pub use credentials::{
-    OPENAI_API_KEY_REFERENCE, OpenAiCredentialSource, OpenAiCredentialSourceError,
-    ProcessEnvironmentCredentialSource,
-};
-
+use crate::adapters::credentials::CredentialSource;
 use crate::domain::artifacts::ArtifactId;
 use crate::domain::model::ModelCapabilities;
+use crate::domain::request_audit::RequestAdapterVersion;
 use crate::domain::research::{ResearchReducer, ResearchState};
 use crate::ports::artifact::ArtifactStore;
 use crate::ports::model::{
     ModelEventStream, ModelProvider, ModelProviderError, ModelRequest, ModelStreamEvent,
 };
 
-/// Configuration explicitly selected for one OpenAI Responses Provider.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct OpenAiResponsesConfig {
+pub struct ResponsesHttpConfig {
     base_url: String,
     model: String,
+    credential_reference: String,
     capabilities: ModelCapabilities,
 }
 
-impl OpenAiResponsesConfig {
-    /// Creates an OpenAI Responses configuration.
+impl ResponsesHttpConfig {
     pub fn new(
         base_url: impl Into<String>,
         model: impl Into<String>,
+        credential_reference: impl Into<String>,
         capabilities: ModelCapabilities,
     ) -> Self {
         Self {
             base_url: base_url.into(),
             model: model.into(),
+            credential_reference: credential_reference.into(),
             capabilities,
         }
     }
@@ -51,28 +49,27 @@ impl OpenAiResponsesConfig {
     }
 }
 
-/// OpenAI Responses implementation of the provider-neutral Model Port.
 #[derive(Clone)]
-pub struct OpenAiResponsesAdapter {
+pub struct ResponsesHttpAdapter {
     client: reqwest::Client,
-    config: OpenAiResponsesConfig,
-    credential_source: Arc<dyn OpenAiCredentialSource>,
+    config: ResponsesHttpConfig,
+    credential_source: Arc<dyn CredentialSource>,
     image_resolver: Option<Arc<ImageArtifactResolver>>,
 }
 
-/// Adapter-private erased resolver. It is deliberately a constructor input,
-/// not a second public Blob Port: Artifact ownership remains with the local
-/// Artifact Store and the composed application decides which immutable
-/// Artifact IDs are resolvable for a Provider request.
-type ImageArtifactResolver =
+pub(crate) type ImageArtifactResolver =
     dyn Fn(&ArtifactId) -> Result<(String, Vec<u8>), ModelProviderError> + Send + Sync;
 
-impl OpenAiResponsesAdapter {
-    /// Builds an Adapter with an injected credential source.
-    pub fn new(
-        config: OpenAiResponsesConfig,
-        credential_source: Arc<dyn OpenAiCredentialSource>,
-    ) -> Self {
+impl ResponsesHttpAdapter {
+    /// Returns the fixed RequestAudit identity for this concrete wire
+    /// implementation. Runtime consumers receive it from ProviderComposition
+    /// instead of encoding protocol knowledge themselves.
+    pub fn request_adapter_version() -> RequestAdapterVersion {
+        RequestAdapterVersion::new("responses-http-sse-v1")
+            .expect("the fixed Responses HTTP/SSE Adapter version is non-empty")
+    }
+
+    pub fn new(config: ResponsesHttpConfig, credential_source: Arc<dyn CredentialSource>) -> Self {
         Self {
             client: reqwest::Client::new(),
             config,
@@ -81,30 +78,14 @@ impl OpenAiResponsesAdapter {
         }
     }
 
-    /// Supplies the composed local Artifact lookup used only while encoding an
-    /// OpenAI wire request. The resolver must return the media type and exact
-    /// immutable Blob bytes for the requested Artifact ID.
-    fn with_image_resolver(
-        mut self,
-        resolver: impl Fn(&ArtifactId) -> Result<(String, Vec<u8>), ModelProviderError>
-        + Send
-        + Sync
-        + 'static,
-    ) -> Self {
-        self.image_resolver = Some(Arc::new(resolver));
-        self
-    }
-
-    /// Resolves image bytes only from strict, project-isolated Artifact facts.
-    /// The Research stream identifies the Artifact and media type; the
-    /// existing SHA-256 Blob Store verifies the immutable bytes.
     pub fn with_project_image_resolver(
-        self,
+        mut self,
         project: crate::adapters::project_event_store::Project,
     ) -> Self {
-        self.with_image_resolver(move |artifact_id| {
+        self.image_resolver = Some(Arc::new(move |artifact_id| {
             resolve_project_image_artifact(&project, artifact_id)
-        })
+        }));
+        self
     }
 }
 
@@ -145,7 +126,7 @@ fn request_encoding_error(error: impl ToString) -> ModelProviderError {
     }
 }
 
-impl ModelProvider for OpenAiResponsesAdapter {
+impl ModelProvider for ResponsesHttpAdapter {
     fn capabilities(&self) -> ModelCapabilities {
         self.config.capabilities.clone()
     }
@@ -153,20 +134,21 @@ impl ModelProvider for OpenAiResponsesAdapter {
     fn stream(&self, request: ModelRequest) -> Result<ModelEventStream, ModelProviderError> {
         request.validate_capabilities(&self.config.capabilities)?;
 
+        let credential_reference = self.config.credential_reference.clone();
         let api_key = self
             .credential_source
-            .read(OPENAI_API_KEY_REFERENCE)
+            .read(&credential_reference)
             .map_err(|error| ModelProviderError::CredentialSourceFailure {
-                credential_ref: OPENAI_API_KEY_REFERENCE.to_string(),
+                credential_ref: credential_reference.clone(),
                 message: error.to_string(),
             })?
             .filter(|value| !value.trim().is_empty())
             .ok_or_else(|| ModelProviderError::CredentialUnavailable {
-                credential_ref: OPENAI_API_KEY_REFERENCE.to_string(),
+                credential_ref: credential_reference.clone(),
             })?;
         let authorization = HeaderValue::from_str(&format!("Bearer {api_key}")).map_err(|_| {
             ModelProviderError::CredentialInvalid {
-                credential_ref: OPENAI_API_KEY_REFERENCE.to_string(),
+                credential_ref: credential_reference,
             }
         })?;
 

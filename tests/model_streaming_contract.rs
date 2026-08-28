@@ -113,6 +113,45 @@ fn mock_fixture_preserves_text_tool_usage_and_completion_order() {
 }
 
 #[test]
+fn fixed_event_stage_observes_each_provider_event_in_wire_order_before_atomic_completion() {
+    let expected_events = vec![
+        ModelEvent::ReasoningDelta {
+            text: "private reasoning".to_owned(),
+        },
+        ModelEvent::TextDelta {
+            text: "visible text".to_owned(),
+        },
+        ModelEvent::Usage {
+            usage: ModelUsage {
+                input_tokens: 8,
+                output_tokens: 5,
+            },
+        },
+    ];
+    let provider = MockModelProvider::new(fixture(all_capabilities(), expected_events.clone()));
+    let service = ModelStreamingService::new(&provider);
+    let mut observed = Vec::new();
+
+    let outcome = poll_to_completion(service.consume_with_event_stage(
+        full_request(ModelRequestRequirements {
+            usage_reporting: true,
+            ..ModelRequestRequirements::default()
+        }),
+        ModelStreamCancellation::new(),
+        &mut |event| {
+            observed.push(event.clone());
+            Ok(())
+        },
+    ));
+
+    assert_eq!(observed, expected_events);
+    assert!(matches!(
+        outcome,
+        Ok(ModelStreamOutcome::Completed { events, .. }) if events == expected_events
+    ));
+}
+
+#[test]
 fn streaming_service_accepts_a_dynamic_model_provider_port() {
     let provider = MockModelProvider::new(fixture(all_capabilities(), Vec::new()));
     let provider: &dyn ModelProvider = &provider;

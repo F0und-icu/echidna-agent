@@ -1,0 +1,13 @@
+data: {"type":"response.created","response":{"id":"resp_reasoning_fixture"}}
+
+data: {"type":"response.reasoning_text.delta","delta":"check the manifest first"}
+
+data: {"type":"response.reasoning_text.done","text":"check the manifest first"}
+
+data: {"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_reasoning_fixture","name":"inspect_manifest","arguments":"{\"path\":\"AndroidManifest.xml\"}"}}
+
+data: {"type":"response.output_text.delta","delta":"reproducible result"}
+
+data: {"type":"response.completed","response":{"usage":{"input_tokens":13,"output_tokens":21}}}
+
+: end-of-fixture

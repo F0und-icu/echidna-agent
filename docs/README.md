@@ -43,6 +43,9 @@
 | `docs/adr/ADR-0000-template.md` | 架构决策记录模板 | 模板本身少改 |
 | `docs/adr/ADR-0002-capability-driven-primary-vision-models.md` | Primary + 可选 Vision Provider 决策 | ACCEPTED 后只由新 ADR 取代 |
 | `docs/adr/ADR-0003-minimal-openai-http-sse-stack.md` | M1a-S2 最小 HTTP/SSE 依赖与取消边界 | ACCEPTED 后只由新 ADR 取代 |
+| `docs/adr/ADR-0006-single-provider-composition-root.md` | F1a 唯一配置驱动 Provider 装配和协议复用边界 | ACCEPTED 后只由新 ADR 取代 |
+| `docs/adr/ADR-0007-protocol-first-responses-adapter.md` | F1b 协议优先 Responses Adapter 与复用规则 | ACCEPTED 后只由新 ADR 取代 |
+| `docs/adr/ADR-0008-local-inline-provider-credentials.md` | F1d 本地内联或引用式 Provider 凭据二选一 | ACCEPTED 后只由新 ADR 取代 |
 
 ## 4. Codex 执行入口
 
@@ -76,17 +79,8 @@ Codex Luna xhigh 或其他高推理 Codex 执行开发任务时，必须按顺�
 
 ## 6. 当前状态
 
-当前已完成设计基线、M0 的两个实现 Slice 和完整 M1a：
+M0 至 M4-S2 已完成并远端封存。F1a/F1b/F1c/F1d 已在本地完成 Config v1、唯一 Provider Composition Root、协议优先 Responses HTTP/SSE Adapter、第一版 AgentLoop Chat，以及内联 `api_key`/引用式 `credential_ref` 二选一配置，并通过一次合成 DeepSeek Live Chat；集成远端封存已获授权并正在进行。
 
-- M0-S1 单 Rust package、默认 CLI 二进制和离线 smoke tests 已完成。
-- M0-S2 provider-neutral EventEnvelope、identity Upcaster、纯 Reducer 和最小 Event Ports 已完成。
-- 已初始化本地 Git 并发布文档基线到私有 `main`。
-- GitHub Actions 使用固定 Rust `1.93.1` 运行 fmt、clippy、test 和 build Gate。
-- M0-S1/M0-S2 分别通过 PR `#1`/`#2` 交付，M1a-S1 通过 PR `#3` 交付。
-- M1a-S2 OpenAI Responses 全量 Streaming Adapter 已通过本地 Gate，按 `NO_COMMIT` 保留在工作树，尚无远程 CI 结果。
-- M1a-S3 单工具 AgentLoop、四个本地 FullAccess 工具和全量再采样闭环已通过本地 Gate，同样按 `NO_COMMIT` 保留在工作树。
-- 已迁移原有 `src/` 就地测试，当前生产源码 inline-test 扫描通过。
-- M1b-S1 为 `READY_NOT_AUTHORIZED`；M1a 完成不构成 ProviderSession Slice 的实现授权。
-- `codex/` 仍是只读参考。
+M4-S3 Observation/TargetDelta 没有开始，`codex/` 仍是固定提交的只读参考。
 
 实现入口以 `docs/development/STATUS.md` 为准。

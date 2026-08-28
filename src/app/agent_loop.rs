@@ -122,6 +122,32 @@ pub type ViewImageFollowUp<'a> = dyn FnMut(ViewImageSelection) -> ViewImageFollo
 pub type ViewImageFollowUpFuture<'a> =
     Pin<Box<dyn Future<Output = Result<InitialImagePrimaryContext, AgentLoopError>> + 'a>>;
 
+/// The one fixed stage that makes a completed Tool outcome durable before the
+/// next Provider sample. It is deliberately scoped to Receipt persistence;
+/// it does not own Tool execution, Cache policy, History pairing or a general
+/// Hook mechanism.
+pub type ToolExecutionReceiptStage<'a> =
+    dyn FnMut(&ToolExecutionOutcome) -> Result<(), AgentLoopError> + 'a;
+
+/// The one fixed stage for user-visible assistant text while a response is
+/// streaming. Reasoning is intentionally not part of this stage and remains
+/// outside Conversation History and CLI output.
+pub type AssistantTextDeltaStage<'a> = dyn FnMut(&str) -> Result<(), AgentLoopError> + 'a;
+
+struct StreamingStages<'a> {
+    text_delta: Option<&'a mut AssistantTextDeltaStage<'a>>,
+    record_execution: Option<&'a mut ToolExecutionReceiptStage<'a>>,
+}
+
+impl StreamingStages<'_> {
+    fn none() -> Self {
+        Self {
+            text_delta: None,
+            record_execution: None,
+        }
+    }
+}
+
 pub struct AgentLoop<'provider, 'tools, Provider: ?Sized, Tools: ?Sized> {
     provider: &'provider Provider,
     tools: &'tools Tools,
@@ -404,8 +430,15 @@ where
         user_text: impl Into<String>,
         cancellation: AgentCancellation,
     ) -> Result<AgentTurnOutcome, AgentLoopError> {
-        self.run_turn_inner(user_text, cancellation, None, None, None)
-            .await
+        self.run_turn_inner(
+            user_text,
+            cancellation,
+            None,
+            None,
+            None,
+            StreamingStages::none(),
+        )
+        .await
     }
 
     /// Runs one Turn through an explicitly supplied request-audit stage. The
@@ -425,6 +458,7 @@ where
             Some((audit_context, record_attempt)),
             None,
             None,
+            StreamingStages::none(),
         )
         .await
     }
@@ -450,6 +484,7 @@ where
             Some((audit_context, record_attempt)),
             Some(initial_image),
             None,
+            StreamingStages::none(),
         )
         .await
     }
@@ -473,6 +508,34 @@ where
             Some((audit_context, record_attempt)),
             None,
             Some(follow_up),
+            StreamingStages::none(),
+        )
+        .await
+    }
+
+    /// Runs the ordinary audited Primary path with fixed text-delta and
+    /// Receipt stages. This is the CLI Chat path: text appears in streaming
+    /// order, while every Tool outcome reaches the Session owner before a
+    /// later Provider sample can fail.
+    pub async fn run_turn_audited_with_stages(
+        &mut self,
+        user_text: impl Into<String>,
+        cancellation: AgentCancellation,
+        audit_context: &RequestAuditRunContext,
+        record_attempt: &mut dyn FnMut(RequestAuditAttempt) -> Result<(), AgentLoopError>,
+        text_delta: &mut AssistantTextDeltaStage<'_>,
+        record_execution: &mut ToolExecutionReceiptStage<'_>,
+    ) -> Result<AgentTurnOutcome, AgentLoopError> {
+        self.run_turn_inner(
+            user_text,
+            cancellation,
+            Some((audit_context, record_attempt)),
+            None,
+            None,
+            StreamingStages {
+                text_delta: Some(text_delta),
+                record_execution: Some(record_execution),
+            },
         )
         .await
     }
@@ -484,7 +547,12 @@ where
         mut audit: Option<RequestAuditStage<'_>>,
         initial_image: Option<ContentItem>,
         mut view_image_follow_up: Option<&mut ViewImageFollowUp<'_>>,
+        stages: StreamingStages<'_>,
     ) -> Result<AgentTurnOutcome, AgentLoopError> {
+        let StreamingStages {
+            mut text_delta,
+            mut record_execution,
+        } = stages;
         self.apply_pending_configuration()?;
         if cancellation.is_cancelled() {
             return Ok(AgentTurnOutcome::Cancelled {
@@ -600,42 +668,84 @@ where
                 &capabilities,
                 &assessment,
             )?;
-            let stream = match ModelStreamingService::new(self.provider)
-                .consume(request.clone(), cancellation.clone())
-                .await
-            {
-                Ok(outcome) => Ok(outcome),
-                Err(ModelStreamingError::Provider(ModelProviderError::ContinuationRejected {
-                    ..
-                })) if request.is_incremental() => {
-                    self.provider_session
-                        .reset(BaselineInvalidationReason::ProviderRejected);
-                    let fallback_assessment = BaselineAssessment::FullRequest {
-                        reason: BaselineInvalidationReason::ProviderRejected,
-                    };
-                    self.last_baseline_assessment = Some(fallback_assessment.clone());
-                    delivery_input = full_input.clone();
-                    snapshot = StepSnapshot::capture(
-                        &turn,
-                        request_index,
-                        &delivery_input,
-                        &capabilities,
-                        InternalRequestMetadata::default(),
-                    )?;
-                    reserve_provider_request(&mut provider_requests)?;
-                    let fallback_request = ModelRequest::full(delivery_input.clone());
-                    self.record_request_audit_attempt(
-                        &mut audit,
-                        &full_input,
-                        &fallback_request,
-                        &capabilities,
-                        &fallback_assessment,
-                    )?;
-                    ModelStreamingService::new(self.provider)
-                        .consume(fallback_request, cancellation.clone())
-                        .await
+            let mut forward_text_delta = |event: &crate::domain::model::ModelEvent| {
+                if let (crate::domain::model::ModelEvent::TextDelta { text }, Some(stage)) =
+                    (event, text_delta.as_deref_mut())
+                {
+                    stage(text).map_err(|error| ModelStreamingError::EventStage {
+                        message: error.to_string(),
+                    })?;
                 }
-                Err(error) => Err(error),
+                Ok(())
+            };
+            let stream = if request.is_incremental() {
+                let mut incremental_text_deltas = Vec::new();
+                let mut buffer_incremental_text = |event: &crate::domain::model::ModelEvent| {
+                    if let crate::domain::model::ModelEvent::TextDelta { text } = event {
+                        incremental_text_deltas.push(text.clone());
+                    }
+                    Ok(())
+                };
+                match ModelStreamingService::new(self.provider)
+                    .consume_with_event_stage(
+                        request.clone(),
+                        cancellation.clone(),
+                        &mut buffer_incremental_text,
+                    )
+                    .await
+                {
+                    Ok(outcome) => {
+                        for text in incremental_text_deltas {
+                            if let Some(stage) = text_delta.as_deref_mut() {
+                                stage(&text)?;
+                            }
+                        }
+                        Ok(outcome)
+                    }
+                    Err(ModelStreamingError::Provider(
+                        ModelProviderError::ContinuationRejected { .. },
+                    )) => {
+                        self.provider_session
+                            .reset(BaselineInvalidationReason::ProviderRejected);
+                        let fallback_assessment = BaselineAssessment::FullRequest {
+                            reason: BaselineInvalidationReason::ProviderRejected,
+                        };
+                        self.last_baseline_assessment = Some(fallback_assessment.clone());
+                        delivery_input = full_input.clone();
+                        snapshot = StepSnapshot::capture(
+                            &turn,
+                            request_index,
+                            &delivery_input,
+                            &capabilities,
+                            InternalRequestMetadata::default(),
+                        )?;
+                        reserve_provider_request(&mut provider_requests)?;
+                        let fallback_request = ModelRequest::full(delivery_input.clone());
+                        self.record_request_audit_attempt(
+                            &mut audit,
+                            &full_input,
+                            &fallback_request,
+                            &capabilities,
+                            &fallback_assessment,
+                        )?;
+                        ModelStreamingService::new(self.provider)
+                            .consume_with_event_stage(
+                                fallback_request,
+                                cancellation.clone(),
+                                &mut forward_text_delta,
+                            )
+                            .await
+                    }
+                    Err(error) => Err(error),
+                }
+            } else {
+                ModelStreamingService::new(self.provider)
+                    .consume_with_event_stage(
+                        request.clone(),
+                        cancellation.clone(),
+                        &mut forward_text_delta,
+                    )
+                    .await
             }?;
             let (events, completion) = match stream {
                 ModelStreamOutcome::Completed { events, completion } => (events, completion),
@@ -683,7 +793,12 @@ where
 
             let exposed_tool_names = tool_specs.iter().map(|spec| spec.name.clone()).collect();
             let scheduled = self
-                .execute_tool_calls(tool_calls, &exposed_tool_names, &cancellation)
+                .execute_tool_calls(
+                    tool_calls,
+                    &exposed_tool_names,
+                    &cancellation,
+                    &mut record_execution,
+                )
                 .await?;
             self.append_view_image_contexts(&scheduled.executions, &mut view_image_follow_up)
                 .await?;
@@ -847,6 +962,7 @@ where
         calls: Vec<ToolCall>,
         exposed_tool_names: &std::collections::BTreeSet<crate::domain::tools::ToolName>,
         cancellation: &AgentCancellation,
+        receipt_stage: &mut Option<&mut ToolExecutionReceiptStage<'_>>,
     ) -> Result<ScheduledCalls, AgentLoopError> {
         let mut prepared = Vec::with_capacity(calls.len());
         let mut plans = Vec::new();
@@ -877,6 +993,7 @@ where
             }
         }
 
+        let planned_outcome_count = plans.len();
         let scheduled = execute_batch(
             self.tools,
             plans,
@@ -884,6 +1001,9 @@ where
             &mut self.completed_idempotency,
         )
         .await;
+        if scheduled.outcomes.len() != planned_outcome_count {
+            return Err(AgentLoopError::SchedulerResultCountMismatch);
+        }
         let mut outcomes = scheduled.outcomes.into_iter();
         let mut executions = Vec::new();
         for entry in prepared {
@@ -902,6 +1022,12 @@ where
         }
         if outcomes.next().is_some() {
             return Err(AgentLoopError::SchedulerResultCountMismatch);
+        }
+        self.history.ensure_all_tool_calls_paired()?;
+        if let Some(stage) = receipt_stage.as_deref_mut() {
+            for outcome in &executions {
+                stage(outcome)?;
+            }
         }
         Ok(ScheduledCalls {
             executions,
@@ -1044,6 +1170,10 @@ pub enum AgentLoopError {
     RequestAuditDeliveryMismatch,
     #[error("RequestAudit commit failed: {message}")]
     RequestAuditCommit { message: String },
+    #[error("Execution Receipt commit failed: {message}")]
+    ExecutionReceiptCommit { message: String },
+    #[error("assistant text presentation failed: {message}")]
+    TextDeltaOutput { message: String },
     #[error("initial image context is invalid: {message}")]
     InitialImageContext { message: String },
     #[error("initial image route identity does not match the active Primary provider")]

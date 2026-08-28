@@ -5,17 +5,17 @@
 - Architecture version: `1.1.0`
 - Phase: `IMPLEMENTATION`
 - Implementation: `STARTED`
-- Current milestone: `M4`; M4-S2 is `COMPLETE` and remotely sealed
-- Current slice: `M4-S3`
-- Slice state: `READY_NOT_AUTHORIZED`; M4-S2 is remotely sealed and work is stopped before Observation/TargetDelta implementation
-- Lean governance: `ACTIVE`; M4-S2 passed its full local Cargo/Lean Gate and final Luna xhigh review with no unresolved P0/P1
-- Local Git initialized: `yes`; `main` contains the M4-S2 implementation Squash Merge and its separate status seal
+- Current milestone: `FIX`; M4-S2 remains `COMPLETE` and remotely sealed
+- Current slice: `F1d`
+- Slice state: `READY_FOR_REMOTE_SEAL`; F1a/F1b/F1c/F1d form one locally verified integration delivery
+- Lean governance: `PASSED`; F1d extends the one Config/Composition credential owner without adding a second Provider path or exposing the inline value to diagnostics or facts
+- Local Git initialized: `yes`; delivery branch `fix/f1-provider-chat-integration` is based on the M4-S2 remote seal
 - Remote repository: `F0und-icu/cyber-agent` private; M4-S2 implementation PR `#44` and `[skip ci]` status PR `#45` form the remote seal without a duplicate post-merge CI
 - Documentation baseline commit: `55ff3be`
-- Current code base: M4-S2 implementation commit `d99f395`, PR `#44`, PR-head CI `33165972124`, Squash Merge `2afe900` and separate status PR `#45`
+- Current code base: remote base `08e9025` plus the locally verified F1a/F1b/F1c/F1d integration delivery
 - Upstream Codex baseline: `3aae5d885bac39c1262491aa3fd100dfd8b3919f`
 
-## Last Completed Slice
+## Last Remotely Sealed Slice
 
 - Slice: `M4-S2`
 - Delivery branch: `agent/m4-s2-trace-replay-eval`
@@ -28,7 +28,7 @@
 - Result: `COMPLETE`; the full Cargo/Lean Gate passes 288 discovered tests, including two ignored opt-in OpenAI Live smokes, with all 286 default-enabled tests passing. Main review closed exact source identity, complete Receipt provenance, Blob validation, exposure, Full-only capability, frozen field naming and multi-Tool ordering; final Luna xhigh review returned `APPROVE` with no unresolved P0/P1. The exact implementation head passed its sole remote macOS Gate and is merged.
 - Dependencies and schemas: no Cargo dependency, feature, persisted Event/Blob/Cache/configuration, Provider DTO, credential source or remote transport was added. New production surface is the non-persisted Trace/Eval schema, fixed Replay Adapters/composition and one terminal Tool Port error; existing `sha2`, Session/Research reducers, RequestAudit, ArtifactStore, ContextPlanner and AgentLoop are reused.
 - Git: implementation commit `d99f395`, PR `#44`, sole PR-head CI `33165972124`, `[skip ci]` Squash Merge `2afe900` and separate `[skip ci]` status PR `#45` complete the remote seal.
-- Live Test: `NOT_RUN`; the available dedicated credential targets a different Provider protocol from the sole production OpenAI Responses Adapter. It was not read, persisted, logged or aliased to the OpenAI credential reference, and no Codex login state was accessed.
+- Live Test: `NOT_RUN_PROVIDER_BINDING_NOT_IMPLEMENTED`; the supplied dedicated credential has no configuration-driven Provider binding in the current production runtime. It was not read, persisted, logged or aliased to the OpenAI credential reference, and no Codex login state was accessed.
 
 ## Current Authority
 
@@ -43,6 +43,9 @@
 9. `docs/adr/ADR-0003-minimal-openai-http-sse-stack.md`
 10. `docs/adr/ADR-0004-sha256-artifact-blob-identity.md`
 11. `docs/adr/ADR-0005-minimal-local-image-stack.md`
+12. `docs/adr/ADR-0006-single-provider-composition-root.md`
+13. `docs/adr/ADR-0007-protocol-first-responses-adapter.md`
+14. `docs/adr/ADR-0008-local-inline-provider-credentials.md`
 
 ## Completed
 
@@ -75,26 +78,210 @@
 - M3-S4 auditable local images, fixed `view_image`, Direct/Secondary Vision composition, strict Vision Session facts and zero-request Mechanical Replay.
 - M4-S1 fixed vulnerability-research Prompt Profiles, Turn-boundary AgentLoop selection and deterministic tests-only controlled offline cases.
 - M4-S2 strict Trace fixtures, full-only Replay Model/Tool Adapters, Mechanical Replay, Context Recompile and isolated non-evidence Shadow Eval.
+- F1a strict Provider Config v1, one Provider Composition Root, shared credential source and configuration-driven generic Live Smokes (local Gate complete; not remotely sealed).
+- F1b one protocol-first Responses HTTP/SSE Adapter, provider-neutral reasoning events and configuration-only conforming-service selection (local Gate complete; not remotely sealed).
+- F1c first-version CLI Chat through the existing AgentLoop, durable Session/RequestAudit/Tool facts and one synthetic DeepSeek Live Chat (local Gate complete; not remotely sealed).
+- F1d compatible Config v1 inline `api_key` or referenced `credential_ref` selection through the existing Composition Root and Adapter boundary (local Gate complete; not remotely sealed).
+
+## Prior Fix Slice
+
+- Slice: `F1a`
+- State: `COMPLETE_WORKTREE_UNCOMMITTED`
+- Scope: add the one strict Provider Config v1 and one Composition Root; make `chat`, `doctor` and both ignored Live Smokes consume that path; keep credentials lazy and explicit; remove generic runtime endpoint/model hard-coding.
+- Protocol boundary: this Slice keeps the existing OpenAI Responses binding but makes selection configuration-driven. A later, separately authorized binding Slice may extract shared Responses wire code when the second real Provider proves the exact common contract; it must not duplicate request encoding, HTTP/SSE transport, response decoding or the ModelProvider Contract Suite.
+- Scope budget: no DeepSeek binding, no real Live Test, no first-version Chat loop, no Provider router/registry/plugin, no fallback, no new dependency, no Event or fact store, and no M4-S3 Observation/TargetDelta work.
+- Git/remote: local source and documentation changes only; no branch, commit, push, PR, merge, tag, release or GitHub Actions run is authorized.
+
+## Prior Completed Fix Slice
+
+- Slice: `F1c`
+- State: `COMPLETE_WORKTREE_UNCOMMITTED`.
+- Delivered scope: `chat --config <path>` now reaches the one Composition Root and one existing AgentLoop for an initialized local Project. It supports fixed Prompt Profiles, durable new/resumed Sessions, RequestAudit, FullAccess Tools, ordered text deltas, Ctrl-C cancellation and explicit exit without a second loop, Provider construction or fact authority.
+- Durable safety: one project-scoped advisory Chat runtime lease prevents concurrent Chat processes while ordinary Writer locks remain short-lived. AgentLoop appends every real Tool Result and verifies complete Tool pairing before invoking receipt persistence; a receipt-stage failure therefore cannot replace successful results with synthetic cancellations.
+- Verification: loopback end-to-end tests cover new/resumed/profiled Chat, audit/history/receipt persistence, lease isolation, cancellation, continuation rejection/Full fallback and PID-bearing Session identities. The final locked Cargo/Lean Gate passes with 308 discovered tests, 306 default-enabled tests passing and two opt-in Live Smokes ignored.
+- Boundary: no TUI/Web, general command framework, model Router/Registry/fallback, new fact store, M4-S3/M4-S4 behavior, Git operation or Codex credential/login access was added or run. One separately authorized synthetic DeepSeek Live Chat used the completed generic path.
+
+## Last Completed Fix Slice
+
+- Slice: `F1d`
+- State: `COMPLETE_WORKTREE_UNCOMMITTED`.
+- Delivered scope: each Config v1 Provider selects exactly one local inline `api_key` or existing `credential_ref`; both route through the one Provider Composition Root and existing Adapter credential interface.
+- Compatibility: existing `credential_ref` configurations remain valid. Inline credentials are explicit local configuration data, do not create a Provider binding and are not written to Session, RequestAudit, Artifact, logs or diagnostic output.
+- Scope budget: no Keychain, encrypted vault, config discovery, credential manager, schema database, Provider router, Codex credential source, Live request, Git operation or M4-S3/M4-S4 work.
+- Verification: inline/reference composition, exact-one validation, lazy Provider use, CLI `doctor` redaction, loopback Chat Authorization and fact/output non-disclosure pass with the complete locked Cargo/Lean Gate.
 
 ## Next Planned Slice
 
 - Slice: `M4-S3`
-- State: `READY_NOT_AUTHORIZED`; this status is planning only and does not start Observation/TargetDelta work.
-- Planned delivery branch: resolve only after a new explicit user instruction authorizes M4-S3; all M4-S2 implementation and status prerequisites are complete.
-- Scope: provider-neutral structured Observations, one bounded external Extractor example and TargetDelta as already bounded by the Implementation Plan.
-- Forbidden continuation: all M4-S3/M4-S4 production work, CLI Chat composition, new Provider Adapter, general Prompt DSL/loader/registry, dataset service, database, model router, Hook/plugin runtime and Codex credential/login access.
+- State: `DEFERRED_NOT_AUTHORIZED`; F1d completion does not start Observation/TargetDelta work.
+- Planned scope: provider-neutral structured Observations, one bounded external Extractor example and TargetDelta only after a new explicit authorization.
+- Forbidden continuation: M4-S3/M4-S4 production work, real Live Test, general Prompt DSL/loader/registry, dataset service, database, model router, Hook/plugin runtime and Codex credential/login access.
 
 ## Current Authorization
 
-The M4-S2 implementation and remote seal requested by the current user instruction are complete. No implementation or Git authorization remains.
+The user explicitly authorized remote publication of the completed F1a/F1b/F1c/F1d integration. F1c/F1d implementation and synthetic Live authorizations remain consumed.
 
-- Run mode: `REVIEW_ONLY`
-- Slice ID: `M4-S3`; state `READY_NOT_AUTHORIZED`
-- Git mode: `REVIEW_ONLY`; no further branch, commit, push, PR, merge, tag or release is authorized
-- Delegation mode: `INACTIVE`; Terra xhigh implementation and Luna xhigh final review are complete
-- Live test mode: `OFF`; M4-S2 recorded the incompatible-Provider reason without adding or impersonating a new protocol, and no further public model request is authorized
-- Forbidden continuation: all M4-S3/M4-S4 production work, general database/index/watcher/hook/router/plugin/model-router work, Codex source modification, Codex credentials/login access or credential persistence in repository/logs/shell profiles
-- Stop condition: `SATISFIED`; remain stopped on clean `main` without starting M4-S3, M4-S4 CLI Chat or another Live Test
+- Run mode: `STOP_AFTER_COMPLETED_SLICE`; F1d is complete and no later Slice is authorized
+- Git mode: `REMOTE_SEAL_AUTHORIZED`; create one short delivery branch, commit and push it, run one exact PR-head CI, Squash Merge with `[skip ci]`, then record the remote evidence without a duplicate CI
+- Delegation mode: `OFF`; the current request does not authorize development sub-agents
+- Live test mode: `OFF`; F1d uses fake/loopback credentials only
+- Configuration rule: Provider binding, model, Base URL and Capability Mapping remain Config v1 data. A Provider selects exactly one inline `api_key` or dedicated `credential_ref`; neither may infer Provider/model identity or use Codex login state.
+- Stop condition: stop after the integration is remotely sealed and the local `main` is synchronized; do not start M4-S3/M4-S4 or a new Live Test
+
+## F1d Lean Review
+
+### Semantic Owners
+
+- `src/provider_composition/config.rs` remains the sole Config v1 decode owner. Its private `InlineApiKey` masks `Debug`, and decode diagnostics redact an `api_key` source line before the error can reach CLI output.
+- `src/provider_composition/validation.rs` remains the sole Provider configuration validator. It requires exactly one non-empty inline `api_key` or valid `CYBER_AGENT_*_API_KEY` `credential_ref` for every Provider before composition or network activity.
+- `src/provider_composition/mod.rs` remains the only production Provider Composition Root. It converts an inline value into one private Provider-scoped in-memory `CredentialSource`; referenced credentials retain the injected external source. Both then enter the same Responses Adapter constructor and existing `ModelProvider` path.
+- `src/adapters/responses/` and the one AgentLoop remain credential-form agnostic. Authorization construction, Model delivery, Tool execution, Session facts and RequestAudit were not given another credential branch or owner.
+
+### Reuse, API and Dependencies
+
+- Reused Config v1, `ProviderComposition`, `CredentialSource`, the protocol-first Responses Adapter, CLI `doctor`, CLI Chat and the existing Session/RequestAudit/Artifact boundaries. Existing referenced configurations remain valid.
+- F1d adds no crate, Cargo feature, public Rust API, Provider binding, Port, Event, Artifact, Cache, persisted schema, fact source or AgentLoop. All new credential representation and composition types are private to `provider_composition`.
+- The three touched production composition modules remain below the 300-line split-review signal. No Config Manager, Secret Service, Provider Registry/Router/Factory or vendor wrapper was introduced.
+- Codex classification remains `REIMPLEMENT`; no Codex source, crate, credential, OAuth/session data or login state was read or copied. The fixed `codex/` reference tree remains clean.
+
+### Tests and Verification
+
+- Permanent regressions under top-level `tests/` cover inline/reference composition, both/neither/empty rejection, malformed-TOML redaction, `doctor` non-disclosure and loopback Chat proof that the inline Key alone reaches Authorization while stdout, stderr and `.cyber-agent` facts do not contain it.
+- Full local Gate passes on Rust `1.93.1`: formatting, denied-warning Clippy, 312 discovered tests with 310 default-enabled tests passing and two opt-in Live Smokes ignored, plus locked build.
+- One-package/one-binary, production inline-test, credential-like literal, generic Provider literal, single Responses owner, forbidden Codex dependency, one-AgentLoop/one-Composition, `git diff --check` and clean fixed `codex/` scans pass. No real API Key exists in the worktree.
+- Live Test: `NOT_RUN`; only synthetic and loopback credentials were used. Git: remote publication is authorized on `fix/f1-provider-chat-integration`; exact commit, PR, CI and merge evidence are pending.
+
+### Removed and Deferred
+
+- No temporary Provider, Adapter, CLI or environment-variable-specific inline-key path remains; the implementation is an additive field and private source inside the existing composition path.
+- File-permission enforcement, Keychain, encrypted Vault, credential manager, automatic config discovery and secret rotation remain intentionally absent for this single-user local tool. CI may continue using `credential_ref`; a personal local config may use `api_key` and remains user-owned uncommitted state.
+- Provider Router/Registry/fallback, vendor-specific Responses wrappers, new Wire APIs and M4-S3/M4-S4 behavior remain deferred and unauthorized.
+
+## F1c Lean Review
+
+### Semantic Owners
+
+- `src/provider_composition/` remains the only generic runtime Provider construction path. `chat` loads its explicit Config v1 and consumes the resulting `ProviderComposition`; it owns no URL, model, credential lookup or protocol Adapter construction.
+- `src/cli_chat.rs` owns only line-oriented CLI interaction and the durable Chat Session handoff. It replays the authoritative Session stream before each append, uses the existing Project Writer and RequestAudit service, and assigns a new Session identity as `chat-<seconds>-<nanoseconds>-<pid>-<sequence>`.
+- `src/app/agent_loop.rs` remains the one History, Context, Provider delivery, Tool pairing and stage-order owner. `src/app/tool_scheduler.rs` is execution-only: it returns the complete ordered real-outcome batch. AgentLoop appends every Tool Result, proves complete pairing, then invokes the receipt stage.
+- The Project Event Store owns the narrowly scoped advisory Chat runtime lease. It is separate from Writer ownership and has no Event or Session-fact semantics.
+
+### Reuse, API and Dependencies
+
+- Reused the existing Config v1/Composition Root, AgentLoop, ProviderSession, Prompt Profiles, Context Planner, ToolRegistry, Project/Event Store, RequestAudit, History normalizer, Local Fragment Cache and Project Snapshot owners. No second AgentLoop, Provider Adapter, History, Tool, audit or fact-store path exists.
+- No new crate, persisted schema, Port, public Rust API, Cache, Provider capability or credential convention was added. Existing `tokio` gained only the already-required `io-std` and `signal` features for interactive stdin and Ctrl-C; `ProjectChatRuntimeLease` and its acquisition method are `pub(crate)` internal composition infrastructure.
+- Codex classification remains `REIMPLEMENT`; no Codex source, crate, credential or login state was read or copied. The fixed `codex/` reference tree remains clean.
+
+### Removed and Deferred
+
+- Removed the scheduler's former AgentLoop-specific receipt/error handling. Receipt-stage failure is now a permanent multi-Tool regression path with completed real outcomes retained in History.
+- No speculative TUI, line editor/history UI, Web surface, command framework, Provider Router/Registry/fallback, Profile loader/DSL, database, M4-S3/M4-S4 behavior or Live Chat route was retained.
+- `src/cli_chat.rs` exceeds the 300-line review signal because its cohesive durable Session composition requires the start/resume, audit, receipt and History handoffs to share one authoritative replay-before-append rule. Splitting it now would add an otherwise single-consumer coordinator without moving a separate semantic owner.
+
+### Tests and Verification
+
+- Permanent loopback regressions cover configuration agreement with `doctor`, initialized-Project enforcement, Session start/resume/Profile selection, History/Receipt/RequestAudit durability, provider failure after a receipt, concurrent same/different Project Chat processes, Ctrl-C, incremental rejection output isolation and cross-process Session IDs. The receipt-stage regression uses two real `read_file` calls and verifies their successful paired History results after the forced persistence failure.
+- Final local Gate: `cargo fmt --all -- --check`, `cargo clippy --locked --all-targets --all-features -- -D warnings`, `cargo test --locked --all-targets --all-features`, and `cargo build --locked` all pass on the pinned toolchain. The suite discovers 308 tests: 306 default-enabled pass and two explicit Live Smokes remain ignored.
+- Lean/static checks pass: no `src/` inline tests; Config-only generic Provider literals; one Responses request/transport/decoder owner; no forbidden Codex dependency; clean fixed `codex/`; no root runtime directory; and `git diff --check`.
+- Git: no Git write or remote action was run. Live Test: one separately authorized synthetic DeepSeek Chat passed through Config v1, the protocol-first Responses Adapter and the one AgentLoop; no Codex credential, `~/.codex` or `CODEX_HOME` was read or changed.
+
+## F1c DeepSeek Live Chat Result
+
+- Authorization: one synthetic text Turn through the completed first-version CLI Chat, with no real target and an instruction not to invoke Tools.
+- Configuration: Config v1 selected `deepseek-v4-flash`, the explicit DeepSeek Responses Base URL, `binding = "http_sse"`, `wire_api = "responses"`, the exact `CYBER_AGENT_PRIMARY_API_KEY` reference and a conservative explicit Full-only text Capability Mapping. `doctor` reported the selected profile ready without reading the credential.
+- Runtime result: `PASS`; the real service returned `LIVE_CHAT_OK` with process exit code 0 through `ProviderComposition -> ResponsesHttpAdapter -> AgentLoop -> CLI Chat`.
+- Durable result: the isolated Session contains exactly one `session.started`, one `session.request_audit_recorded` and two ordered `session.history_item_recorded` facts for the user and assistant text. `prompt inspect` reconstructed the Full request from 16 components with Adapter version `responses-http-sse-v1`; metrics report one Full request, zero Incremental requests, zero fallback and zero Tool cache hits.
+- Credential handling: the user-supplied value was placed only in a mode-0600 credential file inside one mode-0700 `/tmp/cyber-agent-deepseek-chat.*` directory, injected into the Chat child process as the exact configured environment reference, never stored in Provider TOML, repository files, Session facts, RequestAudit Blobs or command output, and removed with the complete temporary directory after verification.
+- Isolation: no Codex login state, `~/.codex`, `CODEX_HOME`, real target, Vision request, Git operation or GitHub Actions run was accessed or performed.
+
+## F1b DeepSeek Live Smoke Result
+
+- Authorization: one fixed synthetic Primary request using the completed generic Composition Root and Responses HTTP/SSE Adapter.
+- Configuration: `deepseek-v4-flash`, explicit DeepSeek Responses Base URL, exact `CYBER_AGENT_PRIMARY_API_KEY` reference, text/stream/tool/usage enabled, image/incremental/structured output disabled and a conservative test-only context window.
+- Credential handling: the user supplied a mode-0600 secret file inside one mode-0700 `/tmp/cyber-agent-deepseek-live.*` directory. The test command read it only into the child process environment; it was never printed, copied into Config/repository/logs or sourced from Codex state. The complete temporary directory was removed after the attempt.
+- Scope: no real target, Tool execution, F1c Chat, Vision request, Git operation or GitHub Actions run.
+- `doctor`: PASS; Config v1 composed the configured Primary profile as ready without resolving or displaying the credential.
+- Primary Live Smoke: PASS; Cargo reported 1 passed, 0 failed in approximately 0.99 seconds. Authentication, configured model and Base URL, Responses streaming text, Usage, Completed and the shared decoder path were exercised.
+- Isolation: no Codex login state, `~/.codex` or `CODEX_HOME` was read or modified; no Git operation or GitHub Actions run occurred.
+
+## F1b Slice Start
+
+- Base: remote-sealed `08e9025` plus the locally complete, uncommitted F1a worktree.
+- Authorized scope: extract one shared Responses request/HTTP-SSE/response owner; remove vendor-named production bindings; decode fixture-proven reasoning-text events; require explicit Capability Mapping for Full-only services; reuse the one Composition Root, generic Live Smokes and ModelProvider contract behavior.
+- Configuration contract: Config v1 is the only Provider/model selection authority. No `*_MODEL` or `*_LIVE_MODEL` environment variable is introduced; `credential_ref` selects only the lazily read secret value.
+- Intended tests: shared request/transport/decoder regression, reasoning-text/Tool/Usage/Completed/unknown-event fixtures, exact credential isolation, Full-only capability validation, differently configured services through the same binding and unchanged existing Responses behavior.
+- Acceptance: full locked Cargo/Lean Gate plus static proof of one Responses transport/decoder, no direct generic Adapter construction, no Provider URL/model environment literal in generic runtime paths and a clean fixed `codex/` tree.
+
+## F1b Lean Review
+
+### Semantic Owners
+
+- `src/adapters/responses/mod.rs` is the sole Responses HTTP/SSE transport and lazy credential-resolution owner. `request.rs` owns the only Responses request DTO/encoding path and `response.rs` owns the only event decoder/error mapping; no vendor wrapper or dialect registry exists.
+- `src/provider_composition/` remains the only runtime construction path. The fixed implemented pair is `binding = "http_sse"` plus `wire_api = "responses"`; URL, Model, exact `CYBER_AGENT_*_API_KEY` reference and Capability Mapping are data and never trigger a Provider-name branch.
+- `domain/model::ModelEvent::ReasoningDelta` is the provider-neutral reasoning event. `app/model_sample` deliberately excludes it from assistant output and Conversation History, while the Trace semantic-output rule requires actual assistant text or a Tool Call rather than reasoning alone.
+- ADR-0007 supersedes vendor-specific binding policy without modifying frozen Architecture v1/v1.1. It requires fixture evidence for any later wire extension and forbids a vendor binding based only on name, URL, Model or credential.
+
+### Reuse, API and Dependencies
+
+- The existing `reqwest`, `eventsource-stream`, Serde, ModelProvider Port, ModelInputIR, explicit Capability Mapping, AgentLoop, Project Artifact resolver, Composition Root and generic Live Smokes are reused. No Cargo dependency, Feature, Provider SDK, Event/Artifact/Cache/fact schema, second AgentLoop or service was added.
+- Public `OpenAiResponsesAdapter`/`OpenAiResponsesConfig` are replaced by the protocol-named `ResponsesHttpAdapter`/`ResponsesHttpConfig`; their production consumer is the Composition Root and their direct test consumer is the permanent protocol Contract Suite. The only new provider-neutral public enum variant is `ModelEvent::ReasoningDelta`.
+- Config v1 replaces the unsealed F1a value `binding = "openai"` with `binding = "http_sse"`; `wire_api = "responses"` and all other fields remain strict. The schema version does not change because Config v1 had not been remotely sealed or released.
+- The configured credential reference may name any dedicated `CYBER_AGENT_*_API_KEY` variable and selects only the secret value. There is no hard-coded OpenAI/DeepSeek credential constant, provider URL, model default, `*_MODEL` environment variable or cross-reference fallback.
+- Codex classification remains `REIMPLEMENT`; no Codex source, crate, credential or login state was read or copied, so the Upstream Port Ledger and dependency set are unchanged.
+
+### Removed and Deferred
+
+- Removed the vendor-named `adapters/openai` production module and its default credential constant. The 760-line F1b-start request/transport/decoder implementation became a 736-line `adapters/responses` owner before the small provider-neutral Reasoning integration; no parallel DeepSeek Adapter was created.
+- Renamed the permanent wire suite/fixtures from `openai` to `responses`, retained every existing request, Tool, image, incremental, failure and cancellation regression, and added rather than replacing reasoning/Full-only coverage.
+- Removed the planned thin OpenAI/DeepSeek binding split and vendor-specific Live-Test key instruction. Deferred Chat Completions, automatic protocol/capability discovery, Provider Router/Registry/fallback, vendor tuning, F1c Chat and M4-S3/M4-S4.
+
+### Tests and Verification
+
+- The protocol fixture covers reasoning text, Tool Call, assistant output, Usage and Full-only Completed without a response ID; malformed reasoning and unknown events are typed failures. Existing request JSON, image, tool pairing, continuation fallback, cancellation and Provider failure tests remain green.
+- Composition tests prove differently named URL/Model/credential profiles use the same Adapter, a Full-only map rejects incremental delivery before credential/network access, and only the exact configured credential reference is read lazily. AgentLoop and Trace tests prove reasoning never becomes assistant History/output or a semantic replay sample by itself.
+- Full local Gate passes on Rust `1.93.1`: formatting, denied-warning Clippy, 298 discovered tests with 296 default-enabled tests passing and two generic Live Smokes ignored, plus locked build.
+- Static scans pass for production inline tests, Provider URL/model environment literals, vendor Adapter symbols, exactly one Responses request/transport/decoder owner, direct construction limited to the Composition Root and protocol Contract Suite, credential/Codex isolation, forbidden Codex dependencies, dependency direction, one AgentLoop/no Provider Router, secret-like literals, `git diff --check` and clean fixed `codex/` state.
+- Live Test: `PASS`; after F1b implementation completed, a separately authorized fixed DeepSeek Primary smoke passed through the generic Config v1 Composition Root and Responses HTTP/SSE Adapter. The temporary credential/configuration directory was removed afterward; no Codex login state, `~/.codex` or `CODEX_HOME` was read or changed.
+- Git: no branch, commit, push, PR, merge, tag, release or GitHub Actions run was created; F1a/F1b remain uncommitted over remote base `08e9025`.
+
+## F1a Slice Start
+
+- Base commit: `08e9025`; worktree was clean and `main` matched `origin/main` before the Slice start.
+- Intended production touch points: one strict configuration schema and one top-level Provider Composition Root; the existing OpenAI Responses binding gains an explicit configured credential reference; `chat` and `doctor` load the same configuration path without resolving credentials; Live Smokes receive the composed Provider from that path.
+- Configuration contract: explicit schema version; named Provider and Agent profiles; required base URL, model, dedicated `CYBER_AGENT_*_API_KEY` reference and versioned capability mapping; exactly one Primary and at most one optional Vision profile; no model-name capability inference.
+- Scope budget: no new Cargo dependency, dynamic Registry, general Router, fallback, second AgentLoop, persisted Event/Artifact/Cache, DeepSeek binding, shared-wire extraction without a second implementation, live request or M4-S3/M4-S4 behavior.
+- Intended permanent tests: strict parse/unknown-field/reference/capability/credential validation; primary/vision composition; credential laziness and exact-reference resolution; `doctor` and shell-only `chat` use the same config; both ignored Live Smokes have no Provider URL/model environment construction.
+- Acceptance commands: locked fmt/clippy/test/build Gate; production inline-test, generic-runtime Provider literal, direct Live Smoke Adapter construction, forbidden Codex dependency, credential isolation, dependency-direction, one-AgentLoop/no-general-router, `git diff --check` and clean fixed `codex/` scans.
+
+## F1a Lean Review
+
+### Semantic Owners
+
+- `src/provider_composition/config.rs` is the sole Config v1 decode and Domain-profile compilation owner. It defines fixed implemented `binding`/`wire_api` enums, named Provider/Capability/Agent profile references and conversion to the existing `AgentModelProfile`/`ModelCapabilities` contracts.
+- `src/provider_composition/validation.rs` is the sole Config v1 validation/error owner. It rejects unknown fields/schema/bindings, malformed identifiers/URLs/credential references, zero generations/windows, dangling references and invalid active or inactive Primary/Vision capability compositions before network activity.
+- `src/provider_composition/mod.rs` is the only concrete Provider Composition Root. CLI `chat`, CLI `doctor` and both generic Live Smokes load this same path; only this module creates a production OpenAI Responses Adapter.
+- `src/adapters/credentials.rs` is the one Provider-neutral credential-source owner. The Adapter receives the configured reference and resolves it lazily at `ModelProvider::stream`; static composition and diagnostics do not read a key.
+
+### Reuse, API and Dependencies
+
+- Reused existing Serde/TOML, `reqwest::Url`, `AgentModelProfile`, `ProviderProfile`, explicit `ModelCapabilities`, `ModelProvider`, OpenAI Responses Adapter and App doctor. No Cargo dependency, Feature, Event, Artifact, Cache, database, remote service, AgentLoop or fact source was added.
+- New public contracts are limited to `CredentialSource`/`CredentialSourceError`/`ProcessEnvironmentCredentialSource` and `ProviderComposition`/`ProviderCompositionError`. They have current OpenAI Adapter, CLI, Primary/Vision composition and generic Live Smoke consumers. Raw Config structs, fixed binding/wire enums, validation and schema version remain internal.
+- `OpenAiResponsesConfig` now receives the exact credential reference selected by composition instead of owning an unconditional lookup. The official OpenAI default constant remains only a binding/contract-test convenience and is absent from generic runtime selection.
+- Codex classification is `REIMPLEMENT`; no Codex source, crate, login state or implementation was read or copied, so the Upstream Port Ledger is unchanged.
+
+### Removed and Deferred
+
+- Removed the OpenAI-owned credential trait/error implementation, two direct Live Smoke Adapter constructions, two hard-coded official endpoints and the vendor-specific live-model environment variable. Retained one direct Adapter constructor only in the OpenAI offline contract suite, where the Adapter itself is the subject.
+- The initial 458-line combined module was split after line-count/ownership review into a 96-line Composition Root, 162-line decode/compile owner and 226-line validation/error owner. No `common`, generic Factory, Registry, Router, Manager or Plugin abstraction exists.
+- Deferred exactly as scoped: DeepSeek binding, shared Responses wire extraction before the second binding, reasoning-text event support, OS config-directory discovery, real Live Test, first-version Chat AgentLoop composition and M4-S3/M4-S4 behavior.
+
+### Tests and Verification
+
+- `tests/provider_composition.rs` covers Primary/Vision composition, exact lazy credential references, credential failure isolation, explicit capability-over-model-name precedence, unknown fields/schema/binding, unsafe URL/reference, zero versions/windows, dangling references and invalid inactive profiles.
+- `tests/cli_smoke.rs` proves `doctor` and shell-only `chat` accept/reject the same explicit config without the configured key and without using generic `OPENAI_API_KEY`. The two ignored Live Smokes use only `CYBER_AGENT_LIVE_CONFIG`, the common Composition Root and fixed synthetic inputs.
+- Full local Gate passes on Rust `1.93.1`: formatting, denied-warning Clippy, 294 discovered tests with 292 default-enabled tests passing and two generic Live Smokes ignored, plus locked build. Production inline-test, credential-like literal, generic Provider URL/model-env, forbidden Codex dependency, Provider Registry/Router, one-AgentLoop, `git diff --check` and clean fixed `codex/` scans pass.
+- Live Test: `NOT_RUN`; F1a had no live authorization and did not read the supplied DeepSeek key, any Cyber Agent Provider key, Codex login state, `~/.codex` or `CODEX_HOME`.
+- Git: no branch, commit, push, PR, merge, tag, release or GitHub Actions run was created; the completed Slice remains uncommitted over clean remote base `08e9025`.
 
 ## M4-S2 Slice Start
 
@@ -746,6 +933,8 @@ The M4-S2 implementation and remote seal requested by the current user instructi
 
 ## Blockers
 
+- None for local F1a implementation; its full offline Gate is complete. Git publication remains intentionally unperformed because it was not authorized.
+- None for local F1b implementation; its full offline Gate is complete. F1c, Git publication and any real Live Test require separate current instructions.
 - None for M2-S5: implementation, stabilization and status PRs plus all post-merge `main` CI runs are complete.
 - None for M3-S1: implementation PR `#27`, status PR `#28` and all corresponding post-merge `main` Gates are complete.
 - None for M3-S2: implementation PR `#29`, status PR `#30` and all corresponding post-merge `main` Gates are complete.
@@ -760,12 +949,23 @@ The M4-S2 implementation and remote seal requested by the current user instructi
 
 ## Last Verification
 
+- F1b local Gate: PASS on Rust `1.93.1`; formatting, denied-warning Clippy, 298 discovered tests with 296 default-enabled tests passing and two generic configuration-driven Live Smokes ignored, plus locked build and all Lean scans.
+- F1b protocol Gate: PASS; one `ResponsesHttpAdapter` owns request encoding, HTTP/SSE transport and decoding for every explicitly configured conforming service. Reasoning, Tool, text, Usage, Completed, unknown-event, cancellation, incremental and Full-only paths are covered without a vendor binding.
+- F1b composition Gate: PASS; Config v1 `http_sse + responses` selects URL, Model, exact dedicated credential reference and explicit Capability Mapping without inference. `chat`, `doctor` and both Live Smokes retain the same Composition Root; Full-only rejection occurs before credential/network access.
+- F1b reuse Gate: PASS; no vendor Adapter symbols, official Provider URL, model environment variable, second wire owner, Provider Router/Registry, second AgentLoop, new dependency or forbidden Codex dependency exists. Reasoning never enters assistant History/output or qualifies alone as semantic Replay output.
+- F1b Live Test: PASS; `doctor` reported the configured Primary ready, then the separately authorized fixed DeepSeek Primary smoke completed with 1 passed, 0 failed in approximately 0.99 seconds. The temporary credential/configuration directory was removed; Codex login state, `~/.codex` and `CODEX_HOME` were untouched.
+- F1b Git/remote: `NOT_RUN`; local F1a/F1b worktree changes remain over `08e9025` because no branch/commit/push/PR/Workflow authorization was provided.
+- F1a local Gate: PASS on Rust `1.93.1`; formatting, denied-warning Clippy, 294 discovered tests with 292 default-enabled tests passing and two generic configuration-driven Live Smokes ignored, plus locked build and all Lean scans.
+- F1a composition Gate: PASS; Config v1 is strict and capability-explicit, Primary/Vision compile through one Root, inactive invalid profiles are rejected, CLI `chat`/`doctor` and Live Smokes share the same entry, and credential resolution remains exact-reference and stream-lazy.
+- F1a reuse Gate: PASS; generic runtime/test paths contain no Provider official URL or vendor-specific live-model environment variable. Only the Root and the provider-specific offline OpenAI contract test directly construct the existing Adapter; there is one AgentLoop and no Provider Registry/Router/Plugin.
+- F1a Live Test: `NOT_RUN`; no real model request or Provider credential read was authorized. Codex login state, `~/.codex` and `CODEX_HOME` were untouched.
+- F1a Git/remote: `NOT_RUN`; local worktree changes remain over `08e9025` because no branch/commit/push/PR/Workflow authorization was provided.
 - M4-S2 local Gate: PASS on Rust `1.93.1`; formatting, denied-warning Clippy, 288 discovered tests with 286 default-enabled tests passing and two ignored OpenAI Live smokes, locked build, inline-test, forbidden Codex dependency, credential/key, Provider-wire/dependency-direction, one-AgentLoop/no-second-store, `git diff --check` and clean fixed `codex/` scans all passed.
 - M4-S2 Trace Gate: PASS; one reference-only fixture is bound to the complete source Session hash, fresh reduced projection, exact Event range, Target/Artifact facts, ordered full RequestAudit/History samples and source-call-ordered Receipts. Required Artifact bytes are reread from the existing store and checked by size and SHA-256.
 - M4-S2 Replay Gate: PASS; Mechanical Replay consumes exact Full model requests and fixed Replay Tool steps with zero external action. Tool exposure is honored without consuming hidden/delayed steps, unmatched calls terminate immediately, complete historical Receipts remain source provenance and derived replay Receipts assert only current replay effects.
 - M4-S2 Context/Shadow Gate: PASS; Context Recompile compares a current candidate to one exact historical RequestAudit without mutation. Shadow Eval accepts only a caller-supplied model plus ReplayToolExecutor, requires complete Tool-step consumption and returns an EvalSource-bound `NonEvidence` result with no formal fact writer.
 - M4-S2 review: Terra xhigh implemented the bounded path. Main review fixed exact source/Eval identity, Receipt provenance, required Blob verification, exposure, Full-only capability truthfulness, frozen field naming and multi-Tool order. Luna xhigh returned final `APPROVE` with no unresolved P0/P1.
-- M4-S2 Live Test: `NOT_RUN_INCOMPATIBLE_PROVIDER`; the only production live Adapter is OpenAI Responses while the available dedicated key targets another Provider protocol. No credential was read, logged, persisted, aliased across Provider roles or sourced from Codex login state.
+- M4-S2 Live Test: `NOT_RUN_PROVIDER_BINDING_NOT_IMPLEMENTED`; DeepSeek publicly supports Responses, but Cyber Agent did not yet have a configuration-driven DeepSeek binding or its explicit event/capability mapping. No credential was read, logged, persisted, aliased across Provider roles or sourced from Codex login state.
 - M4-S2 remote Gate: PASS; exact implementation head `d99f395` was Squash Merged through PR `#44` as `2afe900`, and sole PR-head run `33165972124` passed the macOS Rust Gate. The merge used `[skip ci]`, so no duplicate `main` Workflow was created.
 - M4-S2 status seal: PASS; status-only PR `#45` records the implementation identities and final stopped state. Its commits and merge use `[skip ci]` and start no M4-S3, M4-S4 or Live Test work.
 - M4-S1 local Gate: PASS on Rust `1.93.1`; formatting, denied-warning Clippy, 266 offline/local tests plus one ignored existing synthetic Live Smoke, locked build, inline-test scan, forbidden Codex dependency scan, credential/general-registry review, `git diff --check` and the clean fixed `codex/` reference check all passed.

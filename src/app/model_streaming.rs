@@ -15,6 +15,13 @@ use super::cancellation::AgentCancellation;
 /// Backward-compatible name for the shared Agent cancellation authority.
 pub type ModelStreamCancellation = AgentCancellation;
 
+/// The one fixed observer stage for provider-neutral events while a request
+/// is still streaming. This is deliberately a typed callback boundary rather
+/// than a Hook registry: the owning AgentLoop decides which event kinds, if
+/// any, become user-visible output.
+pub type ModelStreamingEventStage<'a> =
+    dyn FnMut(&ModelEvent) -> Result<(), ModelStreamingError> + 'a;
+
 /// The complete or cancelled sequence observed by the streaming service.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ModelStreamOutcome {
@@ -34,6 +41,8 @@ pub enum ModelStreamingError {
     Provider(#[from] ModelProviderError),
     #[error("model event stream ended before a completed event")]
     EndedBeforeCompletion,
+    #[error("model event stage failed: {message}")]
+    EventStage { message: String },
 }
 
 /// Application service for one provider-neutral streaming model request.
@@ -52,6 +61,21 @@ impl<'provider, Provider: ModelProvider + ?Sized> ModelStreamingService<'provide
         &self,
         request: ModelRequest,
         cancellation: ModelStreamCancellation,
+    ) -> Result<ModelStreamOutcome, ModelStreamingError> {
+        let mut discard = |_event: &ModelEvent| Ok(());
+        self.consume_with_event_stage(request, cancellation, &mut discard)
+            .await
+    }
+
+    /// Consumes one stream while passing each provider-neutral event to the
+    /// one caller-supplied fixed stage in wire order. Event observation never
+    /// commits History or a Provider Baseline; those remain atomic in the
+    /// AgentLoop after a completed response.
+    pub async fn consume_with_event_stage(
+        &self,
+        request: ModelRequest,
+        cancellation: ModelStreamCancellation,
+        event_stage: &mut ModelStreamingEventStage<'_>,
     ) -> Result<ModelStreamOutcome, ModelStreamingError> {
         if cancellation.is_cancelled() {
             return Ok(ModelStreamOutcome::Cancelled { events: Vec::new() });
@@ -84,6 +108,7 @@ impl<'provider, Provider: ModelProvider + ?Sized> ModelStreamingService<'provide
             match next {
                 NextStreamItem::Cancelled => return Ok(ModelStreamOutcome::Cancelled { events }),
                 NextStreamItem::Item(Some(Ok(ModelStreamEvent::Event(event)))) => {
+                    event_stage(&event)?;
                     events.push(event);
                 }
                 NextStreamItem::Item(Some(Ok(ModelStreamEvent::Completed(completion)))) => {

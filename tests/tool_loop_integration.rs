@@ -21,6 +21,10 @@ use cyber_agent::domain::events::{EventEnvelope, StreamId};
 use cyber_agent::domain::model::{
     CapabilityMappingVersion, ContentItem, ModelCapabilities, ModelEvent, ModelInputIR,
 };
+use cyber_agent::domain::project::ProjectId;
+use cyber_agent::domain::request_audit::{
+    RequestAdapterVersion, RequestAuditBinding, RequestAuditRunContext,
+};
 use cyber_agent::domain::tools::{
     ExecutionId, ResourceKey, ToolCall, ToolCallId, ToolExecutionOutcome, ToolExecutionPlan,
     ToolExposure, ToolExposurePlan, ToolName, ToolResultStatus, ToolSpec,
@@ -596,6 +600,69 @@ impl Stream for PendingScriptedStream {
     fn poll_next(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         Poll::Pending
     }
+}
+
+#[tokio::test]
+async fn reasoning_events_never_become_assistant_history_or_user_output() {
+    let project = TestProject::new("reasoning-separation");
+    let provider = ScriptedProvider::new([vec![
+        ModelEvent::ReasoningDelta {
+            text: "private working text".to_owned(),
+        },
+        ModelEvent::TextDelta {
+            text: "auditable answer".to_owned(),
+        },
+    ]]);
+    let tools = ToolRegistry::for_project(&project.root);
+    let mut agent = AgentLoop::new(&provider, &tools, "fixed instructions");
+    let audit_context = RequestAuditRunContext::new(
+        RequestAuditBinding::new(
+            ProjectId::new("project-reasoning-separation"),
+            StreamId::new("session:reasoning-separation"),
+        )
+        .unwrap(),
+        RequestAdapterVersion::new("fixture-adapter-v1").unwrap(),
+    );
+    let mut request_audits = Vec::new();
+    let mut text_deltas = Vec::new();
+    let mut receipts = Vec::new();
+
+    let outcome = agent
+        .run_turn_audited_with_stages(
+            "inspect fixture",
+            AgentCancellation::new(),
+            &audit_context,
+            &mut |attempt| {
+                request_audits.push(attempt);
+                Ok(())
+            },
+            &mut |text| {
+                text_deltas.push(text.to_owned());
+                Ok(())
+            },
+            &mut |outcome| {
+                receipts.push(outcome.clone());
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        outcome,
+        AgentTurnOutcome::Completed { assistant_text, .. }
+            if assistant_text == "auditable answer"
+    ));
+    assert_eq!(
+        agent.history().items(),
+        &[
+            ContentItem::user_text("inspect fixture"),
+            ContentItem::assistant_text("auditable answer"),
+        ]
+    );
+    assert_eq!(text_deltas, vec!["auditable answer"]);
+    assert_eq!(request_audits.len(), 1);
+    assert!(receipts.is_empty());
 }
 
 #[tokio::test]
@@ -1849,4 +1916,82 @@ async fn multiple_tool_calls_are_staged_and_paired_in_model_order() {
             && second_result.call_id == second.call_id
     ));
     assert_eq!(agent.history().ensure_all_tool_calls_paired(), Ok(()));
+}
+
+#[tokio::test]
+async fn receipt_stage_failure_keeps_multi_tool_history_paired_with_real_outcomes() {
+    let project = TestProject::new("receipt-stage-failure");
+    project.write("first.txt", "first fixture\n");
+    project.write("second.txt", "second fixture\n");
+    let first_call = tool_call("call-first", "read_file", json!({"path": "first.txt"}));
+    let second_call = tool_call("call-second", "read_file", json!({"path": "second.txt"}));
+    let provider = ScriptedProvider::new([vec![
+        ModelEvent::ToolCall {
+            call: first_call.clone(),
+        },
+        ModelEvent::ToolCall {
+            call: second_call.clone(),
+        },
+    ]]);
+    let tools = ToolRegistry::for_project(&project.root);
+    let mut agent = AgentLoop::new(&provider, &tools, "fixture");
+    let audit_context = RequestAuditRunContext::new(
+        RequestAuditBinding::new(
+            ProjectId::new("project-receipt-stage-failure"),
+            StreamId::new("session:receipt-stage-failure"),
+        )
+        .unwrap(),
+        RequestAdapterVersion::new("fixture-adapter-v1").unwrap(),
+    );
+    let mut recorded_attempts = Vec::new();
+    let mut receipt_stage_calls = Vec::new();
+
+    let result = agent
+        .run_turn_audited_with_stages(
+            "read both fixtures",
+            AgentCancellation::new(),
+            &audit_context,
+            &mut |attempt| {
+                recorded_attempts.push(attempt);
+                Ok(())
+            },
+            &mut |_text| Ok(()),
+            &mut |outcome| {
+                receipt_stage_calls.push(outcome.clone());
+                Err(AgentLoopError::ExecutionReceiptCommit {
+                    message: "fixture receipt persistence failed".to_owned(),
+                })
+            },
+        )
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(AgentLoopError::ExecutionReceiptCommit { message })
+            if message == "fixture receipt persistence failed"
+    ));
+    assert_eq!(recorded_attempts.len(), 1);
+    assert_eq!(receipt_stage_calls.len(), 1);
+    assert_eq!(
+        receipt_stage_calls[0].result.status,
+        ToolResultStatus::Succeeded,
+        "the stage receives the completed Tool outcome rather than an invented abort"
+    );
+    assert_eq!(agent.history().ensure_all_tool_calls_paired(), Ok(()));
+    assert!(matches!(
+        agent.history().items(),
+        [
+            ContentItem::Text { text, .. },
+            ContentItem::ToolCall { call: first },
+            ContentItem::ToolCall { call: second },
+            ContentItem::ToolResult { result: first_result },
+            ContentItem::ToolResult { result: second_result },
+        ] if text == "read both fixtures"
+            && first == &first_call
+            && second == &second_call
+            && first_result.call_id == first.call_id
+            && second_result.call_id == second.call_id
+            && first_result.status == ToolResultStatus::Succeeded
+            && second_result.status == ToolResultStatus::Succeeded
+    ));
 }

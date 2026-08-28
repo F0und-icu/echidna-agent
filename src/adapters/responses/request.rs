@@ -1,4 +1,4 @@
-//! Private OpenAI Responses request wire encoding.
+//! Shared Responses request wire encoding.
 
 use base64::Engine;
 use serde::Serialize;
@@ -168,7 +168,7 @@ fn append_image_message(
 ) -> Result<(), ModelProviderError> {
     if role != MessageRole::User {
         return Err(request_encoding_error(
-            "OpenAI Responses image Artifact input is supported only for the user role",
+            "Responses image Artifact input is supported only for the user role",
         ));
     }
     if !matches!(media_type.as_str(), "image/png" | "image/jpeg") {

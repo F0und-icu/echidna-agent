@@ -256,6 +256,7 @@ pub struct ModelUsage {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ModelEvent {
     TextDelta { text: String },
+    ReasoningDelta { text: String },
     ToolCall { call: ToolCall },
     Usage { usage: ModelUsage },
 }
