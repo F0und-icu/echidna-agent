@@ -426,6 +426,10 @@ pub(super) fn update_input_schema() -> Value {
     schema::update_input_schema()
 }
 
-pub(super) fn output_schema() -> Value {
-    schema::output_schema()
+pub(super) fn get_output_schema() -> Value {
+    schema::get_output_schema()
+}
+
+pub(super) fn update_output_schema() -> Value {
+    schema::update_output_schema()
 }

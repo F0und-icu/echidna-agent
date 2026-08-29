@@ -1,0 +1,1 @@
+Current objective: verify reachability, prerequisites, repeatability and final security impact. Reproduce the result, run relevant negative and environmental controls, reject instrumentation-only claims as attacker capabilities, and keep every conclusion tied to the exact target version and auditable evidence.

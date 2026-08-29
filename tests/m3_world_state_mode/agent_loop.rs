@@ -35,7 +35,6 @@ async fn queued_mode_and_agent_profile_apply_at_turn_boundary_with_fresh_primary
     let mut agent = AgentLoop::with_primary_context(
         &provider,
         &tools,
-        "base-v1",
         ModelIdentity::new("fixture-provider", "model-primary"),
         ModelProfile::new("initial-primary", 1),
         ProviderSession::new(
@@ -55,14 +54,13 @@ async fn queued_mode_and_agent_profile_apply_at_turn_boundary_with_fresh_primary
         AgentTurnOutcome::Completed { .. }
     ));
 
-    let mode = ModePack::new(
-        "focused",
-        1,
-        "mode-v2",
-        ToolExposurePlan::new([(ToolName::new("write_file"), ToolExposure::Deferred)]),
-    )
-    .unwrap();
-    agent.queue_prompt_composition(PromptComposition::new("base-v2").unwrap().with_mode(mode));
+    agent.queue_prompt_composition(
+        PromptComposition::current()
+            .with_project("base-v2")
+            .unwrap()
+            .with_domain_profile(DomainProfile::Mobile)
+            .with_research_phase(ResearchPhase::Hypothesis),
+    );
     agent
         .queue_agent_model_profile(agent_profile(
             "agent-v2",
@@ -95,7 +93,15 @@ async fn queued_mode_and_agent_profile_apply_at_turn_boundary_with_fresh_primary
         "agent-v2"
     );
     let plan = agent.last_context_plan().unwrap();
-    assert_eq!(plan.base_instructions(), "base-v2\n\nmode-v2");
+    assert!(plan.base_instructions().contains("base-v2"));
+    assert!(
+        plan.base_instructions()
+            .contains(DomainProfile::Mobile.prompt())
+    );
+    assert!(
+        plan.base_instructions()
+            .contains(ResearchPhase::Hypothesis.prompt())
+    );
     assert!(
         plan.full_logical_manifest()
             .entries()
@@ -136,7 +142,7 @@ async fn model_tool_search_updates_the_next_agent_loop_schema_and_resets_the_bas
             completed_response("schemas refreshed", "final-response"),
         ],
     );
-    let mut agent = AgentLoop::new(&provider, &tools, "fixture");
+    let mut agent = AgentLoop::new(&provider, &tools);
 
     let outcome = agent
         .run_turn("find the atomic writer", AgentCancellation::new())
@@ -201,7 +207,7 @@ async fn agent_loop_rejects_model_calls_absent_from_the_sent_schema_before_execu
             completed_response("the hidden call was rejected", "done-response"),
         ],
     );
-    let mut agent = AgentLoop::new(&provider, &tools, "fixture");
+    let mut agent = AgentLoop::new(&provider, &tools);
 
     let outcome = agent
         .run_turn("try an unadvertised Tool", AgentCancellation::new())
@@ -231,7 +237,7 @@ async fn changed_world_state_uses_a_causal_incremental_diff_and_full_retry_prese
             completed_response("recovered", "response-two"),
         ],
     );
-    let mut agent = AgentLoop::new(&provider, &tools, "fixture").with_world_state(world_state("a"));
+    let mut agent = AgentLoop::new(&provider, &tools).with_world_state(world_state("a"));
     agent
         .run_turn("first user", AgentCancellation::new())
         .await
@@ -285,7 +291,10 @@ async fn truncated_world_state_plan_never_injects_an_unplanned_diff() {
     let root = TemporaryDirectory::new("m3-truncated-world-state");
     let tools = ToolRegistry::for_project(root.path());
     let constrained_capabilities = ModelCapabilities {
-        context_window: 8_192,
+        // Exact M4-S3b Tool schemas are part of the fixed model input. Keep
+        // enough room for that contract while still forcing the deliberately
+        // oversized WorldState through the truncation path under test.
+        context_window: 16_384,
         ..incremental_capabilities()
     };
     let provider = ScriptedProvider::new(
@@ -295,8 +304,8 @@ async fn truncated_world_state_plan_never_injects_an_unplanned_diff() {
             completed_response("second", "response-two"),
         ],
     );
-    let mut agent = AgentLoop::new(&provider, &tools, "fixture")
-        .with_world_state(bounded_large_world_state("a"));
+    let mut agent =
+        AgentLoop::new(&provider, &tools).with_world_state(bounded_large_world_state("a"));
     agent
         .run_turn("first user", AgentCancellation::new())
         .await
@@ -352,7 +361,7 @@ async fn changed_project_snapshot_uses_a_causal_incremental_diff() {
             completed_response("second", "response-two"),
         ],
     );
-    let mut agent = AgentLoop::new(&provider, &tools, "fixture").with_project_snapshot(
+    let mut agent = AgentLoop::new(&provider, &tools).with_project_snapshot(
         project_snapshot_context(1, "2026-08-23T00:00:00Z", "initial"),
     );
     agent
@@ -401,7 +410,7 @@ async fn failed_state_diff_request_does_not_commit_derived_state_markers() {
             completed_response("third", "response-three"),
         ],
     );
-    let mut agent = AgentLoop::new(&provider, &tools, "fixture").with_world_state(world_state("a"));
+    let mut agent = AgentLoop::new(&provider, &tools).with_world_state(world_state("a"));
     agent
         .run_turn("first user", AgentCancellation::new())
         .await
@@ -465,7 +474,7 @@ async fn unchanged_world_and_snapshot_fragments_hit_the_fragment_cache() {
         file_count: 1,
     };
     let cache = Arc::new(LocalFragmentCache::for_project(&project));
-    let mut agent = AgentLoop::new(&provider, &tools, "fixture")
+    let mut agent = AgentLoop::new(&provider, &tools)
         .with_fragment_cache(cache)
         .with_world_state(world_state("a"))
         .with_project_snapshot(ProjectSnapshotContext::new(snapshot.clone()).unwrap());
@@ -483,7 +492,7 @@ async fn unchanged_world_and_snapshot_fragments_hit_the_fragment_cache() {
             .unwrap()
             .cache_summary()
             .misses,
-        3
+        5
     );
     agent
         .run_turn("second", AgentCancellation::new())
@@ -495,7 +504,7 @@ async fn unchanged_world_and_snapshot_fragments_hit_the_fragment_cache() {
             .unwrap()
             .cache_summary()
             .hits,
-        3
+        5
     );
 }
 
@@ -517,7 +526,6 @@ async fn secondary_profile_and_vision_mode_changes_keep_primary_session_but_prim
     let mut agent = AgentLoop::with_primary_context(
         &provider,
         &tools,
-        "fixture",
         ModelIdentity::new("fixture-provider", "model-primary"),
         ModelProfile::new("primary", 1),
         ProviderSession::new(
@@ -619,7 +627,7 @@ async fn unchanged_state_after_a_successful_diff_remains_incremental() {
             completed_response("third", "response-three"),
         ],
     );
-    let mut agent = AgentLoop::new(&provider, &tools, "fixture").with_world_state(world_state("a"));
+    let mut agent = AgentLoop::new(&provider, &tools).with_world_state(world_state("a"));
     agent
         .run_turn("first user", AgentCancellation::new())
         .await
@@ -666,8 +674,7 @@ async fn accumulated_state_diffs_that_exceed_the_rendered_budget_fall_back_to_fu
         },
         (0..28).map(|index| completed_response("complete", format!("response-{index}").as_str())),
     );
-    let mut agent =
-        AgentLoop::new(&provider, &tools, "fixture").with_world_state(diff_heavy_world_state(0));
+    let mut agent = AgentLoop::new(&provider, &tools).with_world_state(diff_heavy_world_state(0));
 
     agent
         .run_turn("turn-0", AgentCancellation::new())
@@ -725,8 +732,7 @@ async fn accumulated_state_diffs_that_exceed_the_rendered_budget_fall_back_to_fu
 }
 
 #[tokio::test]
-async fn deferred_to_hidden_exposure_change_resets_the_primary_baseline_even_when_direct_schemas_match()
- {
+async fn phase_exposure_change_resets_the_primary_baseline() {
     let root = TemporaryDirectory::new("m3-exposure-directory-reset");
     let tools = ToolRegistry::for_project(root.path());
     let provider = ScriptedProvider::new(
@@ -737,25 +743,13 @@ async fn deferred_to_hidden_exposure_change_resets_the_primary_baseline_even_whe
             completed_response("third", "response-three"),
         ],
     );
-    let composition_for = |exposure| {
-        PromptComposition::new("fixture").unwrap().with_mode(
-            ModePack::new(
-                "same-mode",
-                1,
-                "same prompt",
-                ToolExposurePlan::new([(ToolName::new("write_file"), exposure)]),
-            )
-            .unwrap(),
-        )
-    };
-    let mut agent = AgentLoop::new(&provider, &tools, "fixture")
-        .with_prompt_composition(composition_for(ToolExposure::Deferred));
+    let mut agent = AgentLoop::new(&provider, &tools).with_research_phase(ResearchPhase::Mapping);
 
     agent
         .run_turn("first", AgentCancellation::new())
         .await
         .unwrap();
-    agent.queue_prompt_composition(composition_for(ToolExposure::Hidden));
+    agent.queue_research_phase(ResearchPhase::Experiment);
     agent
         .run_turn("second", AgentCancellation::new())
         .await
@@ -773,7 +767,7 @@ async fn deferred_to_hidden_exposure_change_resets_the_primary_baseline_even_whe
 
     let requests = provider.requests();
     assert_eq!(requests.len(), 3);
-    assert_eq!(
+    assert_ne!(
         requests[0].input().tool_specs,
         requests[1].input().tool_specs
     );
@@ -792,17 +786,9 @@ async fn failed_turn_boundary_configuration_keeps_pending_prompt_and_exposure_un
         }],
         completion: ModelResponseCompletion::without_response_id(),
     });
-    let mut agent = AgentLoop::new(&provider, &tools, "base");
+    let mut agent = AgentLoop::new(&provider, &tools);
     agent.queue_prompt_composition(
-        PromptComposition::new("new base").unwrap().with_mode(
-            ModePack::new(
-                "writer",
-                1,
-                "writer mode",
-                ToolExposurePlan::new([(ToolName::new("write_file"), ToolExposure::Direct)]),
-            )
-            .unwrap(),
-        ),
+        PromptComposition::current().with_research_phase(ResearchPhase::Experiment),
     );
     agent
         .queue_agent_model_profile(agent_profile(
@@ -842,9 +828,12 @@ async fn failed_turn_boundary_configuration_keeps_pending_prompt_and_exposure_un
         .run_turn("applied", AgentCancellation::new())
         .await
         .unwrap();
-    assert_eq!(
-        agent.last_context_plan().unwrap().base_instructions(),
-        "new base\n\nwriter mode"
+    assert!(
+        agent
+            .last_context_plan()
+            .unwrap()
+            .base_instructions()
+            .contains(ResearchPhase::Experiment.prompt())
     );
     assert!(
         agent
@@ -871,7 +860,6 @@ async fn resume_replaces_the_primary_identity_forces_full_then_allows_fresh_incr
     let mut agent = AgentLoop::with_primary_context(
         &provider,
         &tools,
-        "fixture",
         ModelIdentity::new("fixture", "model"),
         ModelProfile::new("profile", 1),
         ProviderSession::new(
@@ -908,6 +896,7 @@ async fn resume_replaces_the_primary_identity_forces_full_then_allows_fresh_incr
             ),
         )
         .unwrap();
+    assert!(agent.last_sampling_step_plan().is_none());
     agent
         .run_turn("resumed user input", AgentCancellation::new())
         .await
@@ -955,7 +944,6 @@ async fn failed_resumed_full_keeps_session_resumed_pending_for_the_next_attempt(
     let mut agent = AgentLoop::with_primary_context(
         &provider,
         &tools,
-        "fixture",
         ModelIdentity::new("fixture", "model"),
         ModelProfile::new("profile", 1),
         ProviderSession::new(
@@ -1022,7 +1010,6 @@ async fn resume_from_replayed_session_history_replaces_runtime_history_and_force
     let mut agent = AgentLoop::with_primary_context(
         &provider,
         &tools,
-        "fixture",
         ModelIdentity::new("fixture", "model"),
         ModelProfile::new("profile", 1),
         ProviderSession::new(

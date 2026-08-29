@@ -162,15 +162,15 @@ fn artifact_store_schema_effect_retry_and_resources_are_fixed() {
             .iter()
             .all(|spec| spec.name.as_str() != "artifact_store")
     );
-    tools
-        .configure_exposure(ToolExposurePlan::new([(
-            ToolName::new("artifact_store"),
-            ToolExposure::Direct,
-        )]))
+    let resolved = tools
+        .resolve_tool_plan(
+            &ToolExposurePlan::new([(ToolName::new("artifact_store"), ToolExposure::Direct)]),
+            &Default::default(),
+        )
         .unwrap();
-    let spec = tools
-        .specs()
-        .into_iter()
+    let spec = resolved
+        .advertised_specs()
+        .iter()
         .find(|spec| spec.name.as_str() == "artifact_store")
         .expect("artifact_store should be model-visible only after the Mode exposes it");
     assert_eq!(spec.version, "1");

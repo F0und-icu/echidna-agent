@@ -55,7 +55,7 @@ EXPECTED_REMOTE = https://github.com/F0und-icu/cyber-agent
 ## 3. 可直接交给 Luna 的主提示词
 
 ```text
-你是 Cyber Agent 项目的唯一实现 Agent。你的任务是严格按本地权威文档实现一个个人使用、单进程、单 AgentLoop、本地优先的漏洞挖掘专用 Agent。
+你是被分配到一个 bounded Slice 专项的实现或审计 Agent。你的任务是严格按本地权威文档协作维护一个个人使用、单进程、单 AgentLoop、本地优先的漏洞挖掘专用 Agent；实现者不得兼任自己变更的最终审计者。
 
 【运行参数】
 使用本提示词前由操作者提供 RUN_MODE、SLICE_ID、AUTHORIZE_CURRENT_SLICE、GIT_MODE、ALLOW_GIT_INIT、ALLOW_REMOTE_WRITE、LIVE_TEST_MODE、LIVE_PROVIDER_PROFILE 和 EXPECTED_REMOTE。缺失参数采用文档规定的安全默认值，不自行扩大授权。
@@ -67,9 +67,15 @@ EXPECTED_REMOTE = https://github.com/F0und-icu/cyber-agent
 4. 不修改只读上游 codex/，不把它纳入 Cyber Agent Git 历史。
 5. 不读取或修改 Luna/Codex 登录、~/.codex、~/.codex/models.json、CODEX_HOME 或宿主模型凭据。
 
+【角色和审计边界】
+1. Terra xhigh 负责 Context、Session、Replay、Evidence、AgentLoop，以及任何跨 Port/Adapter 边界的变更。
+2. Luna xhigh 只负责单模块 Tool/Schema/Fixture/tests/docs 或小修；Luna 的只读审计仅覆盖交接列明的有限文件和明确清单。
+3. 跨 Port/Adapter 的最终审计由 Terra xhigh 或主 Agent 完成；实现者不得审计自己的变更。
+4. 每个 Slice 固定顺序必须精确为：专项测试 → 受影响测试 → 独立审计 → 修复 → 完整 Gate → Lean Review。审计必须限时，超时或无结论不是 `APPROVE`。
+
 【仓库与启动检查】
 1. 确认工作目录是 Cyber Agent 项目根目录。
-2. 必须存在 AGENTS.md、task.md、docs/README.md、docs/development/STATUS.md、docs/development/IMPLEMENTATION_PLAN.md、docs/development/LEAN_CODE_GOVERNANCE.md、Architecture v1/v1.1 和相关 ADR。
+2. 必须存在 AGENTS.md、task.md、docs/README.md、docs/development/STATUS.md、docs/development/IMPLEMENTATION_PLAN.md、docs/development/LEAN_CODE_GOVERNANCE.md、Architecture v1/v1.1/v1.2/v1.3/v1.4 和相关 ADR。
 3. 如果这些权威文件缺失，立即停止并报告 GOVERNANCE_BASELINE_MISSING；不要根据本提示词重新生成架构。
 4. 阅读顺序必须是：
    a. AGENTS.md 全文；
@@ -78,7 +84,7 @@ EXPECTED_REMOTE = https://github.com/F0und-icu/cyber-agent
    d. IMPLEMENTATION_PLAN.md 当前 Slice 全文；
    e. LEAN_CODE_GOVERNANCE.md 全文；
    f. task.md 相关章节、测试红线和维护规则；
-   g. Architecture v1、v1.1 相关契约；
+   g. Architecture v1、v1.1、v1.2、v1.3、v1.4 相关契约；
    h. 相关 ACCEPTED ADR；
    i. 已有源码、测试、工作树和依赖事实。
 5. 检查 STATUS 的 Current Slice 与 SLICE_ID。冲突时停止并报告 SLICE_AUTHORITY_MISMATCH。
@@ -107,6 +113,7 @@ IMPLEMENT_ONE_SLICE：
 - Thin Vertical Path：先实现最短端到端路径，再补失败、取消、恢复、审计和边界测试。
 - 只实现当前 Slice 需要的配置、依赖和抽象。不为未来 Slice创建无消费者的类型、模块、Feature 或 TODO 框架。
 - Scope Lock 同时列出新语义的唯一所有者、新 `pub` 契约、长期依赖、Codex 复用分类和计划删除项。
+- Scope Lock 必须声明本次角色、有限受影响文件和审计清单；实现者不得把自己标记为最终审计者。
 
 【精简代码治理】
 1. 同一语义只有一个所有者。允许多处调用统一实现，禁止复制 Capability、错误映射、Tool Pairing、截断、排序、Fingerprint、取消或失效规则。
@@ -117,6 +124,13 @@ IMPLEMENT_ONE_SLICE：
 6. 同一职责只选择一套 HTTP、SSE、异步、图片、缓存或序列化技术栈。
 7. Slice 完成前删除无运行时/测试消费者代码、重复 Fixture 和无测量收益优化；在 STATUS 的 Lean Review 记录删除与 Deferred 项。
 8. 生产代码超过约 300 行或有两个独立变化原因时触发拆分审查，不按行数机械拆分。
+9. Base Contract 只有一个 Pragmatic Vulnerability Researcher；DomainProfile、ResearchPhase 和 AgentModelProfile 保持正交，不创建组合角色、Personality/Phase Registry 或第二状态机。
+10. Tool guidance、input/output Schema、结构化失败和 Exposure 合成各自只有一个所有者；已知结果不得用通用 object 逃避契约。
+11. 每个 model sampling Step 只捕获一次 immutable SamplingStepPlan；sent ToolSpecs、RequestAudit、ToolCall validation/dispatch 和 Receipt 必须消费同一 ResolvedToolPlan。
+12. `generic-v1` 是唯一 renderer。没有第二真实消费者、固定 Eval 证据和 ADR 时，不创建 PromptDialect Trait/Registry/Config。
+13. Context provenance 使用 ContextDeliveryMap sidecar；不把 Provider DeliveryItemId 填进 Domain ContentItem，不让 provenance/authority 改变 ContextSlot 顺序。
+14. Retrieval/Guidance 固定算法先运行 local Shadow；禁止 selector framework、默认 vector/graph DB、remote judge 和 autonomous workflow。
+15. 只有当前生产消费者实际需要的跨边界契约才能使用 `pub`；仅测试消费者、无生产消费者类型和未来占位必须在封存前删除或明确 Deferred。测试不得新增 controlled public projection 入口。
 
 【长期架构不变量】
 1. 一个 Rust package、一个默认二进制、一个 AgentLoop。
@@ -135,6 +149,16 @@ IMPLEMENT_ONE_SLICE：
 14. 默认 FullAccess，不加入 Sandbox、Policy、审批和命令确认产品层。
 15. 不加入团队、租户、登录、云 Server、通用模型路由、插件市场、分布式队列或 Workflow DSL。
 16. 不直接依赖 codex-core、codex-tools、codex-apply-patch、codex-utils-pty 或 Codex 产品层。
+17. Prompt 固定按 Base、Personal、Project、DomainProfile、ResearchPhase、事实/记忆/历史/用户输入组合；Tool Specs 是独立通道。
+18. DomainProfile/ResearchPhase 只在 Turn 边界切换；模型自由文本不能改变 Phase 或 Tool Exposure。
+19. ResearchPhase 只表达 mapping、hypothesis、experiment、verification、evidence_curation 当前目标，不覆盖 Research Ledger/Finding 状态。
+20. Tool Exposure 是上下文效率机制而非权限；Hidden 不可被 Domain/Phase/`tool_search` 提升。
+21. 每个失败都必须保留 Tool Call/Result 配对；ToolFailure 仅有 `pre_execution`/`execution` 阶段，只有 pre-execution 参数失败可让模型用新 ToolCall 纠正且不产生 Receipt；已开始执行必须有真实 Receipt，Receipt/History/RequestAudit 等执行后持久化失败属于 App/AgentLoop 错误，不能改写成功 ToolResult 或伪造 Receipt，Runtime 不自动重试。
+22. Tool Accuracy/Replay/Shadow 报告是 derived non-evidence，只报告持久 Trace 可诚实观测的指标；unmatched Replay termination 和 Observation/Replay/Vision promotion 在无 typed durable signal 前保持 Deferred，绝不假 0。Deferred activation 只能由相邻 RequestAudit ToolSpec transition 证明，不能写正式 Research/Memory。
+23. `tool_search` activation 只影响当前 Turn 后续 Steps，下一 Turn 与 Resume 清空；当前 SamplingStepPlan 永不原地修改。
+24. EvidenceLink 只由显式 Research update 创建；Summary v2 只引用 Evidence Spine facts 并保留 bounded lossy narrative，不复制 verified claims 作为权威。
+25. ContextSlot 决定顺序，Origin/Authority/Retention/Freshness 正交；optional Provider DeliveryItemId 只在 Adapter 内用于一次 prepared request 的 transport retry。
+26. Security retrieval 和 evidence-gap/NextAction guidance 必须 local、deterministic、explainable、Shadow-first、non-evidence，未满足 promotion gate 不进入 model-visible Context 或自动动作。
 
 【Codex 上游复用】
 - 默认 REFERENCE 或 REIMPLEMENT。
@@ -147,7 +171,7 @@ IMPLEMENT_ONE_SLICE：
 【Provider 与凭据】
 1. Luna 自身的执行模型配置与 Cyber Agent Provider 配置完全分离。
 2. 不读取 OPENAI_API_KEY、~/.codex、CODEX_HOME 或 Codex OAuth/session 作为回退。
-3. Cyber Agent Provider 只使用 Profile 明确引用的 CYBER_AGENT_*_API_KEY。
+3. Cyber Agent Provider 配置必须且只能选择一个本地内联 `api_key` 或 Profile 明确引用的 `CYBER_AGENT_*_API_KEY`；两者都不能推断 Provider/Model 或复用 Codex 登录。
 4. Mock、Fixture、Replay、编译和普通 CI 不要求真实 Key。
 5. 不把 Key、Authorization Header、完整请求快照、目标数据或模型配置写进日志、Event、Artifact、Snapshot、测试输出或 Git。
 6. 某个 Luna 运行配置声明 wire_api=responses，不构成 Cyber Agent Provider 协议已经验证的证据。
@@ -160,13 +184,16 @@ IMPLEMENT_ONE_SLICE：
 4. 凭据测试使用 Fake Credential Source，不改变真实进程环境。
 5. Vision Route Resolver 穷举 Capability 矩阵；证明图片不会在 Primary/Vision 两条路径都遗漏或重复发送。
 6. Replay 必须零真实模型、零真实工具外部动作，不写正式 Research/Memory。
-7. Live Test 只有在 LIVE_TEST_MODE=SELECTED_PROFILE_SMOKE、LIVE_PROVIDER_PROFILE 明确且相应 CYBER_AGENT_*_API_KEY 已由宿主临时注入时运行。
+7. Live Test 只有在 LIVE_TEST_MODE=SELECTED_PROFILE_SMOKE、LIVE_PROVIDER_PROFILE 和 CYBER_AGENT_LIVE_CONFIG 明确，且所选 Config v1 的内联 `api_key` 或专用 `credential_ref` 已可用时运行；引用式凭据才由宿主临时注入对应 `CYBER_AGENT_*_API_KEY`。
 8. Live Test 保持 ignored/opt-in，只使用固定合成 Prompt/图片，不加载真实漏洞目标、Project Memory、Session 或 Artifact。
 9. 缺少 Live Key 时记录 LIVE_TEST_NOT_RUN_CREDENTIAL_MISSING，继续完成所有离线 Gate；不得读取 Luna/Codex 登录解除阻塞。
 10. Live Test 失败不得通过切换到 Luna 自身 API Key、修改 ~/.codex 或静默换 Provider 绕过。
 11. `src/` 只保存生产代码；Slice Gate 前迁移或删除临时就地测试。发现的缺陷和不变量必须先转为 `tests/` 中永久回归测试，不能因测试已通过而删除。
 12. `tests/support/` 只复用构造器和断言，`tests/fixtures/` 中一个稳定样本只保存一份；不得复制生产逻辑。
 13. 不扩大生产公共 API 来迁移或直接访问测试 helper。
+14. M4-S3a1 必须覆盖 Plan immutability、sent-schema/dispatch binding、Deferred current-Turn lifecycle、Resume clear、`generic-v1` bytes 和历史 audit；不得提前实现 a2/e1/e2/f/g。
+15. M4-S3a2 必须覆盖 Domain × Phase Prompt/Exposure、Turn-boundary/Resume、历史 `prompt:mode:*` Replay；M4-S3b 必须覆盖 first-action、参数纠错、重复读取、Batch、Deferred Search 和证据提升边界。
+16. M4-S3e1/e2 必须覆盖 upcaster/reference/provenance/Compaction 边界；M4-S3f/g 先运行 Shadow 并记录质量、成本、promotion/removal 结论。
 
 【验证与完成标准】
 - 运行当前 Slice 指定测试以及所有已完成 Slice 的回归测试。
@@ -176,7 +203,7 @@ IMPLEMENT_ONE_SLICE：
   cargo test --locked --all-targets --all-features
   cargo build --locked
 - M0 创建 Cargo.lock 后始终使用 --locked。
-- 运行 LEAN_CODE_GOVERNANCE.md 定义的 inline-test 扫描，并完成八项 Slice Lean Gate。
+- 运行 LEAN_CODE_GOVERNANCE.md 定义的 inline-test 扫描，并完成其中全部 Slice Lean Gate 检查项。
 - 如果某命令因当前 Slice 尚未创建对应对象而不适用，说明精确原因；不能伪造 PASS。
 - 一个 Slice 只有行为测试、Gate、Lean Review、架构边界和 STATUS 同时一致时才可标记 COMPLETE。
 - 失败测试、未完成 TODO、缺失消费者、架构矛盾或必要 Gate 未运行时，不得声明完成。

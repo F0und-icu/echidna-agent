@@ -16,9 +16,8 @@ mod snapshot;
 mod tool_search;
 mod view_image;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -28,9 +27,9 @@ use crate::adapters::project_event_store::ProjectEventStoreError;
 use crate::adapters::tool_result_cache::LocalToolResultCache;
 use crate::domain::events::StreamId;
 use crate::domain::tools::{
-    ExecutionId, ResourceKey, ToolCachePolicy, ToolCall, ToolDeterminism, ToolEffect,
-    ToolExecutionOutcome, ToolExecutionPlan, ToolExposure, ToolExposurePlan, ToolName,
-    ToolOutputPolicy, ToolParallelism, ToolRetryPolicy, ToolSpec, split_execution_control,
+    ExecutionId, ResolvedToolPlan, ResourceKey, ToolCachePolicy, ToolCall, ToolDeterminism,
+    ToolEffect, ToolExecutionOutcome, ToolExecutionPlan, ToolExposure, ToolName, ToolOutputPolicy,
+    ToolParallelism, ToolRetryPolicy, ToolSpec, split_execution_control,
 };
 use crate::ports::tool::{ToolExecutionFuture, ToolExecutor, ToolExecutorError};
 
@@ -75,24 +74,10 @@ pub struct ToolRegistry {
     ptys: pty::PtySessions,
     active_leases: ActiveProcessLeases,
     result_cache: Option<LocalToolResultCache>,
-    exposure: Mutex<ToolExposureState>,
-}
-
-struct ToolExposureState {
-    plan: ToolExposurePlan,
-    discovered_deferred: BTreeSet<ToolName>,
 }
 
 impl ToolRegistry {
     pub fn for_project(project_root: impl Into<PathBuf>) -> Self {
-        Self::for_project_with_exposure(project_root, ToolExposurePlan::default())
-            .expect("the built-in Tool catalog accepts its empty exposure plan")
-    }
-
-    pub fn for_project_with_exposure(
-        project_root: impl Into<PathBuf>,
-        exposure_plan: ToolExposurePlan,
-    ) -> Result<Self, ToolExecutorError> {
         let project_root = project_root.into();
         let tools = [
             (ToolName::new("read_file"), BuiltinTool::ReadFile),
@@ -129,19 +114,14 @@ impl ToolRegistry {
         ]
         .into_iter()
         .collect();
-        validate_exposure_plan(&tools, &exposure_plan)?;
-        Ok(Self {
+        Self {
             result_cache: None,
             project_root,
             tools,
             jobs: job::BackgroundJobs::new(),
             ptys: pty::PtySessions::new(),
             active_leases: ActiveProcessLeases::new(),
-            exposure: Mutex::new(ToolExposureState {
-                plan: exposure_plan,
-                discovered_deferred: BTreeSet::new(),
-            }),
-        })
+        }
     }
 
     /// Enables the persistent Tool Result Cache only for one caller-bound
@@ -158,58 +138,26 @@ impl ToolRegistry {
         Ok(registry)
     }
 
-    fn configured_spec(&self, name: &ToolName, tool: BuiltinTool) -> ToolSpec {
-        let exposure = self
-            .exposure
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Self::configured_spec_for_state(name, tool, &exposure)
-    }
-
-    fn configured_spec_for_state(
-        name: &ToolName,
-        tool: BuiltinTool,
-        exposure: &ToolExposureState,
-    ) -> ToolSpec {
+    fn canonical_spec(name: &ToolName, tool: BuiltinTool) -> ToolSpec {
         let mut builtin_spec = tool.spec();
+        debug_assert_eq!(&builtin_spec.name, name);
         builtin_spec.exposure = tool.default_exposure();
-        let mut spec = exposure.plan.apply_to_spec(builtin_spec);
-        let deferred_discovered =
-            spec.exposure == ToolExposure::Deferred && exposure.discovered_deferred.contains(name);
-        if deferred_discovered {
-            spec.exposure = ToolExposure::Direct;
-        }
-        spec
+        builtin_spec
     }
 
-    fn all_specs(&self) -> Vec<ToolSpec> {
-        let exposure = self
-            .exposure
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+    fn canonical_specs(&self) -> Vec<ToolSpec> {
         self.tools
             .iter()
-            .map(|(name, tool)| Self::configured_spec_for_state(name, *tool, &exposure))
+            .map(|(name, tool)| Self::canonical_spec(name, *tool))
             .collect()
     }
 
-    fn deferred_specs(&self) -> Vec<ToolSpec> {
-        let exposure = self
-            .exposure
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        self.tools
-            .iter()
-            .map(|(name, tool)| Self::configured_spec_for_state(name, *tool, &exposure))
-            .filter(|spec| spec.exposure == ToolExposure::Deferred)
-            .collect()
-    }
-
-    fn plan_with_exposure(
+    fn plan_with_spec(
         &self,
         execution_id: ExecutionId,
         mut call: ToolCall,
-        require_direct: bool,
+        spec: &ToolSpec,
+        resolved: Option<&ResolvedToolPlan>,
     ) -> Result<ToolExecutionPlan, ToolExecutorError> {
         let tool = self
             .tools
@@ -217,12 +165,6 @@ impl ToolRegistry {
             .ok_or_else(|| ToolExecutorError::UnknownTool {
                 tool_name: call.name.to_string(),
             })?;
-        let spec = self.configured_spec(&call.name, *tool);
-        if require_direct && spec.exposure != ToolExposure::Direct {
-            return Err(ToolExecutorError::ToolNotExposed {
-                tool_name: call.name.to_string(),
-            });
-        }
         let arguments = std::mem::take(&mut call.arguments);
         let (arguments, rerun_reason) = split_execution_control(arguments).map_err(|error| {
             ToolExecutorError::InvalidArguments {
@@ -236,7 +178,7 @@ impl ToolRegistry {
         let mut plan = ToolExecutionPlan::new_with_rerun_reason(
             execution_id,
             call,
-            &spec,
+            spec,
             resource_keys,
             rerun_reason,
         )
@@ -244,6 +186,14 @@ impl ToolRegistry {
             tool_name: spec.name.to_string(),
             message: error.to_string(),
         })?;
+        if let Some(resolved) = resolved {
+            plan.bind_resolved_tool_plan(resolved).map_err(|error| {
+                ToolExecutorError::PlanFailure {
+                    tool_name: spec.name.to_string(),
+                    message: error.to_string(),
+                }
+            })?;
+        }
         if let Some(fingerprint) =
             tool.cache_resource_fingerprint(&self.project_root, &plan.call.arguments)
         {
@@ -258,11 +208,8 @@ impl ToolRegistry {
 }
 
 impl ToolExecutor for ToolRegistry {
-    fn specs(&self) -> Vec<ToolSpec> {
-        self.all_specs()
-            .into_iter()
-            .filter(|spec| spec.exposure == ToolExposure::Direct)
-            .collect()
+    fn catalog(&self) -> Vec<ToolSpec> {
+        self.canonical_specs()
     }
 
     fn plan(
@@ -270,29 +217,29 @@ impl ToolExecutor for ToolRegistry {
         execution_id: ExecutionId,
         call: ToolCall,
     ) -> Result<ToolExecutionPlan, ToolExecutorError> {
-        self.plan_with_exposure(execution_id, call, false)
+        let tool =
+            self.tools
+                .get(&call.name)
+                .copied()
+                .ok_or_else(|| ToolExecutorError::UnknownTool {
+                    tool_name: call.name.to_string(),
+                })?;
+        let spec = Self::canonical_spec(&call.name, tool);
+        self.plan_with_spec(execution_id, call, &spec, None)
     }
 
-    fn plan_exposed(
+    fn plan_model_call(
         &self,
+        resolved: &ResolvedToolPlan,
         execution_id: ExecutionId,
         call: ToolCall,
     ) -> Result<ToolExecutionPlan, ToolExecutorError> {
-        self.plan_with_exposure(execution_id, call, true)
-    }
-
-    fn configure_exposure(&self, plan: ToolExposurePlan) -> Result<(), ToolExecutorError> {
-        validate_exposure_plan(&self.tools, &plan)?;
-        let mut exposure = self
-            .exposure
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if exposure.plan == plan {
-            return Ok(());
-        }
-        exposure.plan = plan;
-        exposure.discovered_deferred.clear();
-        Ok(())
+        let spec = resolved.advertised_spec(&call.name).ok_or_else(|| {
+            ToolExecutorError::ToolNotExposed {
+                tool_name: call.name.to_string(),
+            }
+        })?;
+        self.plan_with_spec(execution_id, call, spec, Some(resolved))
     }
 
     fn execute(&self, plan: ToolExecutionPlan) -> ToolExecutionFuture<'_> {
@@ -327,18 +274,15 @@ impl ToolExecutor for ToolRegistry {
             }
             let timeout_plan = plan.clone();
             if tool == BuiltinTool::ToolSearch {
-                let search = tool_search::execute(plan, &self.deferred_specs());
-                if !search.activated.is_empty() {
-                    self.exposure
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .discovered_deferred
-                        .extend(search.activated);
-                }
-                return search.outcome;
+                let deferred = plan.deferred_tool_specs().to_vec();
+                return tool_search::execute(plan, &deferred);
             }
             let specs = if tool == BuiltinTool::InspectProject {
-                self.specs()
+                if plan.resolved_tool_plan_fingerprint().is_some() {
+                    plan.resolved_tool_specs().to_vec()
+                } else {
+                    self.specs()
+                }
             } else {
                 Vec::new()
             };
@@ -364,22 +308,6 @@ impl ToolExecutor for ToolRegistry {
             outcome
         })
     }
-}
-
-fn validate_exposure_plan(
-    tools: &BTreeMap<ToolName, BuiltinTool>,
-    plan: &ToolExposurePlan,
-) -> Result<(), ToolExecutorError> {
-    if let Some(tool_name) = plan
-        .overrides()
-        .keys()
-        .find(|tool_name| !tools.contains_key(*tool_name))
-    {
-        return Err(ToolExecutorError::UnknownTool {
-            tool_name: tool_name.to_string(),
-        });
-    }
-    Ok(())
 }
 
 fn is_process_lifecycle_tool(tool_name: &str) -> bool {
@@ -525,18 +453,16 @@ impl BuiltinTool {
     }
 
     fn spec(self) -> ToolSpec {
-        let common_output = json!({"type": "object"});
         match self {
             Self::ReadFile => spec(
                 "read_file",
-                "Read one local file as bounded text.",
                 json!({
                     "type": "object",
                     "properties": {"path": {"type": "string"}},
                     "required": ["path"],
                     "additionalProperties": false
                 }),
-                common_output,
+                self.output_schema(),
                 ToolParallelism::Parallel,
                 Some("file:{path}"),
                 ToolEffect::ReadOnly,
@@ -546,7 +472,6 @@ impl BuiltinTool {
             ),
             Self::ReadFiles => spec(
                 "read_files",
-                "Read multiple local files as bounded text, preserving per-file failures.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -569,7 +494,7 @@ impl BuiltinTool {
                     "required": ["files"],
                     "additionalProperties": false
                 }),
-                common_output,
+                self.output_schema(),
                 ToolParallelism::Parallel,
                 Some("file:{files[*].path}"),
                 ToolEffect::ReadOnly,
@@ -579,7 +504,6 @@ impl BuiltinTool {
             ),
             Self::ListFiles => spec(
                 "list_files",
-                "List local paths recursively with a bounded depth and output.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -588,7 +512,7 @@ impl BuiltinTool {
                     },
                     "additionalProperties": false
                 }),
-                common_output,
+                self.output_schema(),
                 ToolParallelism::Parallel,
                 Some("file:{path}"),
                 ToolEffect::ReadOnly,
@@ -598,7 +522,6 @@ impl BuiltinTool {
             ),
             Self::SearchFiles => spec(
                 "search_files",
-                "Search local files with ripgrep and return bounded line matches.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -609,11 +532,15 @@ impl BuiltinTool {
                             "maxItems": 32,
                             "items": {"type": "string"}
                         },
-                        "paths": {"type": "array", "items": {"type": "string"}}
+                        "paths": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"type": "string"}}
                     },
+                    "oneOf": [
+                        {"required": ["pattern"], "not": {"required": ["patterns"]}},
+                        {"required": ["patterns"], "not": {"required": ["pattern"]}}
+                    ],
                     "additionalProperties": false
                 }),
-                common_output,
+                self.output_schema(),
                 ToolParallelism::Parallel,
                 Some("file:{paths}"),
                 ToolEffect::ReadOnly,
@@ -623,7 +550,6 @@ impl BuiltinTool {
             ),
             Self::WriteFile => spec(
                 "write_file",
-                "Atomically replace one project-relative regular file after an exact preimage Hash check.",
                 file_write::write_file_input_schema(),
                 file_write::output_schema(),
                 ToolParallelism::ResourceLocked,
@@ -635,7 +561,6 @@ impl BuiltinTool {
             ),
             Self::ApplyPatch => spec(
                 "apply_patch",
-                "Apply one confined unified-Diff file patch after full preimage and hunk validation.",
                 file_write::apply_patch_input_schema(),
                 file_write::output_schema(),
                 ToolParallelism::ResourceLocked,
@@ -647,7 +572,6 @@ impl BuiltinTool {
             ),
             Self::RunCommand => spec(
                 "run_command",
-                "Run one argv array directly with FullAccess; no shell string is accepted.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -658,7 +582,7 @@ impl BuiltinTool {
                     "required": ["argv"],
                     "additionalProperties": false
                 }),
-                common_output,
+                self.output_schema(),
                 ToolParallelism::ResourceLocked,
                 Some("resource:{resources}"),
                 ToolEffect::Interactive,
@@ -668,7 +592,6 @@ impl BuiltinTool {
             ),
             Self::RunCommands => spec(
                 "run_commands",
-                "Run several argv arrays with an explicit serial or parallel mode; each result is retained.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -692,7 +615,7 @@ impl BuiltinTool {
                     "required": ["mode", "commands"],
                     "additionalProperties": false
                 }),
-                common_output,
+                self.output_schema(),
                 ToolParallelism::ResourceLocked,
                 Some("resource:{commands[*].resources}"),
                 ToolEffect::Interactive,
@@ -702,7 +625,6 @@ impl BuiltinTool {
             ),
             Self::StartJob => spec(
                 "start_job",
-                "Start one ordinary non-PTY argv process in the background and return its Job ID.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -714,7 +636,7 @@ impl BuiltinTool {
                     "required": ["argv"],
                     "additionalProperties": false
                 }),
-                common_output,
+                self.output_schema(),
                 ToolParallelism::ResourceLocked,
                 Some("resource:{resources}"),
                 ToolEffect::Interactive,
@@ -724,7 +646,6 @@ impl BuiltinTool {
             ),
             Self::PollJob => spec(
                 "poll_job",
-                "Read only new stdout and stderr bytes after caller-supplied offsets from one non-PTY Job.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -735,7 +656,7 @@ impl BuiltinTool {
                     "required": ["job_id"],
                     "additionalProperties": false
                 }),
-                common_output,
+                self.output_schema(),
                 ToolParallelism::ResourceLocked,
                 Some("job:{job_id}"),
                 ToolEffect::ReadOnly,
@@ -745,7 +666,6 @@ impl BuiltinTool {
             ),
             Self::InputJob => spec(
                 "input_job",
-                "Write input to one running non-PTY Job; set close to close its stdin after writing.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -756,7 +676,7 @@ impl BuiltinTool {
                     "required": ["job_id", "input"],
                     "additionalProperties": false
                 }),
-                common_output,
+                self.output_schema(),
                 ToolParallelism::ResourceLocked,
                 Some("job:{job_id}"),
                 ToolEffect::Interactive,
@@ -766,7 +686,6 @@ impl BuiltinTool {
             ),
             Self::StopJob => spec(
                 "stop_job",
-                "Stop and reap one running non-PTY Job, then return its stable terminal completion Receipt.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -775,7 +694,7 @@ impl BuiltinTool {
                     "required": ["job_id"],
                     "additionalProperties": false
                 }),
-                common_output,
+                self.output_schema(),
                 ToolParallelism::ResourceLocked,
                 Some("job:{job_id}"),
                 ToolEffect::Interactive,
@@ -785,7 +704,6 @@ impl BuiltinTool {
             ),
             Self::StartPty => spec(
                 "start_pty",
-                "Start one current-platform PTY argv process and return its PTY Session ID.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -798,7 +716,7 @@ impl BuiltinTool {
                     "required": ["argv"],
                     "additionalProperties": false
                 }),
-                common_output,
+                self.output_schema(),
                 ToolParallelism::ResourceLocked,
                 Some("resource:{resources}"),
                 ToolEffect::Interactive,
@@ -808,7 +726,6 @@ impl BuiltinTool {
             ),
             Self::PollPty => spec(
                 "poll_pty",
-                "Read only newly captured PTY bytes after a caller-supplied offset.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -818,7 +735,7 @@ impl BuiltinTool {
                     "required": ["pty_session_id"],
                     "additionalProperties": false
                 }),
-                common_output,
+                self.output_schema(),
                 ToolParallelism::ResourceLocked,
                 Some("pty:{pty_session_id}"),
                 ToolEffect::ReadOnly,
@@ -828,7 +745,6 @@ impl BuiltinTool {
             ),
             Self::InputPty => spec(
                 "input_pty",
-                "Write input bytes to one running PTY session.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -838,7 +754,7 @@ impl BuiltinTool {
                     "required": ["pty_session_id", "input"],
                     "additionalProperties": false
                 }),
-                common_output,
+                self.output_schema(),
                 ToolParallelism::ResourceLocked,
                 Some("pty:{pty_session_id}"),
                 ToolEffect::Interactive,
@@ -848,7 +764,6 @@ impl BuiltinTool {
             ),
             Self::ResizePty => spec(
                 "resize_pty",
-                "Resize one running PTY terminal on the current platform.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -859,7 +774,7 @@ impl BuiltinTool {
                     "required": ["pty_session_id", "rows", "cols"],
                     "additionalProperties": false
                 }),
-                common_output,
+                self.output_schema(),
                 ToolParallelism::ResourceLocked,
                 Some("pty:{pty_session_id}"),
                 ToolEffect::Interactive,
@@ -869,7 +784,6 @@ impl BuiltinTool {
             ),
             Self::StopPty => spec(
                 "stop_pty",
-                "Stop and reap one PTY direct child, then return its stable terminal completion.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -878,7 +792,7 @@ impl BuiltinTool {
                     "required": ["pty_session_id"],
                     "additionalProperties": false
                 }),
-                common_output,
+                self.output_schema(),
                 ToolParallelism::ResourceLocked,
                 Some("pty:{pty_session_id}"),
                 ToolEffect::Interactive,
@@ -888,7 +802,6 @@ impl BuiltinTool {
             ),
             Self::ArtifactStore => spec(
                 "artifact_store",
-                "Store one local regular file as a SHA-256 Blob and append a provenance-preserving Artifact fact.",
                 artifact::input_schema(),
                 artifact::output_schema(),
                 ToolParallelism::ResourceLocked,
@@ -900,7 +813,6 @@ impl BuiltinTool {
             ),
             Self::ViewImage => spec(
                 "view_image",
-                "Validate one local PNG or JPEG, publish its original Artifact and any budgeted PNG derivative, and return the selected image Artifact reference.",
                 view_image::input_schema(),
                 view_image::output_schema(),
                 ToolParallelism::ResourceLocked,
@@ -912,7 +824,6 @@ impl BuiltinTool {
             ),
             Self::MemoryRead => spec(
                 "memory_read",
-                "Read one project Markdown Memory document and audit any externally edited revision.",
                 memory::read_input_schema(),
                 memory::output_schema(),
                 ToolParallelism::ResourceLocked,
@@ -924,7 +835,6 @@ impl BuiltinTool {
             ),
             Self::MemoryWrite => spec(
                 "memory_write",
-                "Replace one project Markdown Memory document with expected-Hash protection and an audited Diff.",
                 memory::write_input_schema(),
                 memory::output_schema(),
                 ToolParallelism::ResourceLocked,
@@ -936,7 +846,6 @@ impl BuiltinTool {
             ),
             Self::InspectProject => spec(
                 "inspect_project",
-                "Build or reuse the project-isolated metadata Snapshot, File Manifest, and fixed Tool Capability Cache.",
                 snapshot::input_schema(),
                 snapshot::output_schema(),
                 ToolParallelism::ResourceLocked,
@@ -948,9 +857,8 @@ impl BuiltinTool {
             ),
             Self::ResearchGet => cacheable(spec(
                 "research_get",
-                "Read and strictly reduce the current project Research Event stream.",
                 research::get_input_schema(),
-                research::output_schema(),
+                research::get_output_schema(),
                 ToolParallelism::Parallel,
                 Some("file:.cyber-agent/research.jsonl"),
                 ToolEffect::ReadOnly,
@@ -960,9 +868,8 @@ impl BuiltinTool {
             )),
             Self::ResearchUpdate => spec(
                 "research_update",
-                "Append one versioned Research record, update, or explicit merge after strict replay validation.",
                 research::update_input_schema(),
-                research::output_schema(),
+                research::update_output_schema(),
                 ToolParallelism::ResourceLocked,
                 Some("file:.cyber-agent/research.jsonl"),
                 ToolEffect::LocalMutation,
@@ -972,9 +879,8 @@ impl BuiltinTool {
             ),
             Self::ToolSearch => spec(
                 "tool_search",
-                "Discover matching currently Deferred Tools by name or description and expose their schemas for this Agent session.",
                 tool_search::input_schema(),
-                common_output,
+                self.output_schema(),
                 ToolParallelism::Parallel,
                 None,
                 ToolEffect::ReadOnly,
@@ -982,6 +888,127 @@ impl BuiltinTool {
                 ToolDeterminism::Deterministic,
                 5_000,
             ),
+        }
+    }
+
+    fn output_schema(self) -> Value {
+        let string = |nullable: bool| {
+            if nullable {
+                json!({"type": ["string", "null"]})
+            } else {
+                json!({"type": "string", "minLength": 1})
+            }
+        };
+        let integer = json!({"type": "integer", "minimum": 0});
+        let boolean = json!({"type": "boolean"});
+        let status = |values: &[&str]| json!({"type": "string", "enum": values});
+        let stream = json!({
+            "type": "object",
+            "properties": {
+                "offset": {"type": "integer", "minimum": 0},
+                "next_offset": {"type": "integer", "minimum": 0},
+                "data": {"type": "string"},
+                "truncated": {"type": "boolean"},
+                "read_error": {"type": ["string", "null"]}
+            },
+            "required": ["offset", "next_offset", "data", "truncated", "read_error"],
+            "additionalProperties": false
+        });
+        match self {
+            Self::ReadFile => read_file_output_schema(),
+            Self::ReadFiles => json!({
+                "type": "object",
+                "properties": {
+                    "files": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"oneOf": [
+                        {"type": "object", "properties": {
+                            "status": {"type": "string", "const": "succeeded"},
+                            "result": read_file_output_schema()
+                        }, "required": ["status", "result"], "additionalProperties": false},
+                        {"type": "object", "properties": {
+                            "status": {"type": "string", "const": "failed"},
+                            "result": file_read_failure_schema()
+                        }, "required": ["status", "result"], "additionalProperties": false}
+                    ]}},
+                    "partial_failure": boolean
+                }, "required": ["files", "partial_failure"], "additionalProperties": false
+            }),
+            Self::ListFiles => json!({
+                "type": "object", "properties": {
+                    "path": string(false), "paths": {"type": "string"},
+                    "path_count": integer, "truncated": boolean
+                }, "required": ["path", "paths", "path_count", "truncated"], "additionalProperties": false
+            }),
+            Self::SearchFiles => json!({
+                "oneOf": [
+                    search_result_schema(),
+                    {"type": "object", "properties": {
+                        "results": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"oneOf": [
+                            {"type": "object", "properties": {
+                                "pattern": string(false), "status": {"type": "string", "const": "succeeded"},
+                                "result": search_result_schema()
+                            }, "required": ["pattern", "status", "result"], "additionalProperties": false},
+                            {"type": "object", "properties": {
+                                "pattern": string(false), "status": {"type": "string", "const": "failed"},
+                                "result": search_failure_schema()
+                            }, "required": ["pattern", "status", "result"], "additionalProperties": false}
+                        ]}},
+                        "partial_failure": boolean
+                    }, "required": ["results", "partial_failure"], "additionalProperties": false}
+                ]
+            }),
+            Self::RunCommand => command_output_schema(),
+            Self::RunCommands => json!({
+                "type": "object", "properties": {
+                    "commands": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"type": "object", "properties": {
+                        "index": {"type": "integer", "minimum": 0}, "status": {"type": "string", "enum": ["succeeded", "failed"]}, "result": command_output_schema()
+                    }, "required": ["index", "status", "result"], "additionalProperties": false}},
+                    "partial_failure": boolean
+                }, "required": ["commands", "partial_failure"], "additionalProperties": false
+            }),
+            Self::StartJob => json!({
+                "type": "object", "properties": {"job_id": string(false), "status": status(&["running"]), "pid": {"type": "integer", "minimum": 1}},
+                "required": ["job_id", "status", "pid"], "additionalProperties": false
+            }),
+            Self::PollJob => json!({
+                "type": "object", "properties": {"job_id": string(false), "status": status(&["running", "stopping", "completed", "failed", "cancelled", "timed_out"]), "stdout": stream.clone(), "stderr": stream, "completion": {"oneOf": [job_completion_schema(), {"type": "null"}]}},
+                "required": ["job_id", "status", "stdout", "stderr", "completion"], "additionalProperties": false
+            }),
+            Self::InputJob => json!({
+                "type": "object", "properties": {"job_id": string(false), "bytes_written": integer, "input_closed": boolean},
+                "required": ["job_id", "bytes_written", "input_closed"], "additionalProperties": false
+            }),
+            Self::StopJob => json!({
+                "type": "object", "properties": {"job_id": string(false), "status": status(&["completed", "failed", "cancelled", "timed_out"]), "completion": job_completion_schema(), "already_terminal": boolean},
+                "required": ["job_id", "status", "completion", "already_terminal"], "additionalProperties": false
+            }),
+            Self::StartPty => json!({
+                "type": "object", "properties": {"pty_session_id": string(false), "status": status(&["running"])},
+                "required": ["pty_session_id", "status"], "additionalProperties": false
+            }),
+            Self::PollPty => json!({
+                "type": "object", "properties": {"pty_session_id": string(false), "status": status(&["running", "stopping", "completed", "failed", "cancelled"]), "output": stream, "completion": {"oneOf": [pty_completion_schema(), {"type": "null"}]}},
+                "required": ["pty_session_id", "status", "output", "completion"], "additionalProperties": false
+            }),
+            Self::InputPty => json!({
+                "type": "object", "properties": {"pty_session_id": string(false), "bytes_written": integer},
+                "required": ["pty_session_id", "bytes_written"], "additionalProperties": false
+            }),
+            Self::ResizePty => json!({
+                "type": "object", "properties": {"pty_session_id": string(false), "rows": {"type": "integer", "minimum": 1, "maximum": 65535}, "cols": {"type": "integer", "minimum": 1, "maximum": 65535}},
+                "required": ["pty_session_id", "rows", "cols"], "additionalProperties": false
+            }),
+            Self::StopPty => json!({
+                "type": "object", "properties": {"pty_session_id": string(false), "status": status(&["completed", "failed", "cancelled"]), "completion": pty_completion_schema(), "already_terminal": boolean},
+                "required": ["pty_session_id", "status", "completion", "already_terminal"], "additionalProperties": false
+            }),
+            Self::ToolSearch => json!({
+                "type": "object", "properties": {"query": string(false), "matches": {"type": "array", "maxItems": 16, "items": {"type": "object", "properties": {"name": string(false), "description": string(false), "exposure": {"type": "string", "enum": ["direct", "deferred", "hidden"]}, "input_schema": {"type": "object"}, "output_schema": {"type": "object"}}, "required": ["name", "description", "exposure", "input_schema", "output_schema"], "additionalProperties": false}}, "truncated": boolean},
+                "required": ["query", "matches", "truncated"], "additionalProperties": false
+            }),
+            _ => json!({
+                "type": "object", "properties": {"status": {"type": "string"}, "event_appended": boolean, "event_id": {"type": "string"}, "message": {"type": "string"}},
+                "additionalProperties": false
+            }),
         }
     }
 
@@ -993,10 +1020,119 @@ impl BuiltinTool {
     }
 }
 
+fn read_file_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "minLength": 1},
+            "content": {"type": "string"},
+            "original_bytes": {"type": "integer", "minimum": 0},
+            "selected_bytes": {"type": "integer", "minimum": 0},
+            "truncated": {"type": "boolean"},
+            "start_line": {"type": ["integer", "null"], "minimum": 1},
+            "end_line": {"type": ["integer", "null"], "minimum": 1}
+        },
+        "required": ["path", "content", "original_bytes", "selected_bytes", "truncated", "start_line", "end_line"],
+        "additionalProperties": false
+    })
+}
+
+fn file_read_failure_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "error": {"type": "string", "minLength": 1},
+            "path": {"type": "string", "minLength": 1}
+        },
+        "required": ["error", "path"],
+        "additionalProperties": false
+    })
+}
+
+fn search_result_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "matches": {"type": "string"},
+            "original_bytes": {"type": "integer", "minimum": 0},
+            "truncated": {"type": "boolean"}
+        },
+        "required": ["matches", "original_bytes", "truncated"],
+        "additionalProperties": false
+    })
+}
+
+fn search_failure_schema() -> Value {
+    json!({
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {"error": {"type": "string", "minLength": 1}},
+                "required": ["error"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "exit_code": {"type": ["integer", "null"]},
+                    "stdout": {"type": "string"},
+                    "stderr": {"type": "string"},
+                    "truncated": {"type": "boolean"}
+                },
+                "required": ["exit_code", "stdout", "stderr", "truncated"],
+                "additionalProperties": false
+            }
+        ]
+    })
+}
+
+fn job_completion_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "job_id": {"type": "string", "minLength": 1},
+            "status": {"type": "string", "enum": ["completed", "failed", "cancelled", "timed_out"]},
+            "exit_code": {"type": ["integer", "null"]},
+            "start_execution_id": {"type": "string", "minLength": 1},
+            "start_plan_fingerprint": {"type": "string", "minLength": 1},
+            "exit_reason": {"type": "string", "minLength": 1}
+        },
+        "required": ["job_id", "status", "exit_code", "start_execution_id", "start_plan_fingerprint", "exit_reason"],
+        "additionalProperties": false
+    })
+}
+
+fn pty_completion_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "pty_session_id": {"type": "string", "minLength": 1},
+            "status": {"type": "string", "enum": ["completed", "failed", "cancelled"]},
+            "exit_code": {"type": ["integer", "null"]},
+            "start_execution_id": {"type": "string", "minLength": 1},
+            "start_plan_fingerprint": {"type": "string", "minLength": 1},
+            "exit_reason": {"type": "string", "minLength": 1}
+        },
+        "required": ["pty_session_id", "status", "exit_code", "start_execution_id", "start_plan_fingerprint", "exit_reason"],
+        "additionalProperties": false
+    })
+}
+
+fn command_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "cwd": {"type": "string", "minLength": 1}, "exit_code": {"type": ["integer", "null"]},
+            "stdout": {"type": "string"}, "stderr": {"type": "string"}, "truncated": {"type": "boolean"}
+        },
+        "required": ["cwd", "exit_code", "stdout", "stderr", "truncated"],
+        "additionalProperties": false
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn spec(
     name: &str,
-    description: &str,
     input_schema: Value,
     output_schema: Value,
     parallelism: ToolParallelism,
@@ -1009,7 +1145,7 @@ fn spec(
     ToolSpec {
         name: ToolName::new(name),
         version: TOOL_VERSION.to_owned(),
-        description: description.to_owned(),
+        description: canonical_description(name),
         input_schema: with_execution_control(input_schema),
         output_schema,
         exposure: ToolExposure::Direct,
@@ -1024,6 +1160,184 @@ fn spec(
             max_bytes: DEFAULT_OUTPUT_BYTES,
         },
     }
+}
+
+/// Canonical model-facing guidance.  Keeping the four headings in the
+/// ToolSpec owner makes descriptions searchable, auditable and stable across
+/// every Adapter (including `tool_search`) without duplicating prompt prose.
+fn canonical_description(name: &str) -> String {
+    let use_when = match name {
+        "read_file" => "one local file",
+        "read_files" => "several independent local files",
+        "list_files" => "paths or a bounded tree",
+        "search_files" => "bounded text matches in local files",
+        "write_file" => "one atomic expected-hash file replacement",
+        "apply_patch" => "one validated file patch",
+        "run_command" => "one bounded local command",
+        "run_commands" => "independent bounded commands",
+        "start_job" => "long non-interactive work",
+        "poll_job" => "new Job output or completion",
+        "input_job" => "stdin for a running Job",
+        "stop_job" => "stop a running Job",
+        "start_pty" => "a terminal-required child",
+        "poll_pty" => "new PTY output or completion",
+        "input_pty" => "input for a running PTY",
+        "resize_pty" => "resize a running PTY",
+        "stop_pty" => "stop a running PTY",
+        "artifact_store" => "durable raw-output provenance",
+        "view_image" => "one supported local image",
+        "memory_read" => "bounded project Memory",
+        "memory_write" => "a focused project Memory update",
+        "inspect_project" => "current project metadata",
+        "research_get" => "existing typed Research state",
+        "research_update" => "supported typed Research facts",
+        "tool_search" => "find Deferred tools",
+        _ => "the exact Tool contract.",
+    };
+    let (do_not_use, prefer, produces) = match name {
+        "read_file" => (
+            "a batch or search is needed.",
+            "line ranges.",
+            "content, bytes and truncation.",
+        ),
+        "read_files" => (
+            "one file or a text search is enough.",
+            "a bounded independent batch.",
+            "per-file content and failures.",
+        ),
+        "list_files" => (
+            "content or text matches are needed.",
+            "an explicit depth.",
+            "paths and truncation.",
+        ),
+        "search_files" => (
+            "file content or a command result is needed.",
+            "narrow patterns.",
+            "matches, bytes and truncation.",
+        ),
+        "write_file" => (
+            "a patch or multi-file edit is needed.",
+            "apply_patch for hunks.",
+            "a hashed file mutation.",
+        ),
+        "apply_patch" => (
+            "the patch is invalid or spans files.",
+            "a verified preimage.",
+            "a file mutation.",
+        ),
+        "run_command" => (
+            "a batch or interactive terminal is needed.",
+            "argv, not a shell string.",
+            "output and truncation.",
+        ),
+        "run_commands" => (
+            "one command or dependent ordering is needed.",
+            "independent batches.",
+            "ordered results and failures.",
+        ),
+        "start_job" => (
+            "the command is short or terminal-interactive.",
+            "long non-PTY work.",
+            "Job ID and status.",
+        ),
+        "poll_job" => (
+            "there is no Job ID or offset is stale.",
+            "increasing offsets.",
+            "status, content and truncation.",
+        ),
+        "input_job" => (
+            "the process is a PTY or stdin is closed.",
+            "one bounded write.",
+            "Job ID and bytes.",
+        ),
+        "stop_job" => (
+            "start or polling is needed.",
+            "natural completion.",
+            "terminal status.",
+        ),
+        "start_pty" => (
+            "non-terminal work is sufficient.",
+            "run_command or start_job.",
+            "PTY ID and status.",
+        ),
+        "poll_pty" => (
+            "there is no PTY ID or offset is stale.",
+            "increasing offsets.",
+            "status, content and truncation.",
+        ),
+        "input_pty" => (
+            "the process is closed or not a PTY.",
+            "one bounded input.",
+            "PTY ID and bytes.",
+        ),
+        "resize_pty" => (
+            "the PTY is closed or input is needed.",
+            "positive dimensions.",
+            "PTY ID and dimensions.",
+        ),
+        "stop_pty" => (
+            "polling, resizing or input is needed.",
+            "natural completion.",
+            "terminal status.",
+        ),
+        "artifact_store" => (
+            "text is transient or lacks source provenance.",
+            "reproducible raw output.",
+            "Blob and Artifact.",
+        ),
+        "view_image" => (
+            "format validation or proof is needed.",
+            "a local supported image.",
+            "source and selected Artifacts.",
+        ),
+        "memory_read" => (
+            "a mutation or verified Research fact is needed.",
+            "smallest document.",
+            "path, content and hash.",
+        ),
+        "memory_write" => (
+            "there is no expected hash or content is transient.",
+            "focused update.",
+            "hashes, Blob and status.",
+        ),
+        "inspect_project" => (
+            "file content or evidence is needed.",
+            "changed paths.",
+            "Snapshot metadata.",
+        ),
+        "research_get" => (
+            "a mutation or transition is needed.",
+            "the narrowest query.",
+            "typed Research state.",
+        ),
+        "research_update" => (
+            "the source is unbacked.",
+            "typed facts with references.",
+            "record status.",
+        ),
+        "tool_search" => (
+            "a Tool is Hidden or already Direct.",
+            "a narrow query.",
+            "matching schemas.",
+        ),
+        _ => (
+            "Do not use when a more specific Tool contract applies.",
+            "Prefer the narrowest existing Tool and bounded arguments.",
+            "Produces a typed Tool result and the corresponding execution Receipt.",
+        ),
+    };
+    let strip_heading = |text: &str, heading: &str| {
+        text.strip_prefix(heading)
+            .unwrap_or(text)
+            .trim_start()
+            .to_owned()
+    };
+    format!(
+        "Use when: {use_when}\nDo not use when: {}\nPrefer: {}\nProduces: {}",
+        strip_heading(do_not_use, "Do not use when:"),
+        strip_heading(prefer, "Prefer:"),
+        strip_heading(produces, "Produces:"),
+    )
 }
 
 fn cacheable(mut spec: ToolSpec) -> ToolSpec {

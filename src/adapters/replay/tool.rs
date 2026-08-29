@@ -5,8 +5,8 @@ use std::sync::Mutex;
 
 use crate::domain::canonical_json::canonical_blake3_hash;
 use crate::domain::tools::{
-    ExecutionId, ToolCall, ToolExecutionOutcome, ToolExecutionPlan, ToolExposure, ToolExposurePlan,
-    ToolName, ToolResultStatus, ToolSpec,
+    DeferredActivationSet, ExecutionId, ResolvedToolPlan, ToolCall, ToolExecutionOutcome,
+    ToolExecutionPlan, ToolExposure, ToolExposurePlan, ToolName, ToolResultStatus, ToolSpec,
 };
 use crate::domain::trace_eval::{EvalSource, TraceReplayToolStep, TraceReplayToolUse};
 use crate::ports::tool::{ToolExecutionFuture, ToolExecutor, ToolExecutorError};
@@ -24,7 +24,7 @@ struct ReplayToolState {
 pub struct ReplayToolExecutor {
     source: EvalSource,
     specs: BTreeMap<ToolName, ToolSpec>,
-    exposure: Mutex<ToolExposurePlan>,
+    fixed_plan: ResolvedToolPlan,
     state: Mutex<ReplayToolState>,
 }
 
@@ -53,10 +53,16 @@ impl ReplayToolExecutor {
                 });
             }
         }
+        let fixed_plan = ResolvedToolPlan::resolve(
+            replay_specs.values().cloned(),
+            &ToolExposurePlan::default(),
+            &DeferredActivationSet::default(),
+        )
+        .map_err(|_| ReplayAdapterError::DuplicateToolSpec)?;
         Ok(Self {
             source,
             specs: replay_specs,
-            exposure: Mutex::new(ToolExposurePlan::default()),
+            fixed_plan,
             state: Mutex::new(ReplayToolState {
                 remaining_steps: steps,
                 planned_steps: BTreeMap::new(),
@@ -85,23 +91,14 @@ impl ReplayToolExecutor {
         &self,
         execution_id: ExecutionId,
         call: ToolCall,
+        resolved: Option<&ResolvedToolPlan>,
     ) -> Result<ToolExecutionPlan, ToolExecutorError> {
-        let spec =
-            self.specs
-                .get(&call.name)
-                .ok_or_else(|| ToolExecutorError::UnmatchedToolCall {
-                    tool_name: call.name.to_string(),
-                })?;
-        let exposure = self
-            .exposure
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if exposure.apply_to_spec(spec.clone()).exposure != ToolExposure::Direct {
-            return Err(ToolExecutorError::ToolNotExposed {
+        let spec = resolved
+            .unwrap_or(&self.fixed_plan)
+            .advertised_spec(&call.name)
+            .ok_or_else(|| ToolExecutorError::UnmatchedToolCall {
                 tool_name: call.name.to_string(),
-            });
-        }
-        drop(exposure);
+            })?;
         let mut state = self
             .state
             .lock()
@@ -120,12 +117,19 @@ impl ReplayToolExecutor {
                 tool_name: call.name.to_string(),
             });
         }
-        let plan = ToolExecutionPlan::new(execution_id.clone(), call, spec, Vec::new()).map_err(
-            |error| ToolExecutorError::PlanFailure {
+        let mut plan = ToolExecutionPlan::new(execution_id.clone(), call, spec, Vec::new())
+            .map_err(|error| ToolExecutorError::PlanFailure {
                 tool_name: spec.name.to_string(),
                 message: error.to_string(),
-            },
-        )?;
+            })?;
+        if let Some(resolved) = resolved {
+            plan.bind_resolved_tool_plan(resolved).map_err(|error| {
+                ToolExecutorError::PlanFailure {
+                    tool_name: spec.name.to_string(),
+                    message: error.to_string(),
+                }
+            })?;
+        }
         let step = state
             .remaining_steps
             .pop_front()
@@ -136,17 +140,16 @@ impl ReplayToolExecutor {
 }
 
 impl ToolExecutor for ReplayToolExecutor {
-    fn specs(&self) -> Vec<ToolSpec> {
-        let exposure = self
-            .exposure
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        self.specs
-            .values()
-            .cloned()
-            .map(|spec| exposure.apply_to_spec(spec))
-            .filter(|spec| spec.exposure == ToolExposure::Direct)
-            .collect()
+    fn catalog(&self) -> Vec<ToolSpec> {
+        self.specs.values().cloned().collect()
+    }
+
+    fn resolve_tool_plan(
+        &self,
+        _exposure: &ToolExposurePlan,
+        _activations: &DeferredActivationSet,
+    ) -> Result<ResolvedToolPlan, ToolExecutorError> {
+        Ok(self.fixed_plan.clone())
     }
 
     fn plan(
@@ -154,32 +157,19 @@ impl ToolExecutor for ReplayToolExecutor {
         execution_id: ExecutionId,
         call: ToolCall,
     ) -> Result<ToolExecutionPlan, ToolExecutorError> {
-        self.plan_replay(execution_id, call)
+        self.plan_replay(execution_id, call, None)
     }
 
-    fn plan_exposed(
+    fn plan_model_call(
         &self,
+        resolved: &ResolvedToolPlan,
         execution_id: ExecutionId,
         call: ToolCall,
     ) -> Result<ToolExecutionPlan, ToolExecutorError> {
-        self.plan_replay(execution_id, call)
-    }
-
-    fn configure_exposure(&self, plan: ToolExposurePlan) -> Result<(), ToolExecutorError> {
-        if let Some(tool_name) = plan
-            .overrides()
-            .keys()
-            .find(|tool_name| !self.specs.contains_key(*tool_name))
-        {
-            return Err(ToolExecutorError::UnknownTool {
-                tool_name: tool_name.to_string(),
-            });
+        if resolved != &self.fixed_plan {
+            return Err(ToolExecutorError::ResolvedPlanMismatch);
         }
-        *self
-            .exposure
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = plan;
-        Ok(())
+        self.plan_replay(execution_id, call, Some(resolved))
     }
 
     fn execute(&self, plan: ToolExecutionPlan) -> ToolExecutionFuture<'_> {
@@ -204,7 +194,7 @@ impl ToolExecutor for ReplayToolExecutor {
                 ToolResultStatus::Succeeded => {
                     ToolExecutionOutcome::succeeded(plan, source_result.output)
                 }
-                ToolResultStatus::Failed => ToolExecutionOutcome::failed(
+                ToolResultStatus::Failed => ToolExecutionOutcome::failed_preserving_output(
                     plan,
                     source_receipt
                         .exit_reason

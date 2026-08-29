@@ -98,7 +98,74 @@ pub enum ContextFragmentSource {
     BasePrompt,
     PersonalPreferences,
     ProjectPrompt,
+    /// Historical M3/M4-S1 audit identity. New requests use DomainPrompt.
     ModePrompt,
+    DomainPrompt,
+    PhasePrompt,
+    ResearchWorldState,
+    ProjectSnapshot,
+    ProjectMemoryCore,
+    RetrievedMemory,
+    SessionSummary,
+    RecentHistory,
+    UserInput,
+    TurnLocalUpdates,
+}
+
+/// Placement alone controls the stable request order. Semantic provenance is
+/// represented independently by [`ContextOrigin`].
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextSlot {
+    BaseInstructions,
+    PersonalInstructions,
+    ProjectInstructions,
+    DomainInstructions,
+    PhaseInstructions,
+    ResearchState,
+    ProjectState,
+    MemoryCore,
+    RetrievedContext,
+    Summary,
+    History,
+    UserInput,
+    TurnUpdates,
+}
+
+impl ContextSlot {
+    pub(super) const fn order(self) -> u8 {
+        match self {
+            Self::BaseInstructions => 1,
+            Self::PersonalInstructions => 2,
+            Self::ProjectInstructions => 3,
+            Self::DomainInstructions => 4,
+            Self::PhaseInstructions => 5,
+            Self::ResearchState => 6,
+            Self::ProjectState => 7,
+            Self::MemoryCore => 8,
+            Self::RetrievedContext => 9,
+            Self::Summary => 10,
+            Self::History => 11,
+            Self::UserInput => 12,
+            Self::TurnUpdates => 13,
+        }
+    }
+
+    const fn is_instruction(self) -> bool {
+        self.order() <= 5
+    }
+}
+
+/// Semantic producer identity, deliberately independent from placement.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextOrigin {
+    BasePrompt,
+    PersonalPreferences,
+    ProjectPrompt,
+    ModePrompt,
+    DomainPrompt,
+    PhasePrompt,
     ResearchWorldState,
     ProjectSnapshot,
     ProjectMemoryCore,
@@ -110,25 +177,41 @@ pub enum ContextFragmentSource {
 }
 
 impl ContextFragmentSource {
-    pub(super) fn slot(self) -> u8 {
+    pub const fn placement(self) -> ContextSlot {
         match self {
-            Self::BasePrompt => 1,
-            Self::PersonalPreferences => 2,
-            Self::ProjectPrompt => 3,
-            Self::ModePrompt => 4,
-            Self::ResearchWorldState => 5,
-            Self::ProjectSnapshot => 6,
-            Self::ProjectMemoryCore => 7,
-            Self::RetrievedMemory => 8,
-            Self::SessionSummary => 9,
-            Self::RecentHistory => 10,
-            Self::UserInput => 11,
-            Self::TurnLocalUpdates => 12,
+            Self::BasePrompt => ContextSlot::BaseInstructions,
+            Self::PersonalPreferences => ContextSlot::PersonalInstructions,
+            Self::ProjectPrompt => ContextSlot::ProjectInstructions,
+            Self::ModePrompt | Self::DomainPrompt => ContextSlot::DomainInstructions,
+            Self::PhasePrompt => ContextSlot::PhaseInstructions,
+            Self::ResearchWorldState => ContextSlot::ResearchState,
+            Self::ProjectSnapshot => ContextSlot::ProjectState,
+            Self::ProjectMemoryCore => ContextSlot::MemoryCore,
+            Self::RetrievedMemory => ContextSlot::RetrievedContext,
+            Self::SessionSummary => ContextSlot::Summary,
+            Self::RecentHistory => ContextSlot::History,
+            Self::UserInput => ContextSlot::UserInput,
+            Self::TurnLocalUpdates => ContextSlot::TurnUpdates,
         }
     }
 
-    fn is_instruction_slot(self) -> bool {
-        self.slot() <= 4
+    pub const fn origin(self) -> ContextOrigin {
+        match self {
+            Self::BasePrompt => ContextOrigin::BasePrompt,
+            Self::PersonalPreferences => ContextOrigin::PersonalPreferences,
+            Self::ProjectPrompt => ContextOrigin::ProjectPrompt,
+            Self::ModePrompt => ContextOrigin::ModePrompt,
+            Self::DomainPrompt => ContextOrigin::DomainPrompt,
+            Self::PhasePrompt => ContextOrigin::PhasePrompt,
+            Self::ResearchWorldState => ContextOrigin::ResearchWorldState,
+            Self::ProjectSnapshot => ContextOrigin::ProjectSnapshot,
+            Self::ProjectMemoryCore => ContextOrigin::ProjectMemoryCore,
+            Self::RetrievedMemory => ContextOrigin::RetrievedMemory,
+            Self::SessionSummary => ContextOrigin::SessionSummary,
+            Self::RecentHistory => ContextOrigin::RecentHistory,
+            Self::UserInput => ContextOrigin::UserInput,
+            Self::TurnLocalUpdates => ContextOrigin::TurnLocalUpdates,
+        }
     }
 }
 
@@ -165,6 +248,10 @@ impl ContextFragmentContent {
 pub struct ContextFragment {
     pub(super) id: ContextFragmentId,
     pub(super) source: ContextFragmentSource,
+    #[serde(skip)]
+    pub(super) slot: ContextSlot,
+    #[serde(skip)]
+    pub(super) origin: ContextOrigin,
     pub(super) priority: ContextFragmentPriority,
     pub(super) cache_policy: FragmentCachePolicy,
     pub(super) content_hash: ContextContentHash,
@@ -192,12 +279,14 @@ impl ContextFragment {
         content: ContextFragmentContent,
         artifact_reference: Option<ArtifactId>,
     ) -> Result<Self, ContextPlannerError> {
-        if source.is_instruction_slot() != content.is_instructions() {
+        let slot = source.placement();
+        let origin = source.origin();
+        if slot.is_instruction() != content.is_instructions() {
             return Err(ContextPlannerError::InvalidFragmentChannel {
                 fragment_source: source,
             });
         }
-        if source.is_instruction_slot() && artifact_reference.is_some() {
+        if slot.is_instruction() && artifact_reference.is_some() {
             return Err(ContextPlannerError::InstructionArtifactReference {
                 fragment_source: source,
             });
@@ -207,6 +296,8 @@ impl ContextFragment {
         Ok(Self {
             id,
             source,
+            slot,
+            origin,
             priority,
             cache_policy,
             content_hash,
@@ -222,6 +313,14 @@ impl ContextFragment {
 
     pub const fn source(&self) -> ContextFragmentSource {
         self.source
+    }
+
+    pub const fn slot(&self) -> ContextSlot {
+        self.slot
+    }
+
+    pub const fn origin(&self) -> ContextOrigin {
+        self.origin
     }
 
     pub const fn priority(&self) -> ContextFragmentPriority {

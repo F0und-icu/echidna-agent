@@ -12,6 +12,8 @@ use super::manifest::TraceExpectedInvariant;
 pub enum TraceFixtureError {
     #[error("TraceFixtureManifest schema version {schema_version} is unsupported")]
     UnsupportedSchemaVersion { schema_version: u16 },
+    #[error("TraceFixtureManifest schema and Prompt renderer identity are inconsistent")]
+    PromptRendererIdentityMismatch,
     #[error("TraceFixtureManifest field `{field}` must not be empty")]
     EmptyField { field: &'static str },
     #[error("TraceFixtureManifest source stream hash is not lowercase BLAKE3 hex")]

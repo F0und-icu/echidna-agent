@@ -116,5 +116,89 @@ pub(super) fn input_schema() -> Value {
 }
 
 pub(super) fn output_schema() -> Value {
-    json!({"type": "object"})
+    json!({
+        "type": "object", "properties": {
+            "status": {"type": "string", "enum": ["hit", "incremental_refresh", "full_rebuild"]},
+            "rebuild_reason": {"type": ["string", "null"]},
+            "snapshot": {"type": "object", "properties": {
+                "cache_schema_version": {"type": "integer", "const": 1}, "project_id": {"type": "string", "minLength": 1},
+                "source_fingerprint": project_fingerprint_schema(), "created_at": {"type": "string", "minLength": 1},
+                "rebuild_reason": {"type": "string"}, "file_manifest_hash": {"type": "string", "minLength": 1},
+                "tool_capability_hash": {"type": "string", "minLength": 1}, "file_count": {"type": "integer", "minimum": 0}
+            }, "required": ["cache_schema_version", "project_id", "source_fingerprint", "created_at", "rebuild_reason", "file_manifest_hash", "tool_capability_hash", "file_count"], "additionalProperties": false},
+            "file_manifest": file_manifest_schema(), "tool_capabilities": tool_capability_cache_schema(),
+            "hashed_paths": {"type": "array", "items": {"type": "string"}}
+        }, "required": ["status", "rebuild_reason", "snapshot", "file_manifest", "tool_capabilities", "hashed_paths"], "additionalProperties": false
+    })
+}
+
+fn project_fingerprint_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "enum": ["git", "filesystem", "git_unavailable"]},
+            "digest": {"type": "string", "minLength": 1},
+            "cacheable": {"type": "boolean"}
+        },
+        "required": ["kind", "digest", "cacheable"],
+        "additionalProperties": false
+    })
+}
+
+fn file_manifest_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "cache_schema_version": {"type": "integer", "const": 1},
+            "project_id": {"type": "string", "minLength": 1},
+            "source_fingerprint": project_fingerprint_schema(),
+            "created_at": {"type": "string", "minLength": 1},
+            "rebuild_reason": {"type": "string"},
+            "entries": {"type": "array", "items": {
+                "type": "object",
+                "properties": {
+                    "relative_path": {"type": "string"},
+                    "kind": {"type": "string", "enum": ["file", "directory", "symlink", "other"]},
+                    "size_bytes": {"type": "integer", "minimum": 0},
+                    "modified_nanos": {"type": "integer", "minimum": 0},
+                    "blake3": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}
+                },
+                "required": ["relative_path", "kind", "size_bytes", "modified_nanos", "blake3"],
+                "additionalProperties": false
+            }}
+        },
+        "required": ["cache_schema_version", "project_id", "source_fingerprint", "created_at", "rebuild_reason", "entries"],
+        "additionalProperties": false
+    })
+}
+
+fn tool_capability_cache_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "cache_schema_version": {"type": "integer", "const": 1},
+            "project_id": {"type": "string", "minLength": 1},
+            "source_fingerprint": project_fingerprint_schema(),
+            "created_at": {"type": "string", "minLength": 1},
+            "rebuild_reason": {"type": "string"},
+            "tools": {"type": "array", "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "minLength": 1},
+                    "version": {"type": "string", "minLength": 1},
+                    "spec_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                    "effect": {"type": "string", "enum": ["read_only", "local_mutation", "external_mutation", "interactive"]},
+                    "retry_policy": {"type": "string", "enum": ["replay_safe", "dedupe_by_key", "never_auto_retry"]},
+                    "determinism": {"type": "string", "enum": ["deterministic", "environment_dependent", "nondeterministic"]},
+                    "cache_policy": {"type": "string", "enum": ["none", "content_addressed"]},
+                    "input_schema_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                    "output_schema_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+                },
+                "required": ["name", "version", "spec_hash", "effect", "retry_policy", "determinism", "cache_policy", "input_schema_hash", "output_schema_hash"],
+                "additionalProperties": false
+            }}
+        },
+        "required": ["cache_schema_version", "project_id", "source_fingerprint", "created_at", "rebuild_reason", "tools"],
+        "additionalProperties": false
+    })
 }

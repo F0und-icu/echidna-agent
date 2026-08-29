@@ -6,7 +6,10 @@ use crate::domain::model::ModelRequestRequirements;
 use crate::domain::tools::ToolSpec;
 
 use super::error::ContextPlannerError;
-use super::fragment::{ContextContentHash, ContextFragmentId, ContextFragmentSource};
+use super::fragment::{
+    ContextContentHash, ContextFragmentId, ContextFragmentSource, ContextOrigin, ContextSlot,
+};
+use super::render::PromptRendererIdentity;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct ContextBudget {
@@ -121,6 +124,10 @@ pub enum LogicalAppendOnlyRejection {
 pub struct FullLogicalManifestEntry {
     pub(super) fragment_id: ContextFragmentId,
     pub(super) source: ContextFragmentSource,
+    #[serde(skip)]
+    pub(super) slot: ContextSlot,
+    #[serde(skip)]
+    pub(super) origin: ContextOrigin,
     pub(super) content_hash: ContextContentHash,
     pub(super) decision: ContextDecision,
 }
@@ -132,6 +139,14 @@ impl FullLogicalManifestEntry {
 
     pub const fn source(&self) -> ContextFragmentSource {
         self.source
+    }
+
+    pub const fn slot(&self) -> ContextSlot {
+        self.slot
+    }
+
+    pub const fn origin(&self) -> ContextOrigin {
+        self.origin
     }
 
     pub fn content_hash(&self) -> &ContextContentHash {
@@ -158,6 +173,10 @@ impl FullLogicalManifest {
 pub struct ContextDecisionEntry {
     pub(super) fragment_id: ContextFragmentId,
     pub(super) source: ContextFragmentSource,
+    #[serde(skip)]
+    pub(super) slot: ContextSlot,
+    #[serde(skip)]
+    pub(super) origin: ContextOrigin,
     pub(super) content_hash: ContextContentHash,
     pub(super) token_estimate: u32,
     pub(super) decision: ContextDecision,
@@ -172,6 +191,14 @@ impl ContextDecisionEntry {
 
     pub const fn source(&self) -> ContextFragmentSource {
         self.source
+    }
+
+    pub const fn slot(&self) -> ContextSlot {
+        self.slot
+    }
+
+    pub const fn origin(&self) -> ContextOrigin {
+        self.origin
     }
 
     pub fn content_hash(&self) -> &ContextContentHash {
@@ -246,6 +273,7 @@ impl ContextPlannerVersions {
 pub struct ContextPlan {
     pub(super) context_fingerprint: String,
     pub(super) prompt_cache_key: String,
+    pub(super) prompt_renderer: PromptRendererIdentity,
     pub(super) full_logical_manifest: FullLogicalManifest,
     pub(super) append_only_candidate: AppendOnlyCandidate,
     pub(super) context_decision_manifest: ContextDecisionManifest,
@@ -259,6 +287,10 @@ impl ContextPlan {
 
     pub fn prompt_cache_key(&self) -> &str {
         &self.prompt_cache_key
+    }
+
+    pub fn prompt_renderer(&self) -> &PromptRendererIdentity {
+        &self.prompt_renderer
     }
 
     pub fn full_logical_manifest(&self) -> &FullLogicalManifest {

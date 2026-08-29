@@ -24,8 +24,8 @@ use cyber_agent::domain::context::{
     ProviderSession, ProviderSessionId, ProviderSessionRef, ProviderSessionRole, StepSnapshot,
     TurnContext, TurnId,
 };
+use cyber_agent::domain::domain_profile::DomainProfile;
 use cyber_agent::domain::events::{EventId, EventSequence, OccurredAt, StreamId};
-use cyber_agent::domain::mode::{ModePack, PromptComposition};
 use cyber_agent::domain::model::{
     CapabilityMappingVersion, ContentItem, ModelCapabilities, ModelEvent, ModelInputIR,
     ModelRequestRequirements,
@@ -35,11 +35,12 @@ use cyber_agent::domain::profile::{
     VisionRouteReason, resolve_vision_route,
 };
 use cyber_agent::domain::project::ProjectId;
+use cyber_agent::domain::research_control::{PromptComposition, ResearchPhase};
 use cyber_agent::domain::session::{SessionEvent, SessionReducer, SessionState};
 use cyber_agent::domain::snapshot::{ProjectFingerprint, ProjectFingerprintKind, ProjectSnapshot};
 use cyber_agent::domain::tools::{
-    ExecutionId, ToolCall, ToolCallId, ToolExecutionOutcome, ToolExecutionPlan, ToolExposure,
-    ToolExposurePlan, ToolName, ToolSpec,
+    DeferredActivationSet, ExecutionId, ToolCall, ToolCallId, ToolExecutionOutcome,
+    ToolExecutionPlan, ToolExposure, ToolExposurePlan, ToolName, ToolSpec,
 };
 use cyber_agent::domain::world_state::{
     ProjectSnapshotContext, ResearchWorldState, ResearchWorldStateSection,

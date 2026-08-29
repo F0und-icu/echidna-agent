@@ -1,6 +1,6 @@
 //! Provider-neutral Tool contracts and pure execution invariants.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -10,8 +10,12 @@ use thiserror::Error;
 use super::artifacts::ArtifactId;
 use super::events::{EventId, StreamId};
 
+mod failure;
+mod resolution;
 mod resource;
 
+pub(crate) use failure::{ToolFailure, ToolFailureRetryability};
+pub use resolution::{DeferredActivationSet, ResolvedToolPlan};
 pub use resource::ResourceKey;
 pub(crate) use resource::scheduling_conflicts;
 
@@ -48,6 +52,10 @@ string_id!(RerunReason);
 string_id!(JobId);
 string_id!(PtySessionId);
 
+// Stable semantic identity of one completely resolved model-visible Tool
+// plan. It is distinct from an individual ToolExecutionPlan fingerprint.
+string_id!(ResolvedToolPlanFingerprint);
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolExposure {
@@ -56,7 +64,7 @@ pub enum ToolExposure {
     Hidden,
 }
 
-/// A fixed Mode or local configuration override for named Tool exposure.
+/// A fixed Domain, Phase or local configuration override for named Tool exposure.
 ///
 /// Unmentioned Tools retain the registry's built-in exposure. This is a
 /// bounded data contract, not a dynamic plugin or policy system.
@@ -80,10 +88,38 @@ impl ToolExposurePlan {
         &self.overrides
     }
 
+    /// Composes ordered Domain/Phase layers once. Hidden is terminal; later
+    /// layers may promote or defer only a non-Hidden Tool.
+    pub fn layered(layers: impl IntoIterator<Item = Self>) -> Self {
+        let mut overrides = BTreeMap::new();
+        for layer in layers {
+            for (name, exposure) in layer.overrides {
+                if overrides.get(&name) != Some(&ToolExposure::Hidden) {
+                    overrides.insert(name, exposure);
+                }
+            }
+        }
+        Self { overrides }
+    }
+
+    /// Narrows fixed Domain/Phase overrides to the executor's immutable
+    /// catalog. Explicit callers that pass an unknown override directly to
+    /// plan resolution still receive the strict unknown-Tool error.
+    pub fn restricted_to_catalog(mut self, catalog: &[ToolSpec]) -> Self {
+        let names = catalog
+            .iter()
+            .map(|spec| spec.name.clone())
+            .collect::<BTreeSet<_>>();
+        self.overrides.retain(|name, _| names.contains(name));
+        self
+    }
+
     /// Applies the explicit override to a concrete schema while leaving all
     /// model-facing schema fields under the existing ToolSpec owner.
     pub fn apply_to_spec(&self, mut spec: ToolSpec) -> ToolSpec {
-        spec.exposure = self.exposure_for(&spec.name, spec.exposure);
+        if spec.exposure != ToolExposure::Hidden {
+            spec.exposure = self.exposure_for(&spec.name, spec.exposure);
+        }
         spec
     }
 }
@@ -193,6 +229,17 @@ pub struct ToolExecutionPlan {
     /// is absent unless the adapter can prove a result-cache hit is safe.
     #[serde(default)]
     pub cache_resource_fingerprint: Option<String>,
+    /// Present only for a model-originated call planned through the exact
+    /// immutable Tool plan which advertised it.
+    #[serde(default)]
+    resolved_tool_plan_fingerprint: Option<ResolvedToolPlanFingerprint>,
+    /// Exact Step-local schemas needed by Tool implementations such as
+    /// `tool_search` and `inspect_project`. They are transient execution
+    /// inputs; the Receipt retains only their resolved-plan identity.
+    #[serde(default)]
+    resolved_tool_specs: Vec<ToolSpec>,
+    #[serde(default)]
+    deferred_tool_specs: Vec<ToolSpec>,
     pub plan_fingerprint: String,
 }
 
@@ -253,6 +300,9 @@ impl ToolExecutionPlan {
             output_policy: spec.output_policy,
             input_fingerprint,
             cache_resource_fingerprint: None,
+            resolved_tool_plan_fingerprint: None,
+            resolved_tool_specs: Vec::new(),
+            deferred_tool_specs: Vec::new(),
             plan_fingerprint: String::new(),
         };
         plan.plan_fingerprint = fingerprint(&PlanFingerprintInput::from(&plan))?;
@@ -269,6 +319,51 @@ impl ToolExecutionPlan {
         self.cache_resource_fingerprint = Some(cache_resource_fingerprint);
         self.plan_fingerprint = fingerprint(&PlanFingerprintInput::from(&*self))?;
         Ok(())
+    }
+
+    pub fn bind_resolved_tool_plan(
+        &mut self,
+        resolved: &ResolvedToolPlan,
+    ) -> Result<(), ToolContractError> {
+        let Some(spec) = resolved.advertised_spec(&self.call.name) else {
+            return Err(ToolContractError::ToolNotAdvertised {
+                tool_name: self.call.name.to_string(),
+            });
+        };
+        if !self.matches_spec(spec) {
+            return Err(ToolContractError::ResolvedToolSpecMismatch {
+                tool_name: self.call.name.to_string(),
+            });
+        }
+        self.resolved_tool_plan_fingerprint = Some(resolved.fingerprint().clone());
+        self.resolved_tool_specs = resolved.advertised_specs().to_vec();
+        self.deferred_tool_specs = resolved.deferred_specs().to_vec();
+        self.plan_fingerprint = fingerprint(&PlanFingerprintInput::from(&*self))?;
+        Ok(())
+    }
+
+    pub fn resolved_tool_plan_fingerprint(&self) -> Option<&ResolvedToolPlanFingerprint> {
+        self.resolved_tool_plan_fingerprint.as_ref()
+    }
+
+    pub(crate) fn resolved_tool_specs(&self) -> &[ToolSpec] {
+        &self.resolved_tool_specs
+    }
+
+    pub(crate) fn deferred_tool_specs(&self) -> &[ToolSpec] {
+        &self.deferred_tool_specs
+    }
+
+    fn matches_spec(&self, spec: &ToolSpec) -> bool {
+        self.call.name == spec.name
+            && self.tool_version == spec.version
+            && self.parallelism == spec.parallelism
+            && self.effect == spec.effect
+            && self.retry_policy == spec.retry_policy
+            && self.determinism == spec.determinism
+            && self.cache_policy == spec.cache_policy
+            && self.timeout_ms == spec.timeout_ms
+            && self.output_policy == spec.output_policy
     }
 
     /// A persistent Tool result is eligible only when every declared
@@ -298,6 +393,7 @@ struct PlanFingerprintInput<'a> {
     output_policy: ToolOutputPolicy,
     input_fingerprint: &'a str,
     cache_resource_fingerprint: Option<&'a str>,
+    resolved_tool_plan_fingerprint: Option<&'a ResolvedToolPlanFingerprint>,
 }
 
 impl<'a> From<&'a ToolExecutionPlan> for PlanFingerprintInput<'a> {
@@ -318,6 +414,7 @@ impl<'a> From<&'a ToolExecutionPlan> for PlanFingerprintInput<'a> {
             output_policy: plan.output_policy,
             input_fingerprint: &plan.input_fingerprint,
             cache_resource_fingerprint: plan.cache_resource_fingerprint.as_deref(),
+            resolved_tool_plan_fingerprint: plan.resolved_tool_plan_fingerprint.as_ref(),
         }
     }
 }
@@ -418,22 +515,13 @@ pub struct ToolResult {
     pub output: Value,
 }
 
-impl ToolResult {
-    pub fn failed(call: &ToolCall, message: impl Into<String>) -> Self {
-        Self {
-            call_id: call.call_id.clone(),
-            tool_name: call.name.clone(),
-            status: ToolResultStatus::Failed,
-            output: serde_json::json!({"error": message.into()}),
-        }
-    }
-}
-
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionReceipt {
     pub execution_id: ExecutionId,
     pub plan_fingerprint: String,
+    #[serde(default)]
+    pub resolved_tool_plan_fingerprint: Option<ResolvedToolPlanFingerprint>,
     pub status: ToolResultStatus,
     pub exit_reason: Option<String>,
     pub output_artifact_ids: Vec<ArtifactId>,
@@ -598,13 +686,46 @@ impl ToolExecutionOutcome {
         outcome
     }
 
-    pub fn failed(plan: ToolExecutionPlan, reason: impl Into<String>, output: Value) -> Self {
+    pub fn failed(plan: ToolExecutionPlan, code: impl Into<String>, output: Value) -> Self {
+        let code = code.into();
+        let message = tool_failure_message(&output, &code);
+        let execution_id = plan.execution_id.clone();
+        let mut outcome =
+            Self::from_plan(plan, ToolResultStatus::Failed, Some(code.clone()), output);
+        outcome.result.output = ToolFailure::execution(
+            execution_id,
+            code,
+            ToolFailureRetryability::ExplicitRerunOnly,
+            message,
+        )
+        .into_result_output(outcome.result.output);
+        outcome
+    }
+
+    /// Replay preserves the exact recorded Tool output.  The source failure
+    /// is already an immutable fact and must not be rewritten by a derived
+    /// replay adapter.
+    pub(crate) fn failed_preserving_output(
+        plan: ToolExecutionPlan,
+        reason: impl Into<String>,
+        output: Value,
+    ) -> Self {
         Self::from_plan(plan, ToolResultStatus::Failed, Some(reason.into()), output)
     }
 
     pub fn cancelled(plan: ToolExecutionPlan, reason: impl Into<String>) -> Self {
         let reason = reason.into();
-        Self::cancelled_with_output(plan, reason.clone(), serde_json::json!({"error": reason}))
+        let execution_id = plan.execution_id.clone();
+        let mut outcome =
+            Self::cancelled_with_output(plan, reason.clone(), serde_json::json!({"error": reason}));
+        outcome.result.output = ToolFailure::execution(
+            execution_id,
+            "tool_execution_cancelled",
+            ToolFailureRetryability::Terminal,
+            reason,
+        )
+        .into_result_output(outcome.result.output);
+        outcome
     }
 
     /// Produces a cancelled paired outcome while retaining a previously
@@ -651,6 +772,7 @@ impl ToolExecutionOutcome {
         let receipt = ExecutionReceipt {
             execution_id: plan.execution_id,
             plan_fingerprint: plan.plan_fingerprint,
+            resolved_tool_plan_fingerprint: plan.resolved_tool_plan_fingerprint,
             status: ToolResultStatus::Succeeded,
             exit_reason: None,
             output_artifact_ids: source.receipt.output_artifact_ids.clone(),
@@ -699,6 +821,7 @@ impl ToolExecutionOutcome {
         let receipt = ExecutionReceipt {
             execution_id: plan.execution_id,
             plan_fingerprint: plan.plan_fingerprint,
+            resolved_tool_plan_fingerprint: plan.resolved_tool_plan_fingerprint,
             status,
             exit_reason,
             output_artifact_ids: Vec::new(),
@@ -712,10 +835,32 @@ impl ToolExecutionOutcome {
     }
 }
 
+fn tool_failure_message(output: &Value, fallback_code: &str) -> String {
+    output
+        .get("error")
+        .or_else(|| output.get("message"))
+        .and_then(Value::as_str)
+        .filter(|message| !message.trim().is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| fallback_code.to_owned())
+}
+
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum ToolContractError {
     #[error("failed to encode a stable Tool fingerprint: {message}")]
     Fingerprint { message: String },
     #[error("invalid Tool execution control: {message}")]
     InvalidExecutionControl { message: String },
+    #[error("the canonical Tool catalog contains a duplicate name")]
+    DuplicateToolName,
+    #[error("Tool exposure names unknown Tool `{tool_name}`")]
+    UnknownToolExposure { tool_name: String },
+    #[error("Tool `{tool_name}` cannot be activated from its resolved exposure")]
+    InvalidDeferredActivation { tool_name: String },
+    #[error("Tool `{tool_name}` was not advertised by the resolved Tool plan")]
+    ToolNotAdvertised { tool_name: String },
+    #[error("Tool `{tool_name}` execution semantics differ from its resolved ToolSpec")]
+    ResolvedToolSpecMismatch { tool_name: String },
+    #[error("successful tool_search output is malformed")]
+    InvalidToolSearchResult,
 }

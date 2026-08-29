@@ -2,7 +2,7 @@
 
 ## 0. 适用范围
 
-本计划将 Architecture v1 基线和 v1.1 能力驱动模型组合增量转成可由 Codex Luna xhigh 或其他高推理 Codex 实现的 Vertical Slices。
+本计划将 Architecture v1 基线、v1.1 能力驱动模型组合、v1.2 Research Control Plane、v1.3 Immutable Sampling/Evidence-Guided Context 和 v1.4 ToolFailure/准确率可观测性增量转成可由 Codex Luna xhigh 或其他高推理 Codex 实现的 Vertical Slices。
 
 它约束实现顺序、交付物、测试和停止条件，但不授权当前会话自动初始化 Git、提交、推送、创建 PR 或开始 Rust 实现。具体写操作仍由用户当前指令授权。
 
@@ -23,7 +23,7 @@
 3. 阅读本文件中当前 Slice 全文。
 4. 阅读 `docs/development/LEAN_CODE_GOVERNANCE.md` 全文。
 5. 阅读 `task.md` 相关章节、测试红线和维护规则。
-6. 阅读冻结架构对应接口章节。
+6. 阅读冻结架构 v1/v1.1/v1.2/v1.3/v1.4 对应接口章节及当前 Slice 的 ACCEPTED ADR。
 7. 检查当前工作树、分支、最近提交和已有测试。
 8. 确认没有修改 `codex/`，没有覆盖用户未提交内容。
 9. 将 STATUS 的当前 Slice 标为 `IN_PROGRESS` 后才开始代码修改。
@@ -52,6 +52,8 @@
    - 运行此前全部 Slice 的回归测试。
    - 运行 Lean Gate，检查就地测试、重复语义、公共 API、依赖、消费者、删除项、禁止依赖和文档漂移。
 
+每个 Slice 的固定顺序必须精确为：专项测试 → 受影响测试 → 独立审计 → 修复 → 完整 Gate → Lean Review。审计必须限时；超时或无结论不记为 `APPROVE`。实现者不得审计自己的变更，跨 Port/Adapter 的最终审计由 Terra xhigh 或主 Agent 完成。
+
 5. Handoff
    - 更新 STATUS：完成项、测试结果、Lean Review、剩余风险、下一 Slice。
    - 如果授权 Git 提交，按 Git 方案提交；否则保留工作树并报告。
@@ -63,8 +65,8 @@
 
 - 目标行为存在可运行测试，不只存在类型或 TODO。
 - `cargo fmt --all -- --check` 通过。
-- `cargo clippy --all-targets --all-features -- -D warnings` 通过。
-- `cargo test --all-targets --all-features` 通过；尚无 feature 时使用对应精简命令。
+- `cargo clippy --locked --all-targets --all-features -- -D warnings` 通过。
+- `cargo test --locked --all-targets --all-features` 通过；尚无 feature 时使用对应精简命令。
 - `cargo build --locked` 通过；M0 创建 Cargo.lock 后始终使用 `--locked`。
 - 没有修改 `codex/`。
 - 没有直接依赖禁用 Codex crate。
@@ -74,8 +76,13 @@
 - 没有为未来 Slice、测试访问或绕过失败而创建的抽象、Feature、配置或 TODO 框架。
 - 没有把 Cache/Summary/Replay 结果变成事实源。
 - 新事件、Schema、配置和 Prompt 有消费者与测试。
+- 稳定人格、DomainProfile、ResearchPhase 和 AgentModelProfile 保持正交，没有组合角色、第二状态机或动态 Registry。
+- Tool guidance、输入/输出 Schema、结构化失败和阶段 Exposure 由唯一所有者生成并进入 RequestAudit/Fingerprint/Eval。
+- 每个 sampling Step 的 Context、sent ToolSpecs、RequestAudit 和 dispatch 绑定同一 immutable SamplingStepPlan/ResolvedToolPlan；Deferred activation 不跨 Turn/Resume，且准确率报告必须由相邻 RequestAudit ToolSpec transition 证明。
+- Prompt renderer 保持单一 `generic-v1`；Context provenance 使用 sidecar，Provider DeliveryItemId 不进入 Domain/Research identity。
+- Summary/Evidence/Retrieval/Guidance/Accuracy 派生内容不提升事实；Accuracy 只报告持久 Trace 可诚实观测的指标，unmatched Replay termination 和 Observation/Replay/Vision promotion 在无 typed durable signal 前为 Deferred，绝不假 0；Shadow 优化在达到明确 promotion gate 前不改变模型输入或自动动作。
 - `src/` 不含就地 `#[cfg(test)] mod tests`，永久回归测试保留在顶层 `tests/`。
-- 无消费者代码、重复 Fixture 和无收益优化已删除或明确 Deferred。
+- 无消费者代码、重复 Fixture 和无收益优化已删除或明确 Deferred；测试不得通过新增 controlled public projection 入口绕过真实生产边界。
 - STATUS 记录本 Slice Lean Review。
 - STATUS 与实际代码状态一致。
 - 如果修改架构契约，已有 ADR 和新架构版本计划。
@@ -103,7 +110,7 @@
 ### 5.3 Integration
 
 - Mock Provider + 真实本地文件工具完成 AgentLoop。
-- OpenAI live 测试默认 ignored，只有 `CYBER_AGENT_LIVE_TESTS=1` 和 `CYBER_AGENT_OPENAI_API_KEY` 同时存在时才能开启。
+- 通用 Provider Live Smoke 默认 ignored，只有 `CYBER_AGENT_LIVE_TESTS=1` 且 `CYBER_AGENT_LIVE_CONFIG` 指向显式 Config v1 时才能开启；所选 Provider 必须具有本地内联 `api_key` 或可精确解析的专用 `credential_ref`。
 - 默认测试不能依赖公网、真实设备或用户 API Key。
 - Live 测试只使用固定合成输入，不读取真实项目 Memory、Session、Artifact 或漏洞目标。
 - 凭据 Contract Test 使用 Fake Credential Source，证明不会读取 `OPENAI_API_KEY`、`CODEX_HOME`、`~/.codex` 或 Codex OAuth/session data。
@@ -111,7 +118,7 @@
 ### 5.4 Golden/Fixture
 
 - Event 每个历史 Schema 至少一个 fixture。
-- ModelInputIR 与 OpenAI 编码使用 snapshot fixture。
+- ModelInputIR 与 Responses wire 编码使用 snapshot fixture。
 - ContextDecision Reason Code 使用稳定 golden。
 - Trace Replay 使用固定 Event/Artifact fixture。
 
@@ -442,7 +449,7 @@ Gate：在临时项目目录完成一次真实文件分析闭环。
 - Project Snapshot Diff。
 - Direct/Deferred/Hidden Exposure。
 - tool_search。
-- Mode Pack 和 Prompt/Model Profile。
+- Mode Pack 和 Prompt/Model Profile（M3-S2 的历史实现名；v1.3 在 M4-S3a2 将领域语义迁移为 DomainProfile）。
 - AgentModelProfile：一个 Primary、可选 Vision 和 VisionMode。
 - `auto`、`primary_direct`、`secondary_tool`、`disabled` 的纯 Vision Route Resolver。
 - `doctor` 的 Provider/Mode Capability 组合检查。
@@ -451,7 +458,7 @@ Gate：在临时项目目录完成一次真实文件分析闭环。
 
 - Deferred Tool 载入导致 Baseline Reset。
 - Schema Token 指标。
-- 不同 Mode 的 Prompt/Tool 指纹稳定。
+- 不同历史 Mode 的 Prompt/Tool 指纹稳定；M4-S3a2 迁移后继续验证 Domain/Phase 指纹和历史 Replay。
 - Capability 矩阵穷举、无模型名猜测、无价格/延迟/失败驱动的隐式 fallback。
 - Profile/VisionMode 只在 Turn 边界切换，必要时重置 Primary Baseline。
 
@@ -578,17 +585,216 @@ Gate：在临时项目目录完成一次真实文件分析闭环。
 - Eval Session 不写正式 Memory/Research。
 - Replay 结果不能提升为 Finding Evidence。
 
-### M4-S3：Observation 与 TargetDelta
+### M4-S3a1：不可变 Sampling 与 Tool Plan 基础
 
-目标：外部工具返回结构化观察并比较版本攻击面。
+目标：先消除一个模型请求内部 Context、Tool Schema 与 Tool dispatch 观察不同状态的可能，再叠加 Research Control Plane。
 
 交付：
 
-- 第一批 Observation Kind。
-- 至少一个外部 Extractor 示例。
-- 两个 TargetSnapshot 的 TargetDelta。
+- 一个内部不可变 `SamplingStepPlan`，绑定 Step ID、TurnConfigurationSnapshot、ContextPlan、ResolvedToolPlan、AgentModelProfile/Capability Mapping、RequestRequirements 和 Prompt renderer identity。
+- Tool Registry 从可变 exposure authority 收敛为不可变 canonical catalog；一个纯 resolver 产生有稳定 fingerprint 的 `ResolvedToolPlan`，同一 Plan 同时提供 sent ToolSpecs 与 model-originated ToolCall dispatch。
+- typed `DeferredActivationSet`：`tool_search` 只影响当前 Turn 后续 Steps，下一 Turn 和 Resume 清空；当前 Step 永不原地改变。
+- `generic-v1` 固定 Prompt renderer identity 进入 Context/Prompt fingerprint、RequestAudit、IncrementalBaseline 和 Trace；不增加 Trait、Registry 或配置开关。
+- 仅做行为保持的最小 `ContextFragmentSource -> ContextSlot + ContextOrigin` 非持久化迁移，为后续 ContextDeliveryMap 留出正交来源边界；不在本 Slice 实现完整 Authority/Retention/Freshness。
+- RequestAudit 可绑定 sent ToolSpecs 与 ResolvedToolPlan fingerprint；ToolExecutionPlan/Receipt 绑定产生该 ToolCall 的 Plan identity。
 
-Gate：差分每项都能回到 Tool Call、Artifact 和 Snapshot。
+测试：
+
+- 同一 SamplingStepPlan 的 Context、ToolSpecs、RequestAudit 和 dispatch 一致；Plan 捕获后修改候选配置不能影响它。
+- Tool Search 成功只改变下一 Step，Turn 结束和 Resume 后消失；Hidden/Unavailable 不可激活。
+- 对未广告、Deferred 未激活或 plan fingerprint 不匹配的 ToolCall 返回配对 pre-execution ToolResult，且不查 raw Registry、不执行 Runtime。
+- Replay 使用固定 Replay Plan，不能回退 live catalog。
+- `generic-v1` 保持现有 Prompt 精确 bytes；renderer identity 变化触发 Full，Primary/Vision identity 不交叉。
+- ContextSlot/Origin 迁移保持现有顺序、预算、截断、fingerprint 与历史 RequestAudit/Trace 可读性。
+
+禁止：
+
+- 不实现 stable persona、DomainProfile/ResearchPhase Session Event、完整 ContextDeliveryMap/EvidenceLink/Summary v2、Tool Accuracy、Retrieval、Guidance、新 Tool、Provider 或 Live Test。
+- 不复制 Codex ToolRouter/StepContext，不增加第二 Registry/Executor/AgentLoop、Hook、Policy、PromptDialect 或 mutable global exposure。
+
+Gate：完整 locked Cargo/Lean Gate；永久回归覆盖跨 Step/Turn/Resume、dispatch binding、Replay 和历史 audit；证明只有一个 catalog、resolver、renderer、pairing 和 dispatch owner。
+
+### M4-S3a2：稳定研究人格、DomainProfile 与 ResearchPhase
+
+目标：在 M4-S3a1 的不可变 Step/Tool plan 上建立稳定 Agent 身份、正交领域/阶段控制和可审计的 Turn 边界组合。
+
+交付：
+
+- 一个版本化 `Pragmatic Vulnerability Researcher` Base Contract；不增加 Personality enum/registry。
+- 将当前语义不准确的 `ResearchProfile` 一次性重命名为固定 `DomainProfile`，保留 source/web/mobile/binary 四项和现有 TargetKind 兼容性。
+- 固定 `ResearchPhase = mapping | hypothesis | experiment | verification | evidence_curation`，每项只有稳定 ID、generation、编译期 Markdown Prompt 和 bounded ToolExposurePlan。
+- PromptComposition 固定为 Base、Personal、Project、Domain、Phase 后再进入 Research/Project/Memory/History；Tool Specs 仍是独立通道并通过 a1 ResolvedToolPlan。
+- Phase 默认/显式 operator 选择、稳定 Reason Code、Session Event/Reducer/Resume 连续性和 Turn-boundary queue/durable-append/apply；append 失败时不发送模型请求。
+- 新 fragment identity 使用 `prompt:base:*`、`prompt:domain:*` 和 `prompt:phase:*`；历史 `prompt:mode:*` RequestAudit/Replay 不重写。
+
+测试：
+
+- 恰好一个稳定人格，Domain/Phase 不产生组合角色或第二 AgentLoop。
+- 四 Domain × 五 Phase 的 Prompt 顺序、唯一 Context fingerprint 和 Tool exposure 矩阵。
+- Phase/Domain 只在 Turn 边界生效；in-flight Turn 不变化；Prompt/Tool 变化触发正确 Baseline reset。
+- 新 Session 在首个请求前只记录一次默认选择；legacy Session 只读 Replay 不回填、下一真实 Turn 才追加 Mapping；Resume 恢复最新 Phase；未知/非法 Event 严格失败。
+- Hidden 不可搜索/提升；Deferred 使用 a1 的 current-Turn lifecycle。
+- 历史 `prompt:mode:*` Trace 仍可 Mechanical Replay/RequestAudit reconstruct。
+
+禁止：
+
+- 不实现模型自由文本阶段切换、自动 Ledger 阶段推断、Workflow DSL、Prompt/Profile Registry、多人格或多 Agent。
+- 不同时硬化全部 Tool Schema、不增加 `http_request`/`inspect_environment`、Observation/Extractor/TargetDelta、Provider 或 Live Test。
+
+Gate：完整 locked Cargo/Lean Gate；新增 Event/Prompt/Exposure/Resume/Replay 永久回归；无第二 Prompt/Exposure/Phase owner。
+
+### M4-S3b：Tool 准确率契约与 Eval
+
+目标：让模型以精确 Tool guidance/schema/error 选择并纠正工具，并用现有 Trace 基础量化结果。
+
+交付：
+
+- 所有模型可见 Tool description 使用固定 `Use when`、`Do not use when`、`Prefer`、`Produces` 结构。
+- 已知输入/输出使用精确 JSON Schema、required/enum/bounds 和实际 typed result；移除无理由的通用 object output。
+- 一个 provider-neutral `ToolFailure`/错误映射所有者，仅区分 `pre_execution`、`execution` 和 retryability；Receipt/History/RequestAudit 等执行后持久化失败属于 App/AgentLoop 错误，不能改写真实成功 ToolResult 或伪造 Receipt。
+- 只有执行前参数错误可返回无 Receipt 的纠错结果；任何已开始执行必须有真实 Receipt，模型必须发起新 ToolCall，Runtime 不自动重试。
+- 在持久 Trace/Replay/Shadow 上增加 derived non-evidence ToolAccuracyReport 和 tests-only controlled cases；无 typed durable signal 的 unmatched Replay termination 与 Observation/Replay/Vision promotion 保持 Deferred，绝不假 0。
+
+持久 Trace 当前可观测且必须量化：
+
+- acceptable first-action match；
+- invalid arguments 和 correction outcome；
+- redundant reads 与 missed batch opportunities；
+- `tool_search` 调用与命中；
+- Tool Schema token cost。
+
+当前必须显式 Deferred：
+
+- unmatched Replay termination；
+- Observation/Replay/Vision evidence-promotion boundary violations；
+- 不能由同一 Turn 相邻 RequestAudit 精确 ToolSpec transition 证明的 Deferred activation。
+
+RequestAudit 当前没有持久 Turn identity，因此 M4-S3b 不推断 Deferred activation 成功或零；后续只有在既有持久事实能证明同一 Turn，或另一个经 ADR 接纳的真实消费者引入 typed signal 后才可计入。controlled tests 不得新增 public projection 入口。
+
+禁止：
+
+- 不增加工具数量、外部服务、事实库、模型裁判服务或通用 Eval 平台。
+- 不删除单数工具来伪造 Batch 指标；先通过 exposure/guidance/Eval 证明取舍。
+- 不自动重试已开始、已完成、external-mutation 或 interactive 执行。
+
+Gate：完整 locked Cargo/Lean Gate；所有 Tool Contract/AgentLoop/Responses/Replay fixtures 复用同一 Schema；精确证明参数失败没有 ExecutionReceipt 但仍有配对 ToolResult，执行失败有真实 Receipt 且不会静默重放，执行后 Receipt/History/RequestAudit 持久化失败走 App/AgentLoop 错误边界；未观测指标保持 Deferred 且不假 0。当前 Slice 未通过 Gate 前不得标为 COMPLETE。
+
+### M4-S3c：通用研究工具
+
+目标：补齐高复用网络请求和环境指纹能力，不为厂商或漏洞工具建立专用客户端。
+
+交付：
+
+- `http_request`：结构化 method/URL/header/query/body，bounded timeout/redirect/preview，返回 status/final URL/metadata/timing/body Artifact。
+- `inspect_environment`：结构化 OS/runtime、Git、proxy、toolchain 和 connected-device availability/version，加一个稳定 environment fingerprint。
+- 两者复用现有 ToolExecutionPlan、Resource Key、ExecutionReceipt、Artifact、Context truncation 和 Tool accuracy 契约。
+
+测试：
+
+- `http_request` 使用 loopback 覆盖成功、4xx/5xx、redirect、timeout、binary/oversize Artifact 和凭据非泄漏；默认 Gate 不访问公网。
+- `inspect_environment` 使用注入/临时 Fixture 覆盖存在、缺失、版本失败、稳定排序和 fingerprint；不依赖开发机实际安装集合。
+- Phase Exposure、RequestAudit、Tool Result pairing、Cache/Retry 语义保持一致。
+
+禁止：
+
+- 不实现 Web scanner、Provider client、任意 probe DSL、第二 Environment store 或外部漏洞工具 Rust wrapper。
+
+Gate：完整 locked Cargo/Lean Gate；无新增长期依赖，除非实现前有单独 ADR 和不可替代证据。
+
+### M4-S3d：Observation、AndroidManifest Extractor 与 TargetDelta
+
+目标：把外部工具结果导入结构化 Observation，并比较两个目标版本的攻击面。
+
+交付：
+
+- 第一批 provider-neutral Observation Kind 和严格 ObservationEnvelope ingestion。
+- AndroidManifest 作为第一个 bounded external Extractor：通过 `run_commands` 调用现有 aapt/JADX/脚本能力，不在 Rust 中重写解析引擎。
+- 每项 Observation 绑定 TargetSnapshot、ToolCall、ExecutionReceipt、原始 Artifact、Extractor ID/version。
+- 两个 TargetSnapshot/Observation 集合的确定性 TargetDelta。
+
+测试：
+
+- 正常、字段缺失、未知 schema、伪造 Snapshot/Receipt/Artifact 引用和 Extractor version 变化。
+- Manifest component/exported/permission/intent-filter 差分稳定排序并可回到原始输出。
+- Observation 不能自动成为 Finding；只有显式 `research_update` 可引用提升。
+
+Gate：完整 locked Cargo/Lean Gate；差分每项都能回到 ToolCall、Receipt、Artifact、Snapshot 和 Extractor；无新事实数据库或扫描器框架。
+
+### M4-S3e1：typed EvidenceLink 与证据缺口投影
+
+目标：让支持、反证、控制、可达性、前提和影响证明成为显式 Research 关系，停止依赖 Prompt/摘要字符串猜测证据角色。
+
+交付：
+
+- additive Research payload/version 与 `EvidenceLink { relation, evidence }`，固定 supports/contradicts/positive_control/negative_control/environment_control/reachability_proof/prerequisite_proof/impact_proof。
+- chained Upcaster：历史 `evidence_refs -> supports`、`negative_refs -> contradicts`，不把旧引用猜成控制。
+- 一个纯 evidence-gap projection，区分 unknown 与 missing，并只读取 typed Research facts。
+
+测试：
+
+- 每种 relation、重复/跨 Project/错误类型/缺失 Artifact 或 Receipt 引用严格验证。
+- 历史 fixture 连续 Upcast 且原 Event 不重写；控制关系必须由新显式 Research update 创建。
+- Gap projection 不能写 Research/Memory、改变 Phase 或把 Vision/Replay/Eval 提升为证据。
+
+Gate：完整 locked Cargo/Lean Gate；Research schema/upcaster/reducer/reference validation 永久回归；无第二 evidence store 或图数据库。
+
+### M4-S3e2：完整 Context 来源与 Evidence-Spine Compaction
+
+目标：让每个最终请求组件可追溯，并让 Compaction 只引用 Research 事实而不复制“verified facts”权威字符串。
+
+交付：
+
+- 在 a1 ContextSlot/Origin 上增加 SemanticClass、AuthorityLevel、RetentionClass、FreshnessIdentity 和 ContextReferences 校验。
+- deterministic ContextSubitemId；ContextPlanner 产生覆盖 instruction spans/content positions 的 ContextDeliveryMap sidecar，记录 content hash 与 truncate/merge/ArtifactRef transform。
+- additive RequestAudit schema 保存 map 或 deduplicated Blob reference。
+- Session Summary v2 = typed EvidenceSpine + bounded NarrativeSummary；spine 绑定 Research stream identity/watermark/hash，Resume/Rebuild 重验引用。
+
+测试：
+
+- 每个最终 instruction byte/ContentItem 恰好归属一个 Fragment/Subitem，renderer separator 除外；截断/替换仍保留来源。
+- legacy unknown provenance 显式存在而不猜测；Provider DeliveryItemId 不进入 Domain/Research。
+- Summary v2 缺失、跨项目、stale watermark、类型错配引用失败；删除 derived Summary/map 后事实仍可恢复。
+- Summary v1 和旧 RequestAudit fixture 继续可读且语义不被升级。
+
+Gate：完整 locked Cargo/Lean Gate；完整 provenance coverage、Compaction/Resume/Replay 与 schema chain 回归；无第二 Context renderer、事实库或 ContentItem-wide Provider metadata。
+
+### M4-S3f：确定性安全检索 Shadow
+
+目标：用漏洞研究标识符、目标适用性和证据权威度减少重复读取与无关 Context，不先引入向量服务。
+
+交付：
+
+- 一个版本化固定 pipeline：eligibility/Target filter → exact security identifiers → fielded BM25 → CJK/ASCII char n-gram → RRF → authority/freshness tier → stable ID。
+- Project Memory、Research、Artifact/Observation metadata 和显式历史查询各自拥有候选 eligibility；只复用已证明的 normalization/ranking primitives。
+- local Shadow report 包含 query fingerprint、matched fields/IDs、component ranks、tier、reason、estimated Context cost；不改变 model-visible Context。
+- 可删除内存/Cache index；不增加持久索引依赖。
+
+测试：
+
+- CVE/CWE、URL、package/bundle/class/method/symbol、Android permission/intent/component、binary symbol/hash 与 CJK/typo fixtures。
+- cross-project 永不候选；stale/cross-target 默认排除；相同输入稳定排序和理由。
+- controlled acceptable reference sets 量化 recall/precision、重复读取和 Token；无收益则保持 Shadow 或删除。
+
+Gate：完整 locked Cargo/Lean Gate；Shadow 零 Provider/Tool/Research/Memory 写入；无 selector registry、remote embedding/reranker/judge、vector/graph DB 或 telemetry。
+
+### M4-S3g：证据缺口与实验引导 Shadow
+
+目标：对既有 NextAction/controlled Eval candidates 给出可解释的最小决定性实验排序，不生成工作流或自动执行。
+
+交付：
+
+- 只读取 e1 typed gaps 的 pure guidance projection。
+- 固定 factor vector：boundary importance、hypothesis discrimination、gap closure、reproducibility、novelty、Target applicability、cost、mutation/version-drift risk。
+- hard invalidity/prerequisite filter、稳定 Reason Code、逐 factor 报告和 deterministic tie-break。
+- local Shadow result，可由 operator 忽略；不改变 Phase、Research、Memory 或工具状态。
+
+测试：
+
+- unknown/missing、缺前提、重复 action_fingerprint、跨 Snapshot、mutation risk 和稳定 tie-break。
+- 受控案例验证首选项可关闭更多关键 gap，而不是只偏好低成本动作。
+- Shadow 不创建 Experiment、不执行 Tool、不提升 Finding；无收益则删除或保持 Deferred。
+
+Gate：完整 locked Cargo/Lean Gate；无 model judge、learned ranker、autonomous experiment generator、Workflow DSL 或事实写入。
 
 ### F1a：唯一配置驱动 Provider 装配路径（M4-S2 后置修复）
 
@@ -694,6 +900,8 @@ Gate：配置与 Composition 单测、CLI `doctor` 防泄漏、loopback Chat Aut
 - 单一多模态 Primary 完成同一图片样例，并证明没有 Secondary 请求。
 - `disabled` 和无可用图片 Provider 的负向路径返回稳定能力错误。
 - Turn 边界切换 Agent Profile/VisionMode 后，旧 Primary/Vision Session 状态不被复用。
+- 同一稳定人格下切换 DomainProfile/ResearchPhase，并证明 Prompt、Tool exposure、Session continuity 和历史审计不交叉或漂移。
+- 每个 Sampling Step 的 Context/Tool/dispatch plan 一致；Deferred activation 不跨 Turn/Resume；ContextDeliveryMap 和 Evidence Spine 可重建。
 - 两条 Live Provider 路径分别 opt-in；缺少任一凭据时继续完成另一条和全部 Mock/Fixture/Replay Gate。
 
 必须量化：
@@ -704,6 +912,9 @@ Gate：配置与 Composition 单测、CLI `doctor` 防泄漏、loopback Chat Aut
 - 重复读取和 Snapshot Hit。
 - Memory Retrieval。
 - 重复 Hypothesis/Experiment。
+- acceptable first-action、invalid arguments/correction、unmatched tools、missed batch opportunities 和 Tool Schema token。
+- Observation/Replay/Vision evidence-promotion boundary violations。
+- Security retrieval recall/precision、重复读取/Token 变化，以及 guidance 的关键 gap closure/cost；Shadow 未证明收益不得晋升。
 - Replay 回归覆盖。
 
 没有证明收益的优化抽象必须删除或降级为 Deferred。

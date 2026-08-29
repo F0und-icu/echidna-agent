@@ -246,6 +246,7 @@ fn baseline_reason(reason: BaselineInvalidationReason) -> &'static str {
         BaselineInvalidationReason::ModelInputIrSchemaChanged => "model_input_ir_schema_changed",
         BaselineInvalidationReason::CapabilityMappingChanged => "capability_mapping_changed",
         BaselineInvalidationReason::PromptChanged => "prompt_changed",
+        BaselineInvalidationReason::PromptRendererChanged => "prompt_renderer_changed",
         BaselineInvalidationReason::ToolsChanged => "tools_changed",
         BaselineInvalidationReason::OutputContractChanged => "output_contract_changed",
         BaselineInvalidationReason::RequestPropertiesChanged => "request_properties_changed",

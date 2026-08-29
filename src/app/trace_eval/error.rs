@@ -6,8 +6,8 @@ use crate::app::agent_loop::AgentLoopError;
 use crate::domain::artifacts::{ArtifactId, BlobId};
 use crate::domain::events::EventId;
 use crate::domain::request_audit::RequestAuditReconstructionError;
-use crate::domain::trace_eval::TraceFixtureError;
 use crate::domain::trace_eval::TraceReplayPlanError;
+use crate::domain::trace_eval::{ToolAccuracyError, TraceFixtureError};
 
 #[derive(Debug, Error)]
 pub enum TraceEvalServiceError<BlobError> {
@@ -15,6 +15,8 @@ pub enum TraceEvalServiceError<BlobError> {
     Trace(TraceFixtureError),
     #[error(transparent)]
     TracePlan(#[from] TraceReplayPlanError),
+    #[error(transparent)]
+    ToolAccuracy(#[from] ToolAccuracyError),
     #[error("failed to reconstruct the historical RequestAudit input: {0:?}")]
     RequestAuditReconstruction(RequestAuditReconstructionError<BlobError>),
     #[error(transparent)]

@@ -252,7 +252,7 @@ async fn resource_scheduler_parallelizes_distinct_resources_and_serializes_confl
         let mut tools = ProbeExecutor::new(ToolRetryPolicy::NeverAutoRetry);
         tools.spec.parallelism = parallelism;
         let trace = tools.trace.clone();
-        let mut agent = AgentLoop::new(&provider, &tools, "fixture");
+        let mut agent = AgentLoop::new(&provider, &tools);
 
         let outcome = agent
             .run_turn("run the batch", AgentCancellation::new())
@@ -284,7 +284,7 @@ async fn partial_batch_failure_keeps_ordered_pairs_for_all_other_results() {
         }],
     ]);
     let tools = ProbeExecutor::new(ToolRetryPolicy::NeverAutoRetry);
-    let mut agent = AgentLoop::new(&provider, &tools, "fixture");
+    let mut agent = AgentLoop::new(&provider, &tools);
 
     let outcome = agent
         .run_turn("run the batch", AgentCancellation::new())
@@ -328,7 +328,7 @@ async fn completed_dedupe_receipt_prevents_reexecution_across_turns() {
     ]);
     let tools = ProbeExecutor::new(ToolRetryPolicy::DedupeByKey);
     let trace = tools.trace.clone();
-    let mut agent = AgentLoop::new(&provider, &tools, "fixture");
+    let mut agent = AgentLoop::new(&provider, &tools);
 
     agent
         .run_turn("first execution", AgentCancellation::new())
@@ -374,7 +374,7 @@ async fn explicit_rerun_reexecutes_and_replaces_the_completed_receipt() {
     ]);
     let tools = ProbeExecutor::new(ToolRetryPolicy::DedupeByKey);
     let trace = tools.trace.clone();
-    let mut agent = AgentLoop::new(&provider, &tools, "fixture");
+    let mut agent = AgentLoop::new(&provider, &tools);
 
     let first = agent
         .run_turn("first execution", AgentCancellation::new())
@@ -457,7 +457,7 @@ async fn cancelled_receipts_do_not_block_a_later_same_resource_execution() {
     ]);
     let tools = ProbeExecutor::new(ToolRetryPolicy::DedupeByKey);
     let trace = tools.trace.clone();
-    let mut agent = AgentLoop::new(&provider, &tools, "fixture");
+    let mut agent = AgentLoop::new(&provider, &tools);
 
     let first = agent
         .run_turn("first execution", AgentCancellation::new())

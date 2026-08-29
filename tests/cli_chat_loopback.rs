@@ -381,7 +381,7 @@ fn chat_loopback_streams_text_and_persists_started_history_audit_and_explicit_re
         first_request["instructions"]
             .as_str()
             .unwrap()
-            .contains("Source research profile v1")
+            .contains("Source domain profile v1")
     );
 
     let session = session_id(project.path());
@@ -413,7 +413,7 @@ fn chat_loopback_streams_text_and_persists_started_history_audit_and_explicit_re
         project.path(),
         &resumed_config,
         "inspect mobile\n/exit\n",
-        &["--session", &session, "--profile", "mobile"],
+        &["--session", &session, "--domain", "mobile"],
     );
     assert!(
         resumed.status.success(),
@@ -431,7 +431,7 @@ fn chat_loopback_streams_text_and_persists_started_history_audit_and_explicit_re
         resumed_request["instructions"]
             .as_str()
             .unwrap()
-            .contains("Mobile research profile v1")
+            .contains("Mobile domain profile v1")
     );
     assert!(resumed_request["previous_response_id"].is_null());
 
@@ -460,6 +460,144 @@ fn chat_loopback_streams_text_and_persists_started_history_audit_and_explicit_re
             .path()
             .join(".cyber-agent/artifacts/blobs/sha256")
             .is_dir()
+    );
+}
+
+#[test]
+fn new_chat_writes_one_default_phase_before_its_first_provider_request() {
+    let project = TemporaryDirectory::new("cli-chat-default-phase");
+    initialize_project(project.path());
+    let server = spawn_responses_server(vec![
+        (200, text_response("first answer", "phase-first")),
+        (200, text_response("second answer", "phase-second")),
+    ]);
+    let config = write_config(project.path(), &server.base_url);
+
+    let output = run_chat(project.path(), &config, "first\nsecond\n/exit\n", &[]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let first_request = server.requests.recv().unwrap();
+    let second_request = server.requests.recv().unwrap();
+    server.join();
+    assert!(first_request.starts_with("POST /v1/responses HTTP/1.1"));
+    assert!(second_request.starts_with("POST /v1/responses HTTP/1.1"));
+
+    let events = session_events(project.path(), &session_id(project.path()));
+    let phases = events
+        .iter()
+        .filter(|event| event["event_type"] == "session.research_phase_selected")
+        .collect::<Vec<_>>();
+    assert_eq!(phases.len(), 1);
+    assert_eq!(
+        phases[0]["payload"],
+        serde_json::json!({
+            "schema_version": 1,
+            "selection": {
+                "phase": "mapping",
+                "phase_generation": 1,
+                "source": "default",
+                "reason_code": "NEW_SESSION_DEFAULT_MAPPING"
+            }
+        })
+    );
+}
+
+#[test]
+fn legacy_resume_keeps_replay_read_only_then_writes_legacy_mapping_on_real_turn() {
+    let project = TemporaryDirectory::new("cli-chat-legacy-phase");
+    initialize_project(project.path());
+    let inert_config = write_config(project.path(), "http://127.0.0.1:1/v1");
+    let created = run_chat(project.path(), &inert_config, "/exit\n", &[]);
+    assert!(created.status.success());
+    let session = session_id(project.path());
+    assert!(
+        session_events(project.path(), &session)
+            .iter()
+            .all(|event| event["event_type"] != "session.research_phase_selected")
+    );
+
+    let server = spawn_responses_server(vec![(
+        200,
+        text_response("legacy mapping answer", "legacy-phase"),
+    )]);
+    let config = write_config(project.path(), &server.base_url);
+    let resumed = run_chat(
+        project.path(),
+        &config,
+        "resume legacy\n/exit\n",
+        &["--session", &session],
+    );
+    assert!(
+        resumed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    let request = server.requests.recv().unwrap();
+    server.join();
+    assert!(request.starts_with("POST /v1/responses HTTP/1.1"));
+
+    let phases = session_events(project.path(), &session)
+        .into_iter()
+        .filter(|event| event["event_type"] == "session.research_phase_selected")
+        .collect::<Vec<_>>();
+    assert_eq!(phases.len(), 1);
+    assert_eq!(
+        phases[0]["payload"],
+        serde_json::json!({
+            "schema_version": 1,
+            "selection": {
+                "phase": "mapping",
+                "phase_generation": 1,
+                "source": "default",
+                "reason_code": "LEGACY_DEFAULT_MAPPING"
+            }
+        })
+    );
+}
+
+#[test]
+fn explicit_phase_command_records_operator_source_and_reason_before_the_turn() {
+    let project = TemporaryDirectory::new("cli-chat-operator-phase");
+    initialize_project(project.path());
+    let server = spawn_responses_server(vec![(
+        200,
+        text_response("verification answer", "operator-phase"),
+    )]);
+    let config = write_config(project.path(), &server.base_url);
+
+    let output = run_chat(
+        project.path(),
+        &config,
+        "/phase verification\nverify boundary\n/exit\n",
+        &[],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    server.requests.recv().unwrap();
+    server.join();
+
+    let events = session_events(project.path(), &session_id(project.path()));
+    let phase = events
+        .iter()
+        .find(|event| event["event_type"] == "session.research_phase_selected")
+        .unwrap();
+    assert_eq!(
+        phase["payload"],
+        serde_json::json!({
+            "schema_version": 1,
+            "selection": {
+                "phase": "verification",
+                "phase_generation": 1,
+                "source": "operator",
+                "reason_code": "OPERATOR_SELECTED"
+            }
+        })
     );
 }
 

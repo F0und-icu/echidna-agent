@@ -232,11 +232,35 @@ pub(super) fn output_schema() -> Value {
             "schema_version": {"type": "integer", "const": VIEW_IMAGE_SELECTION_SCHEMA_VERSION},
             "status": {"type": "string", "const": "recorded"},
             "image_artifact_ref": {"type": "string", "minLength": 1},
-            "original": {"type": "object"},
-            "derived": {"type": ["object", "null"]},
-            "delivery": {"type": "object"}
+            "original": publication_schema(),
+            "derived": {"oneOf": [publication_schema(), {"type": "null"}]},
+            "delivery": {
+                "type": "object", "properties": {
+                    "artifact_id": {"type": "string", "minLength": 1},
+                    "media_type": {"type": "string", "enum": ["image/png", "image/jpeg"]},
+                    "transform": {"type": ["string", "null"], "enum": ["image_budget_v1", null]}
+                }, "required": ["artifact_id", "media_type", "transform"], "additionalProperties": false
+            }
         },
         "required": ["schema_version", "status", "image_artifact_ref", "original", "derived", "delivery"],
         "additionalProperties": false
+    })
+}
+
+fn publication_schema() -> Value {
+    json!({
+        "type": "object", "properties": {
+            "event_id": {"type": "string", "minLength": 1},
+            "artifact": {"type": "object", "properties": {
+                "id": {"type": "string", "minLength": 1}, "blob_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                "media_type": {"type": "string", "enum": ["image/png", "image/jpeg"]}, "size_bytes": {"type": "integer", "minimum": 0},
+                "source_path": {"type": "string", "minLength": 1}, "created_by_event_id": {"type": "string", "minLength": 1},
+                "produced_by_tool_call_id": {"type": "string", "minLength": 1}, "target_snapshot_id": {"type": "string", "minLength": 1},
+                "toolchain_fingerprint": {"type": "string", "minLength": 1}, "parent_artifact_ids": {"type": "array", "items": {"type": "string", "minLength": 1}},
+                "transform": {"type": ["string", "null"]}
+            }, "required": ["id", "blob_id", "media_type", "size_bytes", "source_path", "created_by_event_id", "produced_by_tool_call_id", "target_snapshot_id", "toolchain_fingerprint", "parent_artifact_ids", "transform"], "additionalProperties": false},
+            "blob": {"type": "object", "properties": {"blob_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "size_bytes": {"type": "integer", "minimum": 0}, "already_present": {"type": "boolean"}}, "required": ["blob_id", "size_bytes", "already_present"], "additionalProperties": false},
+            "research_event_count": {"type": "integer", "minimum": 0}
+        }, "required": ["event_id", "artifact", "blob", "research_event_count"], "additionalProperties": false
     })
 }

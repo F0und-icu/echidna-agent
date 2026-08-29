@@ -322,12 +322,18 @@ fn request_audit_rejects_unknown_schema_reordered_duplicate_and_mismatched_conte
     assert_eq!(sink.events.len(), 1);
 
     let mut unknown_schema = encoded.clone();
-    unknown_schema["schema_version"] = json!(2);
+    unknown_schema["schema_version"] = json!(3);
     let unknown_schema: RequestAuditManifest = serde_json::from_value(unknown_schema).unwrap();
     assert!(matches!(
         unknown_schema.validate(),
-        Err(RequestAuditError::UnsupportedManifestSchema { schema_version: 2 })
+        Err(RequestAuditError::UnsupportedManifestSchema { schema_version: 3 })
     ));
+
+    let mut forged_renderer = encoded.clone();
+    forged_renderer["schema_version"] = json!(2);
+    forged_renderer["prompt_renderer"] = json!({"id": "forged", "version": 1});
+    forged_renderer["resolved_tool_plan_fingerprint"] = json!("a".repeat(64));
+    assert!(serde_json::from_value::<RequestAuditManifest>(forged_renderer).is_err());
 
     let mut unknown_full_ir_schema = encoded.clone();
     unknown_full_ir_schema["full_logical_input"]["schema_version"] = json!(999);

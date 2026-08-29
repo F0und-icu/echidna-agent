@@ -38,7 +38,7 @@
     {
       "type": "function",
       "name": "read_file",
-      "description": "Read one local file as bounded text.",
+      "description": "Use when: one local file\nDo not use when: a batch or search is needed.\nPrefer: line ranges.\nProduces: content, bytes and truncation.",
       "parameters": {
         "type": "object",
         "properties": {

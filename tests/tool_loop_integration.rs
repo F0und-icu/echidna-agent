@@ -17,6 +17,7 @@ use cyber_agent::domain::context::{
     LogicalAppendOnlyRejection, ModelIdentity, ModelProfile, ProviderSession, ProviderSessionId,
     ProviderSessionRole,
 };
+use cyber_agent::domain::domain_profile::DomainProfile;
 use cyber_agent::domain::events::{EventEnvelope, StreamId};
 use cyber_agent::domain::model::{
     CapabilityMappingVersion, ContentItem, ModelCapabilities, ModelEvent, ModelInputIR,
@@ -25,6 +26,7 @@ use cyber_agent::domain::project::ProjectId;
 use cyber_agent::domain::request_audit::{
     RequestAdapterVersion, RequestAuditBinding, RequestAuditRunContext,
 };
+use cyber_agent::domain::research_control::{BaseContract, PromptComposition, ResearchPhase};
 use cyber_agent::domain::tools::{
     ExecutionId, ResourceKey, ToolCall, ToolCallId, ToolExecutionOutcome, ToolExecutionPlan,
     ToolExposure, ToolExposurePlan, ToolName, ToolResultStatus, ToolSpec,
@@ -113,13 +115,16 @@ async fn builtin_tools_cover_files_search_argv_failures_and_bounded_output() {
             "view_image",
         ]
     );
-    tools
-        .configure_exposure(ToolExposurePlan::new([
-            (ToolName::new("run_command"), ToolExposure::Direct),
-            (ToolName::new("run_commands"), ToolExposure::Direct),
-        ]))
+    let resolved = tools
+        .resolve_tool_plan(
+            &ToolExposurePlan::new([
+                (ToolName::new("run_command"), ToolExposure::Direct),
+                (ToolName::new("run_commands"), ToolExposure::Direct),
+            ]),
+            &Default::default(),
+        )
         .unwrap();
-    let specs = tools.specs();
+    let specs = resolved.advertised_specs();
     let run_spec = specs
         .iter()
         .find(|spec| spec.name.as_str() == "run_command")
@@ -614,7 +619,7 @@ async fn reasoning_events_never_become_assistant_history_or_user_output() {
         },
     ]]);
     let tools = ToolRegistry::for_project(&project.root);
-    let mut agent = AgentLoop::new(&provider, &tools, "fixed instructions");
+    let mut agent = AgentLoop::new(&provider, &tools);
     let audit_context = RequestAuditRunContext::new(
         RequestAuditBinding::new(
             ProjectId::new("project-reasoning-separation"),
@@ -697,7 +702,6 @@ async fn agent_loop_keeps_full_resampling_after_local_baseline_comparison() {
     let mut agent = AgentLoop::with_primary_context(
         &provider,
         &tools,
-        "Use local tools and keep candidates distinct from verified findings.",
         ModelIdentity::new("fixture-primary", "fixture-model-v1"),
         ModelProfile::new("fixture-research", 1),
         ProviderSession::new(
@@ -738,7 +742,31 @@ async fn agent_loop_keeps_full_resampling_after_local_baseline_comparison() {
 
     let inputs = provider.inputs();
     assert_eq!(inputs.len(), 2);
-    assert_eq!(inputs[0].tool_specs.len(), 12);
+    let visible_tools = inputs[0]
+        .tool_specs
+        .iter()
+        .map(|spec| spec.name.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    for required in [
+        "read_file",
+        "search_files",
+        "run_command",
+        "run_commands",
+        "research_get",
+        "research_update",
+        "tool_search",
+    ] {
+        assert!(visible_tools.contains(required));
+    }
+    for deferred in [
+        "write_file",
+        "apply_patch",
+        "start_job",
+        "start_pty",
+        "memory_write",
+    ] {
+        assert!(!visible_tools.contains(deferred));
+    }
     assert_eq!(inputs[0].content_items.len(), 1);
     assert_eq!(
         inputs[1].content_items[1],
@@ -795,13 +823,7 @@ async fn agent_loop_executes_research_update_through_the_fixed_registry() {
         }],
     ]);
     let tools = ToolRegistry::for_project(&project.root);
-    tools
-        .configure_exposure(ToolExposurePlan::new([(
-            ToolName::new("research_update"),
-            ToolExposure::Direct,
-        )]))
-        .unwrap();
-    let mut agent = AgentLoop::new(&provider, &tools, "fixture");
+    let mut agent = AgentLoop::new(&provider, &tools);
 
     let outcome = agent
         .run_turn("Record the fixture target.", AgentCancellation::new())
@@ -847,7 +869,7 @@ async fn agent_loop_cache_hit_creates_a_fresh_receipt_linked_to_the_source_execu
             text: "cache result observed".to_owned(),
         }],
     ]);
-    let mut agent = AgentLoop::new(&provider, &tools, "Use project research facts.");
+    let mut agent = AgentLoop::new(&provider, &tools);
     let outcome = agent
         .run_turn("Read the current Research state.", AgentCancellation::new())
         .await
@@ -935,7 +957,7 @@ async fn agent_loop_executes_inspect_project_through_the_fixed_registry() {
         }],
     ]);
     let tools = ToolRegistry::for_project(&project.root);
-    let mut agent = AgentLoop::new(&provider, &tools, "fixture");
+    let mut agent = AgentLoop::new(&provider, &tools);
 
     let outcome = agent
         .run_turn("Inspect this project.", AgentCancellation::new())
@@ -1012,13 +1034,8 @@ async fn agent_loop_executes_artifact_store_through_the_fixed_registry() {
             text: "Artifact was stored.".to_owned(),
         }],
     ]);
-    tools
-        .configure_exposure(ToolExposurePlan::new([(
-            ToolName::new("artifact_store"),
-            ToolExposure::Direct,
-        )]))
-        .unwrap();
-    let mut agent = AgentLoop::new(&provider, &tools, "fixture");
+    let composition = PromptComposition::current().with_research_phase(ResearchPhase::Experiment);
+    let mut agent = AgentLoop::new(&provider, &tools).with_prompt_composition(composition);
 
     let outcome = agent
         .run_turn("Store the fixture Artifact.", AgentCancellation::new())
@@ -1073,13 +1090,8 @@ async fn completed_start_job_receipt_prevents_a_duplicate_background_launch_acro
         }],
     ]);
     let tools = ToolRegistry::for_project(&project.root);
-    tools
-        .configure_exposure(ToolExposurePlan::new([(
-            ToolName::new("start_job"),
-            ToolExposure::Direct,
-        )]))
-        .unwrap();
-    let mut agent = AgentLoop::new(&provider, &tools, "fixture");
+    let composition = PromptComposition::current().with_research_phase(ResearchPhase::Experiment);
+    let mut agent = AgentLoop::new(&provider, &tools).with_prompt_composition(composition);
 
     let first = agent
         .run_turn("start a background job", AgentCancellation::new())
@@ -1128,7 +1140,6 @@ async fn agent_loop_audits_baseline_candidates_while_sending_complete_history() 
     let mut agent = AgentLoop::with_primary_context(
         &provider,
         &tools,
-        "fixture",
         ModelIdentity::new("fixture-primary", "fixture-model-v1"),
         ModelProfile::new("fixture-research", 1),
         ProviderSession::new(
@@ -1204,7 +1215,7 @@ async fn incremental_delivery_uses_tool_result_then_next_user_as_strict_deltas()
         ],
     );
     let tools = ToolRegistry::for_project(&project.root);
-    let mut agent = AgentLoop::new(&provider, &tools, "fixture");
+    let mut agent = AgentLoop::new(&provider, &tools);
 
     let first = agent
         .run_turn("inspect target", AgentCancellation::new())
@@ -1277,20 +1288,53 @@ async fn context_planner_and_cache_feed_the_baseline_without_owning_delivery() {
     );
     let tools = ToolRegistry::for_project(&project_root.root);
     let cache = Arc::new(LocalFragmentCache::for_project(&project));
-    let mut agent =
-        AgentLoop::new(&provider, &tools, "fixture instructions").with_fragment_cache(cache);
+    let mut agent = AgentLoop::new(&provider, &tools).with_fragment_cache(cache);
 
     agent
         .run_turn("first user", AgentCancellation::new())
         .await
         .unwrap();
     let first = agent.last_successful_context().unwrap();
-    assert_eq!(first.plan().base_instructions(), "fixture instructions");
+    assert!(
+        first
+            .plan()
+            .base_instructions()
+            .contains(BaseContract.prompt())
+    );
+    assert!(
+        first
+            .plan()
+            .base_instructions()
+            .contains(DomainProfile::Source.prompt())
+    );
+    assert!(
+        first
+            .plan()
+            .base_instructions()
+            .contains(ResearchPhase::Mapping.prompt())
+    );
+    assert_eq!(
+        first
+            .plan()
+            .full_logical_manifest()
+            .entries()
+            .iter()
+            .take(3)
+            .map(|entry| entry.fragment_id().as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "prompt:base:pragmatic-vulnerability-researcher:1",
+            "prompt:domain:source:1",
+            "prompt:phase:mapping:1",
+        ]
+    );
     assert_eq!(
         first.plan().input_items(),
         &[ContentItem::user_text("first user")]
     );
-    assert_eq!(first.cache_summary().misses, 1);
+    // Base, Domain and Phase are independently content-addressed stable
+    // fragments. They all miss on the first Turn and all reuse on the next.
+    assert_eq!(first.cache_summary().misses, 3);
     assert!(matches!(
         first.baseline_assessment(),
         BaselineAssessment::FullRequest {
@@ -1303,7 +1347,7 @@ async fn context_planner_and_cache_feed_the_baseline_without_owning_delivery() {
         .await
         .unwrap();
     let second = agent.last_successful_context().unwrap();
-    assert_eq!(second.cache_summary().hits, 1);
+    assert_eq!(second.cache_summary().hits, 3);
     assert_eq!(
         second.plan().input_items(),
         &[
@@ -1349,7 +1393,7 @@ async fn failed_model_request_keeps_the_last_successful_context_inspection() {
         ],
     );
     let tools = ToolRegistry::for_project(env!("CARGO_MANIFEST_DIR"));
-    let mut agent = AgentLoop::new(&provider, &tools, "fixture");
+    let mut agent = AgentLoop::new(&provider, &tools);
     agent
         .run_turn("committed user", AgentCancellation::new())
         .await
@@ -1402,7 +1446,7 @@ async fn typed_continuation_rejection_retries_one_full_sample_without_replaying_
         ],
     );
     let tools = ToolRegistry::for_project(&project.root);
-    let mut agent = AgentLoop::new(&provider, &tools, "fixture");
+    let mut agent = AgentLoop::new(&provider, &tools);
 
     let outcome = agent
         .run_turn("inspect target", AgentCancellation::new())
@@ -1469,7 +1513,7 @@ async fn generic_provider_failure_never_falls_back_or_replays_a_completed_tool()
         ],
     );
     let tools = ToolRegistry::for_project(&project.root);
-    let mut agent = AgentLoop::new(&provider, &tools, "fixture");
+    let mut agent = AgentLoop::new(&provider, &tools);
 
     assert!(matches!(
         agent
@@ -1509,7 +1553,7 @@ async fn failed_full_fallback_keeps_a_provider_rejected_reset_until_a_later_full
         ],
     );
     let tools = ToolRegistry::for_project(env!("CARGO_MANIFEST_DIR"));
-    let mut agent = AgentLoop::new(&provider, &tools, "fixture");
+    let mut agent = AgentLoop::new(&provider, &tools);
     agent
         .run_turn("first input", AgentCancellation::new())
         .await
@@ -1576,7 +1620,7 @@ async fn multiple_tool_calls_commit_one_sample_then_advance_continuation() {
         ],
     );
     let tools = ToolRegistry::for_project(env!("CARGO_MANIFEST_DIR"));
-    let mut agent = AgentLoop::new(&provider, &tools, "fixture");
+    let mut agent = AgentLoop::new(&provider, &tools);
 
     agent
         .run_turn("first input", AgentCancellation::new())
@@ -1642,7 +1686,7 @@ async fn cancelled_model_sample_keeps_the_last_committed_continuation() {
         ],
     );
     let tools = ToolRegistry::for_project(env!("CARGO_MANIFEST_DIR"));
-    let mut agent = AgentLoop::new(&provider, &tools, "fixture");
+    let mut agent = AgentLoop::new(&provider, &tools);
     agent
         .run_turn("first input", AgentCancellation::new())
         .await
@@ -1703,7 +1747,7 @@ async fn empty_model_sample_keeps_the_last_committed_continuation() {
         ],
     );
     let tools = ToolRegistry::for_project(env!("CARGO_MANIFEST_DIR"));
-    let mut agent = AgentLoop::new(&provider, &tools, "fixture");
+    let mut agent = AgentLoop::new(&provider, &tools);
     agent
         .run_turn("first input", AgentCancellation::new())
         .await
@@ -1756,7 +1800,6 @@ async fn fresh_provider_sessions_never_share_a_continuation_identity() {
     let mut primary = AgentLoop::with_primary_context(
         &provider,
         &tools,
-        "fixture",
         ModelIdentity::new("fixture", "model"),
         ModelProfile::new("profile", 1),
         ProviderSession::new(
@@ -1769,7 +1812,6 @@ async fn fresh_provider_sessions_never_share_a_continuation_identity() {
     let mut fresh = AgentLoop::with_primary_context(
         &provider,
         &tools,
-        "fixture",
         ModelIdentity::new("fixture", "model"),
         ModelProfile::new("profile", 1),
         ProviderSession::new(
@@ -1852,7 +1894,7 @@ async fn cancellation_during_tool_execution_records_a_cancelled_pair() {
         tokio::task::yield_now().await;
         cancel_from_task.cancel();
     });
-    let mut agent = AgentLoop::new(&provider, &tools, "fixture");
+    let mut agent = AgentLoop::new(&provider, &tools);
 
     let outcome = agent
         .run_turn("read the fixture", cancellation)
@@ -1890,7 +1932,7 @@ async fn multiple_tool_calls_are_staged_and_paired_in_model_order() {
         }],
     ]);
     let tools = ToolRegistry::for_project(env!("CARGO_MANIFEST_DIR"));
-    let mut agent = AgentLoop::new(&provider, &tools, "fixture");
+    let mut agent = AgentLoop::new(&provider, &tools);
 
     let outcome = agent
         .run_turn("inspect", AgentCancellation::new())
@@ -1934,7 +1976,7 @@ async fn receipt_stage_failure_keeps_multi_tool_history_paired_with_real_outcome
         },
     ]]);
     let tools = ToolRegistry::for_project(&project.root);
-    let mut agent = AgentLoop::new(&provider, &tools, "fixture");
+    let mut agent = AgentLoop::new(&provider, &tools);
     let audit_context = RequestAuditRunContext::new(
         RequestAuditBinding::new(
             ProjectId::new("project-receipt-stage-failure"),

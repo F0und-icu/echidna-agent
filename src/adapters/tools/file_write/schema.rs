@@ -77,11 +77,24 @@ pub(in super::super) fn output_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "status": {"type": "string"},
-            "changes": {"type": "array"}
+            "status": {"type": "string", "const": "written"},
+            "changes": {"type": "array", "minItems": 1, "maxItems": 1, "items": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "minLength": 1},
+                    "expected_preimage_hash": {"type": ["string", "null"]},
+                    "before_hash": {"type": ["string", "null"]},
+                    "before_size": {"type": ["integer", "null"], "minimum": 0},
+                    "after_hash": {"type": ["string", "null"]},
+                    "after_size": {"type": ["integer", "null"], "minimum": 0},
+                    "actual_diff": {"type": "string"}
+                },
+                "required": ["path", "expected_preimage_hash", "before_hash", "before_size", "after_hash", "after_size", "actual_diff"],
+                "additionalProperties": false
+            }}
         },
         "required": ["status", "changes"],
-        "additionalProperties": true
+        "additionalProperties": false
     })
 }
 

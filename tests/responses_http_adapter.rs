@@ -932,7 +932,7 @@ async fn loopback_rejection_fallback_sends_full_history_and_never_commits_partia
     .await;
     let provider = adapter(base_url, FakeCredentialSource::value(Some(FIXTURE_SECRET)));
     let tools = ToolRegistry::for_project(env!("CARGO_MANIFEST_DIR"));
-    let mut agent = AgentLoop::new(&provider, &tools, "fixture instructions");
+    let mut agent = AgentLoop::new(&provider, &tools);
 
     let outcome = agent
         .run_turn("inspect Cargo", AgentCancellation::new())

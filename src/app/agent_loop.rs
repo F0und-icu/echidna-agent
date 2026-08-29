@@ -17,18 +17,20 @@ use crate::domain::context::{
     FullLogicalManifest, InternalRequestMetadata, ModelIdentity, ModelProfile, ProviderSession,
     ProviderSessionId, ProviderSessionRole, StepSnapshot, TurnContext, TurnId,
 };
+use crate::domain::domain_profile::DomainProfile;
 use crate::domain::events::StreamId;
 use crate::domain::history::{ConversationHistory, HistoryError};
-use crate::domain::mode::{ModeError, PromptComposition};
 use crate::domain::model::{ContentItem, MessageRole, ModelInputIR};
 use crate::domain::profile::{AgentModelProfile, AgentModelProfileError};
 use crate::domain::request_audit::{
     RequestAuditAttempt, RequestAuditError, RequestAuditRunContext,
 };
-use crate::domain::research_profile::ResearchProfile;
+use crate::domain::research_control::{PromptComposition, ResearchControlError, ResearchPhase};
+use crate::domain::sampling::{SamplingStepPlan, TurnConfigurationSnapshot};
 use crate::domain::session::{SessionError, SessionState, SessionSummary, SessionSummaryDraft};
 use crate::domain::tools::{
-    ExecutionId, IdempotencyKey, ToolCall, ToolExecutionOutcome, ToolExposurePlan, ToolResult,
+    DeferredActivationSet, ExecutionId, IdempotencyKey, ResolvedToolPlan, ToolCall,
+    ToolExecutionOutcome, ToolExposurePlan, ToolFailure, ToolFailureRetryability, ToolResult,
 };
 use crate::domain::world_state::{ProjectSnapshotContext, ResearchWorldState, WorldStateError};
 use crate::domain::{
@@ -168,6 +170,7 @@ pub struct AgentLoop<'provider, 'tools, Provider: ?Sized, Tools: ?Sized> {
     committed_context_manifest: Option<FullLogicalManifest>,
     last_context_plan: Option<ContextPlan>,
     last_successful_context: Option<ContextInspection>,
+    last_sampling_step_plan: Option<SamplingStepPlan>,
     next_turn_sequence: u64,
     last_baseline_assessment: Option<BaselineAssessment>,
     active_agent_model_profile: Option<AgentModelProfile>,
@@ -207,15 +210,10 @@ where
     Provider: ModelProvider + ?Sized,
     Tools: ToolExecutor + ?Sized,
 {
-    pub fn new(
-        provider: &'provider Provider,
-        tools: &'tools Tools,
-        instructions: impl Into<String>,
-    ) -> Self {
+    pub fn new(provider: &'provider Provider, tools: &'tools Tools) -> Self {
         Self::with_primary_context(
             provider,
             tools,
-            instructions,
             ModelIdentity::new("primary", "default"),
             ModelProfile::new("default", 0),
             ProviderSession::new(
@@ -233,7 +231,6 @@ where
     pub fn with_primary_context(
         provider: &'provider Provider,
         tools: &'tools Tools,
-        instructions: impl Into<String>,
         model: ModelIdentity,
         profile: ModelProfile,
         provider_session: ProviderSession,
@@ -241,7 +238,10 @@ where
         if provider_session.reference().role != ProviderSessionRole::Primary {
             return Err(AgentLoopConfigurationError::PrimarySessionRequired);
         }
-        let prompt_composition = PromptComposition::new(instructions.into())?;
+        let prompt_composition = PromptComposition::current();
+        let active_tool_exposure_plan = prompt_composition
+            .tool_exposure()
+            .restricted_to_catalog(&tools.catalog());
         Ok(Self {
             provider,
             tools,
@@ -262,11 +262,12 @@ where
             committed_context_manifest: None,
             last_context_plan: None,
             last_successful_context: None,
+            last_sampling_step_plan: None,
             next_turn_sequence: 0,
             last_baseline_assessment: None,
             active_agent_model_profile: None,
             pending_agent_model_profile: None,
-            active_tool_exposure_plan: ToolExposurePlan::default(),
+            active_tool_exposure_plan,
             committed_delivery_input: None,
             committed_history_len: 0,
             committed_world_state: None,
@@ -323,7 +324,14 @@ where
             .map(|compaction| compaction.summary().clone());
         self.pending_session_summary = None;
         self.applied_compaction = applied_compaction;
+        let composition = self
+            .pending_prompt_composition
+            .take()
+            .unwrap_or_else(|| self.prompt_composition.clone())
+            .with_research_phase(session.effective_research_phase());
+        self.pending_prompt_composition = Some(composition);
         self.clear_committed_primary_delivery_state();
+        self.last_sampling_step_plan = None;
         Ok(())
     }
 
@@ -338,26 +346,41 @@ where
         self
     }
 
-    /// Selects one fixed vulnerability-research Profile before the first
-    /// Turn. Its ModePack remains part of the existing prompt/tool boundary.
-    pub fn with_research_profile(mut self, profile: ResearchProfile) -> Self {
-        self.queue_research_profile(profile);
+    /// Selects one fixed vulnerability-research domain before the first Turn.
+    pub fn with_domain_profile(mut self, profile: DomainProfile) -> Self {
+        self.queue_domain_profile(profile);
         self
     }
 
-    /// Queues a prompt/Mode change for the next Turn boundary.
+    /// Selects one fixed research objective before the first Turn.
+    pub fn with_research_phase(mut self, phase: ResearchPhase) -> Self {
+        self.queue_research_phase(phase);
+        self
+    }
+
+    /// Queues a complete Prompt change for the next Turn boundary.
     pub fn queue_prompt_composition(&mut self, composition: PromptComposition) {
         self.pending_prompt_composition = Some(composition);
     }
 
-    /// Queues a fixed vulnerability-research Profile for the next Turn
-    /// boundary, preserving any pending base/personal/project composition.
-    pub fn queue_research_profile(&mut self, profile: ResearchProfile) {
+    /// Queues a fixed vulnerability-research DomainProfile for the next Turn
+    /// boundary while preserving Personal/Project and Phase composition.
+    pub fn queue_domain_profile(&mut self, profile: DomainProfile) {
         let composition = self
             .pending_prompt_composition
             .clone()
             .unwrap_or_else(|| self.prompt_composition.clone());
-        self.pending_prompt_composition = Some(profile.apply_to(composition));
+        self.pending_prompt_composition = Some(composition.with_domain_profile(profile));
+    }
+
+    /// Queues an already-authorized ResearchPhase selection for the next Turn
+    /// boundary. Durable Session append remains the caller's fact boundary.
+    pub fn queue_research_phase(&mut self, phase: ResearchPhase) {
+        let composition = self
+            .pending_prompt_composition
+            .clone()
+            .unwrap_or_else(|| self.prompt_composition.clone());
+        self.pending_prompt_composition = Some(composition.with_research_phase(phase));
     }
 
     /// Supplies the current derived research view for the next full Context
@@ -417,6 +440,10 @@ where
     /// local History/Baseline commit both succeed.
     pub fn last_successful_context(&self) -> Option<&ContextInspection> {
         self.last_successful_context.as_ref()
+    }
+
+    pub fn last_sampling_step_plan(&self) -> Option<&SamplingStepPlan> {
+        self.last_sampling_step_plan.as_ref()
     }
 
     /// Returns the local delivery decision for the most recent actual model
@@ -569,21 +596,23 @@ where
         let context_budget = self.context_planner.default_budget(&capabilities)?;
         self.next_turn_sequence += 1;
         let turn_id = TurnId::new(format!("turn:{}", self.next_turn_sequence));
+        let mut deferred_activations = DeferredActivationSet::default();
         let mut executions = Vec::new();
         let mut provider_requests = 0;
 
         for request_index in 0..MAX_MODEL_REQUESTS_PER_TURN {
             self.history.ensure_all_tool_calls_paired()?;
-            // A successful tool_search changes the actual schema visible to
-            // the next sample, so direct specs are intentionally refreshed.
-            let tool_specs = self.current_tool_specs();
+            let resolved_tool_plan = self
+                .tools
+                .resolve_tool_plan(&self.active_tool_exposure_plan, &deferred_activations)?;
+            let tool_specs = resolved_tool_plan.advertised_specs();
             let turn = TurnContext::new(
                 turn_id.clone(),
                 self.model.clone(),
                 self.profile.clone(),
                 self.provider_session.reference().clone(),
                 capabilities.context_window,
-                &tool_specs,
+                tool_specs,
             )?;
             let (plan, cache_summary) =
                 context_state::compile_context(context_state::ContextCompilationInput {
@@ -597,15 +626,29 @@ where
                     cache: self.fragment_cache.as_deref(),
                     budget: context_budget,
                     capabilities: &capabilities,
-                    tool_specs: &tool_specs,
+                    tool_specs,
                     prior_manifest: self.committed_context_manifest.as_ref(),
                 })?;
+            let sampling_step = SamplingStepPlan::new(
+                format!("{}:step:{request_index}", turn_id),
+                TurnConfigurationSnapshot::new(
+                    turn.clone(),
+                    self.prompt_composition.domain_profile(),
+                    self.prompt_composition.research_phase(),
+                    self.active_agent_model_profile.clone(),
+                ),
+                plan,
+                resolved_tool_plan,
+                capabilities.clone(),
+            )?;
+            let plan = sampling_step.context_plan();
             let full_input = plan.model_input();
-            let full_snapshot = StepSnapshot::capture(
+            let full_snapshot = StepSnapshot::capture_with_renderer(
                 &turn,
                 request_index,
                 &full_input,
                 &capabilities,
+                sampling_step.prompt_renderer(),
                 InternalRequestMetadata::default(),
             )?;
             let full_assessment = self
@@ -620,7 +663,7 @@ where
                 match context_state::state_diff_delivery_input(
                     context_state::StateDiffDeliveryInput {
                         full_input: &full_input,
-                        current_plan: &plan,
+                        current_plan: plan,
                         planner: &self.context_planner,
                         budget: context_budget,
                         committed_input: self.committed_delivery_input.as_ref(),
@@ -635,11 +678,12 @@ where
                     },
                 )? {
                     Some(candidate_input) => {
-                        let candidate_snapshot = StepSnapshot::capture(
+                        let candidate_snapshot = StepSnapshot::capture_with_renderer(
                             &turn,
                             request_index,
                             &candidate_input,
                             &capabilities,
+                            sampling_step.prompt_renderer(),
                             InternalRequestMetadata::default(),
                         )?;
                         let candidate_assessment = self
@@ -661,8 +705,10 @@ where
             let request = self.request_for_assessment(&delivery_input, &assessment)?;
             reserve_provider_request(&mut provider_requests)?;
             self.last_context_plan = Some(plan.clone());
+            self.last_sampling_step_plan = Some(sampling_step.clone());
             self.record_request_audit_attempt(
                 &mut audit,
+                &sampling_step,
                 &full_input,
                 &request,
                 &capabilities,
@@ -712,17 +758,19 @@ where
                         };
                         self.last_baseline_assessment = Some(fallback_assessment.clone());
                         delivery_input = full_input.clone();
-                        snapshot = StepSnapshot::capture(
+                        snapshot = StepSnapshot::capture_with_renderer(
                             &turn,
                             request_index,
                             &delivery_input,
                             &capabilities,
+                            sampling_step.prompt_renderer(),
                             InternalRequestMetadata::default(),
                         )?;
                         reserve_provider_request(&mut provider_requests)?;
                         let fallback_request = ModelRequest::full(delivery_input.clone());
                         self.record_request_audit_attempt(
                             &mut audit,
+                            &sampling_step,
                             &full_input,
                             &fallback_request,
                             &capabilities,
@@ -775,7 +823,7 @@ where
             self.committed_project_snapshot = self.project_snapshot.clone();
             self.committed_context_manifest = Some(plan.full_logical_manifest().clone());
             self.last_successful_context = Some(ContextInspection {
-                plan,
+                plan: plan.clone(),
                 baseline_assessment: self
                     .last_baseline_assessment
                     .clone()
@@ -791,15 +839,18 @@ where
                 });
             }
 
-            let exposed_tool_names = tool_specs.iter().map(|spec| spec.name.clone()).collect();
             let scheduled = self
                 .execute_tool_calls(
                     tool_calls,
-                    &exposed_tool_names,
+                    sampling_step.resolved_tool_plan(),
                     &cancellation,
                     &mut record_execution,
                 )
                 .await?;
+            for execution in &scheduled.executions {
+                deferred_activations
+                    .apply_search_result(&execution.result, sampling_step.resolved_tool_plan())?;
+            }
             self.append_view_image_contexts(&scheduled.executions, &mut view_image_follow_up)
                 .await?;
             executions.extend(scheduled.executions);
@@ -844,10 +895,6 @@ where
         Ok(())
     }
 
-    fn current_tool_specs(&self) -> Vec<crate::domain::tools::ToolSpec> {
-        self.tools.specs()
-    }
-
     fn apply_pending_configuration(&mut self) -> Result<(), AgentLoopConfigurationError> {
         let pending_composition = self.pending_prompt_composition.as_ref();
         let pending_profile = self.pending_agent_model_profile.as_ref();
@@ -862,11 +909,11 @@ where
         }
         if let Some(composition) = pending_composition {
             let exposure = composition
-                .mode()
-                .map(|mode| mode.tool_exposure().clone())
-                .unwrap_or_else(ToolExposurePlan::default);
+                .tool_exposure()
+                .restricted_to_catalog(&self.tools.catalog());
             if self.active_tool_exposure_plan != exposure {
-                self.tools.configure_exposure(exposure.clone())?;
+                self.tools
+                    .resolve_tool_plan(&exposure, &DeferredActivationSet::default())?;
                 self.active_tool_exposure_plan = exposure;
                 self.provider_session
                     .reset(BaselineInvalidationReason::ToolsChanged);
@@ -960,7 +1007,7 @@ where
     async fn execute_tool_calls(
         &mut self,
         calls: Vec<ToolCall>,
-        exposed_tool_names: &std::collections::BTreeSet<crate::domain::tools::ToolName>,
+        resolved_tool_plan: &ResolvedToolPlan,
         cancellation: &AgentCancellation,
         receipt_stage: &mut Option<&mut ToolExecutionReceiptStage<'_>>,
     ) -> Result<ScheduledCalls, AgentLoopError> {
@@ -968,28 +1015,27 @@ where
         let mut plans = Vec::new();
         for call in calls {
             let execution_id = ExecutionId::new(format!("execution:{}", call.call_id));
-            match self.tools.plan_exposed(execution_id, call.clone()) {
+            match self
+                .tools
+                .plan_model_call(resolved_tool_plan, execution_id, call.clone())
+            {
                 Ok(plan) => {
-                    if exposed_tool_names.contains(&call.name) {
+                    if resolved_tool_plan.validates_execution_plan(&plan) {
                         plans.push(plan);
                         prepared.push(PreparedToolCall::Planned);
                     } else {
-                        prepared.push(PreparedToolCall::PlanningFailure(ToolResult::failed(
+                        prepared.push(PreparedToolCall::PlanningFailure(planning_failure_result(
                             &call,
-                            ToolExecutorError::ToolNotExposed {
-                                tool_name: call.name.to_string(),
-                            }
-                            .to_string(),
+                            ToolExecutorError::ResolvedPlanMismatch,
                         )));
                     }
                 }
                 Err(ToolExecutorError::UnmatchedToolCall { tool_name }) => {
                     return Err(AgentLoopError::UnmatchedToolCall { tool_name });
                 }
-                Err(error) => prepared.push(PreparedToolCall::PlanningFailure(ToolResult::failed(
-                    &call,
-                    error.to_string(),
-                ))),
+                Err(error) => prepared.push(PreparedToolCall::PlanningFailure(
+                    planning_failure_result(&call, error),
+                )),
             }
         }
 
@@ -1052,6 +1098,51 @@ struct ScheduledCalls {
     cancelled: bool,
 }
 
+fn planning_failure_result(call: &ToolCall, error: ToolExecutorError) -> ToolResult {
+    let (code, retryability, message) = match error {
+        ToolExecutorError::InvalidArguments { message, .. } => (
+            "invalid_arguments",
+            ToolFailureRetryability::CorrectArguments,
+            message,
+        ),
+        ToolExecutorError::UnknownTool { tool_name } => (
+            "unknown_tool",
+            ToolFailureRetryability::Terminal,
+            format!("Tool `{tool_name}` is not registered"),
+        ),
+        ToolExecutorError::ToolNotExposed { tool_name } => (
+            "tool_not_exposed",
+            ToolFailureRetryability::Terminal,
+            format!("Tool `{tool_name}` is not advertised by the captured Tool plan"),
+        ),
+        ToolExecutorError::PlanFailure { message, .. } => (
+            "tool_plan_failure",
+            ToolFailureRetryability::Terminal,
+            message,
+        ),
+        ToolExecutorError::ResolvedPlanFailure { message } => (
+            "resolved_tool_plan_failure",
+            ToolFailureRetryability::Terminal,
+            message,
+        ),
+        ToolExecutorError::ResolvedPlanMismatch => (
+            "resolved_tool_plan_mismatch",
+            ToolFailureRetryability::Terminal,
+            "the Tool execution plan does not match the immutable advertised plan".to_owned(),
+        ),
+        ToolExecutorError::UnmatchedToolCall { tool_name } => (
+            "unmatched_tool_call",
+            ToolFailureRetryability::Terminal,
+            format!("Tool `{tool_name}` is not present in the fixed Replay trace"),
+        ),
+    };
+    ToolResult::from_pre_execution_failure(
+        call,
+        ToolFailure::pre_execution(code, retryability, message.clone()),
+        serde_json::json!({"error": message}),
+    )
+}
+
 fn reserve_provider_request(provider_requests: &mut usize) -> Result<(), AgentLoopError> {
     if *provider_requests == MAX_MODEL_REQUESTS_PER_TURN {
         return Err(AgentLoopError::ModelRequestLimit {
@@ -1071,7 +1162,7 @@ pub enum AgentLoopConfigurationError {
     #[error(transparent)]
     Session(#[from] SessionError),
     #[error(transparent)]
-    PromptComposition(#[from] ModeError),
+    PromptComposition(#[from] ResearchControlError),
     #[error(transparent)]
     AgentModelProfile(#[from] AgentModelProfileError),
     #[error(transparent)]
@@ -1155,11 +1246,17 @@ pub enum AgentLoopError {
     #[error(transparent)]
     ContextPlanner(#[from] crate::domain::context::ContextPlannerError),
     #[error(transparent)]
-    Mode(#[from] ModeError),
+    ResearchControl(#[from] ResearchControlError),
     #[error(transparent)]
     WorldState(#[from] WorldStateError),
     #[error(transparent)]
     Configuration(#[from] AgentLoopConfigurationError),
+    #[error(transparent)]
+    Tool(#[from] ToolExecutorError),
+    #[error(transparent)]
+    ToolContract(#[from] crate::domain::tools::ToolContractError),
+    #[error(transparent)]
+    SamplingPlan(#[from] crate::domain::sampling::SamplingPlanError),
     #[error("AgentLoop History does not contain the current Turn input")]
     ContextStateMismatch,
     #[error("the model completed without text or a Tool Call")]

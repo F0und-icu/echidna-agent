@@ -2,18 +2,31 @@
 
 ## Current State
 
-- Architecture version: `1.1.0`
+- Architecture version: `1.4.0`; v1/v1.1 remain remotely sealed, v1.2/v1.3/v1.4 are locally frozen with remote seal unauthorized
 - Phase: `IMPLEMENTATION`
 - Implementation: `STARTED`
-- Current milestone: `FIX` integration complete; M4-S3 remains deferred
-- Current slice: `F1d`
-- Slice state: `COMPLETE_REMOTE_SEALED`; F1a/F1b/F1c/F1d are merged as one verified integration delivery
-- Lean governance: `PASSED`; F1d extends the one Config/Composition credential owner without adding a second Provider path or exposing the inline value to diagnostics or facts
-- Local Git initialized: `yes`; `main` matches the F1a-F1d remote delivery
+- Current milestone: `M4-S3c` Generic Research Tools
+- Current slice: `M4-S3c`
+- Slice state: `READY_NOT_AUTHORIZED`; M4-S3b is locally complete after bounded implementation, independent audit corrections, main-agent cross-boundary review and the full Cargo/Lean Gate
+- Lean governance: `PASSED`; M4-S3b retains one ToolSpec/ToolFailure/Trace Eval owner, removes test-only or unconsumed public surface and keeps unobservable metrics explicitly Deferred
+- Local Git initialized: `yes`; `main` contains the user-authorized local M4-S3a1-through-M4-S3b checkpoint over the F1a-F1d remote delivery, while push/PR/Actions remain unauthorized
 - Remote repository: `F0und-icu/cyber-agent` private; F1a-F1d implementation PR `#46` passed its one exact PR-head CI and merged with `[skip ci]`
 - Documentation baseline commit: `55ff3be`
-- Current code base: F1a-F1d Squash Merge `6eb4959` on `main`
-- Upstream Codex baseline: `3aae5d885bac39c1262491aa3fd100dfd8b3919f`
+- Current code base: locally completed M4-S3a1 through M4-S3b over remote status seal `ee04b7e`, which contains F1a-F1d Squash Merge `6eb4959`
+- Upstream Codex reference baseline: `868c9edb0da913a5fc699a71664e65f44f6058b0`; read-only and not a Cyber Agent dependency
+
+## Latest Local Design Update
+
+- Date: `2026-08-29`.
+- Scope: narrow Architecture v1.4 correction over frozen v1.3; no Rust source, test, Cargo dependency, Provider config, credential, research data or `SEALED_MANIFEST.md` was changed.
+- Tool failure boundary: new `ToolFailure` has only `pre_execution`/`execution`; post-execution Receipt/History/RequestAudit persistence failures are App/AgentLoop errors and cannot rewrite a successful ToolResult or fabricate a Receipt.
+- Accuracy boundary: reports use only durable Trace signals; unmatched Replay termination and Observation/Replay/Vision promotion stay Deferred without typed durable signals, never fake zero, and Deferred activation requires adjacent RequestAudit ToolSpec transition proof.
+- Sampling authority: one immutable SamplingStepPlan binds Context, model/capabilities, exact ToolSpecs, RequestAudit and dispatch to one ResolvedToolPlan. Deferred activation affects only later Steps in the current Turn and clears at Turn/Resume boundaries.
+- Prompt/Context: `generic-v1` is the only renderer; ContextSlot controls order while Origin/Authority/Retention/Freshness remain orthogonal and later enter a validated ContextDeliveryMap sidecar. Provider DeliveryItemId remains Adapter-local.
+- Evidence continuity: typed EvidenceLink relations and Session Summary v2 EvidenceSpine reference authoritative Research/Artifact/Receipt facts; bounded narrative remains lossy and non-authoritative.
+- Research optimization: fixed identifier → fielded BM25 → CJK/ASCII n-gram → RRF → authority/freshness retrieval and evidence-gap/NextAction guidance remain deterministic, local, explainable, Shadow-first and non-evidence.
+- Planned sequence: M4-S3a1 immutable sampling foundation; M4-S3a2 Research Control Plane; M4-S3b/c/d as already bounded; M4-S3e1/e2 evidence/provenance; M4-S3f retrieval; M4-S3g guidance; then separately authorized M4-S4 long-flow acceptance.
+- Authorization: the current user instruction narrows the earlier through-M4-S4 implementation authority to completing M4-S3b and authorizes one local Git checkpoint. That authority is consumed by this handoff; M4-S3c, push/PR/Actions/remote seal and Live Provider requests require new authorization.
 
 ## Last Remote Delivery
 
@@ -47,21 +60,33 @@
 3. `task.md`
 4. `docs/development/IMPLEMENTATION_PLAN.md`
 5. `docs/development/LEAN_CODE_GOVERNANCE.md`
-6. `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_1.md`
-7. `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1.md`
-8. `docs/adr/ADR-0002-capability-driven-primary-vision-models.md`
-9. `docs/adr/ADR-0003-minimal-openai-http-sse-stack.md`
-10. `docs/adr/ADR-0004-sha256-artifact-blob-identity.md`
-11. `docs/adr/ADR-0005-minimal-local-image-stack.md`
-12. `docs/adr/ADR-0006-single-provider-composition-root.md`
-13. `docs/adr/ADR-0007-protocol-first-responses-adapter.md`
-14. `docs/adr/ADR-0008-local-inline-provider-credentials.md`
+6. `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_4.md`
+7. `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_3.md`
+8. `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_2.md`
+9. `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_1.md`
+10. `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1.md`
+11. `docs/adr/ADR-0014-narrow-tool-failure-and-accuracy-observability.md`
+12. `docs/adr/ADR-0010-immutable-sampling-step-and-tool-plan.md`
+13. `docs/adr/ADR-0011-context-provenance-evidence-relations-and-compaction.md`
+14. `docs/adr/ADR-0012-deterministic-security-retrieval-and-evidence-gap-guidance.md`
+15. `docs/adr/ADR-0013-versioned-prompt-renderer-boundary.md`
+16. `docs/adr/ADR-0009-stable-research-persona-domain-profile-and-phase.md`
+17. `docs/adr/ADR-0002-capability-driven-primary-vision-models.md`
+18. `docs/adr/ADR-0003-minimal-openai-http-sse-stack.md`
+19. `docs/adr/ADR-0004-sha256-artifact-blob-identity.md`
+20. `docs/adr/ADR-0005-minimal-local-image-stack.md`
+21. `docs/adr/ADR-0006-single-provider-composition-root.md`
+22. `docs/adr/ADR-0007-protocol-first-responses-adapter.md`
+23. `docs/adr/ADR-0008-local-inline-provider-credentials.md`
 
 ## Completed
 
 - Codex local architecture and prompt-flow assessment.
 - Dedicated single-user vulnerability research Agent architecture and P0/P1/P2 classification.
 - Architecture v1 frozen baseline and v1.1 capability-driven Primary plus optional Vision composition.
+- Architecture v1.2 locally frozen Research Control Plane: one stable persona, orthogonal DomainProfile/ResearchPhase, phase-aware Tool exposure and measurable Tool-accuracy contracts; production and remote seal remain unstarted.
+- Architecture v1.3 locally frozen immutable Sampling/Tool plan, versioned Prompt renderer, Context provenance, typed evidence/Compaction and deterministic Shadow-first retrieval/guidance contracts; production and remote seal remain unstarted.
+- Architecture v1.4 locally frozen narrow ToolFailure and durable accuracy-observability correction; M4-S3b implements and gates that boundary locally without a remote seal.
 - Development, Git/version/release, environment, credential isolation and Mock/Live/CI plans.
 - Parameterized Luna single-Slice implementation prompt and private documentation baseline.
 - M0-S1 single-package CLI skeleton and pinned-toolchain CI Gate.
@@ -88,6 +113,9 @@
 - M3-S4 auditable local images, fixed `view_image`, Direct/Secondary Vision composition, strict Vision Session facts and zero-request Mechanical Replay.
 - M4-S1 fixed vulnerability-research Prompt Profiles, Turn-boundary AgentLoop selection and deterministic tests-only controlled offline cases.
 - M4-S2 strict Trace fixtures, full-only Replay Model/Tool Adapters, Mechanical Replay, Context Recompile and isolated non-evidence Shadow Eval.
+- M4-S3a1 immutable SamplingStepPlan/ResolvedToolPlan binding, current-Turn Deferred activation, fixed `generic-v1` renderer identity and behavior-preserving ContextSlot/ContextOrigin migration.
+- M4-S3a2 fixed Base Contract, orthogonal DomainProfile/ResearchPhase composition, Turn-boundary durable phase selection and bounded Tool exposure.
+- M4-S3b canonical Tool guidance, precise schemas, narrow structured ToolFailure and durable-Trace-only non-evidence Tool accuracy reports.
 - F1a strict Provider Config v1, one Provider Composition Root, shared credential source and configuration-driven generic Live Smokes (remotely sealed in integrated PR `#46`).
 - F1b one protocol-first Responses HTTP/SSE Adapter, provider-neutral reasoning events and configuration-only conforming-service selection (remotely sealed in integrated PR `#46`).
 - F1c first-version CLI Chat through the existing AgentLoop, durable Session/RequestAudit/Tool facts and one synthetic DeepSeek Live Chat (remotely sealed in integrated PR `#46`).
@@ -120,23 +148,152 @@
 - Scope budget: no Keychain, encrypted vault, config discovery, credential manager, schema database, Provider router, Codex credential source, Live request, Git operation or M4-S3/M4-S4 work.
 - Verification: inline/reference composition, exact-one validation, lazy Provider use, CLI `doctor` redaction, loopback Chat Authorization and fact/output non-disclosure pass with the complete locked Cargo/Lean Gate.
 
-## Next Planned Slice
+## Current Slice
 
-- Slice: `M4-S3`
-- State: `DEFERRED_NOT_AUTHORIZED`; F1d completion does not start Observation/TargetDelta work.
-- Planned scope: provider-neutral structured Observations, one bounded external Extractor example and TargetDelta only after a new explicit authorization.
-- Forbidden continuation: M4-S3/M4-S4 production work, real Live Test, general Prompt DSL/loader/registry, dataset service, database, model router, Hook/plugin runtime and Codex credential/login access.
+- Slice: `M4-S3c`
+- State: `READY_NOT_AUTHORIZED`; M4-S3b is complete and this Slice has not started.
+- Planned scope: the separately bounded generic `http_request` and `inspect_environment` Tools, reusing existing ToolExecutionPlan, Resource Key, ExecutionReceipt, Artifact, Context truncation and Tool-accuracy contracts.
+- Required start boundary: reread the authority chain, name the exact M4-S3c scope, set this Slice to `IN_PROGRESS` and obtain separate implementation authorization before changing production code.
+- Later independent Slices: M4-S3d Observation/TargetDelta; M4-S3e1 typed evidence; M4-S3e2 provenance/Compaction; M4-S3f retrieval; M4-S3g guidance; M4-S4 offline long-flow acceptance with Live-only evidence recorded as separately authorized or not run.
+- Forbidden before authorization: any new Tool runtime, dependency, Provider/credential path, real Live Test, mutable request-global exposure, general Prompt/Tool/Eval registry, workflow engine, dataset service, remote judge, model router, Hook/plugin runtime or Codex credential/login access.
 
 ## Current Authorization
 
-The user's F1a/F1b/F1c/F1d remote-publication authorization is consumed. F1c/F1d implementation and synthetic Live authorizations also remain consumed.
+The user's instruction to finish M4-S3b and create a local Git checkpoint is consumed by this handoff. It does not authorize the next Slice or remote publication.
 
-- Run mode: `STOP_AFTER_REMOTE_SEAL`; F1a-F1d are remotely sealed and no later Slice is authorized
-- Git mode: `REMOTE_SEAL_CONSUMED`; PR `#46`, CI `33182963979` and Squash Merge `6eb4959` complete the delivery; no further Git write, tag or release is authorized
-- Delegation mode: `OFF`; the current request does not authorize development sub-agents
-- Live test mode: `OFF`; F1d uses fake/loopback credentials only
+- Run mode: `REVIEW_ONLY`; M4-S3c is `READY_NOT_AUTHORIZED`
+- Git mode: `LOCAL_CHECKPOINT_COMPLETE`; no further commit, branch, push, PR, merge, tag, release or GitHub Actions run is authorized
+- Delegation mode: `OFF`; any future delegation requires a new explicit instruction and remains subject to the bounded Terra/Luna roles
+- Live test mode: `OFF`; no credential resolution or public Provider request is authorized
 - Configuration rule: Provider binding, model, Base URL and Capability Mapping remain Config v1 data. A Provider selects exactly one inline `api_key` or dedicated `credential_ref`; neither may infer Provider/model identity or use Codex login state.
-- Stop condition: satisfied after the remote-evidence status seal; do not start M4-S3/M4-S4 or a new Live Test
+- Stop condition: report the local checkpoint and stop with M4-S3c unstarted
+
+## M4-S3a1 Slice Start
+
+- Base commit: `ee04b7e`; `main` matches `origin/main`. The existing uncommitted Architecture v1.2/v1.3 and governance documentation changes are preserved in place.
+- Intended production touch points: the existing Context Planner and canonical Tool catalog, the one AgentLoop, ToolExecutor Port, Replay Tool Adapter, RequestAudit schema and the existing ToolExecutionPlan/ExecutionReceipt contracts.
+- Scope lock: add one immutable `SamplingStepPlan`, one pure `ResolvedToolPlan` owner, current-Turn `DeferredActivationSet`, fixed `generic-v1` renderer identity and the minimum behavior-preserving ContextSlot/ContextOrigin migration. Do not add persona/Phase, Tool-accuracy, Evidence, Retrieval, Guidance, Provider or Live behavior.
+- Reuse: preserve the current ToolSpec normalization, History pairing, Context ordering/budget/rendering, Baseline, RequestAudit, scheduler, execution and Replay owners. Codex remains `REFERENCE`; no source Port or dependency is admitted.
+- Dependency/public budget: no new crate, Cargo feature, Provider binding, fact store, general Registry/Router/Hook/Policy or second AgentLoop. New API must have a current AgentLoop, RequestAudit, Tool dispatch or Replay consumer and default to crate-private where possible.
+- Baseline verification: the unmodified tree passed formatting, denied-warning Clippy, 310 default-enabled tests with two explicit Live Smokes ignored, locked build, production inline-test scan, `git diff --check` and clean fixed `codex/` verification.
+- Acceptance: full locked Cargo/Lean Gate plus permanent tests for immutable Step/Tool binding, current-Turn Deferred lifetime, paired pre-execution rejection, Replay fixed-plan behavior, renderer identity and byte-preserving Context migration.
+
+## M4-S3a1 Lean Review
+
+### Semantic Owners
+
+- `src/domain/sampling.rs` owns the immutable `SamplingStepPlan` and `TurnConfigurationSnapshot`; the one AgentLoop captures it once per model sampling Step and reuses it for Context, RequestAudit, Tool schemas and dispatch.
+- `src/domain/tools/resolution.rs` owns pure Tool exposure resolution, ordered `ResolvedToolPlan`, stable plan fingerprint and current-Turn `DeferredActivationSet`; `ToolRegistry` remains the single immutable canonical Tool catalog and runtime binding owner.
+- `ContextPlanner` remains the only Context ordering, budgeting, truncation, rendering and fingerprint owner. `PromptRendererIdentity::generic_v1()` only makes the existing renderer version explicit and preserves exact Prompt bytes.
+- Existing History normalization, argument validation, scheduling, Tool execution, Receipt persistence and Replay owners remain unchanged. Plan rejection uses the existing paired ToolResult path and never executes a Runtime or invents a Receipt.
+
+### Reuse, API and Dependencies
+
+- RequestAudit schema v2 additively binds `PromptRendererIdentity` and `ResolvedToolPlanFingerprint`; schema v1 remains readable and explicitly lacks those verified identities. Trace manifest schema v2 records the renderer while the fixed v1 fixture remains readable as unknown.
+- `ToolExecutionPlan` and `ExecutionReceipt` add an optional resolved-plan fingerprint for historical compatibility. Replay consumes one fixed immutable Replay plan and cannot fall back to the live catalog.
+- The minimum non-persisted Context migration separates `ContextSlot` from `ContextOrigin` while retaining the historical `ContextFragmentSource` compatibility mapping and all existing rendered order/bytes.
+- No crate, Cargo feature, Provider/configuration/credential path, second AgentLoop/catalog/renderer, Event fact source or Codex dependency was added. Codex use remains `REFERENCE`/local `REIMPLEMENT`; no PORT ledger entry is required.
+
+### Tests and Verification
+
+- Permanent `tests/m4_sampling_plan.rs` coverage proves one plan binds Context/ToolSpecs/RequestAudit/dispatch; captured plans are not changed by later candidate configuration; Deferred activation affects only the next Step of the current Turn and clears on Turn/Resume; Hidden, unavailable, unadvertised and fingerprint-mismatched calls fail before Runtime with paired results and no Receipt.
+- Existing Context, RequestAudit, Trace, Replay, Vision, Session, CLI Chat and Tool-loop suites prove byte compatibility, historical schema readability, renderer-triggered Full delivery, Primary/Vision isolation and fixed Replay dispatch.
+- Final Gate passed `cargo fmt --all -- --check`, denied-warning locked Clippy, all-target/all-feature locked tests, locked build, production inline-test scan, one-package/one-default-binary/one-AgentLoop checks, mutable exposure and forbidden Codex dependency scans, `git diff --check` and fixed read-only `codex/` verification.
+- The suite discovers 317 tests: 315 default-enabled tests pass and two explicit Live Smokes remain ignored. No Live Provider request or credential resolution occurred.
+
+### Removed and Deferred
+
+- Removed the Registry-owned mutable exposure state, discovered-Deferred set and exposure mutation/planning entry points, so no second active exposure authority remains.
+- Complete Authority/Retention/Freshness/ContextDeliveryMap, stable persona, DomainProfile/ResearchPhase, Tool Accuracy, Evidence, Retrieval and Guidance behavior remain deferred to their named Slices; no placeholder Trait, Registry, configuration, Event or unused schema was retained.
+- No Git branch, commit, push, PR, tag, release or GitHub Actions run occurred.
+
+## M4-S3a2 Slice Start
+
+- Base: locally completed M4-S3a1 working tree over remote status-seal commit `ee04b7e`; all prior uncommitted architecture/governance and a1 implementation changes remain preserved.
+- Intended production touch points: the existing fixed Profile/Prompt resources and composition owner, Session Event/upcaster/reducer path, Turn-boundary AgentLoop configuration, Context fragment construction, immutable Tool resolver and read-only CLI/Replay reconstruction paths.
+- Scope lock: add exactly one versioned `Pragmatic Vulnerability Researcher` Base Contract; rename the current source type from `ResearchProfile` to `DomainProfile` without a duplicate compatibility type; add the five fixed compile-time `ResearchPhase` entries; durably select/default/restore Phase only at Turn boundaries; compose Base/Domain/Phase Prompt and exposure through the existing single owners.
+- Reuse: preserve the one AgentLoop, ContextPlanner, Session/Event Store, RequestAudit, immutable Tool catalog/resolver, Baseline and historical `prompt:mode:*` reconstruction. Phase is a Session projection, not a Research workflow or Finding state machine.
+- Dependency/public budget: no new crate, Cargo feature, Provider/credential path, Personality/Profile/Phase/Prompt registry, automatic Phase inference, workflow engine, Hook, second AgentLoop or new fact store. New public surface is limited to real Domain/App/CLI consumers and defaults to crate-private otherwise.
+- Codex classification: `REFERENCE` only; no upstream source copy, dependency or PORT is admitted.
+- Acceptance: four Domain by five Phase composition, exact fixed Prompt order/identity, one persona, Turn-boundary queue/durable-append/apply atomicity, new/legacy/Resume continuity, immutable plan exposure, Baseline invalidation and historical audit/replay compatibility, followed by the complete locked Cargo/Lean Gate.
+
+## M4-S3a2 Lean Review
+
+### Semantic Owners
+
+- `src/domain/research_control/phase.rs` owns the one compiled Base Contract and five fixed `ResearchPhase` resources; `selection.rs` owns source/reason/generation validation; `prompt.rs` owns the sole Base → Personal → Project → Domain → Phase composition and fragment identity path. The root module only re-exports that fixed surface.
+- `src/domain/domain_profile.rs` owns the four fixed Domain resources, TargetKind compatibility and bounded Domain exposure. It neither selects a Phase nor creates a combined role.
+- `src/domain/session.rs` owns the strict, versioned `ResearchPhaseSelected` payload wrapper and its reducer projection. `cli_chat.rs` durably appends the choice before queueing it into the existing AgentLoop; a failed append therefore has no applied Phase or Provider path.
+- The existing AgentLoop, ContextPlanner, immutable Tool catalog/resolver, SamplingStepPlan, Baseline and RequestAudit owners remain unchanged. Domain/Phase only supply compiled fragments and one bounded exposure layer to those owners.
+
+### Reuse, API and Dependencies
+
+- Reused the existing Session envelope/reducer, append-after-durable projection, Context fragment cache/fingerprint, Tool exposure resolver, SamplingStepPlan, Baseline invalidation and CLI Chat composition. No Cargo crate, feature, Provider binding, credential source, Fact store, Registry, Workflow, Router, Hook or second AgentLoop was added.
+- `ResearchProfile` and `ModePack` were removed without a compatibility alias. Historical `ContextFragmentSource::ModePrompt` and `prompt:mode:*` reconstruction remain read-only compatibility paths; new requests use only Base/Domain/Phase identities.
+- The only persisted addition is the strict Session Event payload for phase selection. It has an explicit `schema_version`, rejects unknown outer and nested fields, validates the phase generation plus source/reason pairing, and reuses the existing Session schema failure behavior.
+
+### Tests and Verification
+
+- Permanent M4 regressions cover all four Domains × five Phases for deterministic Prompt fingerprints and bounded exposure, current-Step immutability across a queued Domain/Phase change, latest durable Phase restoration on Resume, strict payload schema/unknown-field/source-reason/generation rejection, and failed append atomicity.
+- CLI loopback regressions prove a new Session records one `NEW_SESSION_DEFAULT_MAPPING` before its first request, a legacy read-only replay writes `LEGACY_DEFAULT_MAPPING` only on its next real Turn, and `/phase` records the operator source/reason before the Turn. Existing Context, RequestAudit and Replay coverage keeps historical `ModePrompt` readable.
+- Passed: `cargo fmt --all -- --check`; `cargo clippy --locked --all-targets --all-features -- -D warnings`; `cargo test --locked --all-targets --all-features`; `cargo build --locked`; the production inline-test scan; `git diff --check`; and focused M4/CLI loopback suites. The two explicit Live Smokes remain ignored; no credential resolution or real Provider request occurred.
+- Independent review initially found three P1 defects: Mapping left `apply_patch` Direct, two old tests asserted pre-Control-Plane values, and arbitrary Prompt renderer identities were accepted. All three were corrected before completion: Mapping mutation is Deferred, tests assert current semantic owners, and persisted current schemas accept only `generic-v1` while v1 legacy `None` remains readable.
+- The strict renderer correction exposed five historical Replay mismatches. The final implementation reconstructs exact historical RequestAudit instruction bytes only through a crate-private `PreparedTraceReplay` path; ordinary Prompt composition cannot select it, historical facts are not rewritten, and the fixed M4-S2 Trace again replays exactly.
+- Parent review reran the M4 Research Control, immutable Sampling, CLI Chat, Tool-loop and Trace suites together: 70 tests passed, one explicit Live-only Shadow smoke remained ignored, and no Provider credential or network path was entered.
+
+### Removed and Deferred
+
+- Removed the monolithic Research Control implementation file in favor of three ownership-based modules, and corrected historical tests that still assumed the pre-Base/Domain/Phase fragment-cache count or Experiment exposure.
+- Deferred exactly as planned: M4-S3b Tool accuracy, all later evidence/provenance/retrieval/guidance Slices, any second Prompt renderer, any dynamic research registry or workflow engine, and all Live Provider evidence.
+- No Git branch, commit, push, PR, tag, release or GitHub Actions run occurred. No file under `codex/` and no Codex login or credential state was accessed.
+
+## M4-S3b Slice Start
+
+- Base: locally completed M4-S3a1 and M4-S3a2 working tree over remote status-seal commit `ee04b7e`; all existing uncommitted architecture, governance and implementation changes remain preserved.
+- Intended production touch points: the canonical `ToolSpec` definitions and validators, the existing Tool Port failure boundary, AgentLoop `pre_execution`/`execution` result mapping plus the App/AgentLoop post-execution persistence-error boundary, and the existing Trace/Eval derived-result types.
+- Scope lock: normalize every model-visible description to `Use when` / `Do not use when` / `Prefer` / `Produces`; replace unjustified generic output objects with precise schemas; add one provider-neutral structured ToolFailure envelope; derive ToolAccuracyReport only from existing controlled Trace/Event/Tool/Receipt/Artifact inputs.
+- Failure contract: all ToolFailures remain paired ToolResults and use only `pre_execution`/`execution`; only pre-execution argument correction can lack a Receipt; every started execution has a real Receipt. Receipt/History/RequestAudit persistence failures are App/AgentLoop errors, never a rewritten successful ToolResult or fabricated Receipt; started or completed Runtime work is never auto-retried, silently replayed or reclassified as pre-execution.
+- Dependency/public budget: no new crate, Cargo feature, Tool runtime, fact store, Eval platform, remote judge, Registry, Provider/credential path or second AgentLoop. New public surface must have current Tool/AgentLoop/Trace consumers and otherwise remain crate-private.
+- Codex classification: `REFERENCE`/local `REIMPLEMENT` only; no upstream source copy, dependency or PORT is admitted.
+- Acceptance: shared Tool schema/validation across Registry, AgentLoop, Responses and Replay; durable-Trace-only metrics with adjacent RequestAudit proof for Deferred activation; unmatched Replay termination and Observation/Replay/Vision promotion remain Deferred without typed durable signals; complete locked Cargo/Lean Gate; no Live Provider or Codex credential/login access. Git was initially OFF and later narrowed by the user to one local completion checkpoint only.
+
+## M4-S3b Lean Review
+
+### Semantic Owners and Reuse
+
+- `src/adapters/tools/mod.rs` and the existing Tool-specific schema modules remain the one canonical ToolSpec/guidance/input-output Schema owner. All 25 model-visible Tools use the stable `Use when` / `Do not use when` / `Prefer` / `Produces` contract; Registry, immutable ResolvedToolPlan, AgentLoop, Responses request encoding, Replay and `tool_search` consume that same surface.
+- `src/domain/tools/failure.rs` owns the provider-neutral structured ToolFailure with only `pre_execution` and `execution`. The Tool Port maps planning/validation failures once, while AgentLoop execution failures retain real Receipt semantics. Receipt, History or RequestAudit persistence failures remain App/AgentLoop errors and never fabricate a Receipt or rewrite a successful ToolResult.
+- `src/domain/trace_eval/accuracy.rs` owns pure report calculation and reuses the Context Planner's Tool Schema token estimator. `src/app/trace_eval/service.rs` reconstructs its input only from validated Trace manifest, RequestAudit, History, Receipt and Artifact authorities; the report remains derived non-evidence and has no writer.
+- The existing immutable Tool catalog/resolver, SamplingStepPlan, RequestAudit reconstruction, History pairing, ExecutionReceipt, Replay composition and controlled Trace fixture path are reused. No second exposure, pairing, retry, token-cost, Eval fact or Prompt owner was added.
+
+### API, Dependency and Failure Budget
+
+- No crate, Cargo feature, Tool runtime, Event/fact schema, Cache, Provider binding, credential source, external service, model judge, Eval platform, Hook, registry, workflow or second AgentLoop was added.
+- `ToolAccuracyTraceProjection::controlled` was removed; controlled tests now enter through real AgentLoop, RequestAudit, History and Receipt boundaries. Projection construction remains crate-private.
+- `ToolFailure::post_execution`, `ToolResult::failed`, the unused ToolAccuracy percentage getters, `ToolAccuracyReport::is_non_evidence`, the single-field ToolSearchExecution wrapper and unused construction strings were removed. No `ToolFieldError` or placeholder `field_errors`/`receipt_ref` API remains without a production consumer.
+- `ToolFailure::post_execution` has no production replacement because post-execution persistence errors are not Tool execution outcomes. They remain explicit App/AgentLoop failures and do not trigger automatic re-execution.
+
+### Accuracy and Schema Corrections
+
+- Argument correction observes only the immediately following model sampling Step and requires changed arguments; parallel calls in the same sample or unrelated later calls cannot inflate correction success.
+- Missed batch opportunities count only when the declared batch Tool was actually advertised in that sample; unrelated batch use cannot hide an observed sequence of singular calls.
+- Deferred activation remains `None` with a typed Deferred reason. Current RequestAudit has no persistent Turn identity, so adjacent entries cannot yet prove same-Turn activation and the report does not invent success or zero.
+- Precise schemas now cover file batches/search, Job/PTY completion, Snapshot/Fingerprint/FileManifest/ToolCapability and Research outputs. Only `tool_search` keeps open `input_schema`/`output_schema` objects because those values are JSON Schema documents themselves.
+- Main review restored `write_file`'s truthful atomic discovery term, retained strict nested execution control with `additionalProperties:false`, updated the fixed Responses wire Fixture and resized only the deliberately constrained Context regression so exact Tool schemas fit while oversized WorldState still truncates.
+
+### Tests, Audit and Gate
+
+- Focused M4-S3b suite: `cargo test --locked --test m4_tool_accuracy` passed 5 tests; focused denied-warning Clippy passed.
+- Initial affected suites passed 87 tests with one explicit Live-only test ignored. The later full-Gate review also ran and passed all 29 `m3_world_state_mode` tests and the Responses Adapter contract after catching four cross-suite regressions that the narrower set had not covered.
+- Final full Gate on pinned Rust `1.93.1`: `cargo fmt --all -- --check`; `cargo clippy --locked --all-targets --all-features -- -D warnings`; `cargo test --locked --all-targets --all-features`; and `cargo build --locked` all pass. The suite discovers 329 tests, passes 327 default-enabled tests and keeps two explicit Live Smokes ignored.
+- Luna's bounded audits timed out or ended without a final verdict and therefore are not recorded as `APPROVE`. The Terra implementation owner did not audit its own work; the main agent performed the final cross-boundary audit, corrections and complete Gate.
+- Production inline-test, forbidden dependency/credential fallback, one-package/one-binary/one-AgentLoop, `git diff --check`, secret-pattern, fixed `codex/` and schema-openness scans pass before the local checkpoint.
+
+### Removed and Deferred
+
+- Removed test-only public projection access, unconsumed convenience APIs, a fake post-execution failure stage, a redundant wrapper and dead Tool description inputs instead of preserving future placeholders.
+- Deferred exactly because their durable signals do not exist: unmatched Replay termination, Observation promotion, Replay promotion, Vision promotion and same-Turn Deferred activation counts. Architecture v1.4 optional `field_errors`/`receipt_ref` vocabulary remains design-only until a real production consumer exists.
+- No Live Test, public Provider request, credential resolution, GitHub Actions, push, PR, tag or remote seal occurred. No file under `codex/`, Codex login state, `~/.codex` or `CODEX_HOME` was read or modified.
 
 ## F1d Lean Review
 

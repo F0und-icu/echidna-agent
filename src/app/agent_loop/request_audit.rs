@@ -5,6 +5,7 @@ use crate::domain::model::ModelCapabilities;
 use crate::domain::request_audit::{
     RequestAuditAttempt, RequestAuditDelivery, RequestAuditRunContext,
 };
+use crate::domain::sampling::SamplingStepPlan;
 use crate::ports::model::{ModelProvider, ModelRequest};
 use crate::ports::tool::ToolExecutor;
 
@@ -25,6 +26,7 @@ where
     pub(super) fn record_request_audit_attempt(
         &self,
         audit: &mut Option<RequestAuditStage<'_>>,
+        sampling_step: &SamplingStepPlan,
         full_input: &crate::domain::model::ModelInputIR,
         request: &ModelRequest,
         capabilities: &ModelCapabilities,
@@ -50,7 +52,8 @@ where
             full_input.clone(),
             request.input().clone(),
             delivery,
-        )?;
+        )?
+        .bind_sampling_step(sampling_step)?;
         record_attempt(attempt)
     }
 }

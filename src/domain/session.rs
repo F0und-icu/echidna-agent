@@ -20,6 +20,7 @@ use super::events::{
 use super::history::{ConversationHistory, HistoryError, normalize_content_items};
 use super::model::ContentItem;
 use super::request_audit::{RequestAuditError, RequestAuditManifest};
+use super::research_control::{ResearchPhase, ResearchPhaseSelection};
 use super::tools::{ExecutionReceipt, ExecutionReceiptEventPayload, ExecutionReceiptPayloadError};
 use super::vision::{
     VisionAnalysisFailure, VisionFactError, VisionObservation, VisionObservationId,
@@ -39,6 +40,7 @@ pub(super) const REQUEST_AUDIT_RECORDED_EVENT_TYPE: &str = "session.request_audi
 const VISION_ROUTE_DECIDED_EVENT_TYPE: &str = "vision.route_decided";
 const VISION_OBSERVATION_RECORDED_EVENT_TYPE: &str = "vision.observation_recorded";
 const VISION_ANALYSIS_FAILED_EVENT_TYPE: &str = "vision.analysis_failed";
+const RESEARCH_PHASE_SELECTED_EVENT_TYPE: &str = "session.research_phase_selected";
 pub(super) const CURRENT_SESSION_PAYLOAD_SCHEMA_VERSION: u16 = 1;
 
 mod compaction;
@@ -104,6 +106,9 @@ pub enum SessionEvent {
     VisionAnalysisFailed {
         failure: VisionAnalysisFailure,
     },
+    ResearchPhaseSelected {
+        selection: ResearchPhaseSelection,
+    },
 }
 
 impl SessionEvent {
@@ -144,6 +149,9 @@ impl SessionEvent {
                 EventType::new(VISION_OBSERVATION_RECORDED_EVENT_TYPE)
             }
             Self::VisionAnalysisFailed { .. } => EventType::new(VISION_ANALYSIS_FAILED_EVENT_TYPE),
+            Self::ResearchPhaseSelected { .. } => {
+                EventType::new(RESEARCH_PHASE_SELECTED_EVENT_TYPE)
+            }
         }
     }
 
@@ -178,6 +186,9 @@ impl SessionEvent {
             Self::VisionRouteDecided { route } => serde_json::to_value(route),
             Self::VisionObservationRecorded { observation } => serde_json::to_value(observation),
             Self::VisionAnalysisFailed { failure } => serde_json::to_value(failure),
+            Self::ResearchPhaseSelected { selection } => {
+                serde_json::to_value(ResearchPhaseSelectedPayload::current(*selection))
+            }
         };
         payload.map_err(|error| SessionError::PayloadEncode {
             event_type: event_type.clone(),
@@ -263,6 +274,19 @@ impl SessionEvent {
                     .map_err(vision_payload_error(event_type))?;
                 Ok(Self::VisionAnalysisFailed { failure })
             }
+            RESEARCH_PHASE_SELECTED_EVENT_TYPE => {
+                let payload: ResearchPhaseSelectedPayload =
+                    decode_strict_payload(event_type, payload)?;
+                require_current_payload_schema(event_type, payload.schema_version)?;
+                let selection = payload.selection;
+                selection
+                    .validate()
+                    .map_err(|error| SessionError::MalformedPayload {
+                        event_type: event_type.clone(),
+                        message: error.to_string(),
+                    })?;
+                Ok(Self::ResearchPhaseSelected { selection })
+            }
             _ => Err(SessionError::UnknownEventType {
                 event_type: event_type.clone(),
             }),
@@ -290,6 +314,7 @@ pub struct SessionState {
     vision_routes: Vec<VisionRouteRecord>,
     vision_observations: Vec<VisionObservation>,
     vision_failures: Vec<VisionAnalysisFailure>,
+    research_phase_selection: Option<ResearchPhaseSelection>,
 }
 
 impl Default for SessionState {
@@ -312,6 +337,7 @@ impl Default for SessionState {
             vision_routes: Vec::new(),
             vision_observations: Vec::new(),
             vision_failures: Vec::new(),
+            research_phase_selection: None,
         }
     }
 }
@@ -439,6 +465,18 @@ impl SessionState {
 
     pub fn vision_failures(&self) -> &[VisionAnalysisFailure] {
         &self.vision_failures
+    }
+
+    /// The latest explicit durable Phase selection. A missing value remains
+    /// distinguishable from a real Mapping Event for legacy replay.
+    pub const fn research_phase_selection(&self) -> Option<ResearchPhaseSelection> {
+        self.research_phase_selection
+    }
+
+    /// Read-only legacy projection. It never backfills the Session stream.
+    pub fn effective_research_phase(&self) -> ResearchPhase {
+        self.research_phase_selection
+            .map_or(ResearchPhase::Mapping, ResearchPhaseSelection::phase)
     }
 
     /// Returns the precise next Session Event sequence without allocating or
@@ -781,6 +819,20 @@ fn apply_session_event(
             require_unused_vision_session(state, &failure.provider_session)?;
             state.vision_failures.push(failure);
         }
+        SessionEvent::ResearchPhaseSelected { selection } => {
+            require_transition(
+                state.lifecycle,
+                RESEARCH_PHASE_SELECTED_EVENT_TYPE,
+                SessionLifecycle::Active,
+            )?;
+            selection
+                .validate()
+                .map_err(|error| SessionError::MalformedPayload {
+                    event_type: EventType::new(RESEARCH_PHASE_SELECTED_EVENT_TYPE),
+                    message: error.to_string(),
+                })?;
+            state.research_phase_selection = Some(selection);
+        }
     }
     Ok(())
 }
@@ -1046,6 +1098,22 @@ impl SessionHistoryItemPayload {
         Self {
             schema_version: CURRENT_SESSION_PAYLOAD_SCHEMA_VERSION,
             item,
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ResearchPhaseSelectedPayload {
+    schema_version: u16,
+    selection: ResearchPhaseSelection,
+}
+
+impl ResearchPhaseSelectedPayload {
+    const fn current(selection: ResearchPhaseSelection) -> Self {
+        Self {
+            schema_version: CURRENT_SESSION_PAYLOAD_SCHEMA_VERSION,
+            selection,
         }
     }
 }

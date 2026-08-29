@@ -307,7 +307,7 @@ shasum -a 256 target/aarch64-apple-darwin/release/cyber-agent
 规则：
 
 - 缺少领域工具不阻止 Cyber Agent 编译。
-- Mode Pack 声明需要或建议的工具。
+- 固定 DomainProfile/ResearchPhase ToolExposurePlan 声明当前建议暴露的工具；`inspect_environment` 报告实际可用性。
 - Tool Capability Cache 保存路径、版本和探测时间，但可删除重建。
 - 不由 Cyber Agent 自动下载大型漏洞工具链。
 

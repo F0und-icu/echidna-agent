@@ -58,7 +58,9 @@ fn fragment(
         ContextFragmentSource::BasePrompt
         | ContextFragmentSource::PersonalPreferences
         | ContextFragmentSource::ProjectPrompt
-        | ContextFragmentSource::ModePrompt => ContextFragmentContent::Instructions {
+        | ContextFragmentSource::ModePrompt
+        | ContextFragmentSource::DomainPrompt
+        | ContextFragmentSource::PhasePrompt => ContextFragmentContent::Instructions {
             text: format!("instruction:{id}"),
         },
         ContextFragmentSource::ResearchWorldState

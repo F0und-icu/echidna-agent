@@ -2,13 +2,17 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::context::{BaselineInvalidationReason, ModelIdentity, ModelProfile};
+use crate::domain::context::{
+    BaselineInvalidationReason, ModelIdentity, ModelProfile, PromptRendererIdentity,
+};
 use crate::domain::events::{EventId, StreamId};
 use crate::domain::model::{
     CapabilityMappingVersion, MODEL_INPUT_IR_SCHEMA_VERSION, ModelCapabilities, ModelInputIR,
     ModelInputIrSchemaVersion,
 };
 use crate::domain::project::ProjectId;
+use crate::domain::sampling::SamplingStepPlan;
+use crate::domain::tools::ResolvedToolPlanFingerprint;
 
 use super::components::{SemanticHash, validate_component_layout};
 use super::{
@@ -174,6 +178,8 @@ pub struct RequestAuditAttempt {
     pub(super) full_logical_input: ModelInputIR,
     pub(super) delivered_input: ModelInputIR,
     pub(super) delivery: RequestAuditDelivery,
+    pub(super) prompt_renderer: Option<PromptRendererIdentity>,
+    pub(super) resolved_tool_plan_fingerprint: Option<ResolvedToolPlanFingerprint>,
 }
 
 impl RequestAuditAttempt {
@@ -211,6 +217,8 @@ impl RequestAuditAttempt {
             full_logical_input,
             delivered_input,
             delivery,
+            prompt_renderer: None,
+            resolved_tool_plan_fingerprint: None,
         })
     }
 
@@ -220,6 +228,20 @@ impl RequestAuditAttempt {
 
     pub fn delivery(&self) -> RequestAuditDelivery {
         self.delivery
+    }
+
+    pub fn bind_sampling_step(
+        mut self,
+        step: &SamplingStepPlan,
+    ) -> Result<Self, RequestAuditError> {
+        if self.full_logical_input.tool_specs != step.resolved_tool_plan().advertised_specs()
+            || self.delivered_input.tool_specs != step.resolved_tool_plan().advertised_specs()
+        {
+            return Err(RequestAuditError::SamplingToolPlanMismatch);
+        }
+        self.prompt_renderer = Some(step.prompt_renderer().clone());
+        self.resolved_tool_plan_fingerprint = Some(step.resolved_tool_plan().fingerprint().clone());
+        Ok(self)
     }
 }
 
@@ -308,6 +330,10 @@ pub struct RequestAuditManifest {
     pub(super) full_logical_input: RequestAuditModelInput,
     pub(super) delivered_input: RequestAuditModelInput,
     pub(super) delivery: RequestAuditDelivery,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) prompt_renderer: Option<PromptRendererIdentity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) resolved_tool_plan_fingerprint: Option<ResolvedToolPlanFingerprint>,
     pub(super) components: Vec<RequestAuditComponentReference>,
 }
 
@@ -354,6 +380,14 @@ impl RequestAuditManifest {
         self.delivery
     }
 
+    pub fn prompt_renderer(&self) -> Option<&PromptRendererIdentity> {
+        self.prompt_renderer.as_ref()
+    }
+
+    pub fn resolved_tool_plan_fingerprint(&self) -> Option<&ResolvedToolPlanFingerprint> {
+        self.resolved_tool_plan_fingerprint.as_ref()
+    }
+
     pub fn components(&self) -> &[RequestAuditComponentReference] {
         &self.components
     }
@@ -362,10 +396,28 @@ impl RequestAuditManifest {
     /// bytes. Reconstruction validates component content after the Port reads
     /// exact bytes.
     pub fn validate(&self) -> Result<(), RequestAuditError> {
-        if self.schema_version != REQUEST_AUDIT_MANIFEST_SCHEMA_VERSION {
+        if !matches!(
+            self.schema_version,
+            1 | REQUEST_AUDIT_MANIFEST_SCHEMA_VERSION
+        ) {
             return Err(RequestAuditError::UnsupportedManifestSchema {
                 schema_version: self.schema_version,
             });
+        }
+        match (
+            self.schema_version,
+            &self.prompt_renderer,
+            &self.resolved_tool_plan_fingerprint,
+        ) {
+            (1, None, None) => {}
+            (REQUEST_AUDIT_MANIFEST_SCHEMA_VERSION, Some(renderer), Some(fingerprint))
+                if renderer.is_generic_v1()
+                    && fingerprint.as_str().len() == 64
+                    && fingerprint
+                        .as_str()
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')) => {}
+            _ => return Err(RequestAuditError::SamplingIdentityMismatch),
         }
         if self.audit_event_id.as_str().trim().is_empty() {
             return Err(RequestAuditError::BindingFieldRequired {

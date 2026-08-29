@@ -100,8 +100,15 @@ impl RenderedRequestAudit {
                 semantic_hash: rendered.semantic_hash,
             })
             .collect();
+        let schema_version = if self.attempt.prompt_renderer.is_some()
+            && self.attempt.resolved_tool_plan_fingerprint.is_some()
+        {
+            REQUEST_AUDIT_MANIFEST_SCHEMA_VERSION
+        } else {
+            1
+        };
         let manifest = RequestAuditManifest {
-            schema_version: REQUEST_AUDIT_MANIFEST_SCHEMA_VERSION,
+            schema_version,
             audit_event_id,
             binding: self.attempt.binding,
             model: self.attempt.model,
@@ -115,6 +122,8 @@ impl RenderedRequestAudit {
             )?,
             delivered_input: RequestAuditModelInput::from_input(&self.attempt.delivered_input)?,
             delivery: self.attempt.delivery,
+            prompt_renderer: self.attempt.prompt_renderer,
+            resolved_tool_plan_fingerprint: self.attempt.resolved_tool_plan_fingerprint,
             components,
         };
         manifest.validate()?;

@@ -974,16 +974,19 @@ async fn project_memory_and_snapshot_caches_are_isolated() {
 fn memory_and_snapshot_tool_specs_are_fixed_and_non_cacheable() {
     let (_root, project) = initialized_project("memory-snapshot-tool-contract");
     let tools = ToolRegistry::for_project(project.root());
-    tools
-        .configure_exposure(ToolExposurePlan::new([
-            (ToolName::new("memory_read"), ToolExposure::Direct),
-            (ToolName::new("memory_write"), ToolExposure::Direct),
-        ]))
+    let resolved = tools
+        .resolve_tool_plan(
+            &ToolExposurePlan::new([
+                (ToolName::new("memory_read"), ToolExposure::Direct),
+                (ToolName::new("memory_write"), ToolExposure::Direct),
+            ]),
+            &Default::default(),
+        )
         .unwrap();
     for name in ["memory_read", "memory_write", "inspect_project"] {
-        let spec = tools
-            .specs()
-            .into_iter()
+        let spec = resolved
+            .advertised_specs()
+            .iter()
             .find(|spec| spec.name.as_str() == name)
             .unwrap();
         assert_eq!(spec.version, "1");
@@ -995,9 +998,9 @@ fn memory_and_snapshot_tool_specs_are_fixed_and_non_cacheable() {
             cyber_agent::domain::tools::ToolCachePolicy::None
         );
     }
-    let memory_write = tools
-        .specs()
-        .into_iter()
+    let memory_write = resolved
+        .advertised_specs()
+        .iter()
         .find(|spec| spec.name.as_str() == "memory_write")
         .unwrap();
     assert_eq!(

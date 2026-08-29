@@ -11,10 +11,10 @@ use crate::domain::context::{
     ContextFragmentPriority, ContextFragmentSource, ContextPlan, ContextPlanner,
     ContextPlannerError, ContextSourceFingerprint, FragmentCachePolicy, FullLogicalManifest,
 };
-use crate::domain::mode::PromptComposition;
 use crate::domain::model::{
     ContentItem, ModelCapabilities, ModelInputIR, ModelRequestRequirements,
 };
+use crate::domain::research_control::PromptComposition;
 use crate::domain::session::SessionSummary;
 use crate::domain::tools::ToolSpec;
 use crate::domain::world_state::{ProjectSnapshotContext, ResearchWorldState};

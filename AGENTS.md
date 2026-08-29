@@ -14,8 +14,8 @@ Before changing anything, read in order:
 2. The current Slice in `docs/development/IMPLEMENTATION_PLAN.md`
 3. `docs/development/LEAN_CODE_GOVERNANCE.md`
 4. Relevant sections of `task.md`
-5. `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1.md` and the latest frozen additive architecture file
-6. Relevant accepted ADRs, including ADR-0002 for model composition
+5. `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1.md` and every frozen additive architecture file through the latest version
+6. Relevant accepted ADRs, including ADR-0002 for model composition, ADR-0009 for research-control composition, ADR-0010 through ADR-0013 for v1.3 and ADR-0014 for the M4-S3b failure/accuracy boundary
 
 Inspect the worktree and existing tests before planning changes.
 
@@ -23,10 +23,10 @@ If the user explicitly authorizes development sub-agents, every delegated agent 
 
 ## Current Phase
 
-- Architecture v1.1 is sealed as an additive extension over the immutable v1 baseline.
-- M0 through M4-S2 are complete and remotely sealed.
+- Architecture v1.4 is the latest locally frozen additive extension over immutable v1/v1.1/v1.2/v1.3. Its remote seal remains unauthorized; local implementation status is governed by `STATUS.md`.
+- M0 through M4-S2 are complete and remotely sealed; M4-S3a1, M4-S3a2 and M4-S3b are locally implemented and gated but not remotely sealed. M4-S3c is `READY_NOT_AUTHORIZED`.
 - F1a Config/Composition Root, F1b protocol-first Responses HTTP/SSE Adapter, F1c first-version CLI Chat and F1d local inline Provider credentials are complete and remotely sealed by PR `#46` at Squash Merge `6eb4959`; one synthetic F1c DeepSeek Live Chat passed.
-- F1d preserves one configuration and Adapter path: Config v1 may select exactly one inline `api_key` or existing `credential_ref` per Provider. M4-S3 remains `DEFERRED_NOT_AUTHORIZED`.
+- F1d preserves one configuration and Adapter path: Config v1 may select exactly one inline `api_key` or existing `credential_ref` per Provider. The former M4-S3a was split before implementation into M4-S3a1 and M4-S3a2; both and the subsequent M4-S3b are locally complete. Do not start M4-S3c without new authorization.
 - Local Git is initialized and `main` tracks the private remote.
 - `codex/` is a clean, read-only upstream reference repository.
 
@@ -44,6 +44,13 @@ Do not start a Slice, commit, push, create a PR or run a Live Test unless the cu
 
 Do not use multi-agent development orchestration unless the current user explicitly authorizes delegation. If authorized, every child follows the same Slice and governance boundaries. This never changes the product invariant: the Cyber Agent runtime itself remains one AgentLoop, not a multi-agent runtime.
 
+### Bounded implementation and audit roles
+
+- Terra xhigh owns Context, Session, Replay, Evidence and AgentLoop work, plus any change crossing a Port or Adapter boundary.
+- Luna xhigh owns only a bounded single-module Tool/Schema/Fixture/tests/docs change or a small fix. Luna's audit is read-only and limited to the finite files and explicit checklist named in the handoff.
+- The implementation owner must not audit its own changes. Terra xhigh or the main agent performs the final cross-boundary audit.
+- 每个 Slice 固定顺序必须精确为：专项测试 → 受影响测试 → 独立审计 → 修复 → 完整 Gate → Lean Review。审计必须限时；超时或无结论不记为 `APPROVE`。
+
 ## Architecture Invariants
 
 - One Rust package and one default binary.
@@ -52,11 +59,22 @@ Do not use multi-agent development orchestration unless the current user explici
 - Domain contains no filesystem, network, process, clock or Provider-specific I/O.
 - Responses wire types stay inside the protocol Adapter; Core uses ModelInputIR.
 - Runtime has one primary ModelProvider and at most one optional vision ModelProvider; both remain inside one AgentLoop and one Session authority.
+- The Base Contract has one stable `Pragmatic Vulnerability Researcher` identity. Do not add multiple personalities, role Agents or a persona registry.
+- Keep `DomainProfile` (`source`, `web`, `mobile`, `binary`), `ResearchPhase` (`mapping`, `hypothesis`, `experiment`, `verification`, `evidence_curation`) and `AgentModelProfile` as orthogonal axes.
+- Prompt composition is fixed: Base Contract, Personal, Project, DomainProfile, ResearchPhase, Research/Project/Memory facts, Summary/History, current User input and Turn-local updates. Tool Specs remain a separate protocol channel.
+- DomainProfile and ResearchPhase changes take effect only at a Turn boundary. A model's unstructured prose never changes runtime Phase or Tool exposure.
+- Every model sampling Step captures one immutable SamplingStepPlan. The exact ResolvedToolPlan that advertises ToolSpecs also validates and dispatches model-originated ToolCalls.
+- Deferred Tool activation lasts only for later Steps of the current Turn and clears at the next Turn boundary and after Resume.
+- `generic-v1` is the only Prompt renderer. Do not add a renderer Trait, registry or Config field without a second measured implementation and an accepted ADR.
 - Vision routing is capability-driven and limited to `auto`, `primary_direct`, `secondary_tool` or `disabled`; do not build a general model router.
 - JSONL/Markdown/Artifact Blob are facts; Cache/Summary/Snapshot/Replay are derived.
+- Context placement, origin, authority, retention and freshness are orthogonal. Keep provenance in a validated ContextDeliveryMap sidecar rather than widening every ContentItem.
 - Event Streams are append-only and use chained Upcasters.
 - TargetSnapshot/ExperimentCapsule/ExecutionReceipt preserve reproducibility.
+- Tool exposure is a deterministic context-efficiency mechanism, not authorization. Hidden is terminal; Domain/Phase overrides and `tool_search` must use one pure exposure owner.
 - Tool Effect metadata controls retry/cache/scheduling, not approval.
+- Session Summary v2 must retain typed fact references plus bounded lossy narrative; it never copies Research claims into a second authority.
+- Security retrieval and evidence-gap guidance are local, deterministic, explainable, Shadow-first and non-evidence. Do not add a vector database, remote judge or autonomous workflow.
 - Runtime defaults to FullAccess; do not add Sandbox, Policy or confirmation systems.
 - No telemetry, analytics, feedback or remote audit.
 - Provider credentials are explicit Cyber Agent inputs; Codex/ChatGPT login state is never a credential source.
@@ -85,6 +103,8 @@ Do not add:
 - Default vector/graph database
 - Workflow DSL
 - Distributed job queue
+- Personality/role catalogs, combined domain-phase role variants or a general research workflow engine
+- Prompt renderer/tool selector registries, remote model judges or autonomous experiment generation
 
 ## Upstream Port Rules
 
@@ -111,6 +131,11 @@ If these conditions are not met, use REFERENCE or REIMPLEMENT instead of PORT.
 - Use the rule of three for general abstractions, while uniqueness and normalization invariants have one owner from their first implementation.
 - Do not add semantic junk drawers such as `common.rs`, `utils.rs`, `helpers.rs`, `base.rs` or a generic `manager.rs`.
 - Do not add a general Hook Registry. Keep fixed, named and typed stages inside the one AgentLoop until a second real implementation proves a Trait is needed.
+- Do not add a general Prompt/Phase/Profile registry. Fixed compile-time DomainProfile and ResearchPhase resources compose through the existing Prompt/Context owners.
+- Do not add mutable request-global Tool exposure. The immutable catalog, pure exposure resolver and SamplingStepPlan are the only model-visible Tool-plan path.
+- Keep ContextFragment/Subitem identity in Domain. Optional Provider DeliveryItemId stays inside the Adapter and cannot cross Primary/Vision sessions.
+- Model-visible Tool descriptions use the stable `Use when`, `Do not use when`, `Prefer` and `Produces` contract. Known result shapes require precise output schemas rather than a generic object.
+- Tool failures have one provider-neutral structured owner with only `pre_execution` and `execution` stages. Only pre-execution argument failure may invite a corrected new ToolCall without a Receipt; every started execution has a real Receipt. Receipt/History/RequestAudit submission and other post-execution persistence failures are App/AgentLoop errors, never a rewritten successful ToolResult or a fabricated Receipt; Runtime never silently retries execution.
 - Pass argv arrays; do not assemble untrusted shell strings inside tool adapters.
 - Preserve Tool Call/Result pairing.
 - Do not auto-retry completed, external-mutation or interactive tool execution.
@@ -119,8 +144,10 @@ If these conditions are not met, use REFERENCE or REIMPLEMENT instead of PORT.
 - Never infer model capabilities from model-name patterns; use explicit versioned Capability Mapping.
 - Primary and secondary ProviderSession IDs, response IDs and Incremental Baselines must never cross.
 - Treat VisionObservation as a derived observation linked to source Artifacts, never as verified Finding evidence by itself.
+- Treat Replay/Eval and Tool-accuracy reports as derived non-evidence over durable Trace facts only; unmatched Replay termination and Observation/Replay/Vision promotion remain Deferred without typed durable signals and must never be reported as zero. Deferred activation requires an adjacent RequestAudit ToolSpec transition.
 - Avoid speculative abstractions and unused configuration.
 - Remove code with no current runtime/test consumer before completing a Slice; record removed and deferred work in the Lean Review.
+- A `pub` item is justified only by a current production consumer; a test-only consumer never justifies `pub`. Types with no production consumer and future placeholder/TODO surface must be removed or explicitly Deferred before a Slice is sealed. Controlled tests must not add a public projection entry point solely for test access.
 
 ## Credential Isolation
 
@@ -167,7 +194,7 @@ Every Gate also runs the inline-test scan defined in `docs/development/LEAN_CODE
 
 Every completed Slice updates `STATUS.md`.
 
-Update architecture/task/ADR only when behavior or contracts actually change. Do not edit frozen Architecture v1 or v1.1 files; create a new ADR and architecture version.
+Update architecture/task/ADR only when behavior or contracts actually change. Do not edit frozen Architecture v1, v1.1, v1.2, v1.3 or v1.4 files; create a new ADR and architecture version.
 
 New dependencies and Codex ports must be documented.
 

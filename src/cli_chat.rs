@@ -27,13 +27,14 @@ use crate::app::cancellation::AgentCancellation;
 use crate::app::request_audit::RequestAuditService;
 use crate::app::session::{AppendAfterDurableError, SessionProjection};
 use crate::domain::context::{ProviderSession, ProviderSessionId, ProviderSessionRole};
+use crate::domain::domain_profile::DomainProfile;
 use crate::domain::events::{EventId, OccurredAt, StreamId};
 use crate::domain::project::ProjectId;
 use crate::domain::request_audit::{
     RequestAuditAttempt, RequestAuditBinding, RequestAuditRunContext,
 };
 use crate::domain::research::{ResearchReducer, ResearchState};
-use crate::domain::research_profile::ResearchProfile;
+use crate::domain::research_control::{ResearchPhase, ResearchPhaseSelection};
 use crate::domain::session::{SessionEvent, SessionLifecycle, SessionState};
 use crate::domain::tools::ToolExecutionOutcome;
 use crate::domain::world_state::{ProjectSnapshotContext, ResearchWorldState};
@@ -42,7 +43,6 @@ use crate::ports::model::ModelProvider;
 use crate::ports::tool::ToolExecutor;
 use crate::provider_composition::ProviderComposition;
 
-const BASE_INSTRUCTIONS: &str = "Operate as a local-first vulnerability research assistant. Keep evidence, hypotheses, and verified findings distinct.";
 static NEXT_CHAT_SESSION: AtomicU64 = AtomicU64::new(1);
 
 /// Runs the fixed line-oriented CLI path. The caller has already loaded the
@@ -52,7 +52,8 @@ pub(crate) async fn run(
     project: Project,
     composition: &ProviderComposition,
     requested_session: Option<String>,
-    profile: ResearchProfile,
+    domain: DomainProfile,
+    requested_phase: Option<ResearchPhase>,
 ) -> Result<(), ChatError> {
     let _runtime_lease = project.acquire_chat_runtime_lease()?;
     let explicit_resume = requested_session.is_some();
@@ -68,13 +69,12 @@ pub(crate) async fn run(
     let mut agent = AgentLoop::with_primary_context(
         composition.primary_provider(),
         &tools,
-        BASE_INSTRUCTIONS,
         composition.agent_profile().primary().model().clone(),
         composition.agent_profile().primary().profile().clone(),
         provider_session.clone(),
     )?
     .with_fragment_cache(Arc::new(LocalFragmentCache::for_project(&session.project)))
-    .with_research_profile(profile);
+    .with_domain_profile(domain);
     agent.queue_agent_model_profile(composition.agent_profile().clone())?;
     if disposition == SessionDisposition::Resumed {
         agent.resume_from_session(&session_state, provider_session)?;
@@ -90,11 +90,15 @@ pub(crate) async fn run(
     );
 
     println!(
-        "{} session `{}` with profile `{}`. Enter one line at a time; use /exit or EOF to leave the Session active.",
+        "{} session `{}` with domain `{}` and phase `{}`. Enter one line at a time; use /domain, /phase, /exit or EOF.",
         disposition.message(),
         session_id.as_str(),
-        profile.id(),
+        domain.id(),
+        requested_phase
+            .unwrap_or_else(|| session_state.effective_research_phase())
+            .id(),
     );
+    let mut pending_phase = requested_phase.map(ResearchPhaseSelection::operator);
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     loop {
         print!("you> ");
@@ -124,6 +128,24 @@ pub(crate) async fn run(
         if line.is_empty() {
             continue;
         }
+        if let Some(value) = line.strip_prefix("/phase ") {
+            let phase = parse_phase(value)?;
+            pending_phase = Some(ResearchPhaseSelection::operator(phase));
+            println!("Queued phase `{}` for the next Turn.", phase.id());
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("/domain ") {
+            let selected_domain = parse_domain(value)?;
+            agent.queue_domain_profile(selected_domain);
+            println!(
+                "Queued domain `{}` for the next Turn.",
+                selected_domain.id()
+            );
+            continue;
+        }
+
+        let phase = session.prepare_phase_for_turn(disposition, pending_phase.take())?;
+        agent.queue_research_phase(phase);
 
         refresh_agent_context(&session.project, &tools, &mut agent)?;
         print!("assistant> ");
@@ -314,6 +336,46 @@ impl DurableChatSession {
         Ok((projection.state().clone(), provider_session, disposition))
     }
 
+    /// Makes the selected Phase durable before AgentLoop can apply it or send
+    /// a Provider request. A failed append leaves caller configuration alone.
+    fn prepare_phase_for_turn(
+        &self,
+        disposition: SessionDisposition,
+        requested: Option<ResearchPhaseSelection>,
+    ) -> Result<ResearchPhase, ChatError> {
+        let mut writer = self.project.open_writer()?;
+        let mut store = writer.open_session(self.session_id.clone(), None)?;
+        let stream_id = ProjectEventStream::Session(self.session_id.clone()).stream_id();
+        let mut projection =
+            SessionProjection::replay(EventSource::read_events(&store, &stream_id)?)?;
+        let selection = match requested {
+            Some(selection) => selection,
+            None => match projection.state().research_phase_selection() {
+                Some(selection) => return Ok(selection.phase()),
+                None if disposition == SessionDisposition::Started => {
+                    ResearchPhaseSelection::new_session_default()
+                }
+                None => ResearchPhaseSelection::legacy_default(),
+            },
+        };
+        let sequence = store.next_sequence()?;
+        let event = SessionEvent::ResearchPhaseSelected { selection }.into_envelope(
+            event_id(
+                self.project.project_id(),
+                &self.session_id,
+                sequence.get(),
+                "research-phase",
+            ),
+            stream_id,
+            sequence,
+            occurred_at(),
+        )?;
+        projection
+            .append(&mut store, event)
+            .map_err(ChatError::from_session_append)?;
+        Ok(selection.phase())
+    }
+
     fn record_request_audit(&self, attempt: RequestAuditAttempt) -> Result<(), ChatError> {
         let mut writer = self.project.open_writer()?;
         let mut store = writer.open_session(self.session_id.clone(), None)?;
@@ -410,6 +472,31 @@ impl DurableChatSession {
     }
 }
 
+fn parse_phase(value: &str) -> Result<ResearchPhase, ChatError> {
+    match value.trim() {
+        "mapping" => Ok(ResearchPhase::Mapping),
+        "hypothesis" => Ok(ResearchPhase::Hypothesis),
+        "experiment" => Ok(ResearchPhase::Experiment),
+        "verification" => Ok(ResearchPhase::Verification),
+        "evidence_curation" | "evidence-curation" => Ok(ResearchPhase::EvidenceCuration),
+        value => Err(ChatError::UnknownPhase {
+            value: value.to_owned(),
+        }),
+    }
+}
+
+fn parse_domain(value: &str) -> Result<DomainProfile, ChatError> {
+    match value.trim() {
+        "source" => Ok(DomainProfile::Source),
+        "web" => Ok(DomainProfile::Web),
+        "mobile" => Ok(DomainProfile::Mobile),
+        "binary" => Ok(DomainProfile::Binary),
+        value => Err(ChatError::UnknownDomain {
+            value: value.to_owned(),
+        }),
+    }
+}
+
 fn new_session_id() -> StreamId {
     let sequence = NEXT_CHAT_SESSION.fetch_add(1, Ordering::Relaxed);
     let timestamp = SystemTime::now()
@@ -468,6 +555,10 @@ pub(crate) enum ChatError {
     SessionNotActive { session_id: String },
     #[error("Session `{session_id}` already exists; resume it explicitly with --session")]
     SessionAlreadyExists { session_id: String },
+    #[error("unknown research phase `{value}`")]
+    UnknownPhase { value: String },
+    #[error("unknown vulnerability-research domain `{value}`")]
+    UnknownDomain { value: String },
 }
 
 impl ChatError {

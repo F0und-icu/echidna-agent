@@ -19,6 +19,7 @@ pub enum BaselineInvalidationReason {
     ModelInputIrSchemaChanged,
     CapabilityMappingChanged,
     PromptChanged,
+    PromptRendererChanged,
     ToolsChanged,
     OutputContractChanged,
     RequestPropertiesChanged,
@@ -70,6 +71,8 @@ impl IncrementalBaseline {
             Some(BaselineInvalidationReason::CapabilityMappingChanged)
         } else if baseline.prompt_hash != candidate.prompt_hash {
             Some(BaselineInvalidationReason::PromptChanged)
+        } else if baseline.prompt_renderer_hash != candidate.prompt_renderer_hash {
+            Some(BaselineInvalidationReason::PromptRendererChanged)
         } else if baseline.tool_schema_hash != candidate.tool_schema_hash {
             Some(BaselineInvalidationReason::ToolsChanged)
         } else if baseline.output_contract_hash != candidate.output_contract_hash {

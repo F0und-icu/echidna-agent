@@ -25,6 +25,7 @@ use cyber_agent::domain::context::{
     ModelIdentity, ModelProfile, ProviderSession, ProviderSessionId, ProviderSessionRef,
     ProviderSessionRole,
 };
+use cyber_agent::domain::domain_profile::DomainProfile;
 use cyber_agent::domain::events::{EventEnvelope, EventId, EventSequence, OccurredAt, StreamId};
 use cyber_agent::domain::model::{
     CapabilityMappingVersion, ContentItem, ModelCapabilities, ModelEvent,
@@ -374,7 +375,6 @@ async fn secondary_path_commits_route_audit_observation_then_primary_without_sen
     let mut agent = AgentLoop::with_primary_context(
         &primary_provider,
         &tools,
-        "Use observations as leads, not verified evidence.",
         ModelIdentity::new("fixture-primary", "primary-v1"),
         ModelProfile::new("primary", 1),
         ProviderSession::new(
@@ -508,7 +508,6 @@ async fn direct_path_audits_one_primary_image_and_never_calls_a_secondary_provid
     let mut agent = AgentLoop::with_primary_context(
         &primary_provider,
         &tools,
-        "Inspect the supplied image.",
         ModelIdentity::new("fixture-primary", "primary-v1"),
         ModelProfile::new("primary", 1),
         ProviderSession::new(
@@ -976,7 +975,6 @@ async fn view_image_tool_result_requires_fixed_follow_up_before_the_next_primary
     let mut agent = AgentLoop::with_primary_context(
         &provider,
         &tools,
-        "Inspect local image Artifacts without treating observations as verified findings.",
         ModelIdentity::new("fixture-primary", "primary-v1"),
         ModelProfile::new("primary", 1),
         ProviderSession::new(
@@ -985,7 +983,8 @@ async fn view_image_tool_result_requires_fixed_follow_up_before_the_next_primary
             1,
         ),
     )
-    .unwrap();
+    .unwrap()
+    .with_domain_profile(DomainProfile::Mobile);
     let mut audit_number = 0_u64;
     let audit_projection = projection.clone();
     let audit_sink = sink.clone();
@@ -1099,7 +1098,6 @@ async fn view_image_tool_result_without_follow_up_fails_before_a_second_primary_
     let mut agent = AgentLoop::with_primary_context(
         &provider,
         &tools,
-        "Inspect local image Artifacts.",
         ModelIdentity::new("fixture-primary", "primary-v1"),
         ModelProfile::new("primary", 1),
         ProviderSession::new(
@@ -1108,7 +1106,8 @@ async fn view_image_tool_result_without_follow_up_fails_before_a_second_primary_
             1,
         ),
     )
-    .unwrap();
+    .unwrap()
+    .with_domain_profile(DomainProfile::Mobile);
     let mut record_primary = |attempt| {
         audit_service
             .record(

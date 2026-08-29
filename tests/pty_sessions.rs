@@ -508,16 +508,19 @@ async fn active_job_and_pty_leases_share_conflict_and_release_rules() {
 fn pty_schemas_and_control_ids_are_exact_and_model_facing() {
     let project = TestProject::new("schemas");
     let tools = ToolRegistry::for_project(&project.root);
-    tools
-        .configure_exposure(ToolExposurePlan::new([
-            (ToolName::new("start_pty"), ToolExposure::Direct),
-            (ToolName::new("poll_pty"), ToolExposure::Direct),
-            (ToolName::new("input_pty"), ToolExposure::Direct),
-            (ToolName::new("resize_pty"), ToolExposure::Direct),
-            (ToolName::new("stop_pty"), ToolExposure::Direct),
-        ]))
+    let resolved = tools
+        .resolve_tool_plan(
+            &ToolExposurePlan::new([
+                (ToolName::new("start_pty"), ToolExposure::Direct),
+                (ToolName::new("poll_pty"), ToolExposure::Direct),
+                (ToolName::new("input_pty"), ToolExposure::Direct),
+                (ToolName::new("resize_pty"), ToolExposure::Direct),
+                (ToolName::new("stop_pty"), ToolExposure::Direct),
+            ]),
+            &Default::default(),
+        )
         .unwrap();
-    let specs = tools.specs();
+    let specs = resolved.advertised_specs();
     for name in [
         "start_pty",
         "poll_pty",

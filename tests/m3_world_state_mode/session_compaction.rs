@@ -196,7 +196,6 @@ fn make_agent<'provider, 'tools>(
     AgentLoop::with_primary_context(
         provider,
         tools,
-        "fixture",
         ModelIdentity::new("fixture", "model"),
         ModelProfile::new("profile", 1),
         ProviderSession::new(

@@ -17,11 +17,10 @@ use cyber_agent::app::session::SessionProjection;
 use cyber_agent::app::trace_eval::{ContextRecompileInput, TraceEvalService};
 use cyber_agent::domain::artifacts::{ArtifactEvent, ArtifactId, ArtifactRecord, BlobId};
 use cyber_agent::domain::context::{
-    BaselineInvalidationReason, ContextBudget, ModelIdentity, ModelProfile, ProviderSessionId,
-    ProviderSessionRef, ProviderSessionRole,
+    BaselineInvalidationReason, ContextBudget, ContextFragmentContent, ModelIdentity, ModelProfile,
+    ProviderSessionId, ProviderSessionRef, ProviderSessionRole,
 };
 use cyber_agent::domain::events::{EventEnvelope, EventId, EventSequence, OccurredAt, StreamId};
-use cyber_agent::domain::mode::PromptComposition;
 use cyber_agent::domain::model::{
     CapabilityMappingVersion, ContentItem, ModelCapabilities, ModelEvent, ModelInputIR,
     ModelRequestRequirements,
@@ -35,12 +34,14 @@ use cyber_agent::domain::research::{
     ResearchEvent, ResearchReducer, ResearchState, TargetKind, TargetSnapshotDraft,
     TargetSnapshotId, TargetSnapshotRecord,
 };
+use cyber_agent::domain::research_control::PromptComposition;
 use cyber_agent::domain::session::{SessionEvent, SessionReducer, SessionState};
 use cyber_agent::domain::tools::{
-    ExecutionId, ExecutionReceipt, FileMutationAudit, RerunReason, ToolCachePolicy,
-    ToolCacheSource, ToolCacheValidation, ToolCall, ToolCallId, ToolDeterminism, ToolEffect,
-    ToolExecutionOutcome, ToolExposure, ToolExposurePlan, ToolName, ToolOutputPolicy,
-    ToolParallelism, ToolResult, ToolResultCacheKey, ToolResultStatus, ToolRetryPolicy, ToolSpec,
+    DeferredActivationSet, ExecutionId, ExecutionReceipt, FileMutationAudit, RerunReason,
+    ResolvedToolPlan, ToolCachePolicy, ToolCacheSource, ToolCacheValidation, ToolCall, ToolCallId,
+    ToolDeterminism, ToolEffect, ToolExecutionOutcome, ToolExposure, ToolExposurePlan, ToolName,
+    ToolOutputPolicy, ToolParallelism, ToolResult, ToolResultCacheKey, ToolResultStatus,
+    ToolRetryPolicy, ToolSpec,
 };
 use cyber_agent::domain::trace_eval::{
     EvalEvidence, EvalSource, TraceEventRange, TraceExpectedInvariant, TraceFixtureError,
@@ -165,6 +166,30 @@ fn capabilities() -> ModelCapabilities {
     }
 }
 
+/// Builds the current fixed Base/Domain/Phase request shape for direct
+/// AgentLoop regression cases. Historical Trace fixtures deliberately retain
+/// their recorded instructions and go through `PreparedTraceReplay` instead.
+fn current_prompt_input(user_text: &str, tool_specs: Vec<ToolSpec>) -> ModelInputIR {
+    let instructions = PromptComposition::current()
+        .fragments()
+        .unwrap()
+        .into_iter()
+        .map(|fragment| match fragment.content() {
+            ContextFragmentContent::Instructions { text } => text.clone(),
+            ContextFragmentContent::ContentItems { .. } => {
+                panic!("fixed prompt composition must contain only instructions")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    ModelInputIR::current(
+        instructions,
+        vec![ContentItem::user_text(user_text)],
+        ModelRequestRequirements::default(),
+    )
+    .with_tool_specs(tool_specs)
+}
+
 fn replay_source() -> EvalSource {
     EvalSource::new(
         "replay-unit-test",
@@ -214,6 +239,7 @@ fn receipt(status: ToolResultStatus) -> ExecutionReceipt {
     ExecutionReceipt {
         execution_id: ExecutionId::new("execution:call-read"),
         plan_fingerprint: "source-plan-fingerprint".to_owned(),
+        resolved_tool_plan_fingerprint: None,
         status,
         exit_reason: (status != ToolResultStatus::Succeeded).then(|| "source failure".to_owned()),
         output_artifact_ids: Vec::new(),
@@ -405,6 +431,15 @@ fn load_fixed_source_fixture() -> TraceSourceFixture {
     }
 }
 
+#[test]
+fn trace_renderer_identity_is_additive_and_legacy_fixture_remains_explicitly_unknown() {
+    let legacy = load_fixed_source_fixture();
+    assert!(legacy.manifest.prompt_renderer().is_none());
+    let current = source_fixture(ToolResultStatus::Succeeded);
+    assert_eq!(current.manifest.prompt_renderer().unwrap().id(), "generic");
+    assert_eq!(current.manifest.prompt_renderer().unwrap().version(), 1);
+}
+
 #[derive(Clone, Copy)]
 enum ReceiptFact {
     Recorded,
@@ -570,11 +605,7 @@ async fn mechanical_replay_is_deterministic_local_and_non_evidence() {
     let prepared = prepare_fixture(&fixture);
     let before_session = fixture.session.clone();
     let before_blobs = fixture.blobs.bytes();
-    let mut agent = AgentLoop::new(
-        prepared.model_provider(),
-        prepared.tool_executor(),
-        "trace instructions",
-    );
+    let mut agent = AgentLoop::new(prepared.model_provider(), prepared.tool_executor());
 
     let replay = prepared
         .mechanical_replay(&mut agent, ["inspect fixture".to_owned()])
@@ -595,11 +626,7 @@ async fn mechanical_replay_is_deterministic_local_and_non_evidence() {
 async fn fixed_trace_fixture_is_hash_anchored_and_replays_without_external_actions() {
     let fixture = load_fixed_source_fixture();
     let prepared = prepare_fixture(&fixture);
-    let mut agent = AgentLoop::new(
-        prepared.model_provider(),
-        prepared.tool_executor(),
-        "trace instructions",
-    );
+    let mut agent = AgentLoop::new(prepared.model_provider(), prepared.tool_executor());
 
     let replay = prepared
         .mechanical_replay(&mut agent, ["inspect fixture".to_owned()])
@@ -638,11 +665,7 @@ async fn cache_hit_receipt_is_a_replayable_existing_session_fact() {
     assert_eq!(fixture.session.execution_receipt_count(), 0);
     assert_eq!(fixture.session.cache_hit_count(), 1);
     let prepared = prepare_fixture(&fixture);
-    let mut agent = AgentLoop::new(
-        prepared.model_provider(),
-        prepared.tool_executor(),
-        "trace instructions",
-    );
+    let mut agent = AgentLoop::new(prepared.model_provider(), prepared.tool_executor());
 
     let replay = prepared
         .mechanical_replay(&mut agent, ["inspect fixture".to_owned()])
@@ -668,7 +691,7 @@ fn replay_tool_exposure_is_fixed_to_direct_without_a_registry_fallback() {
 }
 
 #[test]
-fn replay_tool_exposure_hides_model_calls_without_consuming_a_recorded_step() {
+fn replay_tool_dispatch_rejects_a_non_fixture_plan_without_consuming_a_recorded_step() {
     let tools = ReplayToolExecutor::new(
         replay_source(),
         [replay_spec()],
@@ -681,25 +704,16 @@ fn replay_tool_exposure_hides_model_calls_without_consuming_a_recorded_step() {
         .unwrap()],
     )
     .unwrap();
-    tools
-        .configure_exposure(ToolExposurePlan::new([(
-            ToolName::new("replay_read"),
-            ToolExposure::Hidden,
-        )]))
-        .unwrap();
-
-    assert!(tools.specs().is_empty());
+    let foreign = ResolvedToolPlan::resolve(
+        [replay_spec()],
+        &ToolExposurePlan::new([(ToolName::new("replay_read"), ToolExposure::Hidden)]),
+        &DeferredActivationSet::default(),
+    )
+    .unwrap();
+    assert!(foreign.advertised_specs().is_empty());
     assert!(matches!(
-        tools.plan_exposed(ExecutionId::new("exposed-hidden"), call()),
-        Err(cyber_agent::ports::tool::ToolExecutorError::ToolNotExposed { tool_name })
-            if tool_name == "replay_read"
-    ));
-    assert_eq!(tools.remaining_steps(), 1);
-
-    assert!(matches!(
-        tools.plan(ExecutionId::new("ordinary-hidden"), call()),
-        Err(cyber_agent::ports::tool::ToolExecutorError::ToolNotExposed { tool_name })
-            if tool_name == "replay_read"
+        tools.plan_model_call(&foreign, ExecutionId::new("foreign-plan"), call()),
+        Err(cyber_agent::ports::tool::ToolExecutorError::ResolvedPlanMismatch)
     ));
     assert_eq!(tools.remaining_steps(), 1);
 }
@@ -708,11 +722,7 @@ fn replay_tool_exposure_hides_model_calls_without_consuming_a_recorded_step() {
 async fn replay_narrows_an_incremental_source_mapping_to_full_delivery() {
     let mut source_capabilities = capabilities();
     source_capabilities.incremental_input = true;
-    let expected_input = ModelInputIR::current(
-        "incremental source mapping",
-        vec![ContentItem::user_text("inspect fixture")],
-        ModelRequestRequirements::default(),
-    );
+    let expected_input = current_prompt_input("inspect fixture", Vec::new());
     let provider = ReplayModelProvider::new(
         source_capabilities.clone(),
         [ReplayModelStep::new(
@@ -734,7 +744,7 @@ async fn replay_narrows_an_incremental_source_mapping_to_full_delivery() {
         Vec::<ReplayToolStep>::new(),
     )
     .unwrap();
-    let mut agent = AgentLoop::new(&provider, &tools, "incremental source mapping");
+    let mut agent = AgentLoop::new(&provider, &tools);
     let outcome = agent
         .run_turn("inspect fixture", AgentCancellation::new())
         .await
@@ -763,6 +773,10 @@ fn manifest_rejects_unknown_fields_bad_hash_and_missing_artifact_reference() {
     let mut unknown = serde_json::to_value(&fixture.manifest).unwrap();
     unknown["unexpected"] = json!(true);
     assert!(serde_json::from_value::<TraceFixtureManifest>(unknown).is_err());
+
+    let mut forged_renderer = serde_json::to_value(&fixture.manifest).unwrap();
+    forged_renderer["prompt_renderer"] = json!({"id": "forged", "version": 1});
+    assert!(serde_json::from_value::<TraceFixtureManifest>(forged_renderer).is_err());
 
     let mut bad_hash = serde_json::to_value(&fixture.manifest).unwrap();
     bad_hash["source_stream_hash"] = json!("0".repeat(64));
@@ -1080,12 +1094,7 @@ fn mechanical_replay_requires_receipt_references_in_source_call_order() {
 #[tokio::test]
 async fn unmatched_replay_tool_call_stops_before_any_follow_up_provider_request() {
     let spec = replay_spec();
-    let expected_input = ModelInputIR::current(
-        "unmatched instructions",
-        vec![ContentItem::user_text("inspect fixture")],
-        ModelRequestRequirements::default(),
-    )
-    .with_tool_specs(vec![spec.clone()]);
+    let expected_input = current_prompt_input("inspect fixture", vec![spec.clone()]);
     let provider = ReplayModelProvider::new(
         capabilities(),
         [
@@ -1122,7 +1131,7 @@ async fn unmatched_replay_tool_call_stops_before_any_follow_up_provider_request(
         .unwrap()],
     )
     .unwrap();
-    let mut agent = AgentLoop::new(&provider, &tools, "unmatched instructions");
+    let mut agent = AgentLoop::new(&provider, &tools);
 
     assert!(matches!(
         agent.run_turn("inspect fixture", AgentCancellation::new()).await,
@@ -1137,7 +1146,7 @@ fn context_recompile_reads_historical_bytes_without_mutating_audit_blobs() {
     let fixture = source_fixture(ToolResultStatus::Succeeded);
     let service = TraceEvalService::new(&fixture.blobs);
     let before = fixture.blobs.bytes();
-    let composition = PromptComposition::new("trace instructions").unwrap();
+    let composition = PromptComposition::current();
     let result = service
         .context_recompile(
             &fixture.manifest,
@@ -1177,7 +1186,7 @@ fn context_recompile_reads_historical_bytes_without_mutating_audit_blobs() {
 fn context_recompile_rejects_an_audit_outside_the_trace_source_scope() {
     let fixture = source_fixture(ToolResultStatus::Succeeded);
     let service = TraceEvalService::new(&fixture.blobs);
-    let composition = PromptComposition::new("trace instructions").unwrap();
+    let composition = PromptComposition::current();
     let unreferenced = EventId::new("audit-outside-trace");
 
     assert!(matches!(
@@ -1255,7 +1264,7 @@ async fn shadow_eval_uses_only_replay_tools_and_remains_non_evidence() {
             text: "shadow conclusion from replayed output".to_owned(),
         }],
     ]);
-    let mut agent = AgentLoop::new(&shadow, prepared.tool_executor(), "trace instructions");
+    let mut agent = AgentLoop::new(&shadow, prepared.tool_executor());
 
     let result = prepared
         .shadow_model_eval(&mut agent, "inspect fixture", AgentCancellation::new())
@@ -1277,7 +1286,7 @@ async fn shadow_eval_fails_when_recorded_replay_tool_steps_are_not_consumed() {
     let shadow = ScriptedProvider::new([vec![ModelEvent::TextDelta {
         text: "shadow skipped the recorded Tool call".to_owned(),
     }]]);
-    let mut agent = AgentLoop::new(&shadow, prepared.tool_executor(), "trace instructions");
+    let mut agent = AgentLoop::new(&shadow, prepared.tool_executor());
 
     assert!(matches!(
         prepared
@@ -1398,7 +1407,11 @@ async fn synthetic_shadow_live_smoke_uses_composition_and_only_fixed_replay_tool
     let mut agent = AgentLoop::new(
         composition.primary_provider(),
         prepared.tool_executor(),
-        "This is an isolated protocol test. First call replay_read exactly once with the JSON arguments {\"path\":\"fixture.txt\"}. After its result, reply with LIVE_SHADOW_OK. Do not call any other Tool.",
+    )
+    .with_prompt_composition(
+        PromptComposition::current()
+            .with_project("This is an isolated protocol test. First call replay_read exactly once with the JSON arguments {\"path\":\"fixture.txt\"}. After its result, reply with LIVE_SHADOW_OK. Do not call any other Tool.")
+            .unwrap(),
     );
 
     let result = prepared

@@ -59,7 +59,7 @@ feat/m1a-s2-openai-streaming
 feat/m2-s3-artifact-lineage
 fix/m1b-baseline-reset
 refactor/context-planner-cache
-docs/architecture-v1-1
+docs/architecture-v1-3
 chore/dependency-update
 ```
 
@@ -153,8 +153,8 @@ PR Body 必须包含：
 | `0.2.0` | M1b 增量请求和回退 |
 | `0.3.0` | M1c Batch、Job、Resource Key、PTY |
 | `0.4.0` | M2 项目、事件、研究、记忆、Artifact |
-| `0.5.0` | M3 Context、Compaction、Mode、多模态 |
-| `0.6.0` | M4 Replay、Observation、真实 Eval |
+| `0.5.0` | M3 Context、Compaction、固定领域 Profile、多模态 |
+| `0.6.0` | M4 Replay、Research Control、Observation、真实 Eval |
 | `1.0.0` | 至少一个真实长流程验收，Schema 演进和恢复承诺稳定 |
 
 开发中可以发布：
@@ -185,9 +185,14 @@ PR Body 必须包含：
 
 ### 5.3 架构版本
 
-- `Architecture 1.0.0` 对应当前封存文件。
-- 兼容澄清发布 `1.0.x`。
+- `Architecture 1.0.0` 是不可变基础架构封存。
+- `Architecture 1.1.0` 是能力驱动 Primary/可选 Vision 模型组合增量封存。
+- `Architecture 1.2.0` 是稳定研究人格、DomainProfile、ResearchPhase 和工具准确率增量，保持不可变。
+- `Architecture 1.3.0` 是不可变 Sampling Step、Context 来源、Evidence Spine 和确定性研究引导增量；当前仅本地冻结，待单独授权后远端封存。
+- `Architecture 1.4.0` 是 ToolFailure 执行边界与持久 Trace 准确率可观测性增量；当前仅本地冻结，远端封存未授权。
+- 对既有架构版本的兼容澄清递增对应 patch 版本。
 - 新增可选能力且不改变核心事实源发布 `1.x.0`。
+- 本地冻结只禁止无 ADR 的继续改写，不等于 Git/远端封存；只有追加 `docs/architecture/SEALED_MANIFEST.md` 的精确 Hash 记录并完成授权发布后，才称为远端封存。
 - 改变 Event/Tool/Model/Artifact 核心契约发布下一主版本。
 
 架构文件一旦封存不修改，使用新文件和 SEALED_MANIFEST 记录。

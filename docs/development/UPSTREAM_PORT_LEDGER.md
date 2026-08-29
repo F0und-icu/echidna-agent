@@ -11,13 +11,20 @@ All reuse also follows `docs/development/LEAN_CODE_GOVERNANCE.md`. The default p
 ## 1. Locked Upstream Baseline
 
 - Repository path: `codex/`
-- Commit: `3aae5d885bac39c1262491aa3fd100dfd8b3919f`
+- Commit: `868c9edb0da913a5fc699a71664e65f44f6058b0`
 - Repository role: read-only reference
 - Cyber Agent dependency: none
 
 ## 2. Current Entries
 
 No Codex source code has been ported into Cyber Agent.
+
+The 2026-08-29 v1.3 design review is also `REFERENCE`/`REIMPLEMENT`; it copied no source and added no dependency. Relevant inspected paths at `868c9edb0da913a5fc699a71664e65f44f6058b0` are:
+
+- `codex-rs/core/src/session/step_context.rs`, `session/turn.rs`, `tools/router.rs` and `tools/spec_plan.rs`: request-scoped Step/Tool planning reference. Cyber Agent reimplements a smaller immutable SamplingStepPlan/ResolvedToolPlan without Code Mode, MCP, collaboration or policy surfaces.
+- `codex-rs/core/src/session/mod.rs`: reference for the explicit `CDXENT-441` Step-model TODO; Cyber Agent does not reproduce the mixed Turn/Step ownership.
+- `codex-rs/core/src/client.rs` and `codex-rs/protocol/src/models.rs`: Provider item-identity and retry reference. Cyber Agent keeps optional DeliveryItemId Adapter-local.
+- `codex-rs/ext/skills/src/dynamic_skill_selector/` and `shadow_selection_experiment/`: deterministic fielded BM25, character n-gram, RRF and Shadow-evaluation reference. Cyber Agent does not port the selector catalog or telemetry and uses vulnerability-specific eligibility/authority rules.
 
 ## 3. Entry Template
 

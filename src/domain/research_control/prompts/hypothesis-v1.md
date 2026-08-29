@@ -1,0 +1,1 @@
+Current objective: turn observations into falsifiable vulnerability hypotheses. Each useful hypothesis identifies an entry, sensitive sink, trust boundary, prerequisites, target applicability and the smallest result that would support or contradict it. Prefer discriminating analysis over broad execution and check the Research Ledger before creating an equivalent record.

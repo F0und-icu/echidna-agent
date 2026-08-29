@@ -754,13 +754,13 @@ async fn persisted_records_cannot_forge_merge_provenance() {
 fn research_tool_schemas_are_fixed_and_execution_metadata_is_exact() {
     let root = TemporaryDirectory::new("research-schemas");
     let tools = ToolRegistry::for_project(root.path());
-    tools
-        .configure_exposure(ToolExposurePlan::new([(
-            ToolName::new("research_update"),
-            ToolExposure::Direct,
-        )]))
+    let resolved = tools
+        .resolve_tool_plan(
+            &ToolExposurePlan::new([(ToolName::new("research_update"), ToolExposure::Direct)]),
+            &Default::default(),
+        )
         .unwrap();
-    let specs = tools.specs();
+    let specs = resolved.advertised_specs();
     let get = specs
         .iter()
         .find(|spec| spec.name.as_str() == "research_get")
@@ -797,6 +797,32 @@ fn research_tool_schemas_are_fixed_and_execution_metadata_is_exact() {
             .len(),
         10
     );
+    let evidence_ref = &update.input_schema["$defs"]["evidence_ref"];
+    assert_eq!(
+        evidence_ref["oneOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["properties"]["kind"]["const"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["artifact", "experiment", "execution_receipt"]
+    );
+    for entry in evidence_ref["oneOf"].as_array().unwrap() {
+        assert_eq!(entry["required"], json!(["kind", "id"]));
+        assert_eq!(entry["additionalProperties"], false);
+        assert_eq!(entry["properties"]["id"]["minLength"], 1);
+    }
+    let operation = &update.input_schema["properties"]["operation"]["oneOf"];
+    for reference in [
+        &operation[1]["properties"]["record"]["properties"]["evidence_refs"],
+        &operation[2]["properties"]["update"]["properties"]["evidence_refs_add"],
+        &operation[5]["properties"]["record"]["properties"]["evidence_refs"],
+        &operation[5]["properties"]["record"]["properties"]["negative_refs"],
+        &operation[6]["properties"]["update"]["properties"]["evidence_refs_add"],
+        &operation[6]["properties"]["update"]["properties"]["negative_refs_add"],
+    ] {
+        assert_eq!(reference["items"]["$ref"], "#/$defs/evidence_ref");
+    }
     assert!(update.input_schema["properties"].get("execution").is_some());
     assert_eq!(
         update.resource_key_template.as_deref(),

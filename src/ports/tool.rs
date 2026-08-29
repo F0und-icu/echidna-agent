@@ -6,15 +6,48 @@ use std::pin::Pin;
 use thiserror::Error;
 
 use crate::domain::tools::{
-    ExecutionId, ToolCall, ToolExecutionOutcome, ToolExecutionPlan, ToolExposurePlan, ToolSpec,
+    DeferredActivationSet, ExecutionId, ResolvedToolPlan, ToolCall, ToolExecutionOutcome,
+    ToolExecutionPlan, ToolExposurePlan, ToolSpec,
 };
 
 pub type ToolExecutionFuture<'executor> =
     Pin<Box<dyn Future<Output = ToolExecutionOutcome> + Send + 'executor>>;
 
 pub trait ToolExecutor: Send + Sync {
-    /// Returns the schemas this executor actually permits a model to call.
-    fn specs(&self) -> Vec<ToolSpec>;
+    /// Returns the immutable canonical catalog. Exposure resolution is pure
+    /// and never stored by the executor.
+    fn catalog(&self) -> Vec<ToolSpec> {
+        self.specs()
+    }
+
+    fn resolve_tool_plan(
+        &self,
+        exposure: &ToolExposurePlan,
+        activations: &DeferredActivationSet,
+    ) -> Result<ResolvedToolPlan, ToolExecutorError> {
+        ResolvedToolPlan::resolve(self.catalog(), exposure, activations).map_err(
+            |error| match error {
+                crate::domain::tools::ToolContractError::UnknownToolExposure { tool_name } => {
+                    ToolExecutorError::UnknownTool { tool_name }
+                }
+                error => ToolExecutorError::ResolvedPlanFailure {
+                    message: error.to_string(),
+                },
+            },
+        )
+    }
+
+    /// Compatibility inspection for the default immutable plan. Callers
+    /// selecting Domain/Phase exposure must resolve an explicit plan.
+    fn specs(&self) -> Vec<ToolSpec> {
+        self.resolve_tool_plan(
+            &ToolExposurePlan::default(),
+            &DeferredActivationSet::default(),
+        )
+        .expect("an executor's canonical catalog must resolve its default Tool plan")
+        .advertised_specs()
+        .to_vec()
+    }
 
     fn plan(
         &self,
@@ -22,21 +55,28 @@ pub trait ToolExecutor: Send + Sync {
         call: ToolCall,
     ) -> Result<ToolExecutionPlan, ToolExecutorError>;
 
-    /// Plans a model-originated call. Executors with local typed/internal
-    /// callers may keep those callers on [`Self::plan`], while this entry
-    /// point must enforce the same exposure authority used by [`Self::specs`].
-    fn plan_exposed(
+    /// Plans a model-originated call exclusively through the immutable plan
+    /// which advertised it. Implementations must not fall back to a raw or
+    /// newer catalog.
+    fn plan_model_call(
         &self,
+        resolved: &ResolvedToolPlan,
         execution_id: ExecutionId,
         call: ToolCall,
     ) -> Result<ToolExecutionPlan, ToolExecutorError> {
-        self.plan(execution_id, call)
-    }
-
-    /// Atomically selects the fixed Mode exposure plan for the next model
-    /// turn. Executors without a dynamic catalog retain their fixed specs.
-    fn configure_exposure(&self, _plan: ToolExposurePlan) -> Result<(), ToolExecutorError> {
-        Ok(())
+        if resolved.advertised_spec(&call.name).is_none() {
+            return Err(ToolExecutorError::ToolNotExposed {
+                tool_name: call.name.to_string(),
+            });
+        }
+        let tool_name = call.name.to_string();
+        let mut plan = self.plan(execution_id, call)?;
+        plan.bind_resolved_tool_plan(resolved)
+            .map_err(|error| ToolExecutorError::PlanFailure {
+                tool_name,
+                message: error.to_string(),
+            })?;
+        Ok(plan)
     }
 
     fn execute(&self, plan: ToolExecutionPlan) -> ToolExecutionFuture<'_>;
@@ -57,4 +97,8 @@ pub enum ToolExecutorError {
     InvalidArguments { tool_name: String, message: String },
     #[error("Tool `{tool_name}` execution plan failed: {message}")]
     PlanFailure { tool_name: String, message: String },
+    #[error("resolved Tool plan failed: {message}")]
+    ResolvedPlanFailure { message: String },
+    #[error("Tool execution plan does not match the Sampling Step Tool plan")]
+    ResolvedPlanMismatch,
 }

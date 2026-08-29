@@ -31,6 +31,10 @@ pub enum RequestAuditError {
     DeliveryReasonMismatch,
     #[error("a full RequestAudit delivery must have identical logical and delivered inputs")]
     FullDeliveryInputMismatch,
+    #[error("RequestAudit ToolSpecs do not match the Sampling Step ResolvedToolPlan")]
+    SamplingToolPlanMismatch,
+    #[error("RequestAudit schema and renderer/Tool-plan identity are inconsistent")]
+    SamplingIdentityMismatch,
     #[error(
         "RequestAudit service binding `{received:?}` does not match the expected binding `{expected:?}`"
     )]

@@ -3,9 +3,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::domain::tools::{
-    ToolExecutionOutcome, ToolExecutionPlan, ToolExposure, ToolName, ToolSpec,
-};
+use crate::domain::tools::{ToolExecutionOutcome, ToolExecutionPlan, ToolExposure, ToolSpec};
 use crate::ports::tool::ToolExecutorError;
 
 use super::{decode_arguments, invalid_plan};
@@ -20,12 +18,6 @@ struct ToolSearchArgs {
     max_results: usize,
 }
 
-#[derive(Clone, Debug)]
-pub(super) struct ToolSearchExecution {
-    pub outcome: ToolExecutionOutcome,
-    pub activated: Vec<ToolName>,
-}
-
 pub(super) fn normalize(
     value: Value,
 ) -> Result<(Value, Vec<crate::domain::tools::ResourceKey>), ToolExecutorError> {
@@ -37,22 +29,16 @@ pub(super) fn normalize(
     ))
 }
 
-pub(super) fn execute(plan: ToolExecutionPlan, specs: &[ToolSpec]) -> ToolSearchExecution {
+pub(super) fn execute(plan: ToolExecutionPlan, specs: &[ToolSpec]) -> ToolExecutionOutcome {
     let arguments: ToolSearchArgs =
         match decode_arguments("tool_search", plan.call.arguments.clone()) {
             Ok(arguments) => arguments,
             Err(error) => {
-                return ToolSearchExecution {
-                    outcome: invalid_plan(plan, error),
-                    activated: Vec::new(),
-                };
+                return invalid_plan(plan, error);
             }
         };
     if let Err(error) = validate(&arguments) {
-        return ToolSearchExecution {
-            outcome: invalid_plan(plan, error),
-            activated: Vec::new(),
-        };
+        return invalid_plan(plan, error);
     }
 
     let normalized_query = normalize_query(&arguments.query);
@@ -70,11 +56,6 @@ pub(super) fn execute(plan: ToolExecutionPlan, specs: &[ToolSpec]) -> ToolSearch
         })
         .take(arguments.max_results)
         .collect::<Vec<_>>();
-    let activated = matches
-        .iter()
-        .filter(|spec| spec.exposure == ToolExposure::Deferred)
-        .map(|spec| spec.name.clone())
-        .collect::<Vec<_>>();
     let truncated = specs
         .iter()
         .filter(|spec| spec.exposure != ToolExposure::Hidden)
@@ -88,23 +69,20 @@ pub(super) fn execute(plan: ToolExecutionPlan, specs: &[ToolSpec]) -> ToolSearch
         })
         .count()
         > matches.len();
-    ToolSearchExecution {
-        outcome: ToolExecutionOutcome::succeeded(
-            plan,
-            json!({
-                "query": normalized_query,
-                "matches": matches.iter().map(|spec| json!({
-                    "name": spec.name,
-                    "description": spec.description,
-                    "exposure": spec.exposure,
-                    "input_schema": spec.input_schema,
-                    "output_schema": spec.output_schema,
-                })).collect::<Vec<_>>(),
-                "truncated": truncated,
-            }),
-        ),
-        activated,
-    }
+    ToolExecutionOutcome::succeeded(
+        plan,
+        json!({
+            "query": normalized_query,
+            "matches": matches.iter().map(|spec| json!({
+                "name": spec.name,
+                "description": spec.description,
+                "exposure": spec.exposure,
+                "input_schema": spec.input_schema,
+                "output_schema": spec.output_schema,
+            })).collect::<Vec<_>>(),
+            "truncated": truncated,
+        }),
+    )
 }
 
 pub(super) fn input_schema() -> Value {

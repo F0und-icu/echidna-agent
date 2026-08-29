@@ -5,6 +5,7 @@ use crate::app::agent_loop::{AgentLoop, AgentTurnOutcome};
 use crate::app::cancellation::AgentCancellation;
 use crate::app::trace_eval::{MechanicalReplayResult, ShadowModelEvalResult, TraceReplayRunError};
 use crate::domain::model::ModelCapabilities;
+use crate::domain::research_control::PromptComposition;
 use crate::domain::trace_eval::{EvalResult, EvalSource, TraceReplayPlan};
 use crate::ports::model::ModelProvider;
 
@@ -15,6 +16,7 @@ pub struct PreparedTraceReplay {
     source: EvalSource,
     model: ReplayModelProvider,
     tools: ReplayToolExecutor,
+    replay_prompt: PromptComposition,
 }
 
 impl PreparedTraceReplay {
@@ -23,10 +25,19 @@ impl PreparedTraceReplay {
         capabilities: ModelCapabilities,
     ) -> Result<Self, ReplayAdapterError> {
         let (source, model_steps, tool_specs, tool_steps) = plan.into_parts();
+        let first_input = model_steps
+            .first()
+            .ok_or(ReplayAdapterError::ModelStepsRequired)?
+            .expected_input();
+        let replay_prompt = PromptComposition::legacy_replay(first_input.instructions.clone())
+            .map_err(|error| ReplayAdapterError::HistoricalPrompt {
+                message: error.to_string(),
+            })?;
         Ok(Self {
             model: ReplayModelProvider::new(capabilities, model_steps)?,
             tools: ReplayToolExecutor::new(source.clone(), tool_specs, tool_steps)?,
             source,
+            replay_prompt,
         })
     }
 
@@ -43,6 +54,10 @@ impl PreparedTraceReplay {
         agent: &mut AgentLoop<'_, '_, ReplayModelProvider, ReplayToolExecutor>,
         user_inputs: impl IntoIterator<Item = String>,
     ) -> Result<MechanicalReplayResult, TraceReplayRunError> {
+        // Historical RequestAudit instruction bytes are the Replay contract.
+        // They are queued once for this fixed evaluation agent and never
+        // change the ordinary runtime's Base/Domain/Phase composition.
+        agent.queue_prompt_composition(self.replay_prompt.clone());
         let mut model_requests: usize = 0;
         for user_input in user_inputs {
             match agent

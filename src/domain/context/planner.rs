@@ -16,6 +16,17 @@ pub(crate) fn estimate_audit_component_tokens(encoded_bytes: usize) -> u32 {
     estimator::estimate_encoded_tokens(encoded_bytes)
 }
 
+/// Uses the same canonical Tool-schema encoding and conservative estimator as
+/// Context planning. Derived Tool-accuracy reports consume this owner rather
+/// than introducing another token formula.
+pub(crate) fn tool_schema_token_cost(specs: &[ToolSpec]) -> Result<u32, ContextPlannerError> {
+    let canonical_tools =
+        canonical_tool_schemas(specs).map_err(|error| ContextPlannerError::CanonicalEncoding {
+            message: error.to_string(),
+        })?;
+    Ok(fixed_input_tokens(&canonical_tools))
+}
+
 use serde::Serialize;
 
 use super::canonical::{RequestHash, canonical_tool_schemas};
@@ -28,7 +39,8 @@ pub use cache_key::{
 pub use error::ContextPlannerError;
 pub use fragment::{
     ContextContentHash, ContextFragment, ContextFragmentContent, ContextFragmentId,
-    ContextFragmentPriority, ContextFragmentSource, FragmentCachePolicy,
+    ContextFragmentPriority, ContextFragmentSource, ContextOrigin, ContextSlot,
+    FragmentCachePolicy,
 };
 pub use manifest::{
     AppendOnlyCandidate, ContextBudget, ContextDecision, ContextDecisionEntry,
@@ -36,6 +48,7 @@ pub use manifest::{
     FullLogicalManifest, FullLogicalManifestEntry, LogicalAppendOnlyRejection,
     LogicalBaselineRelation,
 };
+pub use render::PromptRendererIdentity;
 
 use fingerprint::hash;
 use selection::{
@@ -48,6 +61,7 @@ use selection::{
 #[derive(Clone, Debug)]
 pub struct ContextPlanner {
     versions: ContextPlannerVersions,
+    renderer: PromptRendererIdentity,
 }
 
 impl ContextPlanner {
@@ -60,7 +74,14 @@ impl ContextPlanner {
     }
 
     pub fn new(versions: ContextPlannerVersions) -> Self {
-        Self { versions }
+        Self {
+            versions,
+            renderer: PromptRendererIdentity::generic_v1(),
+        }
+    }
+
+    pub fn renderer_identity(&self) -> &PromptRendererIdentity {
+        &self.renderer
     }
 
     pub fn default_budget(
@@ -130,6 +151,8 @@ impl ContextPlanner {
                 .map(|(index, fragment)| FullLogicalManifestEntry {
                     fragment_id: fragment.id.clone(),
                     source: fragment.source,
+                    slot: fragment.slot,
+                    origin: fragment.origin,
                     content_hash: fragment.content_hash.clone(),
                     decision: decisions[index].decision.clone(),
                 })
@@ -142,6 +165,7 @@ impl ContextPlanner {
         // describe comparison history, not current Provider input semantics.
         let fingerprint = hash(&ContextFingerprintInput {
             versions: &self.versions,
+            renderer: &self.renderer,
             budget,
             capabilities,
             tool_schema_hash: &canonical_tools.hash,
@@ -162,7 +186,12 @@ impl ContextPlanner {
         self.validate_rendered_model_input(&model_input, budget)?;
         Ok(ContextPlan {
             context_fingerprint: fingerprint.clone(),
-            prompt_cache_key: hash(&(&self.versions.planner_version, &full_logical_manifest))?,
+            prompt_cache_key: hash(&(
+                &self.versions.planner_version,
+                &self.renderer,
+                &full_logical_manifest,
+            ))?,
+            prompt_renderer: self.renderer.clone(),
             full_logical_manifest,
             append_only_candidate,
             context_decision_manifest: ContextDecisionManifest {
@@ -218,6 +247,7 @@ fn fixed_input_tokens(canonical_tools: &super::canonical::CanonicalToolSchemas) 
 #[derive(Serialize)]
 struct ContextFingerprintInput<'a> {
     versions: &'a ContextPlannerVersions,
+    renderer: &'a PromptRendererIdentity,
     budget: ContextBudget,
     capabilities: &'a ModelCapabilities,
     tool_schema_hash: &'a RequestHash,

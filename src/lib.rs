@@ -9,7 +9,8 @@ use thiserror::Error;
 
 use crate::adapters::project_event_store::{Project, ProjectEventStoreError};
 use crate::app::doctor::{AgentProfileDoctorReport, inspect_agent_model_profile};
-use crate::domain::research_profile::ResearchProfile;
+use crate::domain::domain_profile::DomainProfile;
+use crate::domain::research_control::ResearchPhase;
 use crate::provider_composition::{ProviderComposition, ProviderCompositionError};
 
 pub mod adapters;
@@ -45,9 +46,12 @@ enum CliCommand {
         /// Explicitly resume this durable Session instead of starting a new one.
         #[arg(long, value_name = "SESSION_ID")]
         session: Option<String>,
-        /// Fixed vulnerability-research prompt Profile for this Chat process.
-        #[arg(long, value_enum, default_value_t = CliResearchProfile::Source)]
-        profile: CliResearchProfile,
+        /// Fixed vulnerability-research target domain for this Chat process.
+        #[arg(long, value_enum, default_value_t = CliDomainProfile::Source)]
+        domain: CliDomainProfile,
+        /// Explicit initial research objective. Omit to use or restore Mapping.
+        #[arg(long, value_enum)]
+        phase: Option<CliResearchPhase>,
     },
     /// Inspect local configuration and runtime readiness.
     Doctor,
@@ -72,20 +76,41 @@ enum CliCommand {
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
-enum CliResearchProfile {
+enum CliDomainProfile {
     Source,
     Web,
     Mobile,
     Binary,
 }
 
-impl From<CliResearchProfile> for ResearchProfile {
-    fn from(value: CliResearchProfile) -> Self {
+impl From<CliDomainProfile> for DomainProfile {
+    fn from(value: CliDomainProfile) -> Self {
         match value {
-            CliResearchProfile::Source => Self::Source,
-            CliResearchProfile::Web => Self::Web,
-            CliResearchProfile::Mobile => Self::Mobile,
-            CliResearchProfile::Binary => Self::Binary,
+            CliDomainProfile::Source => Self::Source,
+            CliDomainProfile::Web => Self::Web,
+            CliDomainProfile::Mobile => Self::Mobile,
+            CliDomainProfile::Binary => Self::Binary,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum CliResearchPhase {
+    Mapping,
+    Hypothesis,
+    Experiment,
+    Verification,
+    EvidenceCuration,
+}
+
+impl From<CliResearchPhase> for ResearchPhase {
+    fn from(value: CliResearchPhase) -> Self {
+        match value {
+            CliResearchPhase::Mapping => Self::Mapping,
+            CliResearchPhase::Hypothesis => Self::Hypothesis,
+            CliResearchPhase::Experiment => Self::Experiment,
+            CliResearchPhase::Verification => Self::Verification,
+            CliResearchPhase::EvidenceCuration => Self::EvidenceCuration,
         }
     }
 }
@@ -235,7 +260,8 @@ fn discover_current_project() -> Result<Project, CliError> {
 fn run_chat(
     config: Option<&Path>,
     session: Option<String>,
-    profile: CliResearchProfile,
+    domain: CliDomainProfile,
+    phase: Option<CliResearchPhase>,
 ) -> Result<(), CliError> {
     let config = config.ok_or(CliError::ChatConfigurationRequired)?;
     let composition = load_provider_composition(Some(config))?
@@ -251,7 +277,8 @@ fn run_chat(
             project,
             &composition,
             session,
-            profile.into(),
+            domain.into(),
+            phase.map(ResearchPhase::from),
         ))
         .map_err(|error| CliError::Chat {
             message: error.to_string(),
@@ -267,9 +294,11 @@ where
 
     match cli.command {
         Some(CliCommand::Init) => initialize_current_project(),
-        Some(CliCommand::Chat { session, profile }) => {
-            run_chat(cli.config.as_deref(), session, profile)
-        }
+        Some(CliCommand::Chat {
+            session,
+            domain,
+            phase,
+        }) => run_chat(cli.config.as_deref(), session, domain, phase),
         Some(CliCommand::Doctor) => {
             let composition = load_provider_composition(cli.config.as_deref())?;
             print_json(&doctor_report(composition.as_ref()))

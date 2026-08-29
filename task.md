@@ -7,10 +7,16 @@
 参考材料：
 
 - Codex 本地源码：`codex/`
-- Codex 分析提交：`3aae5d885bac39c1262491aa3fd100dfd8b3919f`
+- Codex 最新设计复核提交：`868c9edb0da913a5fc699a71664e65f44f6058b0`
 - 分析文档：`Codex架构与漏洞挖掘Agent复用评估.md`
-- 冻结架构：`docs/architecture/CYBER_AGENT_ARCHITECTURE_V1.md` + `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_1.md`
+- 冻结架构：`docs/architecture/CYBER_AGENT_ARCHITECTURE_V1.md` + `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_1.md` + `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_2.md` + `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_3.md` + `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_4.md`
 - 模型组合决策：`docs/adr/ADR-0002-capability-driven-primary-vision-models.md`
+- 研究控制决策：`docs/adr/ADR-0009-stable-research-persona-domain-profile-and-phase.md`
+- 不可变 Step/Tool Plan 决策：`docs/adr/ADR-0010-immutable-sampling-step-and-tool-plan.md`
+- Context/Evidence/Compaction 决策：`docs/adr/ADR-0011-context-provenance-evidence-relations-and-compaction.md`
+- 确定性检索/引导决策：`docs/adr/ADR-0012-deterministic-security-retrieval-and-evidence-gap-guidance.md`
+- Prompt renderer 决策：`docs/adr/ADR-0013-versioned-prompt-renderer-boundary.md`
+- ToolFailure/准确率可观测性决策：`docs/adr/ADR-0014-narrow-tool-failure-and-accuracy-observability.md`
 - 唯一 Provider 装配决策：`docs/adr/ADR-0006-single-provider-composition-root.md`
 - 开发计划：`docs/development/IMPLEMENTATION_PLAN.md`
 - 精简代码治理：`docs/development/LEAN_CODE_GOVERNANCE.md`
@@ -22,10 +28,10 @@
 
 当前状态：
 
-- 阶段：Implementation / M1b-S1 Ready Not Authorized
-- M0-S1 CLI 骨架、M0-S2 Domain/Event/Port 最小契约和完整 M1a 已完成；M1a-S2 OpenAI Responses Adapter 与 M1a-S3 单工具 AgentLoop 均已通过固定 Rust `1.93.1` 的本地 Gate，尚未提交或运行远程 CI。
-- 已初始化本地 Git 并发布治理/架构文档基线。
-- M0-S1/M0-S2/M1a-S1 分别通过 PR `#1`/`#2`/`#3` 交付；M1a-S2/M1a-S3 按 `NO_COMMIT` 保留在本地，M1b-S1 未获授权。
+- 阶段：Implementation；M0 至 M4-S2 和 F1a-F1d 已远端封存。
+- 当前代码基线已具备一个 AgentLoop、项目/会话/研究/审计事实、固定领域 Prompt Profiles、多模态组合、Replay/Eval、唯一 Provider Composition Root 和第一版 CLI Chat。
+- Architecture v1.4 已在本地冻结，在 v1.3 上窄化 ToolFailure 执行边界并限定准确率只能报告持久 Trace 可诚实观测的指标；Git/远端封存和本地生产实现仍以 `STATUS.md` 授权为准。
+- 当前 Slice 是 M4-S3b，状态为 `IN_PROGRESS`；不因本架构文档或受控测试而标记 COMPLETE/Gate PASS，具体事实始终以 `docs/development/STATUS.md` 为准。
 
 ## 1. 产品定义
 
@@ -38,6 +44,7 @@ Cyber Agent 是一个由单人使用和维护的、本地优先的漏洞挖掘�
 - 可靠的工具调用循环。
 - 轻量、结构化的研究台账，避免重复验证和研究漂移。
 - 可编辑、可检查、可版本化的提示词。
+- 一个稳定、务实、证据优先的漏洞研究人格；领域 Profile 与当前研究阶段独立组合。
 - 长任务上下文管理。
 - 项目快照、差量上下文、增量模型请求和可重建缓存。
 - 文本和图片输入。
@@ -51,6 +58,8 @@ Cyber Agent 是一个由单人使用和维护的、本地优先的漏洞挖掘�
 ### 2.1 必须实现
 
 - 单进程、单主 Agent。
+- Base Contract 只有一个 `Pragmatic Vulnerability Researcher` 身份，不提供多人格或角色 Agent。
+- `DomainProfile`、`ResearchPhase` 和 `AgentModelProfile` 是正交轴，不创建组合角色。
 - 一个主模型和至多一个可选视觉模型；视觉模型只提供受限推理能力，不拥有独立 AgentLoop、Memory、Research Ledger 或通用工具权限。
 - 一个 Rust package 和一个可执行文件。
 - 每个目标项目使用独立 `.cyber-agent/` 目录。
@@ -58,10 +67,13 @@ Cyber Agent 是一个由单人使用和维护的、本地优先的漏洞挖掘�
 - 默认 `FullAccess`，不启用沙箱，不强制工具确认。
 - Shell、文件、网络和本地设备工具可直接调用。
 - 模型可以连续调用工具，工具结果会进入后续采样。
+- 每次模型采样捕获一个不可变 SamplingStepPlan；发送的 ToolSpecs、RequestAudit 和 Tool dispatch 使用同一 ResolvedToolPlan。
 - 同一运行进程的本地 Session 内复用 Provider Session，可跨 Turn 追加；请求兼容时只发送增量 Input。
 - 支持批量工具、长运行 Job 和基于 Resource Key 的并发调度。
 - 支持 Project Snapshot/Diff，项目未变化时不重复扫描。
 - 支持会话压缩、中断恢复和上下文预算。
+- Context 具有可验证的来源 sidecar；Compaction 使用事实引用 Evidence Spine 与有损叙事，不复制第二套漏洞结论。
+- 安全检索和证据缺口/实验引导保持本地、确定性、可解释、Shadow-first，未证明收益前不改变模型输入或自动执行。
 - 所有审计数据只写本地。
 - 不上报 telemetry、analytics、feedback、crash dump 或调试日志。
 - 不需要云 Server、远程任务或账号系统。
@@ -72,7 +84,8 @@ Cyber Agent 是一个由单人使用和维护的、本地优先的漏洞挖掘�
 - Research Ledger 使用稳定 ID 管理 Hypothesis、Experiment、Finding Record 和 Next Action，但不强制复杂状态迁移。
 - Prompt 中要求区分静态候选、可复现问题和已证明影响，但不在 Core 中实现繁重的 Finding 状态机。
 - 大型命令输出、安装包、抓包、日志、截图和二进制文件以 Artifact 引用进入上下文。
-- 支持按项目编写 `source-audit`、`web`、`mobile`、`binary`、`firmware` 等轻量 Prompt Profile。
+- 提供固定 `source`、`web`、`mobile`、`binary` DomainProfile；项目特殊约束进入 Project Prompt，Firmware 在有真实需求前不提供 Profile。
+- 提供固定 `mapping`、`hypothesis`、`experiment`、`verification`、`evidence_curation` ResearchPhase，只改变当前目标、Prompt 和 Tool Exposure，不替代 Research Ledger。
 - 漏洞研究工具主要继续使用现有 CLI 和脚本，不为每个工具建立 Rust 封装层。
 
 ## 3. 明确不做
@@ -88,6 +101,8 @@ Cyber Agent 是一个由单人使用和维护的、本地优先的漏洞挖掘�
 - 通用 IDE、完整 TUI 和代码审查产品线。
 - 自建模型网关、模型调度 Server 和远程记忆服务。
 - 为了“模块化”而拆分大量 crate。
+- 多人格/角色目录、Domain × Phase 组合角色、通用 Prompt/Phase Registry 和研究 Workflow Engine。
+- PromptDialect/renderer Registry、Tool Router 平台、selector framework、默认向量/图数据库、远程 embedding/reranker/judge 和自动实验生成器。
 
 ## 4. 总体架构
 
@@ -108,14 +123,21 @@ Cyber Agent 是一个由单人使用和维护的、本地优先的漏洞挖掘�
       ├── Context Planner
       │   ├── Fragment Cache
       │   ├── Snapshot / Diff
-      │   └── Memory Retrieval
+      │   ├── generic-v1 Renderer / ContextDeliveryMap
+      │   └── Deterministic Security Retrieval (Shadow first)
       ├── Memory Manager
       ├── Research Ledger / Provenance
       │   ├── TargetSnapshot / ExperimentCapsule
+      │   ├── EvidenceLink / Evidence Gap
       │   └── Observation / TargetDelta View
-      ├── Prompt / Mode Manager
+      ├── Research Control Plane
+      │   ├── Stable Base Contract
+      │   ├── DomainProfile
+      │   └── ResearchPhase
+      ├── Prompt Composition
       ├── Tool Runtime
-      │   ├── Direct / Deferred Tools
+      │   ├── Immutable Catalog / ResolvedToolPlan
+      │   ├── Direct / Turn-local Deferred Tools
       │   ├── Batch / Resource Locks
       │   ├── Effect / Intent / Receipt
       │   └── Jobs / PTY
@@ -136,6 +158,8 @@ Cyber Agent 是一个由单人使用和维护的、本地优先的漏洞挖掘�
 - 一套人类可直接阅读和修改的本地文件。
 - 先用内部 Rust module 隔离职责，真的出现独立发布或重依赖需求时才拆 crate。
 - 没有通用 Hook Bus；只保留主循环中明确的前后处理点。
+- 没有人格、Prompt Stage、DomainProfile 或 ResearchPhase 动态 Registry；只保留固定资源和一个组合路径。
+- 没有 Prompt renderer/Tool selector/Context source 动态 Registry；一个当前实现使用显式版本和固定纯函数。
 - 权威数据使用 Markdown/JSONL/Artifact；性能缓存可随时删除和重建。
 - 效率优化优先减少模型往返、重复 Token、重复扫描和重复工具调用，不通过增加多 Agent 解决。
 
@@ -145,11 +169,13 @@ Cyber Agent 是一个由单人使用和维护的、本地优先的漏洞挖掘�
       ↓
     load TurnContext and ProviderSession
       ↓
+    apply queued DomainProfile / ResearchPhase / AgentModelProfile at Turn boundary
+      ↓
     append local audit event
       ↓
     refresh cheap Project/Runtime fingerprints
       ↓
-    capture StepSnapshot
+    capture TurnConfigurationSnapshot and StepSnapshot
       ↓
     update Research State and Project Snapshot diff
       ↓
@@ -157,9 +183,11 @@ Cyber Agent 是一个由单人使用和维护的、本地优先的漏洞挖掘�
       ↓
     when secondary_tool, create scoped VisionObservation before primary sampling
       ↓
-    build or reuse ContextPlan and ContextDecisionManifest
+    resolve immutable SamplingStepPlan + ResolvedToolPlan
       ↓
-    build ModelInputIR and choose full or incremental delivery
+    render generic-v1 ContextPlan + ContextDeliveryMap
+      ↓
+    persist RequestAudit, build ModelInputIR and choose full or incremental delivery
       ↓
     stream text / reasoning items / tool calls
       ↓
@@ -167,7 +195,7 @@ Cyber Agent 是一个由单人使用和维护的、本地优先的漏洞挖掘�
       ├── no  → persist response → update session memory → wait for input
       └── yes
            ↓
-         validate tool schema
+         validate ToolCall against the same ResolvedToolPlan
            ↓
          resolve ToolExecutionPlan and persist execution intent
            ↓
@@ -181,7 +209,9 @@ Cyber Agent 是一个由单人使用和维护的、本地优先的漏洞挖掘�
            ↓
          append ToolResult to history
            ↓
-         append only changed context fragments
+         update Turn-local DeferredActivationSet when tool_search matches
+           ↓
+         capture a new immutable plan and append only changed context fragments
            ↓
          sample model again
 
@@ -189,6 +219,8 @@ Cyber Agent 是一个由单人使用和维护的、本地优先的漏洞挖掘�
 
 - 会话状态。
 - Prompt 和上下文组装。
+- 稳定 Base、DomainProfile、ResearchPhase 与 Tool Exposure 的固定组合。
+- 每个 Step 的 Context/Tool/model/capability 计划捕获和一致性。
 - 模型流式输出。
 - 工具调用与结果回传。
 - 取消、重试和恢复。
@@ -203,12 +235,12 @@ Cyber Agent 是一个由单人使用和维护的、本地优先的漏洞挖掘�
 
 - Turn ID。
 - Model Profile。
-- Base/Personal/Project/Mode Prompt Version。
+- Stable Base/Personal/Project/Domain/ResearchPhase Prompt Version。
 - Provider Session。
 - Context Budget。
 - Tool Exposure Baseline。
 
-### 5.2 StepSnapshot
+### 5.2 StepSnapshot 与 SamplingStepPlan
 
 每次模型采样前快速重新捕获：
 
@@ -216,17 +248,23 @@ Cyber Agent 是一个由单人使用和维护的、本地优先的漏洞挖掘�
 - Runtime Environment Fingerprint。
 - Research Ledger Version。
 - 当前 TargetSnapshot ID 和 Toolchain Fingerprint。
-- 当前 Tool Registry 和 Deferred Tool Catalog。
+- immutable Tool catalog、当前 Turn DeferredActivationSet 和 resolved plan identity。
 - 设备、PTY 和后台 Job 状态。
 - 本 Turn 已修改文件和新建 Artifact。
 
 StepSnapshot 不做全项目重扫描。它先比较便宜的 mtime、size、Git HEAD/dirty state 和工具状态，只在指纹变化时刷新对应 Snapshot。
 
+每次模型采样再捕获不可变 SamplingStepPlan，绑定 TurnConfigurationSnapshot、ContextPlan、ResolvedToolPlan、AgentModelProfile/Capability Mapping、RequestRequirements 和 `generic-v1` renderer。该 Plan 同时决定发送 ToolSpecs、RequestAudit、ToolCall validation/dispatch、Receipt binding 和 Baseline admission；捕获后不受 queued 配置或后续 `tool_search` 修改。
+
+`tool_search` 匹配只更新 typed DeferredActivationSet，使当前 Turn 的下一 Step 重算 Plan。Activation 在 Turn 结束和 Resume 后清空；Hidden/Unavailable Tool 永不进入集合。
+
 ### 5.3 固定处理点
 
-不实现通用 Hook Runtime，但主循环保留三个内部处理点：
+不实现通用 Hook Runtime，但主循环保留固定内部处理点：
 
-- `before_model_request`：刷新 Snapshot，组装 ContextPlan/DecisionManifest 和 ModelInputIR，决定全量/增量请求。
+- `turn_boundary_configuration`：应用排队的 DomainProfile、ResearchPhase 和 AgentModelProfile，组合当前 Tool Exposure；模型自由文本不能触发切换。
+- `before_model_request`：刷新 Snapshot，捕获 SamplingStepPlan，组装 ContextPlan/DecisionManifest/ContextDeliveryMap 和 ModelInputIR，持久化 RequestAudit 后决定全量/增量请求。
+- `before_tool_execution`：使用产生该 ToolCall 的 ResolvedToolPlan 验证 Tool Schema/dispatch，返回结构化执行前错误或建立 ToolExecutionPlan；不回查新 Plan，不自动重试。
 - `after_tool_result`：持久化 ExecutionReceipt/Artifact Lineage，更新 Observation、Research Ledger、Project Diff 和 Job 状态。
 - `turn_end`：更新 Session Summary、Project Memory 和效率指标。
 
@@ -253,12 +291,6 @@ StepSnapshot 不做全项目重扫描。它先比较便宜的 mtime、size、Git
         │   ├── notes/
         │   ├── decisions.md
         │   └── failed-paths.md
-        ├── modes/
-        │   └── <mode-name>/
-        │       ├── prompt.md
-        │       ├── tools.toml
-        │       ├── bootstrap.toml
-        │       └── memory-template.md
         ├── prompts/
         │   └── project.md
         ├── sessions/
@@ -288,7 +320,7 @@ StepSnapshot 不做全项目重扫描。它先比较便宜的 mtime、size、Git
 
 | 数据 | 权威来源 | 派生数据 |
 |---|---|---|
-| 项目配置 | `project.toml`、`tools.toml`、Mode Pack | 解析后的运行时配置 |
+| 项目配置 | `project.toml`、`tools.toml`、Project Prompt；固定 Domain/Phase 资源来自版本化程序资源 | 解析后的运行时配置 |
 | 对话、模型请求和工具审计 | `sessions/<id>/events.jsonl` | Prompt History、Session Summary、Metrics |
 | TargetSnapshot/Hypothesis/Experiment/Finding/Next Action | `research.jsonl` | ResearchState、ResearchWorldState Section、TargetDelta |
 | 人工/模型整理的长期知识 | `memory/*.md` | Memory Retrieval Index、注入片段 |
@@ -409,10 +441,12 @@ Memory Manager 在项目打开和 Turn 开始时比较当前文件 Hash 与最�
 上下文不再无条件注入全部 Project Memory：
 
 - `core.md` 的短小核心事实始终注入。
-- `notes/`、`decisions.md` 和 `failed-paths.md` 根据当前用户输入、Mode、Research ID 和最近工具结果按需检索。
-- 检索结果保留来源路径、Section、Hash 和相关性分数。
-- 首期使用标题、标签、关键词和 `rg` 风格文本检索，不需要向量数据库。
-- 当记忆和会话规模证明文本检索不足时，可增加可重建的 SQLite FTS 索引，但 SQLite 不成为事实源。
+- `notes/`、`decisions.md`、`failed-paths.md`、Research Records 和 Artifact/Observation metadata 使用独立 candidate eligibility，先排除跨 Project、错误 Target/Version 和不可用 Artifact。
+- 固定版本化 pipeline 为 exact security identifiers → fielded BM25 → CJK/ASCII character n-gram → RRF → authority/freshness tiered rerank → stable ID tie-break。
+- Query views 只由当前输入、精确标识符、DomainProfile/ResearchPhase、active Hypothesis、TargetSnapshot 和 typed evidence gap 确定性生成，不调用模型扩写 query。
+- 检索结果保留来源路径/Record、Section、Hash、exact matches、component ranks、authority/freshness disposition、inclusion/exclusion reason 和 Context cost。
+- 首个实现只用 bounded scan/in-memory derived index 并运行 Shadow，不改变模型输入。promotion 需要 controlled acceptable-reference fixtures 证明 recall/precision、重复读取或 Token 收益。
+- 只有实测延迟证据、可删除重建路径和独立依赖决策后才考虑 SQLite FTS；默认不使用向量数据库、remote embedding/reranker 或 model judge。
 - 每次模型请求记录注入了哪些记忆片段及其 Token 占用。
 
 ## 8. Research Ledger 与上下文管理
@@ -482,6 +516,10 @@ Memory Manager 在项目打开和 Turn 开始时比较当前文件 Hash 与最�
 - Core 不阻止状态转移，不要求安全审批或自动 Validator。
 - `confirmed` 只是研究语义，Base Prompt 要求其有可引用的实验和证据。
 - 同标题、同 Target、同 Sink 或同 Artifact 的记录在新建前先做去重检查。
+
+M4-S3e1 通过 additive payload 将证据角色变为 `EvidenceLink { relation, evidence }`。固定 relation 是 supports、contradicts、positive_control、negative_control、environment_control、reachability_proof、prerequisite_proof 和 impact_proof。它只能由显式 `research_update` 创建；Prompt、Summary、Replay/Eval/Vision 和模型 confidence 都不能推断或升级关系。
+
+历史 `evidence_refs` 保守 Upcast 为 supports，`negative_refs` 为 contradicts，不把旧数据猜成 control。Gap projection 只读 typed fields/links，并明确区分 unknown 与 missing。
 
 #### 确定性去重
 
@@ -637,7 +675,13 @@ Context Builder 改为 Context Planner。每个输入片段实现：
 
     ContextFragment {
         id
-        source
+        slot
+        origin
+        semantic_class
+        authority_level
+        retention_class
+        freshness_identity
+        references
         priority
         content_hash
         token_estimate
@@ -657,6 +701,8 @@ Context Builder 改为 Context Planner。每个输入片段实现：
         context_fingerprint
         fragment_manifest
         context_decision_manifest
+        context_delivery_map
+        prompt_renderer: generic-v1
     }
 
     ContextDecisionManifest {
@@ -664,7 +710,8 @@ Context Builder 改为 Context Planner。每个输入片段实现：
         budget
         candidates: [
             fragment_id
-            source
+            slot
+            origin
             content_hash
             token_estimate
             decision: include | truncate | artifact_ref | exclude
@@ -680,6 +727,12 @@ Context Builder 改为 Context Planner。每个输入片段实现：
 - 离线 Eval 可以针对同一历史 Turn 重新运行 Context Planner，比较 Token、覆盖率和决策变化；重新编译结果是 Eval 派生数据，不改写原请求审计。
 - Selection 算法或 Token Estimator 变化必须进入 Context Planner Version 和 Fingerprint。
 
+`ContextSlot` 只负责 Base/Personal/Project/Domain/Phase/Research/Project Snapshot/Memory/Summary/History/User/Turn-local 的固定位置。Origin、SemanticClass、AuthorityLevel、RetentionClass 和 FreshnessIdentity 不得影响排序。M4-S3a1 只迁移最小 Slot/Origin 并保持现有 bytes；完整 provenance 在 M4-S3e2 实现。
+
+每个 Fragment 具有稳定 ContextFragmentId，每个 fragment-local 条目具有确定性 ContextSubitemId；exact bytes 另有 content hash。Provider 可选 DeliveryItemId 只在 Adapter 内为一次 prepared request 的 transport retry 使用，不能进入 Domain/Research identity，也不能跨 Primary/Vision。
+
+ContextPlanner 使用唯一 `generic-v1` renderer，并产生不进入模型文本的 `ContextDeliveryMap` sidecar：instruction byte span 和 ContentItem final position 都必须恰好映射到 Fragment/Subitem、content hash、transform 和 provenance；renderer separator 是唯一例外。Renderer identity 进入 Context/Prompt fingerprint、RequestAudit、Baseline 和 Replay。没有第二个真实 renderer 和 Eval 证据前，不增加 PromptDialect Trait/Registry/Config。
+
 与 Codex 一样，模型请求保持三个独立通道：
 
 - Base Instructions。
@@ -690,18 +743,19 @@ Context Builder 改为 Context Planner。每个输入片段实现：
 
 ### 8.5 固定组装顺序
 
-1. Base Prompt。
+1. Base Contract（`Pragmatic Vulnerability Researcher`）。
 2. Personal Preferences。
 3. Project Prompt。
-4. 当前 Mode Prompt。
-5. ResearchWorldState Full/Diff。
-6. Project Snapshot Full/Diff。
-7. Project Memory Core。
-8. 按需检索的 Memory Fragments。
-9. Session Summary。
-10. 最近会话历史。
-11. 当前用户输入。
-12. Turn-local Tool/Job Update。
+4. 当前 DomainProfile Prompt。
+5. 当前 ResearchPhase Prompt。
+6. ResearchWorldState Full/Diff。
+7. Project Snapshot Full/Diff。
+8. Project Memory Core。
+9. 按需检索的 Memory Fragments。
+10. Session Summary。
+11. 最近会话历史。
+12. 当前用户输入。
+13. Turn-local Tool/Job Update。
 
 稳定内容始终放在前面，动态内容放在后面，便于 Prompt Cache 和调试。
 
@@ -782,62 +836,64 @@ StepSnapshot 只计算这一级指纹。如果它与缓存一致，直接复用 
 4. 写入 `Compaction` 审计事件。
 5. 原始会话仍保留在本地 `events.jsonl`，不删除。
 
-Session Summary 至少保留：
+Session Summary v2 分离：
 
-- 当前目标。
-- Target、Version、TargetSnapshot ID 和 Environment。
-- 已验证事实。
-- 活跃假设。
-- 失败路径。
-- 重要 Artifact。
-- 已修改文件。
-- 未完成工具或进程。
-- 下一步。
+- `EvidenceSpine`：TargetSnapshot、active Hypothesis、Experiment、Finding、NextAction、Artifact、ExecutionReceipt 引用，以及绑定的 Research stream identity + watermark/hash。
+- `NarrativeSummary`：当前目标、简短进展、未解决问题和下一步说明；它有损、bounded 且不是事实。
+
+Compaction Event 只证明本次压缩已发生。Evidence Spine 引用现有事实，Narrative 只帮助续写；两者都不能创建或升级 Research claim。append 前验证每个引用的 Project/stream/type/watermark，Resume/Rebuild 对 missing、cross-project、stale 或 type mismatch 严格失败。历史 Summary v1 通过 Upcaster 保持可读，不把旧字符串升级成 typed evidence。
 
 ## 9. Prompt 管理与优化
 
 ### 9.1 Prompt 来源
 
-- 内置 Base Prompt：保持短小，只定义 Agent 身份、漏洞研究原则、工具协议和输出格式。
+- 内置 Base Contract：保持短小，固定唯一 `Pragmatic Vulnerability Researcher` 身份、漏洞研究原则、工具协议和输出格式。
 - 全局 Personal Prompt：用户的偏好和工作方式。
 - Project Prompt：当前目标的特殊约束和工作流。
-- Mode Prompt：按需加载的源码、Web、移动端、二进制或固件研究指引。
+- DomainProfile Prompt：固定 source、web、mobile、binary 领域研究指引。
+- ResearchPhase Prompt：固定 mapping、hypothesis、experiment、verification、evidence_curation 当前目标指引。
 
-Prompt 保存为 Markdown，不编译进大量 Rust 字符串。
+固定 Base/Domain/Phase Prompt 保存为独立 Markdown 资源并以 `include_str!` 进入单一二进制；Personal/Project Prompt 是本地可编辑输入。不建设运行时 Prompt 文件系统 loader 或动态 Registry。
+
+Prompt renderer 与 Prompt 内容分离：当前只有固定 `generic-v1`，只拥有 fragment separator、instruction/content channel 渲染和 ContextDeliveryMap emission，不拥有人格、Domain/Phase、Tool Schema 或 Provider wire。
 
 ### 9.2 优化能力
 
 - `/prompt inspect`：显示本次模型请求的精确组装顺序、来源、Hash 和 Token 估算。
 - `/prompt edit project`：打开项目 Prompt。
-- `/prompt mode <name>`：切换当前研究模式。
+- `/domain <source|web|mobile|binary>`：排队切换领域 Profile，在下一 Turn 生效。
+- `/phase <mapping|hypothesis|experiment|verification|evidence_curation>`：排队切换当前研究阶段，在下一 Turn 生效。
 - `/prompt diff`：对比相邻请求中的 Prompt 变化。
 - `/context`：显示各片段占用和截断情况。
 - 每次 Model Request 记录 Prompt Version 和 Context Fingerprint。
 - 使用 snapshot test 保证组装顺序不被无意改变。
 - 稳定 Prompt Fragment 独立计算 Hash 和 Token，内容未变时复用缓存。
-- Base、Personal、Project 和 Mode Prompt 的变化必须导致 Context Fingerprint 变化和增量请求回退。
+- Base、Personal、Project、Domain 和 Phase Prompt 的变化必须导致 Context Fingerprint 变化和增量请求回退；实际发送的 Tool Exposure 变化使用 `TOOLS_CHANGED`。
 
-### 9.3 Mode Pack
+### 9.3 DomainProfile 和 ResearchPhase
 
-Mode 不只是一段 Prompt，而是一个轻量本地目录：
+固定 DomainProfile 只包含：
 
-    modes/<name>/
-    ├── prompt.md
-    ├── tools.toml
-    ├── bootstrap.toml
-    └── memory-template.md
+- stable ID 和 generation；
+- 编译期 Markdown Prompt；
+- TargetKind 兼容性；
+- bounded ToolExposurePlan。
 
-- `prompt.md`：当前领域的研究方法和输出偏好。
-- `tools.toml`：该 Mode 的 Direct/Deferred 工具和资源键声明。
-- `bootstrap.toml`：进入 Mode 时执行一次或指纹变化后再执行的环境检查。
-- `memory-template.md`：该类项目建议维护的 Memory Section。
+固定 ResearchPhase 只包含：
 
-Bootstrap 结果写入 Project Snapshot 和 Tool Capabilities Cache，避免模型在每个会话重复执行工具存在性、版本、设备和目标检查。
+- stable ID 和 generation；
+- 当前工作目标的短 Markdown Prompt；
+- bounded ToolExposurePlan。
+
+新 Session 在第一次模型请求前追加默认 `mapping` 选择；legacy Session 的只读 Replay 只解析为 `mapping` 而不改写历史，在下一次真实 Turn 请求前再追加该默认选择。显式 operator 选择同样只有在 Session Event durable append 成功后才于 Turn 边界生效；失败则在模型请求前停止。首版不从模型自由文本或隐式启发式推断 Phase。未来只有在精确 Ledger 谓词和稳定 Reason Code 已定义时，才允许增加一个纯函数投影。
+
+新请求使用 `prompt:domain:<id>:<generation>` 和 `prompt:phase:<id>:<generation>`。历史 `prompt:mode:<id>:<generation>` RequestAudit 保持可重建，不追溯改写。
 
 ### 9.4 漏洞研究基本原则
 
-Base Prompt 应要求 Agent：
+Base Contract 应要求 Agent：
 
+- 保持务实、简洁、证据优先的漏洞研究协作方式；人格不随 Domain 或 Phase 变化。
 - 先理解攻击面，再提出可检验假设。
 - 主动使用工具验证，不把模型推理当成事实。
 - 区分 Candidate、Reproduced 和 Confirmed Impact。
@@ -891,10 +947,29 @@ Base Prompt 应要求 Agent：
 
 执行结束产生 `ExecutionReceipt`，至少保存 Plan Hash、开始/结束状态、退出原因、输出 Artifact/Observation 引用和环境变化摘要。
 
+模型可见的 Tool description 必须稳定包含 `Use when`、`Do not use when`、`Prefer` 和 `Produces`。已知输入/输出使用精确 JSON Schema、required/enum/bounds 和实际结构，不用无约束通用 object 掩盖契约。
+
+执行失败统一映射为：
+
+    ToolFailure {
+        code
+        stage: pre_execution | execution
+        retryability: correct_arguments | explicit_rerun_only | terminal
+        message
+        field_errors[]?
+        execution_id?
+        receipt_ref?
+    }
+
+每个 ToolFailure 都必须放在与原 ToolCall 配对的 ToolResult 中；没有 ExecutionReceipt 不等于可以省略结果。只有 `pre_execution + correct_arguments` 可以在没有 ExecutionReceipt 时返回给模型纠正，因为工具尚未执行。执行一旦开始必须有真实 ExecutionReceipt，包括执行失败或取消；模型必须发起新的 ToolCall，Runtime 不静默重试。Receipt、History、RequestAudit、Artifact 等执行后持久化提交失败属于 App/AgentLoop 错误，不得把真实成功 ToolResult 改写成失败或伪造 Receipt。
+
+Architecture v1.4 中的 `field_errors` 与 `receipt_ref` 是可选契约词汇，不构成当前 Rust 占位授权。M4-S3b 只有 `execution_id` 存在真实模型可见消费者，因此当前实现不增加无消费者字段、类型或 getter；需要它们时必须先出现真实生产路径和对应回归。
+
 Tool Registry 只负责：
 
 - 名称到实现的映射。
 - JSON Schema 验证。
+- Tool guidance、input/output Schema 和结构化错误的一致呈现。
 - 超时和取消。
 - 并行或串行执行。
 - Direct/Deferred/Hidden 工具暴露。
@@ -925,6 +1000,10 @@ Tool Registry 只负责：
 
 `run_command` 是漏洞工具集成的主入口，可直接调用 `rg`、`git`、`adb`、`frida`、`apktool`、`jadx`、`gdb`、`lldb`、`radare2`、`nmap`、`curl` 和用户自己的脚本。Core 不重复实现这些工具。
 
+`http_request` 只提供结构化 method/URL/header/query/body、bounded timeout/redirect/preview，以及 status/final URL/metadata/timing/body Artifact，不演变成 Web Scanner 或厂商 API Client。
+
+`inspect_environment` 只返回与研究相关的 OS/runtime、Git、proxy、toolchain 和 connected-device availability/version 及稳定 fingerprint，复用现有进程和 Snapshot 所有者，不建立第二个环境数据库或任意 Probe DSL。
+
 文件修改能力由 Cyber Agent 自有 Adapter 提供，不依赖 `codex-apply-patch`：
 
 - `write_file` 负责小文件或完整内容已知时的原子整文件写入；写入前后记录内容 Hash、大小和本地审计事件。
@@ -954,13 +1033,19 @@ MCP 只作为后续可选 Adapter；在真的有必须接入的 MCP Server 前�
 
 ### 10.4 Tool Exposure 和按需发现
 
-精简复用 Codex ToolExposure，只保留三种模式：
+精简复用 Codex ToolExposure，只保留三种暴露状态：
 
 - `Direct`：基础工具，初始请求直接暴露。
-- `Deferred`：按 Mode 或项目加载的工具，通过 `tool_search` 发现后再追加 Schema。
+- `Deferred`：按 DomainProfile、ResearchPhase 或项目需要延迟的工具，通过 `tool_search` 发现后再追加 Schema。
 - `Hidden`：由 Runtime 内部调用，模型不可直接调用。
 
-默认 Direct 只保留高频工具：文件读取/搜索、命令执行、Patch、图片、Research State 和 `tool_search`。低频领域工具保持 Deferred。
+一个纯所有者按 Registry default → DomainProfile override → ResearchPhase override → Deferred activation → runtime availability 合成最终暴露。`Hidden` 是终止状态，后续层不能搜索或提升；Phase/Domain 只能提升或延迟非 Hidden 工具。
+
+Registry 本身是 immutable canonical catalog。每个采样 Step 的纯 resolver 生成 ordered `ResolvedToolPlan`，其 exact ToolSpecs 与 Runtime binding 一起进入 SamplingStepPlan。模型 ToolCall 只能经广告该调用的 Plan dispatch；未广告、未激活、Hidden、Unavailable 或 fingerprint mismatch 返回配对 pre-execution ToolResult，不能回查 raw catalog 或更新后的 Plan。
+
+Deferred activation 只属于当前 Turn：成功 `tool_search` 使后续 Step 捕获新 Plan，当前 Step 不变；下一 Turn 和 Resume 清空。RequestAudit 记录每个 Step 实际发送的 ToolSpecs，因此不建立第二套 durable activation fact。
+
+默认 Direct 只保留当前阶段高频工具以及 Research State 和 `tool_search`。Mapping 偏 inspect/read/search/batch/environment/network；Experiment/Verification 才直接暴露更多执行、Job、PTY 和变更工具；Evidence Curation 偏 Artifact/Research/Memory。它们只是模型上下文优化，Runtime 仍为 FullAccess。
 
 当总 Tool Schema 还很小时，Deferred 不应增加额外往返。启用阈值由实测确定，至少记录 Tool Schema Token 占用和 `tool_search` 命中率。
 
@@ -985,6 +1070,7 @@ Effect 元数据只用于调度、重试、缓存和恢复，不用于确认弹�
 - 工具开始、完成、失败和取消都形成本地事件。
 - 恢复会话时不自动重放上一进程未完成的有副作用命令。
 - Provider 网络重试只重试模型请求；ToolExecutionPlan 一旦获得完成 Receipt，不因模型重试再次执行。
+- 执行前参数失败不产生虚假 ExecutionReceipt；执行失败和已完成执行都不因“纠错”自动重放。执行后 Receipt/History/RequestAudit 持久化失败走 App/AgentLoop 错误边界，不产生 post-execution ToolFailure。
 
 ## 11. Full Access 执行模型
 
@@ -1026,6 +1112,7 @@ Full Access 不等于无条件记录敏感值：
 - ArtifactCreated / ArtifactDerived
 - MemoryChanged / MemoryExternalChangeDetected
 - PromptChanged
+- ResearchPhaseSelected：Phase、generation、source 和稳定 Reason Code
 - CompactionCreated / StreamRecovered
 
 完整模型请求快照默认关闭，只在本地 debug 配置下保存到当前 Session 的 `request-snapshots/`。Prompt Hash、Context Fingerprint、Fragment Manifest 和 Usage 始终保留。
@@ -1033,6 +1120,7 @@ Full Access 不等于无条件记录敏感值：
 仅记录 Hash 不足以长期审计，因为 Prompt、Memory 和项目文件以后可能变化。默认审计因此保存轻量 `RequestAuditManifest`：
 
 - 按发送顺序记录 Instructions、Input Item、Tool Schema、Output Schema、Model Profile 和语义请求属性的类型、来源、版本与内容 Hash。
+- 记录 SamplingStepPlan identity、ResolvedToolPlan fingerprint、`generic-v1` renderer identity 和 ContextDeliveryMap 或其去重 Blob 引用；sent ToolSpecs 与 dispatch plan 必须可证明一致。
 - 记录 ModelInputIR Schema/Hash、Provider Adapter Version 和 Capability Mapping Hash；语义 IR 与实际 Provider 编码可以分别定位。
 - 每个首次出现的渲染后文本片段、Tool/Output Schema 和派生图片副本只向 Artifact Store 内的 content-addressed Blob Store 写入一次；后续请求复用同一 Blob 引用。
 - User/Assistant/Tool Item 仍以 Session Event 为权威，Manifest 引用对应 Event ID；大型 Tool Output 和图片引用 Artifact ID。
@@ -1069,6 +1157,8 @@ Cyber Agent 只允许三类有意义的对外网络请求：
 - 重复文件读取比例、Project Snapshot Cache Hit 和 Memory Retrieval 命中。
 - Compaction 次数、耗时和压缩前后 Token。
 - 重复建立的 Hypothesis 和重复运行的已否定 Experiment。
+- controlled Eval 中 acceptable first-action、invalid arguments/correction、missed batch opportunity 和 Schema cost；unmatched Replay termination 与 Observation/Replay/Vision promotion 在无 typed durable signal 前保持 Deferred，绝不假 0。Deferred activation 只可由同一 Turn 相邻 RequestAudit ToolSpec transition 证明；当前 RequestAudit 没有持久 Turn identity，因此 M4-S3b 保持 Deferred。
+- Retrieval Shadow 的 recall/precision、重复读取/Token 变化、authority/freshness disposition，以及 Guidance Shadow 的关键 gap closure/cost。
 
 指标只写当前项目的本地 Event/summary，不上传。`/metrics` 显示当前 Session 和项目累计值。
 
@@ -1110,6 +1200,20 @@ Event、RequestAuditManifest、ExecutionReceipt 和 Artifact 已足以构造可�
 - Replayed/Shadow 结果必须带来源标签，不能被提升为真实漏洞证据、复现或 confirmed Finding。
 - Trace Fixture 只保存 Event/Artifact 引用和期望不变量；源事实仍是原 Event Stream 和 Blob。
 - Prompt、Context、Provider Adapter 或 Tool Protocol 修改后，优先运行固定 Trace Suite，再进行真实目标研究。
+- Tool Accuracy Eval 只从现有 Trace/Event/ToolCall/Result/Receipt/Artifact 派生报告；可为一个 case 声明多个 acceptable first actions，不建立模型裁判服务。
+- 受控报告至少比较首次动作、参数失败/纠正、未匹配 Tool、重复读取、遗漏 Batch、Deferred Search、Schema Token 和证据提升边界；报告不能写正式 Research/Memory。
+
+### 12.5 确定性安全检索与证据引导
+
+安全检索不是通用 Skill selector。它使用 7.4 的固定 pipeline，并针对 CVE/CWE、package/bundle、class/method/symbol、URL、Android permission/intent/component、binary import/export/address、Hash 和 Research/Artifact/Receipt ID 保留标点语义。不同 candidate pool 只能复用 normalizer/ranker，不能共用一个 global eligibility 或 opaque score。
+
+检索先在 local Shadow 运行：不改变 ModelInputIR，不调用 Provider/Tool，不写 Research/Memory。报告包含 algorithm/query identity、rank components、authority/freshness tier 和成本；没有 measurable benefit 时保持 Shadow 或删除。
+
+一个独立 pure evidence-gap projection 只从 typed Research fields/EvidenceLinks 推导 entry/sink/reachability/prerequisite/positive/negative/environment control/impact/repeatability/target-version/provenance/contradiction gaps。它不把 Unknown 当 Missing，也不改变 Phase 或 Finding。
+
+实验引导只排序既有 NextAction 或 caller-supplied Eval candidates，factor 固定为 boundary importance、competing-hypothesis discrimination、expected gap closure、reproducibility、novelty、Target applicability、execution cost、mutation risk 和 version-drift risk。Hard invalidity/missing prerequisite 先过滤，所有 factor 和 tie-break 可解释。
+
+Guidance 从不创建 Experiment、执行 Tool、更新 Memory/Research 或自动切换 ResearchPhase。它先运行 Shadow；不建立 learned ranker、model judge、autonomous workflow 或 experiment-template DSL。
 
 ## 13. 多模态
 
@@ -1224,7 +1328,7 @@ WebSocket 和 HTTP/SSE 连接复用在 HTTP Streaming 稳定后评估；这是 T
 
 - Primary ProviderSession 是 AgentLoop 唯一可增量复用的 ProviderSession。
 - Secondary Vision Request 使用独立的 scoped request identity，不与 Primary 共享 `previous_response_id`、Server Output Items 或 IncrementalBaseline。
-- `VisionRouteDecision` 记录 Mode、Resolved Route、Reason Code、Profile 引用、Capability Hash 和 source Artifact。
+- `VisionRouteDecision` 记录 VisionMode、Resolved Route、Reason Code、AgentModelProfile 引用、Capability Hash 和 source Artifact。
 - `VisionObservation` 记录 source/derived Artifact、task hash、摘要、OCR/region、线索、不确定性和 RequestAuditManifest 引用。
 - Replay 只重放已记录的 Route/Observation，不调用真实 Vision Provider。
 - Vision Provider 没有项目 Memory、Research Ledger、通用 Tool Runtime 或独立自动续写能力，因此不构成第二 Agent。
@@ -1251,7 +1355,7 @@ WebSocket 和 HTTP/SSE 连接复用在 HTTP Streaming 稳定后评估；这是 T
 |---|---|
 | Model/Profile 变化 | 清空 Baseline，发送全量请求 |
 | ModelInputIR Schema 或 Provider Capability Mapping 变化 | 清空 Baseline，发送全量请求 |
-| Base/Personal/Project/Mode Prompt Hash 变化 | 清空 Baseline，发送全量请求 |
+| Base/Personal/Project/Domain/ResearchPhase Prompt Hash 变化 | 清空 Baseline，发送全量请求 |
 | Tool Schema/Exposure 变化，包括 Deferred Tool 加载 | 清空 Baseline，发送全量请求 |
 | Output Schema、reasoning、include 或其他非 Input 语义变化 | 清空 Baseline，发送全量请求 |
 | Input 严格等于旧 Input + 服务端 Output + 新增 Items | 发送 `previous_response_id + delta` |
@@ -1289,9 +1393,9 @@ WebSocket 和 HTTP/SSE 连接复用在 HTTP Streaming 稳定后评估；这是 T
 - Provider Profile 定义 Adapter、Model、Capability Mapping、显式凭据来源和请求属性。
 - Agent Profile 只组合一个 Primary、可选 Vision 和 VisionMode，不包含通用路由规则。
 - 用户可用 `/profile <agent-profile-name>` 切换组合 Profile。
-- Mode Pack 可声明默认 Profile，但不在单个 Turn 中隐式频繁切换模型。
+- DomainProfile/ResearchPhase 不选择 Provider；AgentModelProfile 只由显式配置/操作切换，不在单个 Turn 中隐式频繁切换模型。
 - `/profile` 或 `/vision mode` 在当前 Turn 结束后生效；改变 Primary 请求语义时重建 ProviderSession 和 Baseline。
-- `doctor` 检查 Mode 与显式 Capability 是否匹配；它会解析内联配置但不显示 Secret，也不发起 Provider 请求。
+- `doctor` 检查 AgentModelProfile、VisionMode 与显式 Capability 是否匹配；它会解析内联配置但不显示 Secret，也不发起 Provider 请求。
 
 Provider Config v1 使用显式 `schema_version`、`active_agent_profile`、命名 `providers`、命名 `capability_mappings` 和命名 `agent_profiles`。Provider 条目分别声明固定 binding、Wire API、Base URL、Model、二选一的内联 `api_key` 或专用 `CYBER_AGENT_*_API_KEY` 引用、Capability Mapping 引用和 generation；未知字段、凭据缺失/冲突、悬空引用、零版本和非法能力组合必须在网络活动前失败。
 
@@ -1336,6 +1440,8 @@ REPL 内部命令：
 - `/tools`
 - `/tools search <query>`
 - `/jobs`
+- `/domain <source|web|mobile|binary>`
+- `/phase <mapping|hypothesis|experiment|verification|evidence_curation>`
 - `/profile <name>`
 - `/vision mode <auto|primary_direct|secondary_tool|disabled>`
 - `/snapshot`
@@ -1369,7 +1475,8 @@ Web 不进入 MVP。CLI 稳定后，如果图片、Markdown 和长输出的展�
     ├── task.md
     ├── prompts/
     │   ├── base.md
-    │   └── modes/
+    │   ├── domains/
+    │   └── phases/
     ├── src/
     │   ├── main.rs
     │   ├── lib.rs
@@ -1378,6 +1485,8 @@ Web 不进入 MVP。CLI 稳定后，如果图片、Markdown 和长输出的展�
     │   │   ├── model.rs
     │   │   ├── research.rs
     │   │   ├── context.rs
+    │   │   ├── domain_profile.rs
+    │   │   ├── research_phase.rs
     │   │   ├── tools.rs
     │   │   └── artifacts.rs
     │   ├── ports/
@@ -1397,8 +1506,7 @@ Web 不进入 MVP。CLI 稳定后，如果图片、Markdown 和长输出的展�
     │   │   ├── vision_analysis_service.rs
     │   │   └── eval_service.rs
     │   ├── adapters/
-    │   │   ├── model/openai_responses.rs
-    │   │   ├── model/compatible_chat.rs       # 仅在首个非 Responses Provider Slice 获批后创建
+    │   │   ├── responses/                     # 唯一 Responses HTTP/SSE wire owner
     │   │   ├── model/replay.rs
     │   │   ├── tools/filesystem.rs
     │   │   ├── tools/process.rs
@@ -1454,12 +1562,22 @@ P0/MVP 核心只需要：
 - `EventEnvelope<T>`
 - `SessionEvent`
 - `TurnContext`
+- `DomainProfile`
+- `ResearchPhase`
+- `ResearchPhaseSelection`
+- `TurnConfigurationSnapshot`
 - `StepSnapshot`
+- `SamplingStepPlan`
 - `Message`
 - `ContentItem`
 - `ContextFragment`
 - `ContextPlan`
 - `ContextDecisionManifest`
+- `ContextSlot`
+- `ContextOrigin`
+- `ContextSubitemId`
+- `ContextDeliveryMap`
+- `PromptRendererIdentity`
 - `ModelInputIR`
 - `ModelEvent`
 - `ModelCapabilities`
@@ -1471,6 +1589,9 @@ P0/MVP 核心只需要：
 - `IncrementalBaseline`
 - `ModelProfile`
 - `ToolSpec`
+- `RegisteredTool`
+- `ResolvedToolPlan`
+- `DeferredActivationSet`
 - `ToolExecutionPlan`
 - `ExecutionReceipt`
 - `ToolCall`
@@ -1497,33 +1618,44 @@ P1/M4 Eval 和领域工具协议再增加：
 - `TargetDelta`
 - `TraceFixtureManifest`
 - `ReplayResult`
+- `EvidenceLink`
+- `EvidenceSpine`
+- `NarrativeSummary`
+- `SecurityRetrievalReport`
+- `EvidenceGapReport`
+- `ExperimentGuidanceReport`
 
 这些类型只表达核心数据和效率语义，不包含团队、权限、云任务、通用工作流和复杂状态验证。Report 继续先使用 Markdown 模板，不进入 MVP 协议。
 
 ## 18. 从 Codex 复用什么
 
-复用原则：优先移植独立算法和测试，不依赖完整 `codex-core`。
+复用原则：优先 REFERENCE 后小型 REIMPLEMENT；只有 Port Ledger 先获准时才移植独立算法和测试，不依赖完整 `codex-core`。当前没有 Codex PORT。
 
 | 能力 | 方式 | 决策 |
 |---|---|---|
-| Tool Call / Tool Result 配对 | PORT | 保留异常 History 修复逻辑 |
-| ContextualUserFragment | PORT/REIMPLEMENT | 精简为 ContextFragment，保留来源、顺序、Hash 和大小上限 |
+| Tool Call / Tool Result 配对 | REIMPLEMENT | 已按本地 History 类型重实现严格配对；上游只作边界参考 |
+| ContextualUserFragment | REIMPLEMENT | 精简为 ContextFragment，保留来源、顺序、Hash 和大小上限 |
 | TurnContext / StepContext | REIMPLEMENT | 保留 Turn 稳定状态与每次采样快照的分离 |
-| Tool Schema 与 Executor 绑定 | PORT/REIMPLEMENT | 只保留最小 trait |
-| ToolExposure / Tool Search | PORT/REIMPLEMENT | 从设计和测试移植，不依赖 `codex-tools` |
-| 输出截断 | PORT | 移植独立算法和测试，不直接依赖其 `codex-protocol` 闭包 |
-| 图片验证和缩放 | PORT SUBSET | 只移植本地读取、格式验证、缩放和模型输入转换 |
-| Streaming Responses | PORT/REFERENCE | 只移植 HTTP 必需部分 |
+| SamplingStepPlan / ToolRouter 边界 | REIMPLEMENT | 借鉴 captured Step/Router 一致性；本地只保留 immutable plan、无 Code Mode/MCP/Policy |
+| Tool Schema 与 Executor 绑定 | REIMPLEMENT | immutable ResolvedToolPlan 同时绑定 advertised spec 与 runtime，不复制上游 Router |
+| ToolExposure / Tool Search | REIMPLEMENT | current-Turn DeferredActivationSet，不依赖 `codex-tools` |
+| 输出截断 | REIMPLEMENT | 按本地 Tool/Context budget 类型实现，上游只作测试边界参考 |
+| 图片验证和缩放 | REIMPLEMENT | 已按本地 Artifact/预算边界实现最小读取、验证、缩放和模型输入转换 |
+| Streaming Responses | REIMPLEMENT | 协议优先 Responses HTTP/SSE owner 已独立实现 |
 | Provider-neutral ModelInputIR | REIMPLEMENT | Domain 只表达语义请求，OpenAI 字段留在 Adapter |
-| Provider Session | PORT/REIMPLEMENT | 保留同进程 Session 内的 Last Request、Last Response ID 和 Transport 状态；不跨进程复用 |
-| previous_response_id | PORT | M1 完整请求稳定后立即补入，不延后到项目后期 |
+| Provider Session | REIMPLEMENT | 保留同进程 Session 内的 Last Request、Last Response ID 和 Transport 状态；不跨进程复用 |
+| previous_response_id | REIMPLEMENT | ProviderSession/Baseline 已按本地 IR 和 Capability 语义实现 |
 | WebSocket 连接复用 | LATER | HTTP Streaming 和增量语义稳定后再评估 |
-| Prompt Cache 稳定 ID | PORT | 保留稳定 Hash 思路 |
-| Replacement History / Compaction | REIMPLEMENT | 基于更小的本地 Summary |
+| Prompt Cache 稳定 ID | REIMPLEMENT | 复用稳定 Hash 思路，不复制实现 |
+| Prompt renderer identity | REIMPLEMENT | 只有固定 `generic-v1`，不移植 model-catalog template/registry |
+| 稳定人格 / DomainProfile / ResearchPhase | REIMPLEMENT | 借鉴人格只控制协作风格的分层思路；本地使用一个 Base Contract 和固定正交轴，不移植角色系统 |
+| Context provenance / Provider item ID | REIMPLEMENT | Domain 使用 Fragment/Subitem + ContextDeliveryMap；DeliveryItemId 留在 Adapter |
+| Replacement History / Compaction | REIMPLEMENT | Evidence Spine 只引用 Research/Artifact/Receipt facts，Narrative 保持有损非权威 |
+| BM25 / char n-gram / RRF Shadow selectors | REFERENCE/REIMPLEMENT | 借鉴 deterministic primitives/Shadow gate；按漏洞标识符、Target 和 evidence authority 重实现固定 pipeline，不移植 selector catalog/telemetry |
 | Apply Patch | REIMPLEMENT MINIMAL | 自有 Tool Adapter；首期只用 atomic whole-file write、最小统一 Diff 或外部 `git apply`，不依赖 `codex-apply-patch` |
-| Shell 命令处理 | PORT/REFERENCE | 只保留 argv、取消、截断和 Job 语义 |
+| Shell 命令处理 | REIMPLEMENT | 只保留 argv、取消、截断和 Job 语义；上游作边界参考 |
 | PTY | REIMPLEMENT | 直接使用 `portable-pty` 实现当前平台需要的最小功能，不移植 Codex 完整 PTY Runtime |
-| World State snapshot/diff | PORT/REIMPLEMENT | 只保留轻量 ResearchWorldState Section、Snapshot、Hash 和 Diff |
+| World State snapshot/diff | REIMPLEMENT | 只保留轻量 ResearchWorldState Section、Snapshot、Hash 和 Diff |
 | Artifact Lineage / Experiment Capsule | REIMPLEMENT | 基于现有 Event/Artifact 引用，不引入 Evidence 数据库 |
 | Trace Replay / Shadow Eval | REIMPLEMENT | Replay Adapter 只消费本地 Trace，不移植 Codex 产品级 Eval Runtime |
 | Observation / Target Delta | REIMPLEMENT | 使用漏洞研究字段和外部工具输出，不建立通用知识图谱 |
@@ -1584,7 +1716,7 @@ MVP 必须完成：
 11. ResearchWorldState 和 Project Snapshot 支持 Full/Diff，Context Fragment 支持 Hash/Cache。
 12. 会话超过上下文预算后可压缩并继续，强制退出后可 resume。
 13. 可用 `/prompt inspect`、`/context`、`/research`、`/snapshot` 和 `/metrics` 解释当前状态和开销。
-14. Direct/Deferred/Hidden Tool Exposure 可根据 Mode 和 Schema Token 开销运行。
+14. Direct/Deferred/Hidden Tool Exposure 可根据 DomainProfile、ResearchPhase 和 Schema Token 开销运行。
 15. 文本和本地图片可进入模型；既支持单一多模态 Primary，也支持文本 Primary + 可选 Vision Provider，并且路由可解释、可重放。
 16. 工具、记忆、Research、Prompt、Compaction、缓存命中和模型请求在本地可追溯。
 17. 除用户选择的 Model Provider 和显式研究请求外，不发送任何远程日志。
@@ -1593,6 +1725,14 @@ MVP 必须完成：
 20. ToolExecutionPlan/ExecutionReceipt 明确 Effect、Retry、Idempotency 和可缓存条件，但不增加审批。
 21. Artifact 内容和语义身份分离，可从 Event 生成完整 Lineage。
 22. 所有已发布 Event Schema 保留连续 Upcaster 链，旧项目不会因多次升级而失去可读性。
+23. 一个稳定漏洞研究人格与正交 DomainProfile/ResearchPhase 在 Turn 边界组合，Resume 后可恢复 Phase。
+24. Tool guidance、输入/输出 Schema 和结构化失败可审计；参数纠错不伪造 Receipt，执行不自动重放；执行后 Receipt/History/RequestAudit 持久化失败属于 App/AgentLoop 错误。
+25. 受控 Replay/Shadow Eval 只报告持久 Trace 可诚实观测的首次工具选择、参数失败、重复读取、Batch 和 Deferred Search；unmatched Replay termination 与 Observation/Replay/Vision promotion 在无 typed durable signal 前保持 Deferred，绝不假 0。
+26. 每个 Sampling Step 的 Context、ToolSpecs、RequestAudit 和 dispatch 绑定同一 immutable Plan；Deferred activation 不跨 Turn/Resume。
+27. `generic-v1` renderer 和 ContextDeliveryMap 可重建精确 bytes 与 Fragment/Subitem 来源，Provider item ID 不成为 Domain identity。
+28. EvidenceLink 显式表达支持/反证/控制/证明角色；Summary v2 Evidence Spine 只引用权威事实。
+29. 安全检索在 Shadow 中证明 identifier/CJK/authority/freshness 排序收益后才进入 Context，派生 index 可删除。
+30. Evidence-gap/NextAction guidance 可解释且不自动改变 Phase、执行 Tool、创建 Experiment 或提升 Finding。
 
 MVP 不包含：
 
@@ -1602,17 +1742,20 @@ MVP 不包含：
 - 多 Agent。
 - Sandbox 和审批系统。
 - 强制 Finding 状态机、Validator 和审批流程。
+- 多人格、角色 Agent、Domain × Phase 组合角色和通用 Workflow/Prompt Registry。
 - 报告平台。
 - 云服务。
 
 ### 19.1 超前设计分层
 
-- P0 Contract：ModelInputIR、TargetSnapshot、ExperimentCapsule、ArtifactRecord、Tool Effect/Receipt、Event Upcaster、VisionMode/RouteDecision 和 VisionObservation 进入 MVP，因为晚加会改动核心协议和历史数据。
-- P1 Validation：Trace Replay、Context Recompile、ObservationEnvelope 和 TargetDelta 进入 M3/M4；先用本地 Trace 和真实样例证明价值。
+- P0 Contract：ModelInputIR、TargetSnapshot、ExperimentCapsule、ArtifactRecord、Tool Effect/Receipt、Event Upcaster、VisionMode/RouteDecision、VisionObservation 以及 ResearchPhase Session continuity 进入 MVP，因为晚加会改动核心协议和历史数据。
+- P1 Validation：Trace Replay、Context Recompile、Tool Accuracy Report、ObservationEnvelope 和 TargetDelta 进入 M3/M4；先用本地 Trace 和可控样例证明价值。
 - P2 Deferred：通用知识图谱、向量数据库、模型路由服务、分布式执行、动态插件 ABI 和 Workflow DSL 不预留实现，只在真实瓶颈出现后重新评估。
 - P1/P2 不得创建新的权威数据库；优先从现有 Event、Research 和 Artifact 派生。
 
 ## 20. 实施里程碑
+
+以下 checkbox 是目标能力清单，不是当前完成状态；历史交付、当前 Slice 和授权状态只以 `docs/development/STATUS.md` 为准。
 
 ### M0：单 package 骨架
 
@@ -1699,7 +1842,7 @@ M1 总完成标准：M1a、M1b、M1c 分别有可运行集成测试，任一后�
 
 完成标准：中断后通过事件重放恢复会话和研究台账，历史 Schema 可经 Upcaster 读取，删除所有 Cache/Summary 仍可重建，且不加载其他项目记忆；TargetSnapshot/ExperimentCapsule 可定位一次实验的版本和输入，项目未变化时第二次 `inspect_project` 命中快照缓存。
 
-### M3：Context 效率、Tool Exposure、Mode 和图片
+### M3：Context 效率、Tool Exposure、DomainProfile 和图片
 
 - [ ] Context Budget。
 - [ ] ContextFragment / ContextPlan 和 Fragment Cache。
@@ -1711,12 +1854,11 @@ M1 总完成标准：M1a、M1b、M1c 分别有可运行集成测试，任一后�
 - [ ] History 归一化。
 - [ ] Compaction。
 - [ ] Direct/Deferred/Hidden Tool Exposure 和 `tool_search`。
-- [ ] Mode Pack 和指纹驱动 Bootstrap。
-- [ ] Prompt Profile 和 Model Profile。
+- [ ] 固定 DomainProfile Pack 和 Prompt/Tool 指纹。
+- [ ] Domain Prompt Profile 和 Agent Model Profile。
 - [ ] AgentModelProfile、VisionMode 和纯函数 Vision Route Resolver。
 - [ ] `doctor` 对 Primary/Vision Capability 组合做静态验证。
 - [ ] `/prompt inspect`、`/prompt diff`、`/context`、`/research`、`/snapshot` 和 `/metrics`。
-- [ ] `inspect_environment` 和 `http_request`。
 - [ ] `view_image`、图片 Artifact 和模型输入。
 - [ ] `VisionAnalysisService`、`analyze_image`、VisionRouteDecision 和结构化 VisionObservation。
 - [ ] `auto`、`primary_direct`、`secondary_tool`、`disabled` 四种模式矩阵。
@@ -1728,17 +1870,30 @@ M1 总完成标准：M1a、M1b、M1c 分别有可运行集成测试，任一后�
 
 ### M4：漏洞研究实战验收
 
+- [ ] 固定 `Pragmatic Vulnerability Researcher` Base Contract，不增加 Personality/Role Registry。
 - [ ] 源码审计 Prompt Profile。
 - [ ] Web 研究 Prompt Profile。
 - [ ] Mobile 研究 Prompt Profile。
 - [ ] Binary 研究 Prompt Profile。
+- [ ] `ResearchProfile` 语义迁移为 DomainProfile，历史 `prompt:mode:*` 审计继续可读。
+- [ ] mapping/hypothesis/experiment/verification/evidence_curation 固定 ResearchPhase、Session continuity 和 Turn-boundary selection。
+- [ ] Domain + Phase Tool Exposure 合成、Hidden 终止和 Baseline invalidation。
+- [ ] immutable SamplingStepPlan/ResolvedToolPlan、current-Turn DeferredActivationSet 和 exact dispatch binding。
+- [ ] 固定 `generic-v1` Prompt renderer identity，保持现有 bytes 且无 Dialect Registry。
+- [ ] Tool guidance、精确 input/output schema 和结构化 `pre_execution`/`execution` failure；执行后持久化错误走 App/AgentLoop 边界。
 - [ ] 使用本地可控样例执行端到端 Eval。
 - [ ] ReplayModelProvider、ReplayToolExecutor 和 TraceFixtureManifest。
 - [ ] Mechanical Replay、Context Recompile 和显式 Shadow Model Eval 三种隔离模式。
 - [ ] ObservationEnvelope 外部工具样例和两个 TargetSnapshot 的 TargetDelta。
 - [ ] Replay/Shadow 默认不写 Project Memory/Research，未匹配 Tool Call 不执行真实工具。
 - [ ] 建立全量/增量请求、单工具/批量工具、无缓存/有缓存的对照 Eval。
-- [ ] 统计模型往返、Token、重复读取、Snapshot Hit、Memory Retrieval 和重复 Hypothesis。
+- [ ] 统计模型往返、Token、acceptable first-action、参数失败/纠正、重复读取、Batch、Deferred Search、Snapshot Hit、Memory Retrieval 和重复 Hypothesis；unmatched Replay termination 与 Observation/Replay/Vision promotion 只有 typed durable signal 后才统计，否则保持 Deferred，绝不假 0。
+- [ ] `http_request` 和 `inspect_environment` 两个通用研究工具。
+- [ ] AndroidManifest 外部 Extractor，通过 `run_commands` 复用现有工具链，不在 Rust 内重写解析器。
+- [ ] typed EvidenceLink、legacy Upcaster 和 pure evidence-gap projection。
+- [ ] ContextSlot/Origin/Authority/Retention/Freshness、ContextDeliveryMap 和 Evidence-Spine Summary v2。
+- [ ] exact identifier + fielded BM25 + CJK/ASCII n-gram + RRF + authority/freshness retrieval Shadow。
+- [ ] deterministic evidence-gap/NextAction guidance Shadow，无 autonomous execution。
 - [ ] 根据 Eval 删除无用抽象和 Prompt。
 
 完成标准：至少完成一个长流程漏洞研究任务，且恢复、记忆、Research Ledger、TargetSnapshot、ExperimentCapsule 和证据引用正常；固定 Trace 可回放核心不变量，版本差分能解释来源；增量、批量和缓存方案在对照 Eval 中减少模型往返或重复 Token，否则删除对应复杂度。
@@ -1769,6 +1924,14 @@ M1 总完成标准：M1a、M1b、M1c 分别有可运行集成测试，任一后�
 - `primary_direct`/`secondary_tool` 的强制模式在能力不满足时仍发送请求，或图片在 Primary 与 Vision 两条路径中都被静默遗漏。
 - Primary 与 Vision Provider 交叉复用 Response ID、Server Output Items、ProviderSession 或 IncrementalBaseline。
 - Vision 模型拥有独立 AgentLoop/Research/Memory，或 VisionObservation 未经真实验证就提升为 Finding Evidence。
+- 为 Mapping/Experiment/Verification 创建不同人格或 Agent，或把 DomainProfile、ResearchPhase、AgentModelProfile 合并成组合角色。
+- ResearchPhase 在 Turn 中途生效、由模型自由文本隐式切换，或另建 Workflow/Phase 状态机覆盖 Research Ledger。
+- Prompt Full 顺序缺少 Domain/Phase 稳定身份，或 Tool Specs 被拼接进普通 Prompt。
+- Hidden Tool 被 Domain/Phase/`tool_search` 提升，或 Tool Exposure 被实现成权限/审批系统。
+- 同一 Sampling Step 的 sent ToolSpecs 与 dispatch runtime 来自不同 plan，执行时回查 mutable Registry，或 Deferred activation 泄漏到下一 Turn/Resume。
+- 为一个 `generic-v1` renderer 提前建立 PromptDialect Trait/Registry/配置，或 renderer identity 未进入 Fingerprint/Audit/Baseline。
+- 已知 Tool 输入/输出仍用无约束 Schema，Tool description 无法区分使用/禁用/优先/产出语义。
+- 参数验证失败产生虚假 ExecutionReceipt，或 execution 失败被 Runtime 自动重试；执行后 Receipt/History/RequestAudit 持久化失败被误报为 ToolFailure，或改写成功 ToolResult/伪造 Receipt。
 - 已有完成 Receipt 的 ToolExecutionPlan 因 Provider 重试再次执行，或 `never_auto_retry` 工具被自动重放。
 - 非确定性/有外部副作用的工具结果被 content-addressed Cache 静默复用。
 - `write_file`/`apply_patch` 校验或应用失败后留下部分写入，或成功后没有前后 Hash 和实际 Diff 可审计。
@@ -1788,11 +1951,16 @@ M1 总完成标准：M1a、M1b、M1c 分别有可运行集成测试，任一后�
 - 相同 Blob Hash 导致不同实验中的 Artifact Provenance 被错误合并。
 - Observation 的模型置信度未经 `research_update` 就被提升为 Finding/已验证事实。
 - Core 仅根据模型相似度自动合并 Research Record，或合并后删除原始记录。
-- Compaction 后丢失 Target、Version、已验证事实或下一步。
+- Compaction 后丢失 Target/Version/事实引用/下一步，或 Summary 文本被当作新的 verified Research authority。
 - 项目记忆改动无法在本地审计。
 - Prompt/Memory/Schema 源内容变化后，无法从 Event、RequestAuditManifest 和 Artifact 重建历史语义请求。
 - Context Planner 无法解释片段包含/排除原因，或离线 Recompile 改写历史 RequestAuditManifest。
+- 最终 instruction byte/ContentItem 无法映射到 Fragment/Subitem，provenance 被塞进 Provider-specific ContentItem，或 Provider DeliveryItemId 进入 Research identity。
+- legacy evidence 被猜测为 positive/negative/environment control，或 Prompt/Summary/Vision/Replay 自动创建 EvidenceLink。
+- 检索跨 Project/Target 泄漏、用一个 opaque score 覆盖 authority/freshness，或未经过 Shadow 证据就进入模型 Context。
+- Evidence-gap/Guidance 把 Unknown 当 Missing、自动切换 Phase/执行 Tool/创建 Experiment/提升 Finding，或依赖远程 judge/learned ranker。
 - Replay/Shadow 执行真实工具、写入正式 Research/Memory，或其结果被当作真实漏洞证据。
+- Tool Accuracy Eval 依赖第二套 Trace/事实库、远程裁判服务、controlled public projection 入口或假 0，或评分结果自动改变正式 Finding/Memory。
 - 未经配置即向 Model Provider 以外的产品端点发送数据。
 - CLI 必须依赖云 Server 才能运行。
 - 为一个内部功能新增 crate、网络服务或通用插件框架，但无真实使用证据。
@@ -1807,16 +1975,24 @@ M1 总完成标准：M1a、M1b、M1c 分别有可运行集成测试，任一后�
 - 通用抽象遵循三次重复规则；唯一性和规范化不变量从第一次实现起只有一个所有者。
 - 默认使用 `pub(crate)`；测试访问不是扩大公共 API 的理由。
 - 不创建 `common.rs`、`utils.rs`、`helpers.rs`、`base.rs`、通用 `manager.rs` 或 Hook Registry 杂物抽象。
+- 不创建 Personality/Role、Prompt Stage、DomainProfile、ResearchPhase 或 Tool Exposure 动态 Registry；固定轴使用显式类型和一个组合路径。
+- 不创建 Prompt renderer、Tool selector、Retrieval 算法动态 Registry；一个真实实现用显式版本和固定 owner。
+- 稳定人格只属于 Base Contract；DomainProfile 只拥有领域方法，ResearchPhase 只拥有当前目标和阶段 Tool Exposure，AgentModelProfile 只拥有模型组合。
+- SamplingStepPlan 捕获后不可变；RequestAudit、sent ToolSpecs、ToolCall validation/dispatch 和 Receipt 复用同一 ResolvedToolPlan。
+- Context provenance 使用 ContextDeliveryMap sidecar，Summary 使用 typed Evidence Spine；两者不得复制/提升事实权威。
 - 能通过 Prompt、Markdown 模板或外部脚本解决的问题，不新增 Core 抽象。
 - 能通过 `run_command` 调用的漏洞研究工具，不重写客户端。
 - 每增加一个长期依赖，都记录它解决的具体问题。
 - 每个新事件类型、配置项和 Prompt 片段必须有消费方和测试。
+- Tool guidance、input/output Schema、结构化失败、Provider 编码和 RequestAudit 必须复用同一个 ToolSpec 所有者。
+- 只有 pre-execution 参数失败允许模型用新的 ToolCall 纠正；Runtime 不自动重试，执行后的 Effect/Retry/Receipt 语义不被 Prompt 覆盖。
 - `chat`、`doctor` 和 Live Smoke 必须复用唯一 Provider Composition Root；通用运行路径禁止写死 Provider URL 或模型环境变量。
 - Provider Adapter 只负责 ModelInputIR 编解码和能力映射；wire-specific 类型不得上浮到 Domain。
 - 相同 Wire API 的请求编码、Transport 和响应解码不得因新增 Provider 配置而复制，厂商名称本身不构成 binding。
 - 每个 Tool Cache 必须证明 Tool Version、TargetSnapshot、Input、Environment 和 Effect/Determinism 都进入 Key。
 - 每个 Artifact 派生操作必须保留 Parent、Transform、Producer 和 TargetSnapshot，Lineage 只作为派生视图。
 - Replay、Observation 和 TargetDelta 优先使用现有 Event/Artifact，不新增权威数据库。
+- Retrieval/Guidance 先在 local Shadow 运行；candidate eligibility 与 ranking 分离，报告不写正式 Research/Memory。
 - 每个性能缓存必须有稳定 Key、明确失效条件、Hit/Miss 指标和删除重建路径。
 - 优化功能必须通过对照 Eval 证明减少模型往返、重复 Token、重复 I/O 或工具等待，否则不保留。
 - `src/` 只保存生产代码；永久回归测试保留在顶层 `tests/`，临时就地测试必须在 Gate 前迁移或删除，发现的回归不得因测试已通过而删除。
@@ -1861,6 +2037,15 @@ M1 总完成标准：M1a、M1b、M1c 分别有可运行集成测试，任一后�
 - [x] 保留图片输入。
 - [x] CLI 优先，Web 可选。
 - [x] 不实现多 Agent、团队、云 Server 和插件市场。
+- [x] 只保留一个 `Pragmatic Vulnerability Researcher` Base Contract，不实现多人格或角色 Agent。
+- [x] DomainProfile、ResearchPhase、AgentModelProfile 正交组合，不建立 Domain × Phase 角色或 Workflow Engine。
+- [x] ResearchPhase 固定为 mapping/hypothesis/experiment/verification/evidence_curation，只在 Turn 边界切换；首版默认 Mapping 并接受显式 operator 选择。
+- [x] Tool 准确率由 guidance/schema/exposure/runtime validation 和 Replay/Shadow Eval 共同保证，不依赖 Prompt 人设单独保证。
+- [x] 每个采样 Step 使用 immutable SamplingStepPlan/ResolvedToolPlan；Deferred activation 只在当前 Turn 后续 Step 生效。
+- [x] 当前 Prompt renderer 固定为 `generic-v1`，没有第二实现前不增加 Trait/Registry/Config。
+- [x] Context provenance 使用 sidecar；Fragment/Subitem Domain identity 与 Adapter DeliveryItemId 分离。
+- [x] Research evidence 使用显式 typed relation；Session Summary v2 使用 Evidence Spine + lossy Narrative，不复制第二事实源。
+- [x] Security Retrieval 与 evidence-gap/NextAction guidance 使用 deterministic Shadow-first 方案，不默认使用 vector/graph DB 或 remote judge。
 - [x] 不上报日志、telemetry 和 feedback。
 - [x] 文档基线先于代码 Slice 发布；实现阶段继续按单 Slice 授权和 Gate 推进。
 
@@ -1872,18 +2057,21 @@ M1 总完成标准：M1a、M1b、M1c 分别有可运行集成测试，任一后�
 - [ ] Token 估算库。
 - [ ] WebSocket 连接复用是否能显著降低延迟。
 - [ ] Deferred Tool Exposure 的 Schema Token/工具数量启用阈值。
-- [ ] Memory Retrieval 何时需要可重建 SQLite FTS 索引。
+- [ ] M4-S3f Shadow 的首个 recall/precision、重复读取/Token promotion 阈值，以及是否有实测延迟证明需要可重建 SQLite FTS。
 - [ ] `fast` Profile 是否自动处理 Compaction 和 Memory 更新。
 - [ ] Tool Result Cache 对哪些确定性工具实际有收益及启用阈值。
 - [ ] 第一批 Observation Kind 和外部 Extractor Schema。
 - [ ] 第一个 TargetDelta 样例选择 Mobile、Web 还是 Binary。
 - [ ] Shadow Model Eval 的固定 Trace Suite 和成本上限。
+- [ ] 是否有足够现有 Research Ledger 字段支持纯函数自动 Phase projection；在此之前保持默认 Mapping + 显式选择。
+- [ ] Tool Accuracy controlled cases 的 acceptable first-action 集合和首个基线阈值。
+- [ ] Evidence-gap/Guidance controlled cases 的关键 gap closure、成本和 mutation-risk 基线阈值。
 - [ ] 第一个端到端漏洞研究 Eval。
 
 这些问题在对应里程碑开始时决定，不提前搭建抽象。
 
 ## 25. 下一步
 
-具体状态始终以 `docs/development/STATUS.md` 为准。F1b 已在本地完成：唯一 Composition Root 下只有一个协议优先的 Responses HTTP/SSE Adapter，任意符合协议的服务只通过配置接入，不增加厂商 binding。下一候选是 F1c 第一版 CLI Chat，仍需单独授权。
+具体状态始终以 `docs/development/STATUS.md` 为准。F1a-F1d 已远端封存；Architecture v1.2/v1.3 只完成了本地设计更新，没有开始生产代码或 Git/远端封存。
 
-F1b 不实现第一版 Chat。F1c 才把 CLI Chat 接入现有 AgentLoop；M4-S3 Observation/TargetDelta 在这些原型修复 Slice 期间保持 Deferred。
+下一候选是 M4-S3a1 Immutable Sampling Foundation，仍需单独授权。之后依次是 M4-S3a2 Research Control、M4-S3b/c/d、M4-S3e1/e2 typed evidence/provenance、M4-S3f retrieval Shadow、M4-S3g guidance Shadow 和 M4-S4 真实长流程验收；任何前一项完成都不自动授权下一项。

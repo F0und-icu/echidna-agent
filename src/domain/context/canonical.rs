@@ -11,6 +11,8 @@ use crate::domain::canonical_json::{canonical_blake3_hash, canonical_json};
 use crate::domain::model::{ContentItem, ModelCapabilities, ModelInputIR};
 use crate::domain::tools::ToolSpec;
 
+use super::planner::PromptRendererIdentity;
+
 macro_rules! string_id {
     ($name:ident) => {
         #[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -183,6 +185,7 @@ pub struct CanonicalRequest {
     pub(super) model_input_ir_schema_hash: RequestHash,
     pub(super) provider_capability_hash: RequestHash,
     pub(super) prompt_hash: RequestHash,
+    pub(super) prompt_renderer_hash: RequestHash,
     pub(super) tool_schema_hash: RequestHash,
     pub(super) output_contract_hash: RequestHash,
     pub(super) request_properties_hash: RequestHash,
@@ -194,6 +197,7 @@ impl CanonicalRequest {
         turn: &TurnContext,
         input: &ModelInputIR,
         capabilities: &ModelCapabilities,
+        renderer: &PromptRendererIdentity,
     ) -> Result<Self, ContextError> {
         Ok(Self {
             model_hash: hash_value(&turn.model)?,
@@ -201,6 +205,7 @@ impl CanonicalRequest {
             model_input_ir_schema_hash: hash_value(&input.schema_version)?,
             provider_capability_hash: hash_value(capabilities)?,
             prompt_hash: hash_value(&input.instructions)?,
+            prompt_renderer_hash: hash_value(renderer)?,
             tool_schema_hash: canonical_tool_schema_hash(&input.tool_specs)?,
             output_contract_hash: hash_value(&OutputContract::from_input(input))?,
             request_properties_hash: hash_value(&RequestProperties::from_input(input))?,
@@ -229,13 +234,31 @@ impl StepSnapshot {
         capabilities: &ModelCapabilities,
         internal_metadata: InternalRequestMetadata,
     ) -> Result<Self, ContextError> {
+        Self::capture_with_renderer(
+            turn,
+            sample_index,
+            input,
+            capabilities,
+            &PromptRendererIdentity::generic_v1(),
+            internal_metadata,
+        )
+    }
+
+    pub fn capture_with_renderer(
+        turn: &TurnContext,
+        sample_index: usize,
+        input: &ModelInputIR,
+        capabilities: &ModelCapabilities,
+        renderer: &PromptRendererIdentity,
+        internal_metadata: InternalRequestMetadata,
+    ) -> Result<Self, ContextError> {
         Ok(Self {
             turn_id: turn.turn_id.clone(),
             provider_session: turn.provider_session.clone(),
             sample_index,
             context_budget: turn.context_budget,
             tool_exposure_hash: turn.tool_exposure_hash.clone(),
-            request: CanonicalRequest::from_input(turn, input, capabilities)?,
+            request: CanonicalRequest::from_input(turn, input, capabilities, renderer)?,
             internal_metadata,
         })
     }

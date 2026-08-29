@@ -16,6 +16,7 @@ use super::resources::ResourceKeyResolver;
 use super::{decode_arguments, invalid_arguments, invalid_plan};
 
 const MAX_PATTERNS: usize = 32;
+const MAX_PATHS: usize = 32;
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -38,8 +39,11 @@ pub(super) fn normalize(
 ) -> Result<(Value, Vec<ResourceKey>), ToolExecutorError> {
     let arguments: SearchFilesArgs = decode_arguments("search_files", value)?;
     let patterns = patterns(&arguments)?;
-    if arguments.paths.is_empty() {
-        return Err(invalid_arguments("search_files", "`paths` is empty"));
+    if arguments.paths.is_empty() || arguments.paths.len() > MAX_PATHS {
+        return Err(invalid_arguments(
+            "search_files",
+            "`paths` must contain between 1 and 32 entries",
+        ));
     }
     if patterns.len() > MAX_PATTERNS {
         return Err(invalid_arguments(
@@ -66,7 +70,13 @@ pub(super) async fn execute(project_root: &Path, plan: ToolExecutionPlan) -> Too
             Err(error) => return invalid_plan(plan, error),
         };
     let patterns = match patterns(&arguments) {
-        Ok(patterns) if !arguments.paths.is_empty() && patterns.len() <= MAX_PATTERNS => patterns,
+        Ok(patterns)
+            if !arguments.paths.is_empty()
+                && arguments.paths.len() <= MAX_PATHS
+                && patterns.len() <= MAX_PATTERNS =>
+        {
+            patterns
+        }
         Ok(_) => {
             return invalid_plan(
                 plan,

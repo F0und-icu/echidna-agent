@@ -13,7 +13,7 @@ use super::{
 pub(super) fn sort_full_order(fragments: &mut [ContextFragment]) {
     fragments.sort_by_key(|fragment| {
         (
-            fragment.source.slot(),
+            fragment.slot.order(),
             Reverse(fragment.priority),
             fragment.id.clone(),
         )
@@ -63,7 +63,7 @@ pub(super) fn select_decisions(
     selection_order.sort_by_key(|index| {
         (
             Reverse(fragments[*index].priority),
-            fragments[*index].source.slot(),
+            fragments[*index].slot.order(),
             fragments[*index].id.clone(),
         )
     });
@@ -104,6 +104,8 @@ pub(super) fn select_decisions(
         selected[index] = Some(ContextDecisionEntry {
             fragment_id: fragment.id.clone(),
             source: fragment.source,
+            slot: fragment.slot,
+            origin: fragment.origin,
             content_hash: fragment.content_hash.clone(),
             token_estimate: fragment.token_estimate,
             decision,
@@ -119,7 +121,7 @@ pub(super) fn select_decisions(
 
 fn include_reason(fragment: &ContextFragment) -> ContextReasonCode {
     match (fragment.priority, fragment.source) {
-        (ContextFragmentPriority::Required, source) if source.slot() <= 4 => {
+        (ContextFragmentPriority::Required, source) if source.placement().order() <= 5 => {
             ContextReasonCode::RequiredBaseInstructions
         }
         (ContextFragmentPriority::Required, ContextFragmentSource::UserInput) => {

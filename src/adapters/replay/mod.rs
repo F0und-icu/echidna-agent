@@ -25,4 +25,6 @@ pub enum ReplayAdapterError {
     DuplicateToolSpec,
     #[error("Replay Tool step has no recorded direct spec for `{tool_name}`")]
     ToolStepSpecMissing { tool_name: String },
+    #[error("historical Replay instructions are invalid: {message}")]
+    HistoricalPrompt { message: String },
 }

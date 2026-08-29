@@ -44,7 +44,26 @@ pub(super) fn write_input_schema() -> Value {
 }
 
 pub(super) fn output_schema() -> Value {
-    json!({"type": "object"})
+    json!({
+        "oneOf": [
+            {
+                "type": "object", "properties": {
+                    "status": {"type": "string", "const": "ok"}, "path": {"type": "string", "minLength": 1},
+                    "content": {"type": "string"}, "hash": {"type": ["string", "null"]},
+                    "external_change_detected": {"type": "boolean"}, "stream_event_count": {"type": "integer", "minimum": 0}
+                }, "required": ["status", "path", "content", "hash", "external_change_detected", "stream_event_count"], "additionalProperties": false
+            },
+            {
+                "type": "object", "properties": {
+                    "status": {"type": "string", "enum": ["recorded", "unchanged"]}, "event_appended": {"type": "boolean"},
+                    "event_type": {"type": "string", "const": "memory.changed"}, "event_id": {"type": "string", "minLength": 1},
+                    "path": {"type": "string", "minLength": 1}, "old_hash": {"type": ["string", "null"]},
+                    "new_hash": {"type": ["string", "null"]}, "diff_blob_id": {"type": ["string", "null"]},
+                    "hash": {"type": ["string", "null"]}, "stream_event_count": {"type": "integer", "minimum": 0}
+                }, "required": ["status", "event_appended", "path", "stream_event_count"], "additionalProperties": false
+            }
+        ]
+    })
 }
 
 fn memory_path_schema() -> Value {

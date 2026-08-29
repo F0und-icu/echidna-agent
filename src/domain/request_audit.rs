@@ -18,5 +18,6 @@ pub use manifest::{
 };
 pub(crate) use render::PublishedAuditBlob;
 
-/// The first persisted RequestAuditManifest schema.
-pub const REQUEST_AUDIT_MANIFEST_SCHEMA_VERSION: u16 = 1;
+/// The current additive RequestAuditManifest schema. Schema v1 remains
+/// readable and explicitly lacks verified renderer/Tool-plan binding.
+pub const REQUEST_AUDIT_MANIFEST_SCHEMA_VERSION: u16 = 2;

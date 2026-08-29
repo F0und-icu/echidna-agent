@@ -1,0 +1,1 @@
+Current objective: map the target and environment before narrowing the investigation. Establish versions, trust boundaries, entry points, exposed surfaces, sensitive sinks and the highest-value unknowns. Reuse batched inspection and existing project facts; finish with a bounded attack-surface map and explicit next surfaces.

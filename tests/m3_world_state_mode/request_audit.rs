@@ -129,7 +129,7 @@ async fn audited_agent_loop_records_each_full_incremental_and_provider_rejected_
             completed_response("fallback", "response-fallback"),
         ],
     );
-    let mut agent = AgentLoop::new(&provider, &tools, "fixture instructions");
+    let mut agent = AgentLoop::new(&provider, &tools);
     let audit_context = RequestAuditRunContext::new(
         RequestAuditBinding::new(
             ProjectId::new("project-audit-loop"),
@@ -197,7 +197,7 @@ async fn audited_agent_loop_commits_through_the_real_request_audit_service_befor
         incremental_capabilities(),
         [completed_response("recorded", "response-recorded")],
     );
-    let mut agent = AgentLoop::new(&provider, &tools, "fixture instructions");
+    let mut agent = AgentLoop::new(&provider, &tools);
     let binding = RequestAuditBinding::new(
         ProjectId::new("project-audit-real-service"),
         StreamId::new("session:audit-real-service"),
@@ -237,6 +237,16 @@ async fn audited_agent_loop_commits_through_the_real_request_audit_service_befor
 
     assert_eq!(provider.requests().len(), 1);
     assert_eq!(projection.state().request_audits().len(), 1);
+    let manifest = &projection.state().request_audits()[0];
+    assert_eq!(manifest.schema_version(), 2);
+    assert_eq!(manifest.prompt_renderer().unwrap().id(), "generic");
+    assert_eq!(manifest.prompt_renderer().unwrap().version(), 1);
+    assert_eq!(
+        manifest.resolved_tool_plan_fingerprint(),
+        agent
+            .last_sampling_step_plan()
+            .map(|step| step.resolved_tool_plan().fingerprint())
+    );
     assert_eq!(sink.events.len(), 1);
     assert!(blobs.blob_count() > 0);
 }
@@ -249,7 +259,7 @@ async fn request_audit_commit_failure_stops_before_the_provider_stream() {
         incremental_capabilities(),
         [completed_response("must not stream", "response-unused")],
     );
-    let mut agent = AgentLoop::new(&provider, &tools, "fixture instructions");
+    let mut agent = AgentLoop::new(&provider, &tools);
     let binding = RequestAuditBinding::new(
         ProjectId::new("project-audit-commit-failure"),
         StreamId::new("session:audit-commit-failure"),

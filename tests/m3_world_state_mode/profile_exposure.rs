@@ -143,21 +143,14 @@ fn doctor_reports_declared_profile_capabilities_without_credential_access() {
 }
 
 #[test]
-fn mode_prompt_fragments_and_tool_exposure_are_stable() {
-    let mode = ModePack::new(
-        "android",
-        4,
-        "Mode-specific mobile research guidance.",
-        ToolExposurePlan::new([(ToolName::new("run_command"), ToolExposure::Deferred)]),
-    )
-    .unwrap();
-    let composition = PromptComposition::new("Base research guidance.")
-        .unwrap()
+fn domain_phase_prompt_fragments_and_tool_exposure_are_stable() {
+    let composition = PromptComposition::current()
         .with_personal("Prefer explicit evidence.")
         .unwrap()
         .with_project("Target only the fixture project.")
         .unwrap()
-        .with_mode(mode.clone());
+        .with_domain_profile(DomainProfile::Mobile)
+        .with_research_phase(ResearchPhase::Hypothesis);
     let first = composition.fragments().unwrap();
     let second = composition.fragments().unwrap();
     assert_eq!(first, second);
@@ -165,70 +158,69 @@ fn mode_prompt_fragments_and_tool_exposure_are_stable() {
         first
             .iter()
             .map(|fragment| fragment.id().as_str())
+            .filter(|id| id.starts_with("prompt:base:")
+                || id.starts_with("prompt:domain:")
+                || id.starts_with("prompt:phase:"))
             .collect::<Vec<_>>(),
         vec![
-            "prompt:base",
-            "prompt:personal",
-            "prompt:project",
-            "prompt:mode:android:4",
+            "prompt:base:pragmatic-vulnerability-researcher:1",
+            "prompt:domain:mobile:1",
+            "prompt:phase:hypothesis:1",
         ]
     );
+    assert!(first[1].id().as_str().starts_with("prompt:personal:"));
+    assert!(first[2].id().as_str().starts_with("prompt:project:"));
+    let exposure = composition.tool_exposure();
     assert_eq!(
-        mode.tool_exposure()
-            .exposure_for(&ToolName::new("run_command"), ToolExposure::Direct),
+        exposure.exposure_for(&ToolName::new("run_command"), ToolExposure::Direct),
         ToolExposure::Deferred
     );
-    let tools = ToolRegistry::for_project_with_exposure(
-        Path::new(env!("CARGO_MANIFEST_DIR")),
-        ToolExposurePlan::new([(ToolName::new("run_command"), ToolExposure::Direct)]),
-    )
-    .unwrap();
-    let all_direct = tools.specs();
-    let mode_direct = all_direct
-        .iter()
-        .cloned()
-        .map(|spec| mode.tool_exposure().apply_to_spec(spec))
-        .filter(|spec| spec.exposure == ToolExposure::Direct)
-        .collect::<Vec<_>>();
-    let stable = context_metrics(&composition, mode_direct.clone());
-    assert_eq!(stable, context_metrics(&composition, mode_direct.clone()));
-    assert_ne!(stable.0, context_metrics(&composition, all_direct).0);
-    let changed_mode = ModePack::new(
-        "android",
-        4,
-        "A changed mobile research instruction.",
-        mode.tool_exposure().clone(),
-    )
-    .unwrap();
-    let changed_composition = PromptComposition::new("Base research guidance.")
+    let tools = ToolRegistry::for_project(Path::new(env!("CARGO_MANIFEST_DIR")));
+    let all_direct = tools
+        .resolve_tool_plan(
+            &ToolExposurePlan::new([(ToolName::new("run_command"), ToolExposure::Direct)]),
+            &DeferredActivationSet::default(),
+        )
         .unwrap()
+        .advertised_specs()
+        .to_vec();
+    let phase_direct = tools
+        .resolve_tool_plan(&exposure, &DeferredActivationSet::default())
+        .unwrap()
+        .advertised_specs()
+        .to_vec();
+    let stable = context_metrics(&composition, phase_direct.clone());
+    assert_eq!(stable, context_metrics(&composition, phase_direct.clone()));
+    assert_ne!(stable.0, context_metrics(&composition, all_direct).0);
+    let changed_phase = PromptComposition::current()
         .with_personal("Prefer explicit evidence.")
         .unwrap()
         .with_project("Target only the fixture project.")
         .unwrap()
-        .with_mode(changed_mode);
+        .with_domain_profile(DomainProfile::Mobile)
+        .with_research_phase(ResearchPhase::Experiment);
     assert_ne!(
         stable.0,
-        context_metrics(&changed_composition, mode_direct.clone()).0
+        context_metrics(
+            &changed_phase,
+            tools
+                .resolve_tool_plan(
+                    &changed_phase.tool_exposure(),
+                    &DeferredActivationSet::default(),
+                )
+                .unwrap()
+                .advertised_specs()
+                .to_vec(),
+        )
+        .0
     );
 
-    let changed_generation = PromptComposition::new("Base research guidance.")
-        .unwrap()
-        .with_personal("Prefer explicit evidence.")
-        .unwrap()
-        .with_project("Target only the fixture project.")
-        .unwrap()
-        .with_mode(
-            ModePack::new("android", 5, mode.prompt(), mode.tool_exposure().clone()).unwrap(),
-        );
+    let changed_domain = composition.clone().with_domain_profile(DomainProfile::Web);
     assert_eq!(
-        changed_generation.fragments().unwrap()[3].id().as_str(),
-        "prompt:mode:android:5"
+        changed_domain.fragments().unwrap()[3].id().as_str(),
+        "prompt:domain:web:1"
     );
-    assert_ne!(
-        stable.0,
-        context_metrics(&changed_generation, mode_direct).0
-    );
+    assert_ne!(stable.0, context_metrics(&changed_domain, phase_direct).0);
 }
 #[tokio::test]
 async fn deferred_tool_search_changes_actual_schema_and_blocks_pre_discovery_planning() {
@@ -238,8 +230,10 @@ async fn deferred_tool_search_changes_actual_schema_and_blocks_pre_discovery_pla
         (ToolName::new("write_file"), ToolExposure::Deferred),
         (ToolName::new("run_command"), ToolExposure::Hidden),
     ]);
-    let tools = ToolRegistry::for_project_with_exposure(&root, exposure.clone()).unwrap();
-    let initial = tools.specs();
+    let tools = ToolRegistry::for_project(&root);
+    let mut activations = DeferredActivationSet::default();
+    let initial_plan = tools.resolve_tool_plan(&exposure, &activations).unwrap();
+    let initial = initial_plan.advertised_specs().to_vec();
     assert!(
         initial
             .iter()
@@ -256,7 +250,8 @@ async fn deferred_tool_search_changes_actual_schema_and_blocks_pre_discovery_pla
             .any(|spec| spec.name.as_str() == "run_command")
     );
     assert!(matches!(
-        tools.plan_exposed(
+        tools.plan_model_call(
+            &initial_plan,
             ExecutionId::new("write-before-search"),
             ToolCall::new(
                 ToolCallId::new("write-before-search"),
@@ -270,7 +265,8 @@ async fn deferred_tool_search_changes_actual_schema_and_blocks_pre_discovery_pla
     let search = tools
         .execute(
             tools
-                .plan_exposed(
+                .plan_model_call(
+                    &initial_plan,
                     ExecutionId::new("tool-search"),
                     ToolCall::new(
                         ToolCallId::new("tool-search"),
@@ -292,7 +288,11 @@ async fn deferred_tool_search_changes_actual_schema_and_blocks_pre_discovery_pla
             .iter()
             .any(|entry| entry["name"] == "write_file")
     );
-    let activated = tools.specs();
+    activations
+        .apply_search_result(&search.result, &initial_plan)
+        .unwrap();
+    let activated_plan = tools.resolve_tool_plan(&exposure, &activations).unwrap();
+    let activated = activated_plan.advertised_specs().to_vec();
     assert!(
         activated
             .iter()
@@ -306,14 +306,15 @@ async fn deferred_tool_search_changes_actual_schema_and_blocks_pre_discovery_pla
     assert!(
         serde_json::to_vec(&activated).unwrap().len() > serde_json::to_vec(&initial).unwrap().len()
     );
-    tools.configure_exposure(exposure).unwrap();
     assert!(
         tools
-            .specs()
+            .resolve_tool_plan(&exposure, &DeferredActivationSet::default())
+            .unwrap()
+            .advertised_specs()
             .iter()
-            .any(|spec| spec.name.as_str() == "write_file")
+            .all(|spec| spec.name.as_str() != "write_file")
     );
-    let metric_prompt = PromptComposition::new("schema metric").unwrap();
+    let metric_prompt = PromptComposition::current();
     assert!(
         context_metrics(&metric_prompt, activated.clone()).1
             > context_metrics(&metric_prompt, initial.clone()).1
@@ -398,39 +399,43 @@ fn exposure_overrides_reject_unknown_names_and_respect_tool_search_visibility() 
     let tools = ToolRegistry::for_project(root.path());
     let initial = tools.specs();
     assert!(matches!(
-        tools.configure_exposure(ToolExposurePlan::new([(
-            ToolName::new("not-a-built-in-tool"),
-            ToolExposure::Direct,
-        )])),
+        tools.resolve_tool_plan(
+            &ToolExposurePlan::new([(
+                ToolName::new("not-a-built-in-tool"),
+                ToolExposure::Direct,
+            )]),
+            &DeferredActivationSet::default(),
+        ),
         Err(ToolExecutorError::UnknownTool { tool_name }) if tool_name == "not-a-built-in-tool"
     ));
     assert_eq!(tools.specs(), initial);
     assert!(matches!(
-        ToolRegistry::for_project_with_exposure(
-            root.path(),
-            ToolExposurePlan::new([(
+        tools.resolve_tool_plan(
+            &ToolExposurePlan::new([(
                 ToolName::new("not-a-built-in-tool"),
                 ToolExposure::Hidden,
             )]),
+            &DeferredActivationSet::default(),
         ),
         Err(ToolExecutorError::UnknownTool { tool_name }) if tool_name == "not-a-built-in-tool"
     ));
 
     for exposure in [ToolExposure::Hidden, ToolExposure::Deferred] {
-        tools
-            .configure_exposure(ToolExposurePlan::new([(
-                ToolName::new("tool_search"),
-                exposure,
-            )]))
+        let resolved = tools
+            .resolve_tool_plan(
+                &ToolExposurePlan::new([(ToolName::new("tool_search"), exposure)]),
+                &DeferredActivationSet::default(),
+            )
             .unwrap();
         assert!(
-            tools
-                .specs()
+            resolved
+                .advertised_specs()
                 .iter()
                 .all(|spec| spec.name.as_str() != "tool_search")
         );
         assert!(matches!(
-            tools.plan_exposed(
+            tools.plan_model_call(
+                &resolved,
                 ExecutionId::new(format!("tool-search-{exposure:?}")),
                 ToolCall::new(
                     ToolCallId::new(format!("tool-search-{exposure:?}")),

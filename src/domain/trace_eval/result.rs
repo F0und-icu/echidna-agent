@@ -1,20 +1,22 @@
 //! Closed derived-only Eval result labels and source scope.
 
 use crate::domain::events::{EventId, StreamId};
+use serde::Serialize;
 
 use super::{TraceFixtureError, TraceFixtureManifest};
 
 /// Every M4-S2 result carries one of these derived-only origins.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub enum EvalProvenance {
     MechanicalReplay,
     ContextRecompile,
     ShadowModelEval,
+    ToolAccuracy,
 }
 
 /// Eval output has one intentionally closed evidence state. It cannot be
 /// constructed as a Finding or promoted by this contract.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub enum EvalEvidence {
     NonEvidence,
 }
@@ -24,7 +26,7 @@ pub enum EvalEvidence {
 /// Historical identifiers, including an `ExecutionId`, are interpreted under
 /// this source Session. Replay executions remain derived Eval activity even
 /// when the AgentLoop deterministically produces the same bare identifier.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct EvalSource {
     trace_id: String,
     source_session_id: StreamId,
@@ -89,7 +91,7 @@ fn is_lowercase_blake3_hash(value: &str) -> bool {
 /// `provenance + source` is the isolated Eval namespace: it prevents derived
 /// replay identities from being interpreted as facts in the source Session.
 /// Context Recompile further scopes the comparison to one RequestAudit Event.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct EvalResult {
     provenance: EvalProvenance,
     evidence: EvalEvidence,
@@ -119,6 +121,15 @@ impl EvalResult {
     pub(crate) fn shadow_model_eval(source: EvalSource) -> Self {
         Self {
             provenance: EvalProvenance::ShadowModelEval,
+            evidence: EvalEvidence::NonEvidence,
+            source,
+            request_audit_event_id: None,
+        }
+    }
+
+    pub(crate) fn tool_accuracy(source: EvalSource) -> Self {
+        Self {
+            provenance: EvalProvenance::ToolAccuracy,
             evidence: EvalEvidence::NonEvidence,
             source,
             request_audit_event_id: None,

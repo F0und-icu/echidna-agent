@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::artifacts::ArtifactId;
+use crate::domain::context::PromptRendererIdentity;
 use crate::domain::events::{EventId, EventSequence, StreamId};
 use crate::domain::research::TargetSnapshotId;
 
@@ -12,7 +13,7 @@ use super::EvalSource;
 use super::error::TraceFixtureError;
 
 /// The only Trace fixture schema accepted by M4-S2.
-pub const TRACE_FIXTURE_MANIFEST_SCHEMA_VERSION: u16 = 1;
+pub const TRACE_FIXTURE_MANIFEST_SCHEMA_VERSION: u16 = 2;
 
 /// A versioned Trace fixture containing references, never copies, of source
 /// Session, Research, Artifact, Receipt or RequestAudit facts.
@@ -24,6 +25,8 @@ pub struct TraceFixtureManifest {
     source_session_id: StreamId,
     event_range: TraceEventRange,
     source_stream_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    prompt_renderer: Option<PromptRendererIdentity>,
     target_snapshot_ids: Vec<TargetSnapshotId>,
     required_artifact_ids: Vec<ArtifactId>,
     provider_event_refs: Vec<TraceProviderEventReference>,
@@ -50,6 +53,7 @@ impl TraceFixtureManifest {
             source_session_id,
             event_range,
             source_stream_hash: source_stream_hash.into(),
+            prompt_renderer: Some(PromptRendererIdentity::generic_v1()),
             target_snapshot_ids,
             required_artifact_ids,
             provider_event_refs,
@@ -76,6 +80,10 @@ impl TraceFixtureManifest {
         &self.source_stream_hash
     }
 
+    pub fn prompt_renderer(&self) -> Option<&PromptRendererIdentity> {
+        self.prompt_renderer.as_ref()
+    }
+
     pub fn target_snapshot_ids(&self) -> &[TargetSnapshotId] {
         &self.target_snapshot_ids
     }
@@ -97,10 +105,19 @@ impl TraceFixtureManifest {
     }
 
     pub(super) fn validate_structure(&self) -> Result<(), TraceFixtureError> {
-        if self.schema_version != TRACE_FIXTURE_MANIFEST_SCHEMA_VERSION {
+        if !matches!(
+            self.schema_version,
+            1 | TRACE_FIXTURE_MANIFEST_SCHEMA_VERSION
+        ) {
             return Err(TraceFixtureError::UnsupportedSchemaVersion {
                 schema_version: self.schema_version,
             });
+        }
+        match (self.schema_version, &self.prompt_renderer) {
+            (1, None) => {}
+            (TRACE_FIXTURE_MANIFEST_SCHEMA_VERSION, Some(renderer)) if renderer.is_generic_v1() => {
+            }
+            _ => return Err(TraceFixtureError::PromptRendererIdentityMismatch),
         }
         EvalSource::new(
             self.trace_id.clone(),
