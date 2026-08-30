@@ -2,20 +2,28 @@
 
 ## Current State
 
-- Architecture version: `1.4.0`; v1/v1.1 remain remotely sealed, v1.2/v1.3/v1.4 are locally frozen with remote seal unauthorized
+- Architecture version: `1.6.0`; v1/v1.1 remain remotely sealed, v1.2 through v1.6 are locally frozen with remote seal unauthorized
 - Phase: `IMPLEMENTATION`
 - Implementation: `STARTED`
-- Current milestone: `M4-S3c` Generic Research Tools
+- Current milestone: `M4-S3c` General Research Tools
 - Current slice: `M4-S3c`
-- Slice state: `READY_NOT_AUTHORIZED`; M4-S3b is locally complete after bounded implementation, independent audit corrections, main-agent cross-boundary review and the full Cargo/Lean Gate
-- Lean governance: `PASSED`; M4-S3b retains one ToolSpec/ToolFailure/Trace Eval owner, removes test-only or unconsumed public surface and keeps unobservable metrics explicitly Deferred
+- Slice state: `READY_NOT_AUTHORIZED`; F1e is locally complete and M4-S3c has not started
+- Lean governance: `PASS`; F1e retains one Responses encoder/decoder, one AgentLoop and one ConversationHistory owner while separating provider-visible completed output continuation
 - Local Git initialized: `yes`; `main` contains the remotely submitted M4-S3a1-through-M4-S3b checkpoint over the F1a-F1d delivery
 - Remote repository: `F0und-icu/cyber-agent` private; M4 checkpoint `892edaa` passed push CI `33290961921`, while no PR, tag or release was created
 - Documentation baseline commit: `55ff3be`
-- Current code base: remote M4 checkpoint `892edaa` on `main`, containing locally completed M4-S3a1 through M4-S3b over prior status seal `ee04b7e`
+- Current code base: remote status checkpoint `c52fcbe` on `main`; F1e Git publication is authorized and being prepared on a short branch
 - Upstream Codex reference baseline: `868c9edb0da913a5fc699a71664e65f44f6058b0`; read-only and not a Cyber Agent dependency
 
 ## Latest Local Design Update
+
+- Date: `2026-08-30`.
+- Scope: Architecture v1.5/v1.6 adds only completed Responses reasoning continuation and the real-protocol correction for a redundant encrypted sidecar; no new Provider binding, configuration field, dependency, fact store or vendor branch exists.
+- Delivery boundary: `ModelInputIR` v3 represents plaintext completed reasoning only in provider-visible delivery. Conversation/Session History rejects it; Resume, Compaction and Primary replacement clear it.
+- Protocol boundary: the one Responses Adapter replays `reasoning -> function_call -> function_call_output`. Plaintext plus opaque encrypted sidecar uses the plaintext semantic item and keeps the sidecar Adapter-local; encrypted-only and unknown content fail explicitly.
+- Completion: F1e passed the complete local Cargo/Lean Gate and a configuration-driven DeepSeek Full-only `read_file` Live Tool Loop. Git publication is authorized and pending the exact PR-head Gate; M4-S3c remains unstarted.
+
+## Prior Local Design Update
 
 - Date: `2026-08-29`.
 - Scope: narrow Architecture v1.4 correction over frozen v1.3; no Rust source, test, Cargo dependency, Provider config, credential, research data or `SEALED_MANIFEST.md` was changed.
@@ -60,24 +68,28 @@
 3. `task.md`
 4. `docs/development/IMPLEMENTATION_PLAN.md`
 5. `docs/development/LEAN_CODE_GOVERNANCE.md`
-6. `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_4.md`
-7. `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_3.md`
-8. `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_2.md`
-9. `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_1.md`
-10. `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1.md`
-11. `docs/adr/ADR-0014-narrow-tool-failure-and-accuracy-observability.md`
-12. `docs/adr/ADR-0010-immutable-sampling-step-and-tool-plan.md`
-13. `docs/adr/ADR-0011-context-provenance-evidence-relations-and-compaction.md`
-14. `docs/adr/ADR-0012-deterministic-security-retrieval-and-evidence-gap-guidance.md`
-15. `docs/adr/ADR-0013-versioned-prompt-renderer-boundary.md`
-16. `docs/adr/ADR-0009-stable-research-persona-domain-profile-and-phase.md`
-17. `docs/adr/ADR-0002-capability-driven-primary-vision-models.md`
-18. `docs/adr/ADR-0003-minimal-openai-http-sse-stack.md`
-19. `docs/adr/ADR-0004-sha256-artifact-blob-identity.md`
-20. `docs/adr/ADR-0005-minimal-local-image-stack.md`
-21. `docs/adr/ADR-0006-single-provider-composition-root.md`
-22. `docs/adr/ADR-0007-protocol-first-responses-adapter.md`
-23. `docs/adr/ADR-0008-local-inline-provider-credentials.md`
+6. `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_6.md`
+7. `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_5.md`
+8. `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_4.md`
+9. `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_3.md`
+10. `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_2.md`
+11. `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_1.md`
+12. `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1.md`
+13. `docs/adr/ADR-0016-redundant-encrypted-reasoning-sidecar.md`
+14. `docs/adr/ADR-0015-responses-reasoning-continuation.md`
+15. `docs/adr/ADR-0014-narrow-tool-failure-and-accuracy-observability.md`
+16. `docs/adr/ADR-0010-immutable-sampling-step-and-tool-plan.md`
+17. `docs/adr/ADR-0011-context-provenance-evidence-relations-and-compaction.md`
+18. `docs/adr/ADR-0012-deterministic-security-retrieval-and-evidence-gap-guidance.md`
+19. `docs/adr/ADR-0013-versioned-prompt-renderer-boundary.md`
+20. `docs/adr/ADR-0009-stable-research-persona-domain-profile-and-phase.md`
+21. `docs/adr/ADR-0002-capability-driven-primary-vision-models.md`
+22. `docs/adr/ADR-0003-minimal-openai-http-sse-stack.md`
+23. `docs/adr/ADR-0004-sha256-artifact-blob-identity.md`
+24. `docs/adr/ADR-0005-minimal-local-image-stack.md`
+25. `docs/adr/ADR-0006-single-provider-composition-root.md`
+26. `docs/adr/ADR-0007-protocol-first-responses-adapter.md`
+27. `docs/adr/ADR-0008-local-inline-provider-credentials.md`
 
 ## Completed
 
@@ -87,6 +99,7 @@
 - Architecture v1.2 locally frozen Research Control Plane: one stable persona, orthogonal DomainProfile/ResearchPhase, phase-aware Tool exposure and measurable Tool-accuracy contracts; production and remote seal remain unstarted.
 - Architecture v1.3 locally frozen immutable Sampling/Tool plan, versioned Prompt renderer, Context provenance, typed evidence/Compaction and deterministic Shadow-first retrieval/guidance contracts; production and remote seal remain unstarted.
 - Architecture v1.4 locally frozen narrow ToolFailure and durable accuracy-observability correction; M4-S3b implements and gates that boundary locally without a remote seal.
+- Architecture v1.5/v1.6 locally frozen provider-visible completed reasoning, Full replay and redundant encrypted-sidecar boundaries.
 - Development, Git/version/release, environment, credential isolation and Mock/Live/CI plans.
 - Parameterized Luna single-Slice implementation prompt and private documentation baseline.
 - M0-S1 single-package CLI skeleton and pinned-toolchain CI Gate.
@@ -120,6 +133,7 @@
 - F1b one protocol-first Responses HTTP/SSE Adapter, provider-neutral reasoning events and configuration-only conforming-service selection (remotely sealed in integrated PR `#46`).
 - F1c first-version CLI Chat through the existing AgentLoop, durable Session/RequestAudit/Tool facts and one synthetic DeepSeek Live Chat (remotely sealed in integrated PR `#46`).
 - F1d compatible Config v1 inline `api_key` or referenced `credential_ref` selection through the existing Composition Root and Adapter boundary (remotely sealed in integrated PR `#46`).
+- F1e provider-visible Responses reasoning continuation, ModelInputIR v2/v3 compatibility and one DeepSeek Full-only Live Tool Loop (locally complete; Git publication authorized and pending remote Gate).
 
 ## Prior Fix Slice
 
@@ -139,7 +153,7 @@
 - Verification: loopback end-to-end tests cover new/resumed/profiled Chat, audit/history/receipt persistence, lease isolation, cancellation, continuation rejection/Full fallback and PID-bearing Session identities. The final locked Cargo/Lean Gate passes with 308 discovered tests, 306 default-enabled tests passing and two opt-in Live Smokes ignored.
 - Boundary: no TUI/Web, general command framework, model Router/Registry/fallback, new fact store, M4-S3/M4-S4 behavior, Git operation or Codex credential/login access was added or run. One separately authorized synthetic DeepSeek Live Chat used the completed generic path.
 
-## Last Completed Fix Slice
+## Prior Completed Fix Slice
 
 - Slice: `F1d`
 - State: `COMPLETE_REMOTE_SEALED` through integrated PR `#46`.
@@ -148,25 +162,41 @@
 - Scope budget: no Keychain, encrypted vault, config discovery, credential manager, schema database, Provider router, Codex credential source, Live request, Git operation or M4-S3/M4-S4 work.
 - Verification: inline/reference composition, exact-one validation, lazy Provider use, CLI `doctor` redaction, loopback Chat Authorization and fact/output non-disclosure pass with the complete locked Cargo/Lean Gate.
 
+## Last Completed Fix Slice
+
+- Slice: `F1e`
+- State: `COMPLETE_LOCAL`; no commit, push, PR, Actions, tag or release was authorized.
+- Delivered scope: completed Responses `reasoning_text` is retained only in provider-visible delivery and replayed with the matching Function Call and Tool Result in exact order. Conversation/Session/Research/Memory and user output never receive reasoning.
+- Compatibility: new requests use ModelInputIR v3; historical RequestAudit v2 remains readable and real Replay request matching promotes v2 to v3 without changing the stored audit. Full RequestAudit differences retain the established state-diff reasons; Prompt/Tool-plan changes accept only an exact reasoning replay of the logical input.
+- Protocol: one generic Responses Adapter accepts plaintext reasoning with an optional redundant encrypted sidecar, rejects encrypted-only/unknown content, and contains no DeepSeek, Provider, model, URL or credential branch.
+- Verification: complete Gate passes on Rust `1.93.1` with 313 discovered tests, 311 default-enabled tests passing and two ignored opt-in Live Smokes; Lean scans pass. A selected DeepSeek `deepseek-v4-flash` Full-only Live Chat called `read_file`, replayed reasoning/call/result and returned the fixed synthetic file content.
+- Audit: the bounded independent Luna audit first found the Context-candidate reasoning-loss P1; the permanent over-budget regression and explicit failure fixed it. Its repair review returned `APPROVE` with no P0/P1. Main cross-boundary review additionally fixed Deferred `tool_search`/ToolsChanged replay and added its regression. Later optional addendum audit threads timed out and were terminated; none was counted as approval.
+
+### F1e Lean Review
+
+- Semantic owners: `domain/model` owns provider-neutral completed reasoning and the exact reasoning-replay relation; `adapters/responses` owns all wire encoding/decoding and encrypted-sidecar handling; the one AgentLoop owns atomic completion, provider delivery and fallback; ConversationHistory remains the sole durable pairing/history owner.
+- Reuse: existing Config v1 Composition Root, Responses transport, ModelStreaming completion, ProviderSession Baseline, ContextPlanner/state-diff, RequestAudit, Replay, Tool Registry and Session owners are reused. No second path or copied vendor Adapter exists.
+- API/dependencies: ModelInputIR advances additively from v2 to v3. New surface defaults to crate-private where cross-module production consumers permit; no Cargo dependency, feature, Event, Config, Provider binding, service, Registry, Hook or public test-only projection was added.
+- Removed/deferred: partial reasoning deltas, opaque encrypted values and Provider item IDs are not retained. Encrypted-only continuation, general model routing, automatic capability probing and reconstruction of ephemeral provider delivery after Resume remain explicitly unsupported/deferred.
+- Tests: permanent top-level regressions cover wire order, malformed/unknown/encrypted-only content, redundant sidecar, Full/incremental/fallback, budget failure, `tool_search` ToolSpecs change, History isolation, RequestAudit v2/v3 and real Replay request matching. Production `src/` has no inline tests.
+- Governance debt: none blocking. Empty/missing reasoning `content` remains a documented no-op when no encrypted continuation exists. Timed-out addendum audits are recorded as no conclusion, never `APPROVE`.
+
 ## Current Slice
 
 - Slice: `M4-S3c`
-- State: `READY_NOT_AUTHORIZED`; M4-S3b is complete and this Slice has not started.
-- Planned scope: the separately bounded generic `http_request` and `inspect_environment` Tools, reusing existing ToolExecutionPlan, Resource Key, ExecutionReceipt, Artifact, Context truncation and Tool-accuracy contracts.
-- Required start boundary: reread the authority chain, name the exact M4-S3c scope, set this Slice to `IN_PROGRESS` and obtain separate implementation authorization before changing production code.
-- Later independent Slices: M4-S3d Observation/TargetDelta; M4-S3e1 typed evidence; M4-S3e2 provenance/Compaction; M4-S3f retrieval; M4-S3g guidance; M4-S4 offline long-flow acceptance with Live-only evidence recorded as separately authorized or not run.
-- Forbidden before authorization: any new Tool runtime, dependency, Provider/credential path, real Live Test, mutable request-global exposure, general Prompt/Tool/Eval registry, workflow engine, dataset service, remote judge, model router, Hook/plugin runtime or Codex credential/login access.
+- State: `READY_NOT_AUTHORIZED`; no production or test implementation has started.
+- Planned scope: the bounded general research tools defined in `IMPLEMENTATION_PLAN.md`; F1e completion does not authorize them.
 
 ## Current Authorization
 
-The user's later instruction to submit the completed checkpoint remotely is consumed by commit `892edaa`, its successful sole CI and this `[skip ci]` status correction. It does not authorize the next Slice or further publication.
+On 2026-08-30 the user authorized Git publication of the completed F1e Slice. This authority covers one short branch, reviewed commits, push, one exact PR-head GitHub Actions Gate, Squash Merge and a status-only `[skip ci]` seal. It does not authorize M4-S3c, another Live request, a tag, release or architecture-manifest seal.
 
-- Run mode: `REVIEW_ONLY`; M4-S3c is `READY_NOT_AUTHORIZED`
-- Git mode: `REMOTE_CHECKPOINT_COMPLETE`; no further commit, branch, push, PR, merge, tag, release or GitHub Actions run is authorized
-- Delegation mode: `OFF`; any future delegation requires a new explicit instruction and remains subject to the bounded Terra/Luna roles
-- Live test mode: `OFF`; no credential resolution or public Provider request is authorized
+- Run mode: `SEAL_F1E_ONLY`; no new implementation Slice is authorized
+- Git mode: `PUBLISH_F1E`; branch, commit, push, PR, one exact PR-head Gate, Squash Merge and a status-only `[skip ci]` correction are authorized
+- Delegation mode: `OFF`; no new sub-agent work is authorized
+- Live test mode: `OFF`; the one selected F1e DeepSeek Tool Loop is complete
 - Configuration rule: Provider binding, model, Base URL and Capability Mapping remain Config v1 data. A Provider selects exactly one inline `api_key` or dedicated `credential_ref`; neither may infer Provider/model identity or use Codex login state.
-- Stop condition: report the remote checkpoint and stop with M4-S3c unstarted
+- Stop condition: complete the F1e remote seal, leave M4-S3c unstarted and report the exact Git/CI identities
 
 ## M4-S3a1 Slice Start
 
@@ -1112,9 +1142,16 @@ The user's later instruction to submit the completed checkpoint remotely is cons
 - None for M3-S4; implementation PR `#39`, status PR `#40` and the single required PR-head Gate are complete.
 - None for M4-S1; implementation PR `#42`, exact-head CI, implementation merge and separate status PR `#43` complete the remote seal.
 - None for M4-S2; implementation commit `d99f395`, PR `#44`, sole PR-head CI `33165972124`, Squash Merge `2afe900` and separate status PR `#45` complete the remote seal.
-- Live Provider compatibility remains unverified by design; missing live credentials do not block offline development and no Codex credential is an allowed substitute.
+- None for F1e: offline Gate and the selected DeepSeek Full-only Tool Loop pass, and its Git publication is authorized. M4-S3c and any additional Live request remain unauthorized; no Codex credential is an allowed substitute.
 
 ## Last Verification
+
+- F1e local Gate: PASS on Rust `1.93.1`; formatting, denied-warning Clippy, 313 discovered tests with 311 default-enabled tests passing and two configuration-driven Live Smokes ignored, locked build and all Lean scans pass.
+- F1e protocol/AgentLoop Gate: PASS; one Responses decoder accepts completed plaintext reasoning with an optional redundant Adapter-local encrypted sidecar, rejects encrypted-only/unknown content, and one encoder preserves reasoning/call/result order. Atomic completion, cancellation/failure isolation, Full/incremental/rejection, Context budget and Deferred ToolSpecs-change paths are covered.
+- F1e History/Audit/Replay Gate: PASS; reasoning never enters Conversation/Session/Research/Memory or user output. RequestAudit reads ModelInputIR v2/v3, narrows distinct Full delivery, and a real Replay provider regression proves v2-to-v3 request matching.
+- F1e review: the bounded independent Luna audit found one Context-candidate P1, which was fixed with explicit `ProviderContinuationUnavailable` and a permanent regression; its repair review returned `APPROVE`. Main cross-boundary review found and fixed the deferred `tool_search`/ToolsChanged path. Optional post-fix addendum audit threads timed out and were terminated without being counted as approval.
+- F1e Live Test: PASS; explicit Config v1 selected `deepseek-v4-flash` with `incremental_input=false`. The first model step produced reasoning plus `read_file`, the existing Tool Registry executed the synthetic file read, and the second Full step replayed reasoning/call/result and returned the exact fixture content. The first attempt exposed a redundant encrypted sidecar and failed under v1.5; ADR-0016/v1.6 plus permanent fixtures narrowed that wire rule, after which the same generic path passed.
+- F1e isolation/Git: PASS; the inline credential was not displayed or copied into repository facts, and Codex login state, `~/.codex` and `CODEX_HOME` were untouched. Five temporary reasoning probe SSE files were permanently deleted; the user-owned local Provider config and synthetic project remain. No commit, push, PR, Actions, tag or release occurred.
 
 - F1b local Gate: PASS on Rust `1.93.1`; formatting, denied-warning Clippy, 298 discovered tests with 296 default-enabled tests passing and two generic configuration-driven Live Smokes ignored, plus locked build and all Lean scans.
 - F1b protocol Gate: PASS; one `ResponsesHttpAdapter` owns request encoding, HTTP/SSE transport and decoding for every explicitly configured conforming service. Reasoning, Tool, text, Usage, Completed, unknown-event, cancellation, incremental and Full-only paths are covered without a vendor binding.

@@ -38,6 +38,7 @@ impl ConversationHistory {
         match item {
             ContentItem::ToolCall { call } => self.append_tool_call(call),
             ContentItem::ToolResult { result } => self.append_tool_result(result),
+            ContentItem::Reasoning { .. } => Err(HistoryError::ProviderContinuationItem),
             ContentItem::Text { .. }
             | ContentItem::ImageArtifact { .. }
             | ContentItem::Unsupported { .. } => {
@@ -125,6 +126,7 @@ impl ConversationHistory {
                     })
                 }
                 ContentItem::ToolResult { .. }
+                | ContentItem::Reasoning { .. }
                 | ContentItem::Text { .. }
                 | ContentItem::ImageArtifact { .. }
                 | ContentItem::Unsupported { .. } => None,
@@ -159,6 +161,9 @@ pub fn normalize_content_items(items: &[ContentItem]) -> Result<Vec<ContentItem>
             ContentItem::Text { .. }
             | ContentItem::ImageArtifact { .. }
             | ContentItem::Unsupported { .. } => history.append_content_item(item.clone())?,
+            ContentItem::Reasoning { .. } => {
+                return Err(HistoryError::ProviderContinuationItem);
+            }
         }
     }
 
@@ -222,6 +227,7 @@ pub(crate) fn validate_content_items(items: &[ContentItem]) -> Result<(), Histor
             ContentItem::ToolResult { result } => history.append_tool_result(result.clone())?,
             ContentItem::Text { .. }
             | ContentItem::ImageArtifact { .. }
+            | ContentItem::Reasoning { .. }
             | ContentItem::Unsupported { .. } => {}
         }
     }
@@ -230,6 +236,8 @@ pub(crate) fn validate_content_items(items: &[ContentItem]) -> Result<(), Histor
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum HistoryError {
+    #[error("provider continuation reasoning is not Conversation History")]
+    ProviderContinuationItem,
     #[error("Tool Call `{call_id}` already exists in History")]
     DuplicateToolCall { call_id: ToolCallId },
     #[error("Tool Result `{call_id}` has no matching Tool Call")]

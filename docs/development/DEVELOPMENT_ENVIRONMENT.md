@@ -272,6 +272,8 @@ shasum -a 256 target/aarch64-apple-darwin/release/cyber-agent
 - 测试 Device/PTY 使用 fake 或可控子进程。
 - Live Test 使用独立标记并默认 ignored；只有 `CYBER_AGENT_LIVE_TESTS=1` 和专用凭据同时存在时才能运行。
 - Live Test 只使用固定合成 Prompt，不加载真实漏洞目标、Project Memory、历史 Session 或 Artifact。
+- Responses Full-only reasoning Tool Loop 必须由 Config v1 显式声明 `incremental_input = false`；测试代码不得按 Provider/Model 名覆盖 Capability。
+- completed reasoning 同时含明文 `reasoning_text` 和 opaque encrypted sidecar 时只测试通用明文 replay；encrypted-only 仍是显式协议失败，任何 opaque 值不得进入日志或 Core。
 - Live Test 限制用例数、并发、超时和输出长度，只验证 Provider 编解码、Streaming、Tool Call 与 Usage 的最小兼容性。
 - 凭据解析单元测试使用注入的 Fake Env/Credential Source，不调用 `std::env::set_var` 改变并行测试进程的真实环境。
 - Contract Test 必须证明 `OPENAI_API_KEY`、`CODEX_HOME` 和 Codex 登录文件不会被当作回退凭据。

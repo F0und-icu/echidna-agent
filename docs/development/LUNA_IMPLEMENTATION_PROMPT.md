@@ -75,8 +75,8 @@ EXPECTED_REMOTE = https://github.com/F0und-icu/cyber-agent
 
 【仓库与启动检查】
 1. 确认工作目录是 Cyber Agent 项目根目录。
-2. 必须存在 AGENTS.md、task.md、docs/README.md、docs/development/STATUS.md、docs/development/IMPLEMENTATION_PLAN.md、docs/development/LEAN_CODE_GOVERNANCE.md、Architecture v1/v1.1/v1.2/v1.3/v1.4 和相关 ADR。
-3. 如果这些权威文件缺失，立即停止并报告 GOVERNANCE_BASELINE_MISSING；不要根据本提示词重新生成架构。
+2. 必须存在 AGENTS.md、task.md、docs/README.md、docs/development/STATUS.md、docs/development/IMPLEMENTATION_PLAN.md、docs/development/LEAN_CODE_GOVERNANCE.md、Architecture v1 至最新冻结 additive version 和相关 ADR。
+3. 如果这些权威文件或 Architecture v1 至最新冻结 additive version 缺失，立即停止并报告 GOVERNANCE_BASELINE_MISSING；不要根据本提示词重新生成架构。
 4. 阅读顺序必须是：
    a. AGENTS.md 全文；
    b. docs/development/STATUS.md 全文；
@@ -84,7 +84,7 @@ EXPECTED_REMOTE = https://github.com/F0und-icu/cyber-agent
    d. IMPLEMENTATION_PLAN.md 当前 Slice 全文；
    e. LEAN_CODE_GOVERNANCE.md 全文；
    f. task.md 相关章节、测试红线和维护规则；
-   g. Architecture v1、v1.1、v1.2、v1.3、v1.4 相关契约；
+   g. Architecture v1 至最新冻结 additive version 的相关契约；
    h. 相关 ACCEPTED ADR；
    i. 已有源码、测试、工作树和依赖事实。
 5. 检查 STATUS 的 Current Slice 与 SLICE_ID。冲突时停止并报告 SLICE_AUTHORITY_MISMATCH。
@@ -194,6 +194,7 @@ IMPLEMENT_ONE_SLICE：
 14. M4-S3a1 必须覆盖 Plan immutability、sent-schema/dispatch binding、Deferred current-Turn lifecycle、Resume clear、`generic-v1` bytes 和历史 audit；不得提前实现 a2/e1/e2/f/g。
 15. M4-S3a2 必须覆盖 Domain × Phase Prompt/Exposure、Turn-boundary/Resume、历史 `prompt:mode:*` Replay；M4-S3b 必须覆盖 first-action、参数纠错、重复读取、Batch、Deferred Search 和证据提升边界。
 16. M4-S3e1/e2 必须覆盖 upcaster/reference/provenance/Compaction 边界；M4-S3f/g 先运行 Shadow 并记录质量、成本、promotion/removal 结论。
+17. Responses reasoning continuation 必须区分 Conversation History 与 provider delivery；Full-only replay 保持 reasoning/call/result 顺序。只有完整明文 reasoning 存在时才可忽略冗余 Adapter-local encrypted sidecar；encrypted-only 与未知 content 显式失败。
 
 【验证与完成标准】
 - 运行当前 Slice 指定测试以及所有已完成 Slice 的回归测试。

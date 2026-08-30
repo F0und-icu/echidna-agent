@@ -6,7 +6,7 @@
 
 它约束所有本地或远程实现 Agent，包括在用户明确授权后参与开发的子 Agent。聊天摘要不能替代本文件；每个实现 Agent 都必须亲自阅读本文件、`AGENTS.md`、`STATUS.md` 和当前 Slice。
 
-本规范是开发治理增量，不修改 Architecture v1/v1.1/v1.2/v1.3/v1.4 的冻结语义。发生冲突时遵循 `docs/README.md` 的权威顺序。
+本规范是开发治理增量，不修改 Architecture v1 至 v1.6 的冻结语义。发生冲突时遵循 `docs/README.md` 的权威顺序。
 
 ## 1. 当前基线与迁移规则
 
@@ -28,6 +28,7 @@
 | Provider-neutral Model Port 与通用 Provider 错误 | `ports/model` | Adapter 私有错误只在边界映射一次 |
 | Streaming 完成、断流和应用级取消 | `app/model_streaming` 或后续唯一 AgentLoop 服务 | Transport 只提供流、释放和协议错误 |
 | Responses 请求、响应和 SSE DTO | `adapters/responses` | 不得进入 Domain 或 App 契约；Provider 配置不得复制协议类型 |
+| Completed reasoning continuation | `domain/model` 的语义项 + AgentLoop provider delivery state | Conversation History 拒绝 reasoning；opaque encrypted sidecar 与 wire ID 保持 Adapter-local |
 | Tool 类型、Effect 和执行收据 | `domain/tools` | Tool Adapter 只执行并返回结果 |
 | Tool Call/Result 配对和 History 修复 | 一个纯 History Normalizer | AgentLoop、Context Planner、Adapter 不各自修复 |
 | Prompt Fragment、排序和上下文预算 | 一个 Context Compiler/Planner | Provider Adapter 只序列化最终 IR |

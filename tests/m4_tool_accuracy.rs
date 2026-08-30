@@ -452,6 +452,9 @@ async fn only_changed_arguments_in_the_immediately_following_sample_count_as_a_c
             | ContentItem::ImageArtifact { .. }
             | ContentItem::ToolCall { .. }
             | ContentItem::Unsupported { .. } => None,
+            ContentItem::Reasoning { .. } => {
+                panic!("provider reasoning must not enter Conversation History")
+            }
         })
         .collect();
     let fixture = record_agent_trace(
@@ -634,6 +637,9 @@ async fn controlled_accuracy_fixture() -> ToolAccuracyFixture {
             | ContentItem::ToolCall { .. }
             | ContentItem::ToolResult { .. }
             | ContentItem::Unsupported { .. } => None,
+            ContentItem::Reasoning { .. } => {
+                panic!("provider reasoning must not enter Conversation History")
+            }
         })
         .unwrap();
     let history_results = agent
@@ -646,6 +652,9 @@ async fn controlled_accuracy_fixture() -> ToolAccuracyFixture {
             | ContentItem::ImageArtifact { .. }
             | ContentItem::ToolCall { .. }
             | ContentItem::Unsupported { .. } => None,
+            ContentItem::Reasoning { .. } => {
+                panic!("provider reasoning must not enter Conversation History")
+            }
         })
         .collect();
 
@@ -803,7 +812,8 @@ fn model_events(items: &[ContentItem]) -> Vec<ModelEvent> {
             ContentItem::Text { .. }
             | ContentItem::ImageArtifact { .. }
             | ContentItem::ToolResult { .. }
-            | ContentItem::Unsupported { .. } => panic!("fixture sample must be model output"),
+            | ContentItem::Unsupported { .. }
+            | ContentItem::Reasoning { .. } => panic!("fixture sample must be model output"),
         })
         .collect()
 }

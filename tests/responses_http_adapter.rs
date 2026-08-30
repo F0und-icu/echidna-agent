@@ -15,9 +15,14 @@ use cyber_agent::app::model_streaming::{
     ModelStreamCancellation, ModelStreamOutcome, ModelStreamingError, ModelStreamingService,
 };
 use cyber_agent::domain::artifacts::ArtifactId;
+use cyber_agent::domain::events::StreamId;
 use cyber_agent::domain::model::{
     CapabilityMappingVersion, ContentItem, MessageRole, ModelCapabilities, ModelEvent,
     ModelInputIR, ModelRequestRequirements, ModelUsage,
+};
+use cyber_agent::domain::project::ProjectId;
+use cyber_agent::domain::request_audit::{
+    RequestAdapterVersion, RequestAuditBinding, RequestAuditRunContext,
 };
 use cyber_agent::domain::tools::{
     ExecutionId, ToolCall, ToolCallId, ToolExecutionOutcome, ToolName, ToolResult, ToolResultStatus,
@@ -617,6 +622,9 @@ async fn reasoning_extension_tool_usage_and_full_only_completion_share_one_decod
                 ModelEvent::ReasoningDelta {
                     text: "check the manifest first".to_owned(),
                 },
+                ModelEvent::ReasoningItem {
+                    text: "check the manifest first".to_owned(),
+                },
                 ModelEvent::ToolCall {
                     call: ToolCall::new(
                         ToolCallId::new("call_reasoning_fixture"),
@@ -644,6 +652,91 @@ async fn reasoning_extension_tool_usage_and_full_only_completion_share_one_decod
     let actual: Value = serde_json::from_str(&request.body).unwrap();
     assert_eq!(actual["model"], json!("fixture-reasoning-model"));
     assert!(actual.get("previous_response_id").is_none());
+}
+
+#[tokio::test]
+async fn full_only_tool_loop_replays_reasoning_call_and_result_in_wire_order() {
+    let first = concat!(
+        "data: {\"type\":\"response.output_item.done\",\"item\":{",
+        "\"type\":\"reasoning\",\"content\":[{\"type\":\"reasoning_text\",",
+        "\"text\":\"Search the bounded fixture first.\"}],\"encrypted_content\":null}}\n\n",
+        "data: {\"type\":\"response.output_item.done\",\"item\":{",
+        "\"type\":\"function_call\",\"call_id\":\"call-full-reasoning\",",
+        "\"name\":\"search_files\",\"arguments\":",
+        "\"{\\\"pattern\\\":\\\"cyber-agent\\\",\\\"paths\\\":[\\\"Cargo.toml\\\"]}\"}}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{}}\n\n",
+    );
+    let second = concat!(
+        "data: {\"type\":\"response.output_text.delta\",",
+        "\"delta\":\"bounded search complete\"}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{}}\n\n",
+    );
+    let (base_url, mut requests, server) =
+        spawn_sse_sequence_server(vec![first.to_owned(), second.to_owned()]).await;
+    let mut full_only_capabilities = capabilities();
+    full_only_capabilities.incremental_input = false;
+    full_only_capabilities.usage_reporting = false;
+    let provider = ResponsesHttpAdapter::new(
+        ResponsesHttpConfig::new(
+            base_url,
+            "fixture-full-only-model",
+            FIXTURE_CREDENTIAL_REFERENCE,
+            full_only_capabilities,
+        ),
+        FakeCredentialSource::value(Some(FIXTURE_SECRET)),
+    );
+    let tools = ToolRegistry::for_project(env!("CARGO_MANIFEST_DIR"));
+    let mut agent = AgentLoop::new(&provider, &tools);
+
+    let audit_context = RequestAuditRunContext::new(
+        RequestAuditBinding::new(
+            ProjectId::new("project-full-only-reasoning"),
+            StreamId::new("session:full-only-reasoning"),
+        )
+        .unwrap(),
+        RequestAdapterVersion::new("fixture-responses-v1").unwrap(),
+    );
+    let mut audits = Vec::new();
+    let outcome = agent
+        .run_turn_audited(
+            "inspect the package manifest",
+            AgentCancellation::new(),
+            &audit_context,
+            &mut |attempt| {
+                audits.push(attempt);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        AgentTurnOutcome::Completed {
+            assistant_text,
+            model_requests: 2,
+            executions,
+        } if assistant_text == "bounded search complete" && executions.len() == 1
+    ));
+    assert!(
+        agent
+            .history()
+            .items()
+            .iter()
+            .all(|item| !matches!(item, ContentItem::Reasoning { .. }))
+    );
+    assert_eq!(audits.len(), 2);
+
+    let _first_request = requests.recv().await.unwrap();
+    let second_request = requests.recv().await.unwrap();
+    server.await.unwrap();
+    let second_body: Value = serde_json::from_str(&second_request.body).unwrap();
+    assert!(second_body.get("previous_response_id").is_none());
+    let input = second_body["input"].as_array().unwrap();
+    assert_eq!(input.len(), 4);
+    assert_eq!(input[0]["type"], json!("message"));
+    assert_eq!(input[1]["type"], json!("reasoning"));
+    assert_eq!(input[2]["type"], json!("function_call"));
+    assert_eq!(input[3]["type"], json!("function_call_output"));
 }
 
 #[tokio::test]
@@ -676,6 +769,9 @@ async fn tool_schema_call_and_result_encode_in_full_history_order() {
         vec![
             ContentItem::user_text("Inspect Cargo.toml."),
             ContentItem::assistant_text("I will read it."),
+            ContentItem::Reasoning {
+                text: "The file read is the next required step.".to_owned(),
+            },
             ContentItem::ToolCall { call },
             ContentItem::ToolResult { result },
         ],
@@ -994,6 +1090,14 @@ async fn malformed_unknown_and_uncompleted_streams_are_protocol_errors() {
         (
             "data: {\"type\":\"response.reasoning_text.delta\"}\n\n",
             "reasoning text delta event omitted `delta`",
+        ),
+        (
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"content\":[],\"encrypted_content\":\"opaque\"}}\n\n",
+            "only unsupported encrypted content",
+        ),
+        (
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"content\":[{\"type\":\"future_reasoning\",\"text\":\"opaque\"}]}}\n\n",
+            "unsupported completed reasoning content `future_reasoning`",
         ),
         (
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",

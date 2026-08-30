@@ -614,6 +614,9 @@ async fn reasoning_events_never_become_assistant_history_or_user_output() {
         ModelEvent::ReasoningDelta {
             text: "private working text".to_owned(),
         },
+        ModelEvent::ReasoningItem {
+            text: "completed provider continuation".to_owned(),
+        },
         ModelEvent::TextDelta {
             text: "auditable answer".to_owned(),
         },
@@ -668,6 +671,46 @@ async fn reasoning_events_never_become_assistant_history_or_user_output() {
     assert_eq!(text_deltas, vec!["auditable answer"]);
     assert_eq!(request_audits.len(), 1);
     assert!(receipts.is_empty());
+}
+
+#[tokio::test]
+async fn reasoning_continuation_that_exceeds_context_budget_fails_before_resampling() {
+    let project = TestProject::new("reasoning-budget");
+    project.write("src/target.rs", "// bounded reasoning fixture\n");
+    let call = tool_call(
+        "call-reasoning-budget",
+        "search_files",
+        json!({"pattern": "reasoning fixture", "paths": ["src"]}),
+    );
+    let provider = ScriptedProvider::new([
+        vec![
+            ModelEvent::ReasoningItem {
+                text: "r".repeat(700_000),
+            },
+            ModelEvent::ToolCall { call },
+        ],
+        vec![ModelEvent::TextDelta {
+            text: "must not be sampled".to_owned(),
+        }],
+    ]);
+    let tools = ToolRegistry::for_project(&project.root);
+    let mut agent = AgentLoop::new(&provider, &tools);
+
+    assert_eq!(
+        agent
+            .run_turn("inspect the fixture", AgentCancellation::new())
+            .await,
+        Err(AgentLoopError::ProviderContinuationUnavailable)
+    );
+    assert_eq!(provider.requests().len(), 1);
+    assert!(
+        agent
+            .history()
+            .items()
+            .iter()
+            .all(|item| !matches!(item, ContentItem::Reasoning { .. }))
+    );
+    assert_eq!(agent.history().ensure_all_tool_calls_paired(), Ok(()));
 }
 
 #[tokio::test]
@@ -1431,12 +1474,22 @@ async fn typed_continuation_rejection_retries_one_full_sample_without_replaying_
         incremental_capabilities(),
         [
             completed_response(
-                vec![ModelEvent::ToolCall { call: call.clone() }],
+                vec![
+                    ModelEvent::ReasoningItem {
+                        text: "committed continuation reasoning".to_owned(),
+                    },
+                    ModelEvent::ToolCall { call: call.clone() },
+                ],
                 Some("resp-before-rejection"),
             ),
-            rejected_response(vec![ModelEvent::TextDelta {
-                text: "discard this partial response".to_owned(),
-            }]),
+            rejected_response(vec![
+                ModelEvent::ReasoningItem {
+                    text: "discard this partial reasoning".to_owned(),
+                },
+                ModelEvent::TextDelta {
+                    text: "discard this partial response".to_owned(),
+                },
+            ]),
             completed_response(
                 vec![ModelEvent::TextDelta {
                     text: "full fallback answer".to_owned(),
@@ -1486,6 +1539,26 @@ async fn typed_continuation_rejection_retries_one_full_sample_without_replaying_
             .any(|item| matches!(
                 item,
                 ContentItem::ToolResult { result } if result.call_id == call.call_id
+            ))
+    );
+    assert!(
+        requests[2]
+            .input()
+            .content_items
+            .iter()
+            .any(|item| matches!(
+                item,
+                ContentItem::Reasoning { text } if text == "committed continuation reasoning"
+            ))
+    );
+    assert!(
+        requests[2]
+            .input()
+            .content_items
+            .iter()
+            .all(|item| !matches!(
+                item,
+                ContentItem::Reasoning { text } if text == "discard this partial reasoning"
             ))
     );
 }

@@ -121,11 +121,12 @@ async fn deferred_activation_changes_only_later_steps_and_clears_at_the_next_tur
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     let provider = ScriptedProvider::new([
-        vec![call(
-            "search",
-            "tool_search",
-            json!({"query": "atomic file"}),
-        )],
+        vec![
+            ModelEvent::ReasoningItem {
+                text: "find the deferred write tool".to_owned(),
+            },
+            call("search", "tool_search", json!({"query": "atomic file"})),
+        ],
         vec![call(
             "write-first-turn",
             "write_file",
@@ -176,6 +177,13 @@ async fn deferred_activation_changes_only_later_steps_and_clears_at_the_next_tur
     assert_eq!(requests.len(), 5);
     assert!(!contains_tool(&requests[0], "write_file"));
     assert!(contains_tool(&requests[1], "write_file"));
+    assert!(requests[1].input().content_items.iter().any(|item| {
+        matches!(
+            item,
+            cyber_agent::domain::model::ContentItem::Reasoning { text }
+                if text == "find the deferred write tool"
+        )
+    }));
     assert!(contains_tool(&requests[2], "write_file"));
     assert!(!contains_tool(&requests[3], "write_file"));
     assert!(!contains_tool(&requests[4], "write_file"));

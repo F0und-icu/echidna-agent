@@ -6,6 +6,7 @@ use crate::domain::tools::ToolCall;
 
 enum SampleItem {
     AssistantText(String),
+    Reasoning(String),
     ToolCall(ToolCall),
 }
 
@@ -21,6 +22,12 @@ impl ModelSample {
             match event {
                 ModelEvent::TextDelta { text: delta } => text.push_str(&delta),
                 ModelEvent::ReasoningDelta { .. } => {}
+                ModelEvent::ReasoningItem { text: reasoning } => {
+                    if !text.is_empty() {
+                        items.push(SampleItem::AssistantText(std::mem::take(&mut text)));
+                    }
+                    items.push(SampleItem::Reasoning(reasoning));
+                }
                 ModelEvent::ToolCall { call } => {
                     if !text.is_empty() {
                         items.push(SampleItem::AssistantText(std::mem::take(&mut text)));
@@ -41,7 +48,7 @@ impl ModelSample {
             .iter()
             .filter_map(|item| match item {
                 SampleItem::ToolCall(call) => Some(call.clone()),
-                SampleItem::AssistantText(_) => None,
+                SampleItem::AssistantText(_) | SampleItem::Reasoning(_) => None,
             })
             .collect()
     }
@@ -51,6 +58,7 @@ impl ModelSample {
         for item in &self.items {
             match item {
                 SampleItem::AssistantText(text) => staged.append_assistant_text(text.clone()),
+                SampleItem::Reasoning(_) => {}
                 SampleItem::ToolCall(call) => staged.append_tool_call(call.clone())?,
             }
         }
@@ -63,7 +71,7 @@ impl ModelSample {
             .iter()
             .filter_map(|item| match item {
                 SampleItem::AssistantText(text) => Some(text.as_str()),
-                SampleItem::ToolCall(_) => None,
+                SampleItem::Reasoning(_) | SampleItem::ToolCall(_) => None,
             })
             .collect()
     }
@@ -73,6 +81,7 @@ impl ModelSample {
             .iter()
             .map(|item| match item {
                 SampleItem::AssistantText(text) => ContentItem::assistant_text(text.clone()),
+                SampleItem::Reasoning(text) => ContentItem::Reasoning { text: text.clone() },
                 SampleItem::ToolCall(call) => ContentItem::ToolCall { call: call.clone() },
             })
             .collect()

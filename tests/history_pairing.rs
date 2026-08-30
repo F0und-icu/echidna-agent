@@ -98,6 +98,19 @@ fn failed_and_cancelled_results_are_complete_pairs() {
 }
 
 #[test]
+fn provider_reasoning_cannot_be_normalized_as_conversation_history() {
+    assert_eq!(
+        normalize_content_items(&[
+            ContentItem::user_text("inspect the target"),
+            ContentItem::Reasoning {
+                text: "provider continuation only".to_owned(),
+            },
+        ]),
+        Err(HistoryError::ProviderContinuationItem)
+    );
+}
+
+#[test]
 fn normalization_preserves_complete_pairs_drops_orphans_and_repairs_open_calls_in_call_order() {
     let completed_call = call("complete", "read_file");
     let completed_result = result("complete", "read_file", ToolResultStatus::Succeeded);

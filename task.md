@@ -9,7 +9,7 @@
 - Codex 本地源码：`codex/`
 - Codex 最新设计复核提交：`868c9edb0da913a5fc699a71664e65f44f6058b0`
 - 分析文档：`Codex架构与漏洞挖掘Agent复用评估.md`
-- 冻结架构：`docs/architecture/CYBER_AGENT_ARCHITECTURE_V1.md` + `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_1.md` + `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_2.md` + `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_3.md` + `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_4.md`
+- 冻结架构：`docs/architecture/CYBER_AGENT_ARCHITECTURE_V1.md` 至 `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_6.md` 的完整 additive chain
 - 模型组合决策：`docs/adr/ADR-0002-capability-driven-primary-vision-models.md`
 - 研究控制决策：`docs/adr/ADR-0009-stable-research-persona-domain-profile-and-phase.md`
 - 不可变 Step/Tool Plan 决策：`docs/adr/ADR-0010-immutable-sampling-step-and-tool-plan.md`
@@ -17,6 +17,8 @@
 - 确定性检索/引导决策：`docs/adr/ADR-0012-deterministic-security-retrieval-and-evidence-gap-guidance.md`
 - Prompt renderer 决策：`docs/adr/ADR-0013-versioned-prompt-renderer-boundary.md`
 - ToolFailure/准确率可观测性决策：`docs/adr/ADR-0014-narrow-tool-failure-and-accuracy-observability.md`
+- Responses reasoning continuation 决策：`docs/adr/ADR-0015-responses-reasoning-continuation.md`
+- 冗余 encrypted reasoning sidecar 决策：`docs/adr/ADR-0016-redundant-encrypted-reasoning-sidecar.md`
 - 唯一 Provider 装配决策：`docs/adr/ADR-0006-single-provider-composition-root.md`
 - 开发计划：`docs/development/IMPLEMENTATION_PLAN.md`
 - 精简代码治理：`docs/development/LEAN_CODE_GOVERNANCE.md`
@@ -30,8 +32,8 @@
 
 - 阶段：Implementation；M0 至 M4-S2 和 F1a-F1d 已远端封存。
 - 当前代码基线已具备一个 AgentLoop、项目/会话/研究/审计事实、固定领域 Prompt Profiles、多模态组合、Replay/Eval、唯一 Provider Composition Root 和第一版 CLI Chat。
-- Architecture v1.4 已在本地冻结，在 v1.3 上窄化 ToolFailure 执行边界并限定准确率只能报告持久 Trace 可诚实观测的指标；Git/远端封存和本地生产实现仍以 `STATUS.md` 授权为准。
-- 当前 Slice 是 M4-S3b，状态为 `IN_PROGRESS`；不因本架构文档或受控测试而标记 COMPLETE/Gate PASS，具体事实始终以 `docs/development/STATUS.md` 为准。
+- Architecture v1.5/v1.6 已在本地冻结：Provider-visible completed reasoning 与 Conversation History 分离，并仅在有完整 `reasoning_text` 时忽略冗余 Adapter-local encrypted sidecar；Git/远端封存仍未授权。
+- F1e 已完成本地实现、完整 Gate 和一次配置驱动 DeepSeek Full-only Tool Loop。当前 Slice 恢复为 M4-S3c `READY_NOT_AUTHORIZED`；具体事实始终以 `docs/development/STATUS.md` 为准。
 
 ## 1. 产品定义
 
@@ -2072,6 +2074,6 @@ M1 总完成标准：M1a、M1b、M1c 分别有可运行集成测试，任一后�
 
 ## 25. 下一步
 
-具体状态始终以 `docs/development/STATUS.md` 为准。F1a-F1d 已远端封存；Architecture v1.2/v1.3 只完成了本地设计更新，没有开始生产代码或 Git/远端封存。
+具体状态始终以 `docs/development/STATUS.md` 为准。F1a-F1d 已远端封存；F1e 已在本地完成，Git 发布已授权并等待准确 PR-head Gate。Architecture v1.2 至 v1.6 的远端架构封存仍未授权。
 
-下一候选是 M4-S3a1 Immutable Sampling Foundation，仍需单独授权。之后依次是 M4-S3a2 Research Control、M4-S3b/c/d、M4-S3e1/e2 typed evidence/provenance、M4-S3f retrieval Shadow、M4-S3g guidance Shadow 和 M4-S4 真实长流程验收；任何前一项完成都不自动授权下一项。
+下一候选是 M4-S3c 通用研究工具，状态为 `READY_NOT_AUTHORIZED`。之后依次是 M4-S3d、M4-S3e1/e2 typed evidence/provenance、M4-S3f retrieval Shadow、M4-S3g guidance Shadow 和 M4-S4 真实长流程验收；任何前一项完成都不自动授权下一项。

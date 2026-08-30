@@ -30,6 +30,30 @@ pub enum BaselineInvalidationReason {
     ProviderRejected,
 }
 
+impl BaselineInvalidationReason {
+    /// Full delivery may differ from the current logical input only for the
+    /// two existing state-diff fallbacks or for an exact Provider reasoning
+    /// replay across a Prompt/Tool-plan change.
+    pub(crate) const fn permits_distinct_full_delivery(self) -> bool {
+        matches!(
+            self,
+            Self::IncrementalInputUnsupported
+                | Self::ProviderRejected
+                | Self::PromptChanged
+                | Self::ToolsChanged
+        )
+    }
+
+    /// These reasons may carry the established state-diff representation,
+    /// which need not equal the logical input after removing reasoning.
+    pub(crate) const fn permits_state_diff_full_delivery(self) -> bool {
+        matches!(
+            self,
+            Self::IncrementalInputUnsupported | Self::ProviderRejected
+        )
+    }
+}
+
 /// The local delivery decision for one semantic request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BaselineAssessment {

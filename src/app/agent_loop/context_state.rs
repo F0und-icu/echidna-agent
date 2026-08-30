@@ -168,54 +168,53 @@ pub(super) fn state_diff_delivery_input(
         history,
         turn_history_start,
     } = input;
-    let (Some(committed_input), Some(committed_manifest)) = (committed_input, committed_manifest)
-    else {
+    let Some(committed_input) = committed_input else {
         return Ok(None);
     };
+    let retains_reasoning = committed_input
+        .content_items
+        .iter()
+        .any(|item| matches!(item, ContentItem::Reasoning { .. }));
+    let Some(committed_manifest) = committed_manifest else {
+        return continuation_unavailable_or_none(retains_reasoning);
+    };
     if committed_history_len > history.len() || !plan_allows_history_append(current_plan) {
-        return Ok(None);
+        return continuation_unavailable_or_none(retains_reasoning);
     }
 
     let mut state_items = Vec::new();
-    let mut has_state_projection = false;
     match (committed_world_state, world_state) {
         (Some(previous), Some(current)) => {
-            has_state_projection = true;
             let previous_full = previous.full_fragment()?;
             let current_full = current.full_fragment()?;
             if !fragment_is_completely_included(current_plan, &current_full)
                 || !committed_fragment_was_completely_included(committed_manifest, &previous_full)
             {
-                return Ok(None);
+                return continuation_unavailable_or_none(retains_reasoning);
             }
             if let Some(fragment) = current.diff_fragment(previous)? {
                 append_context_items(&mut state_items, fragment)?;
             }
         }
         (None, None) => {}
-        _ => return Ok(None),
+        _ => return continuation_unavailable_or_none(retains_reasoning),
     }
     match (committed_project_snapshot, project_snapshot) {
         (Some(previous), Some(current)) => {
-            has_state_projection = true;
             let previous_full = previous.full_fragment()?;
             let current_full = current.full_fragment()?;
             if !fragment_is_completely_included(current_plan, &current_full)
                 || !committed_fragment_was_completely_included(committed_manifest, &previous_full)
             {
-                return Ok(None);
+                return continuation_unavailable_or_none(retains_reasoning);
             }
             if let Some(fragment) = current.diff_fragment(previous)? {
                 append_context_items(&mut state_items, fragment)?;
             }
         }
         (None, None) => {}
-        _ => return Ok(None),
+        _ => return continuation_unavailable_or_none(retains_reasoning),
     }
-    if !has_state_projection {
-        return Ok(None);
-    }
-
     let mut candidate = committed_input.clone();
     if committed_history_len <= turn_history_start {
         candidate
@@ -236,8 +235,21 @@ pub(super) fn state_diff_delivery_input(
     candidate.requirements = full_input.requirements;
     match planner.validate_rendered_model_input(&candidate, budget) {
         Ok(()) => Ok(Some(candidate)),
+        Err(ContextPlannerError::RenderedInputExceedsBudget { .. }) if retains_reasoning => {
+            Err(AgentLoopError::ProviderContinuationUnavailable)
+        }
         Err(ContextPlannerError::RenderedInputExceedsBudget { .. }) => Ok(None),
         Err(error) => Err(error.into()),
+    }
+}
+
+fn continuation_unavailable_or_none(
+    retains_reasoning: bool,
+) -> Result<Option<ModelInputIR>, AgentLoopError> {
+    if retains_reasoning {
+        Err(AgentLoopError::ProviderContinuationUnavailable)
+    } else {
+        Ok(None)
     }
 }
 

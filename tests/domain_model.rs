@@ -69,6 +69,9 @@ fn model_input_ir_json_has_a_stable_current_version_and_content_shape() {
                 role: MessageRole::User,
                 artifact_id: ArtifactId::new("artifact-1"),
             },
+            ContentItem::Reasoning {
+                text: "completed provider reasoning".to_owned(),
+            },
         ],
         ModelRequestRequirements {
             tool_call: true,
@@ -81,11 +84,12 @@ fn model_input_ir_json_has_a_stable_current_version_and_content_shape() {
     assert_eq!(
         serde_json::to_value(input).expect("ModelInputIR should serialize"),
         json!({
-            "schema_version": 2,
+            "schema_version": 3,
             "instructions": "test instructions",
             "content_items": [
                 {"kind": "text", "role": "user", "text": "test input"},
                 {"kind": "image_artifact", "role": "user", "artifact_id": "artifact-1"},
+                {"kind": "reasoning", "text": "completed provider reasoning"},
             ],
             "tool_specs": [],
             "requirements": {

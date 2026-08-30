@@ -161,9 +161,16 @@ fn attempt(context: &RequestAuditRunContext, input: ModelInputIR) -> RequestAudi
 }
 
 #[test]
-fn full_request_audit_attempt_requires_identical_logical_and_delivered_inputs() {
+fn full_request_audit_allows_distinct_provider_delivery_only_for_continuation_reasons() {
     let logical_input = input("logical instructions", "logical user input");
     let delivered_input = input("delivered instructions", "logical user input");
+    let mut reasoning_replay = logical_input.clone();
+    reasoning_replay.content_items.insert(
+        0,
+        cyber_agent::domain::model::ContentItem::Reasoning {
+            text: "completed reasoning".to_owned(),
+        },
+    );
 
     assert!(matches!(
         RequestAuditAttempt::new(
@@ -171,14 +178,43 @@ fn full_request_audit_attempt_requires_identical_logical_and_delivered_inputs() 
             cyber_agent::domain::context::ModelIdentity::new("fixture", "model"),
             cyber_agent::domain::context::ModelProfile::new("fixture-profile", 1),
             capabilities(),
-            logical_input,
-            delivered_input,
+            logical_input.clone(),
+            delivered_input.clone(),
             RequestAuditDelivery::full(
                 cyber_agent::domain::context::BaselineInvalidationReason::NoBaseline,
             ),
         ),
         Err(RequestAuditError::FullDeliveryInputMismatch)
     ));
+
+    for reason in [
+        cyber_agent::domain::context::BaselineInvalidationReason::IncrementalInputUnsupported,
+        cyber_agent::domain::context::BaselineInvalidationReason::ProviderRejected,
+    ] {
+        RequestAuditAttempt::new(
+            &run_context("project-left"),
+            cyber_agent::domain::context::ModelIdentity::new("fixture", "model"),
+            cyber_agent::domain::context::ModelProfile::new("fixture-profile", 1),
+            capabilities(),
+            logical_input.clone(),
+            delivered_input.clone(),
+            RequestAuditDelivery::full(reason),
+        )
+        .expect("continuation-aware Full delivery retains distinct audited input");
+    }
+
+    RequestAuditAttempt::new(
+        &run_context("project-left"),
+        cyber_agent::domain::context::ModelIdentity::new("fixture", "model"),
+        cyber_agent::domain::context::ModelProfile::new("fixture-profile", 1),
+        capabilities(),
+        logical_input,
+        reasoning_replay,
+        RequestAuditDelivery::full(
+            cyber_agent::domain::context::BaselineInvalidationReason::ToolsChanged,
+        ),
+    )
+    .expect("an exact reasoning replay may accompany an otherwise identical Full request");
 }
 
 fn projection() -> SessionProjection {
@@ -298,6 +334,14 @@ fn request_audit_rejects_unknown_schema_reordered_duplicate_and_mismatched_conte
         "request-audit-strict",
     );
     let encoded = serde_json::to_value(&manifest).unwrap();
+
+    let mut historical_ir_v2 = encoded.clone();
+    historical_ir_v2["full_logical_input"]["schema_version"] = json!(2);
+    historical_ir_v2["delivered_input"]["schema_version"] = json!(2);
+    let historical_ir_v2: RequestAuditManifest = serde_json::from_value(historical_ir_v2).unwrap();
+    historical_ir_v2
+        .validate()
+        .expect("historical ModelInputIR v2 audit identities remain readable");
 
     let mut conflicting_duplicate = encoded.clone();
     conflicting_duplicate["adapter_version"] = json!("conflicting-adapter-v2");

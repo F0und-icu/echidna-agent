@@ -890,6 +890,26 @@ Gate：Mock/loopback 端到端 Chat 回归、项目隔离和审计回归、完�
 
 Gate：配置与 Composition 单测、CLI `doctor` 防泄漏、loopback Chat Authorization 与 Session/RequestAudit 非泄漏回归，以及完整 locked Cargo/Lean Gate。
 
+### F1e：Responses Reasoning Continuation
+
+目标：让需要客户端重放已完成 reasoning output item 的无状态 Responses 服务，通过现有 Config v1、唯一 Responses Adapter 和一个 AgentLoop 完成真实 Tool Loop。
+
+交付：
+
+- `ModelInputIR` v3 增加仅用于 Provider delivery 的 completed reasoning；Reasoning 不进入 Conversation/Session/Research/Memory 或用户输出。
+- Responses Adapter 解码 completed `reasoning_text`，并按原始顺序编码 `reasoning -> function_call -> function_call_output`；无 Provider、Model、URL 或凭据分支。
+- Full-only Capability Mapping 保留完整 provider-visible delivery；incremental 服务继续只发送严格 Delta。任何 Context 预算或状态路径无法保留 reasoning 时显式失败，不静默退回普通 History。
+- RequestAudit 继续保存 full logical 与 actual delivered input；历史 ModelInputIR v2 可读，Replay 在请求匹配边界无损提升为 v3。
+- 明文 reasoning 旁的冗余 opaque `encrypted_content` 保持 Adapter-local；encrypted-only 或未知 reasoning content 显式失败。
+
+禁止：
+
+- 不把 reasoning 伪装为 assistant text 或持久事实，不保存 opaque encrypted sidecar 或 Provider item ID。
+- 不增加 DeepSeek/厂商 Adapter、Capability 推断、Router/fallback、配置字段、依赖、第二 History 或第二 AgentLoop。
+- 不以 Live 兼容为理由放宽任意 Full RequestAudit mismatch；非 state-diff 路径只能接受移除 reasoning 后与逻辑输入完全一致的 replay。
+
+Gate：Responses/AgentLoop/History/RequestAudit/Replay 专项与受影响测试、独立有限审计、完整 locked Cargo/Lean Gate；如单独授权，再用显式 `incremental_input=false` 的 Config v1 完成一个固定 DeepSeek `read_file` Live Tool Loop。
+
 ### M4-S4：真实长流程验收
 
 目标：完成一个授权、可控的长流程漏洞研究任务。

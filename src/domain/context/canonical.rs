@@ -366,6 +366,7 @@ fn canonical_content_item(item: &ContentItem) -> ContentItem {
                 output: canonical_json(&result.output),
             },
         },
+        ContentItem::Reasoning { text } => ContentItem::Reasoning { text: text.clone() },
         ContentItem::Unsupported { content_kind } => ContentItem::Unsupported {
             content_kind: content_kind.clone(),
         },

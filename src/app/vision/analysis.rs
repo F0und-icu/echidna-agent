@@ -290,6 +290,7 @@ fn collect_json_response(events: Vec<ModelEvent>) -> Result<String, VisionAnalys
         match event {
             ModelEvent::TextDelta { text } => response.push_str(&text),
             ModelEvent::ReasoningDelta { .. } => {}
+            ModelEvent::ReasoningItem { .. } => {}
             ModelEvent::Usage { .. } => {}
             ModelEvent::ToolCall { .. } => return Err(VisionAnalysisError::ToolCallRejected),
         }

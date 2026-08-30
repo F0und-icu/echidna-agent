@@ -654,12 +654,19 @@ where
             let full_assessment = self
                 .provider_session
                 .assess_delivery(&full_snapshot, capabilities.incremental_input);
-            let (mut delivery_input, mut snapshot, assessment) = if matches!(
-                full_assessment,
-                BaselineAssessment::FullRequest {
-                    reason: BaselineInvalidationReason::InputNotAppendOnly
-                }
-            ) {
+            let retains_reasoning = self.committed_delivery_input.as_ref().is_some_and(|input| {
+                input
+                    .content_items
+                    .iter()
+                    .any(|item| matches!(item, ContentItem::Reasoning { .. }))
+            });
+            let (mut delivery_input, mut snapshot, assessment) = if retains_reasoning
+                || matches!(
+                    full_assessment,
+                    BaselineAssessment::FullRequest {
+                        reason: BaselineInvalidationReason::InputNotAppendOnly
+                    }
+                ) {
                 match context_state::state_diff_delivery_input(
                     context_state::StateDiffDeliveryInput {
                         full_input: &full_input,
@@ -692,6 +699,16 @@ where
                         match candidate_assessment {
                             BaselineAssessment::AppendOnlyCandidate { .. } => {
                                 (candidate_input, candidate_snapshot, candidate_assessment)
+                            }
+                            BaselineAssessment::FullRequest { reason }
+                                if reason.permits_state_diff_full_delivery()
+                                    || (reason.permits_distinct_full_delivery()
+                                        && candidate_input.is_reasoning_replay_of(&full_input)) =>
+                            {
+                                (candidate_input, candidate_snapshot, candidate_assessment)
+                            }
+                            _ if retains_reasoning => {
+                                return Err(AgentLoopError::ProviderContinuationUnavailable);
                             }
                             _ => (full_input.clone(), full_snapshot, full_assessment),
                         }
@@ -757,15 +774,21 @@ where
                             reason: BaselineInvalidationReason::ProviderRejected,
                         };
                         self.last_baseline_assessment = Some(fallback_assessment.clone());
-                        delivery_input = full_input.clone();
-                        snapshot = StepSnapshot::capture_with_renderer(
-                            &turn,
-                            request_index,
-                            &delivery_input,
-                            &capabilities,
-                            sampling_step.prompt_renderer(),
-                            InternalRequestMetadata::default(),
-                        )?;
+                        if !delivery_input
+                            .content_items
+                            .iter()
+                            .any(|item| matches!(item, ContentItem::Reasoning { .. }))
+                        {
+                            delivery_input = full_input.clone();
+                            snapshot = StepSnapshot::capture_with_renderer(
+                                &turn,
+                                request_index,
+                                &delivery_input,
+                                &capabilities,
+                                sampling_step.prompt_renderer(),
+                                InternalRequestMetadata::default(),
+                            )?;
+                        }
                         reserve_provider_request(&mut provider_requests)?;
                         let fallback_request = ModelRequest::full(delivery_input.clone());
                         self.record_request_audit_attempt(
@@ -1263,6 +1286,10 @@ pub enum AgentLoopError {
     EmptyModelResponse,
     #[error("an incremental-capable Provider completed without a continuation identity")]
     ContinuationIdentityMissing,
+    #[error(
+        "completed Provider reasoning continuation cannot be retained by the current Context plan"
+    )]
+    ProviderContinuationUnavailable,
     #[error("the selected RequestAudit delivery does not match the actual Provider request")]
     RequestAuditDeliveryMismatch,
     #[error("RequestAudit commit failed: {message}")]

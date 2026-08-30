@@ -15,7 +15,7 @@ Before changing anything, read in order:
 3. `docs/development/LEAN_CODE_GOVERNANCE.md`
 4. Relevant sections of `task.md`
 5. `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1.md` and every frozen additive architecture file through the latest version
-6. Relevant accepted ADRs, including ADR-0002 for model composition, ADR-0009 for research-control composition, ADR-0010 through ADR-0013 for v1.3 and ADR-0014 for the M4-S3b failure/accuracy boundary
+6. Relevant accepted ADRs, including ADR-0002 for model composition, ADR-0009 for research-control composition, ADR-0010 through ADR-0014 for v1.3/v1.4 and ADR-0015/ADR-0016 for Responses reasoning continuation
 
 Inspect the worktree and existing tests before planning changes.
 
@@ -23,10 +23,11 @@ If the user explicitly authorizes development sub-agents, every delegated agent 
 
 ## Current Phase
 
-- Architecture v1.4 is the latest locally frozen additive extension over immutable v1/v1.1/v1.2/v1.3. Its remote seal remains unauthorized; local implementation status is governed by `STATUS.md`.
+- Architecture v1.6 is the latest locally frozen additive extension over immutable v1 through v1.5. Its remote seal remains unauthorized; local implementation status is governed by `STATUS.md`.
 - M0 through M4-S2 are complete and remotely sealed; M4-S3a1, M4-S3a2 and M4-S3b are locally implemented and gated but not remotely sealed. M4-S3c is `READY_NOT_AUTHORIZED`.
 - F1a Config/Composition Root, F1b protocol-first Responses HTTP/SSE Adapter, F1c first-version CLI Chat and F1d local inline Provider credentials are complete and remotely sealed by PR `#46` at Squash Merge `6eb4959`; one synthetic F1c DeepSeek Live Chat passed.
 - F1d preserves one configuration and Adapter path: Config v1 may select exactly one inline `api_key` or existing `credential_ref` per Provider. The former M4-S3a was split before implementation into M4-S3a1 and M4-S3a2; both and the subsequent M4-S3b are locally complete. Do not start M4-S3c without new authorization.
+- F1e Responses Reasoning Continuation is locally complete and gated, including one configuration-driven DeepSeek Full-only Live Tool Loop. Its Git publication is authorized and pending the exact PR-head Gate; M4-S3c and any further Live request remain unauthorized. Completed reasoning stays in provider delivery, never Conversation History; a redundant encrypted sidecar is ignored only beside valid plaintext reasoning, while encrypted-only remains unsupported.
 - Local Git is initialized and `main` tracks the private remote.
 - `codex/` is a clean, read-only upstream reference repository.
 
@@ -80,6 +81,7 @@ Do not use multi-agent development orchestration unless the current user explici
 - Provider credentials are explicit Cyber Agent inputs; Codex/ChatGPT login state is never a credential source.
 - `chat`, `doctor` and generic Live Smokes use the one configuration-driven Provider Composition Root; generic runtime paths do not own Provider URLs, models or Adapter construction.
 - One Wire API has one request encoding, transport and response-decoding owner. The fixed `http_sse + responses` binding is protocol-first: URL, model and credential reference never create a vendor binding. Add a wire-level extension only when fixtures prove a real reusable protocol difference.
+- Completed Responses reasoning is provider delivery state, not Conversation History. Full-only replay preserves reasoning/call/result order; loss under Context budget or replacement fails explicitly. Opaque encrypted reasoning stays Adapter-local and may be ignored only when complete supported plaintext reasoning is present.
 - CLI first; Web remains optional.
 
 ## Forbidden Dependencies and Scope

@@ -23,6 +23,15 @@
       ]
     },
     {
+      "type": "reasoning",
+      "content": [
+        {
+          "type": "reasoning_text",
+          "text": "The file read is the next required step."
+        }
+      ]
+    },
+    {
       "type": "function_call",
       "call_id": "call-read",
       "name": "read_file",

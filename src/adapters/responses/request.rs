@@ -43,6 +43,15 @@ enum ResponsesInputItem {
         call_id: String,
         output: String,
     },
+    Reasoning {
+        content: Vec<ResponsesReasoningContent>,
+    },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ResponsesReasoningContent {
+    ReasoningText { text: String },
 }
 
 #[derive(Debug, Serialize)]
@@ -117,6 +126,16 @@ pub(super) fn encode_request(
             }
             ContentItem::ToolCall { call } => items.push(encode_tool_call(call)?),
             ContentItem::ToolResult { result } => items.push(encode_tool_result(result)?),
+            ContentItem::Reasoning { text } => {
+                if text.is_empty() {
+                    return Err(request_encoding_error(
+                        "completed reasoning input requires non-empty text",
+                    ));
+                }
+                items.push(ResponsesInputItem::Reasoning {
+                    content: vec![ResponsesReasoningContent::ReasoningText { text }],
+                });
+            }
             ContentItem::Unsupported { content_kind } => {
                 return Err(request_encoding_error(format!(
                     "content item `{content_kind}` cannot be encoded"

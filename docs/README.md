@@ -16,7 +16,7 @@
 4. `task.md` 中当前产品范围、架构约束和里程碑。
 5. `docs/development/IMPLEMENTATION_PLAN.md`。
 6. `docs/development/LEAN_CODE_GOVERNANCE.md`。
-7. 最新的冻结架构链：`docs/architecture/CYBER_AGENT_ARCHITECTURE_V1.md` + `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_1.md` + `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_2.md` + `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_3.md` + `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_4.md`。
+7. 最新的冻结架构链：`docs/architecture/CYBER_AGENT_ARCHITECTURE_V1.md` 至 `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_6.md`。
 8. 已接受的 `docs/adr/ADR-*.md`。
 9. `docs/development/GIT_VERSION_RELEASE.md` 和 `docs/development/DEVELOPMENT_ENVIRONMENT.md`。
 10. `Codex架构与漏洞挖掘Agent复用评估.md`。
@@ -35,6 +35,8 @@
 | `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_2.md` | 架构 v1.2 稳定研究人格、DomainProfile、ResearchPhase 和工具准确率增量 | 本地冻结；远端封存前不修改 |
 | `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_3.md` | 架构 v1.3 不可变 Sampling Step、Context 来源、证据压缩与确定性研究引导增量 | 本地冻结；远端封存前不修改 |
 | `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_4.md` | 架构 v1.4 ToolFailure 执行边界与持久 Trace 准确率可观测性增量 | 本地冻结；远端封存未授权前不修改 |
+| `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_5.md` | 架构 v1.5 Provider reasoning continuation 与双 History 权威边界 | 本地冻结；远端封存未授权前不修改 |
+| `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_6.md` | 架构 v1.6 冗余 encrypted reasoning sidecar 的 Adapter-local 边界 | 本地冻结；远端封存未授权前不修改 |
 | `docs/architecture/SEALED_MANIFEST.md` | 封存来源、提交基线和 Hash 清单 | 只追加新封存记录 |
 | `docs/development/IMPLEMENTATION_PLAN.md` | 按 Slice 可执行的开发步骤和验收门 | 可以，不能追溯改写已完成 Slice |
 | `docs/development/STATUS.md` | 当前唯一工作状态和下一动作 | 每个 Slice 开始/结束更新 |
@@ -55,6 +57,8 @@
 | `docs/adr/ADR-0012-deterministic-security-retrieval-and-evidence-gap-guidance.md` | 本地确定性安全检索与证据缺口/实验引导 | ACCEPTED 后只由新 ADR 取代 |
 | `docs/adr/ADR-0013-versioned-prompt-renderer-boundary.md` | 单一 `generic-v1` Prompt renderer 版本边界 | ACCEPTED 后只由新 ADR 取代 |
 | `docs/adr/ADR-0014-narrow-tool-failure-and-accuracy-observability.md` | M4-S3b ToolFailure 边界、持久 Trace 准确率和 Deferred activation 审计证明 | ACCEPTED 后只由新 ADR 取代 |
+| `docs/adr/ADR-0015-responses-reasoning-continuation.md` | F1e completed reasoning 的 Provider delivery 与 History 隔离 | ACCEPTED 后只由新 ADR 取代 |
+| `docs/adr/ADR-0016-redundant-encrypted-reasoning-sidecar.md` | 明文 reasoning 旁冗余 encrypted sidecar 保持 Adapter-local | ACCEPTED 后只由新 ADR 取代 |
 
 ## 4. Codex 执行入口
 
@@ -65,7 +69,7 @@ Codex Luna xhigh 或其他高推理 Codex 执行开发任务时，必须按顺�
 3. 当前 Slice 在 `docs/development/IMPLEMENTATION_PLAN.md` 中的完整章节
 4. `docs/development/LEAN_CODE_GOVERNANCE.md`
 5. `task.md` 的相关架构章节和测试红线
-6. 冻结架构 v1 基线、v1.1/v1.2/v1.3/v1.4 增量及相关 ADR 中与该 Slice 相关的接口契约
+6. 冻结架构 v1 至 v1.6 的完整 additive chain 及相关 ADR 中与该 Slice 相关的接口契约
 7. 已有源码、测试和工作树状态
 
 用户明确授权开发子 Agent 时，每个子 Agent 也必须自行读取上述文件；父 Agent 的摘要不能替代本地治理文件。
@@ -88,10 +92,10 @@ Codex Luna xhigh 或其他高推理 Codex 执行开发任务时，必须按顺�
 
 ## 6. 当前状态
 
-M0 至 M4-S2 以及 F1a/F1b/F1c/F1d 集成交付均已远端封存。当前已具备 Config v1、唯一 Provider Composition Root、协议优先 Responses HTTP/SSE Adapter、第一版 AgentLoop Chat，以及内联 `api_key`/引用式 `credential_ref` 二选一配置，并通过一次合成 DeepSeek Live Chat。
+M0 至 M4-S2 以及 F1a/F1b/F1c/F1d 集成交付均已远端封存。F1e 已在本地完成、通过完整 Gate 和一次 DeepSeek Full-only Live Tool Loop；其 Git 发布已授权并等待准确 PR-head Gate，M4-S3c 与进一步 Live 请求仍未授权。
 
-Architecture v1.4 已在本地冻结，在 v1.3 上窄化 ToolFailure 执行边界并要求准确率只报告持久 Trace 可诚实观测的指标；unmatched Replay termination 与 Observation/Replay/Vision promotion 在无 typed durable signal 前保持 Deferred，Git/远端封存尚未授权。
+Architecture v1.5/v1.6 已在本地冻结：completed reasoning 仅属于 Provider delivery，明文存在时冗余 opaque encrypted sidecar 不进入 Core；encrypted-only 与未知 content 继续显式失败。
 
-原 M4-S3a 又在实现前拆成 M4-S3a1 与 M4-S3a2；当前 M4-S3b 为 `IN_PROGRESS`，不宣称 COMPLETE 或 Gate PASS。`codex/` 仍是固定提交的只读参考。
+原 M4-S3a 又在实现前拆成 M4-S3a1 与 M4-S3a2；M4-S3a1/a2/b 已完成并远端 checkpoint，当前 M4-S3c 为 `READY_NOT_AUTHORIZED`。`codex/` 仍是固定提交的只读参考。
 
 实现入口以 `docs/development/STATUS.md` 为准。

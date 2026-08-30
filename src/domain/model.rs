@@ -6,8 +6,9 @@ use thiserror::Error;
 use super::artifacts::ArtifactId;
 use super::tools::{ToolCall, ToolResult, ToolSpec};
 
-/// The initial version of the semantic model input representation.
-pub const MODEL_INPUT_IR_SCHEMA_VERSION: u16 = 2;
+/// The current version of the semantic model input representation.
+pub const MODEL_INPUT_IR_SCHEMA_VERSION: u16 = 3;
+pub(crate) const MODEL_INPUT_IR_V2_SCHEMA_VERSION: u16 = 2;
 
 /// A version for the provider-neutral input representation.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -60,6 +61,11 @@ pub enum ContentItem {
     },
     ToolResult {
         result: ToolResult,
+    },
+    /// Completed model reasoning retained only for provider-visible
+    /// continuation. This is never ordinary Conversation History.
+    Reasoning {
+        text: String,
     },
     /// Preserves an unsupported item so it can fail explicitly at the Port.
     Unsupported {
@@ -143,6 +149,30 @@ impl ModelInputIR {
         self.tool_specs = tool_specs;
         self
     }
+
+    /// Returns whether this input is the exact logical request plus one or
+    /// more completed reasoning items retained for Provider continuation.
+    /// All non-reasoning semantics must remain byte-for-byte identical.
+    pub(crate) fn is_reasoning_replay_of(&self, logical_input: &Self) -> bool {
+        if self.schema_version != logical_input.schema_version
+            || self.instructions != logical_input.instructions
+            || self.tool_specs != logical_input.tool_specs
+            || self.requirements != logical_input.requirements
+        {
+            return false;
+        }
+
+        let retained_reasoning = self
+            .content_items
+            .iter()
+            .any(|item| matches!(item, ContentItem::Reasoning { .. }));
+        retained_reasoning
+            && self
+                .content_items
+                .iter()
+                .filter(|item| !matches!(item, ContentItem::Reasoning { .. }))
+                .eq(logical_input.content_items.iter())
+    }
 }
 
 /// The explicitly declared features for one configured model capability map.
@@ -198,10 +228,14 @@ impl ModelCapabilities {
                 {
                     return Err(ModelCapabilityError::ToolCallUnsupported);
                 }
+                ContentItem::Reasoning { .. } if !self.text_input => {
+                    return Err(ModelCapabilityError::TextInputUnsupported);
+                }
                 ContentItem::Text { .. }
                 | ContentItem::ImageArtifact { .. }
                 | ContentItem::ToolCall { .. }
-                | ContentItem::ToolResult { .. } => {}
+                | ContentItem::ToolResult { .. }
+                | ContentItem::Reasoning { .. } => {}
             }
         }
 
@@ -257,6 +291,7 @@ pub struct ModelUsage {
 pub enum ModelEvent {
     TextDelta { text: String },
     ReasoningDelta { text: String },
+    ReasoningItem { text: String },
     ToolCall { call: ToolCall },
     Usage { usage: ModelUsage },
 }

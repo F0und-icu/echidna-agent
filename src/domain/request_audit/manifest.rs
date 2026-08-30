@@ -7,8 +7,8 @@ use crate::domain::context::{
 };
 use crate::domain::events::{EventId, StreamId};
 use crate::domain::model::{
-    CapabilityMappingVersion, MODEL_INPUT_IR_SCHEMA_VERSION, ModelCapabilities, ModelInputIR,
-    ModelInputIrSchemaVersion,
+    CapabilityMappingVersion, MODEL_INPUT_IR_SCHEMA_VERSION, MODEL_INPUT_IR_V2_SCHEMA_VERSION,
+    ModelCapabilities, ModelInputIR, ModelInputIrSchemaVersion,
 };
 use crate::domain::project::ProjectId;
 use crate::domain::sampling::SamplingStepPlan;
@@ -165,6 +165,41 @@ impl RequestAuditDelivery {
             _ => Err(RequestAuditError::DeliveryReasonMismatch),
         }
     }
+
+    fn validate_attempt_input_relationship(
+        &self,
+        full_logical_input: &ModelInputIR,
+        delivered_input: &ModelInputIR,
+    ) -> Result<(), RequestAuditError> {
+        if self.mode == RequestAuditDeliveryMode::Full && full_logical_input != delivered_input {
+            let RequestAuditDeliveryReason::Full(reason) = self.reason else {
+                return Err(RequestAuditError::FullDeliveryInputMismatch);
+            };
+            if !reason.permits_distinct_full_delivery()
+                || (!reason.permits_state_diff_full_delivery()
+                    && !delivered_input.is_reasoning_replay_of(full_logical_input))
+            {
+                return Err(RequestAuditError::FullDeliveryInputMismatch);
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_manifest_input_relationship(
+        &self,
+        full_logical_input: &RequestAuditModelInput,
+        delivered_input: &RequestAuditModelInput,
+    ) -> Result<(), RequestAuditError> {
+        if self.mode == RequestAuditDeliveryMode::Full && full_logical_input != delivered_input {
+            let RequestAuditDeliveryReason::Full(reason) = self.reason else {
+                return Err(RequestAuditError::FullDeliveryInputMismatch);
+            };
+            if !reason.permits_distinct_full_delivery() {
+                return Err(RequestAuditError::FullDeliveryInputMismatch);
+            }
+        }
+        Ok(())
+    }
 }
 
 /// One supplied actual Provider attempt before any Blob or Event I/O.
@@ -203,11 +238,7 @@ impl RequestAuditAttempt {
             .validate("full_logical_input", "full_logical_input.semantic_hash")?;
         let delivered_audit_input = RequestAuditModelInput::from_input(&delivered_input)?;
         delivered_audit_input.validate("delivered_input", "delivered_input.semantic_hash")?;
-        if delivery.mode() == RequestAuditDeliveryMode::Full
-            && full_logical_input != delivered_input
-        {
-            return Err(RequestAuditError::FullDeliveryInputMismatch);
-        }
+        delivery.validate_attempt_input_relationship(&full_logical_input, &delivered_input)?;
         Ok(Self {
             binding: context.binding.clone(),
             model,
@@ -274,7 +305,10 @@ impl RequestAuditModelInput {
         input_field: &'static str,
         semantic_hash_field: &'static str,
     ) -> Result<(), RequestAuditError> {
-        if self.schema_version.get() != MODEL_INPUT_IR_SCHEMA_VERSION {
+        if !matches!(
+            self.schema_version.get(),
+            MODEL_INPUT_IR_V2_SCHEMA_VERSION | MODEL_INPUT_IR_SCHEMA_VERSION
+        ) {
             return Err(RequestAuditError::UnsupportedModelInputIrSchema {
                 input_field,
                 schema_version: self.schema_version.get(),
@@ -434,11 +468,10 @@ impl RequestAuditManifest {
         self.delivered_input
             .validate("delivered_input", "delivered_input.semantic_hash")?;
         self.delivery.validate()?;
-        if self.delivery.mode() == RequestAuditDeliveryMode::Full
-            && self.full_logical_input != self.delivered_input
-        {
-            return Err(RequestAuditError::FullDeliveryInputMismatch);
-        }
+        self.delivery.validate_manifest_input_relationship(
+            &self.full_logical_input,
+            &self.delivered_input,
+        )?;
         validate_component_layout(&self.components)
     }
 }

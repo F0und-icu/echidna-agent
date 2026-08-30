@@ -118,10 +118,64 @@ fn decode_output_item(item: Value) -> Result<DecodedResponsesEvent, ModelProvide
                 ),
             }]))
         }
-        "message" | "reasoning" => Ok(decoded(Vec::new())),
+        "message" => Ok(decoded(Vec::new())),
+        "reasoning" => decode_reasoning_item(item),
         unknown => Err(protocol_error(format!(
             "unsupported completed output item `{unknown}`"
         ))),
+    }
+}
+
+fn decode_reasoning_item(item: Value) -> Result<DecodedResponsesEvent, ModelProviderError> {
+    let reasoning: ReasoningItem = serde_json::from_value(item)
+        .map_err(|error| protocol_error(format!("invalid completed reasoning item: {error}")))?;
+    let has_encrypted_content = reasoning
+        .encrypted_content
+        .as_ref()
+        .is_some_and(has_non_empty_wire_content);
+
+    let mut text = String::new();
+    for content in reasoning.content {
+        let kind = content
+            .get("type")
+            .and_then(Value::as_str)
+            .ok_or_else(|| protocol_error("reasoning content omitted string `type`"))?;
+        if kind != "reasoning_text" {
+            return Err(protocol_error(format!(
+                "unsupported completed reasoning content `{kind}`"
+            )));
+        }
+        let part = content
+            .get("text")
+            .and_then(Value::as_str)
+            .ok_or_else(|| protocol_error("reasoning text content omitted string `text`"))?;
+        text.push_str(part);
+    }
+
+    if text.is_empty() {
+        if has_encrypted_content {
+            Err(protocol_error(
+                "completed reasoning item contains only unsupported encrypted content",
+            ))
+        } else {
+            Ok(decoded(Vec::new()))
+        }
+    } else {
+        // Some conforming services return an opaque encrypted sidecar next to
+        // complete reasoning_text. The supported plaintext is sufficient for
+        // generic output-item replay, so the wire-only sidecar stays inside
+        // this Adapter and never widens the provider-neutral Core.
+        Ok(decoded(vec![ModelEvent::ReasoningItem { text }]))
+    }
+}
+
+fn has_non_empty_wire_content(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::String(value) => !value.is_empty(),
+        Value::Array(values) => !values.is_empty(),
+        Value::Object(values) => !values.is_empty(),
+        Value::Bool(_) | Value::Number(_) => true,
     }
 }
 
@@ -234,6 +288,14 @@ struct FunctionCallItem {
     call_id: String,
     name: String,
     arguments: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReasoningItem {
+    #[serde(default)]
+    content: Vec<Value>,
+    #[serde(default)]
+    encrypted_content: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]

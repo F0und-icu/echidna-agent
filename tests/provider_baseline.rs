@@ -292,7 +292,7 @@ fn invalidation_matrix_separates_model_profile_and_uses_stable_priority() {
             match step {
                 0 => model = ModelIdentity::new("primary", "model-v1"),
                 1 => profile = ModelProfile::new("research", 1),
-                2 => input.schema_version = ModelInputIrSchemaVersion::new(2),
+                2 => input.schema_version = ModelInputIrSchemaVersion::new(3),
                 3 => mapping.capability_mapping_version = CapabilityMappingVersion::new(1),
                 4 => input.instructions = "prompt-v1".to_owned(),
                 5 => input.tool_specs[0].version = "1".to_owned(),

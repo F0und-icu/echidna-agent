@@ -4,6 +4,8 @@ data: {"type":"response.reasoning_text.delta","delta":"check the manifest first"
 
 data: {"type":"response.reasoning_text.done","text":"check the manifest first"}
 
+data: {"type":"response.output_item.done","item":{"type":"reasoning","content":[{"type":"reasoning_text","text":"check the manifest first"}],"encrypted_content":"redundant-opaque-sidecar","id":"reasoning_fixture","status":"completed","summary":[]}}
+
 data: {"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_reasoning_fixture","name":"inspect_manifest","arguments":"{\"path\":\"AndroidManifest.xml\"}"}}
 
 data: {"type":"response.output_text.delta","delta":"reproducible result"}

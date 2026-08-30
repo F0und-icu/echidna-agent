@@ -767,6 +767,36 @@ async fn replay_narrows_an_incremental_source_mapping_to_full_delivery() {
     ));
 }
 
+#[tokio::test]
+async fn replay_upcasts_historical_v2_input_before_matching_a_current_request() {
+    let mut historical_input = current_prompt_input("inspect fixture", Vec::new());
+    historical_input.schema_version = cyber_agent::domain::model::ModelInputIrSchemaVersion::new(2);
+    let provider = ReplayModelProvider::new(
+        capabilities(),
+        [ReplayModelStep::new(
+            historical_input,
+            vec![ModelEvent::TextDelta {
+                text: "historical replay output".to_owned(),
+            }],
+        )
+        .unwrap()],
+    )
+    .unwrap();
+    let tools = ReplayToolExecutor::new(
+        replay_source(),
+        Vec::<ToolSpec>::new(),
+        Vec::<ReplayToolStep>::new(),
+    )
+    .unwrap();
+    let mut agent = AgentLoop::new(&provider, &tools);
+
+    agent
+        .run_turn("inspect fixture", AgentCancellation::new())
+        .await
+        .expect("historical v2 input is losslessly promoted before request matching");
+    assert_eq!(provider.remaining_steps(), 0);
+}
+
 #[test]
 fn manifest_rejects_unknown_fields_bad_hash_and_missing_artifact_reference() {
     let fixture = source_fixture(ToolResultStatus::Succeeded);
