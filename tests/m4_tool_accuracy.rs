@@ -207,7 +207,7 @@ struct ToolAccuracyFixture {
 fn every_model_visible_tool_has_canonical_guidance_and_typed_output_objects() {
     let tools = ToolRegistry::for_project(".");
     let specs = tools.catalog();
-    assert_eq!(specs.len(), 25);
+    assert_eq!(specs.len(), 27);
     for spec in specs {
         for heading in ["Use when:", "Do not use when:", "Prefer:", "Produces:"] {
             assert!(

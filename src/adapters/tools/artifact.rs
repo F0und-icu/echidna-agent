@@ -52,6 +52,73 @@ pub(crate) struct ArtifactPublicationError {
     pub(crate) message: String,
 }
 
+/// Verifies that the supplied provenance can become one Artifact fact before
+/// an adapter performs an irreversible external action. The final publisher
+/// repeats this same validation while it holds the Research writer, so a
+/// concurrent update cannot turn a successful external action into an
+/// unvalidated Artifact fact.
+pub(crate) fn preflight_artifact(
+    project_root: &Path,
+    plan: &ToolExecutionPlan,
+    arguments: &ArtifactStoreArgs,
+) -> Result<(), ArtifactPublicationError> {
+    let project = Project::discover(project_root)
+        .map_err(|error| publication_error("artifact_project_unavailable", error))?;
+    let mut writer = project
+        .open_writer()
+        .map_err(|error| publication_error("artifact_writer_unavailable", error))?;
+    let store = writer
+        .open_research(None)
+        .map_err(|error| publication_error("artifact_stream_unavailable", error))?;
+    let reducer = ResearchReducer;
+    let state = reduce_store(&store, &reducer)
+        .map_err(|error| publication_error("artifact_state_invalid", error))?;
+    validate_preflight(&state, &reducer, plan, arguments)
+}
+
+/// Resolves an Artifact reference through the authoritative Research replay
+/// and asks the one Blob Store owner to revalidate and read its bytes. This
+/// is intentionally narrower than a Blob-path API: callers can consume an
+/// existing Artifact, but cannot name or bypass a content-addressed file.
+pub(crate) fn read_artifact_bytes_bounded(
+    project_root: &Path,
+    artifact_id: &ArtifactId,
+    maximum_bytes: usize,
+) -> Result<Vec<u8>, ArtifactPublicationError> {
+    let project = Project::discover(project_root)
+        .map_err(|error| publication_error("artifact_project_unavailable", error))?;
+    let state = super::research::load_state(project.root())
+        .map_err(|error| publication_error("artifact_state_invalid", error))?;
+    let record = state
+        .artifact(artifact_id)
+        .ok_or_else(|| ArtifactPublicationError {
+            code: "artifact_not_found",
+            message: "Artifact reference is not present in the Research stream".to_owned(),
+        })?;
+    if record.size_bytes > maximum_bytes as u64 {
+        return Err(ArtifactPublicationError {
+            code: "artifact_blob_too_large",
+            message: format!(
+                "Artifact Blob size {} exceeds the {maximum_bytes}-byte consumer limit",
+                record.size_bytes
+            ),
+        });
+    }
+    let bytes = LocalArtifactStore::for_project(&project)
+        .read_blob(&record.blob_id)
+        .map_err(|error| publication_error("artifact_blob_read_failed", error))?;
+    if bytes.len() > maximum_bytes {
+        return Err(ArtifactPublicationError {
+            code: "artifact_blob_too_large",
+            message: format!(
+                "Artifact Blob size {} exceeds the {maximum_bytes}-byte consumer limit",
+                bytes.len()
+            ),
+        });
+    }
+    Ok(bytes)
+}
+
 pub(super) fn normalize(
     project_root: &Path,
     value: Value,
@@ -129,18 +196,7 @@ where
     let reducer = ResearchReducer;
     let mut state = reduce_store(&store, &reducer)
         .map_err(|error| publication_error("artifact_state_invalid", error))?;
-    let event_id = EventId::new(arguments.event_id.clone());
-    if state.has_event_id(&event_id) {
-        return Err(ArtifactPublicationError {
-            code: "artifact_event_id_duplicate",
-            message: "event_id already exists in the Research stream; no Blob or Event was created"
-                .to_owned(),
-        });
-    }
-    let preflight = artifact_event(arguments, plan, zero_blob_id(), 0);
-    reducer
-        .validate_event(&state, &preflight)
-        .map_err(|error| publication_error("artifact_provenance_rejected", error))?;
+    validate_preflight(&state, &reducer, plan, arguments)?;
     let blob = publish_blob(&project)
         .map_err(|error| publication_error("artifact_blob_publish_failed", error))?;
     let event = artifact_event(arguments, plan, blob.blob_id.clone(), blob.size_bytes);
@@ -150,6 +206,7 @@ where
     let sequence = store
         .next_sequence()
         .map_err(|error| publication_error("artifact_sequence_unavailable", error))?;
+    let event_id = EventId::new(arguments.event_id.clone());
     let payload = event
         .encode_payload()
         .map_err(|error| publication_error("artifact_payload_encode_failed", error))?;
@@ -174,6 +231,26 @@ where
         blob,
         research_event_count: state.applied_event_count(),
     })
+}
+
+fn validate_preflight(
+    state: &crate::domain::research::ResearchState,
+    reducer: &ResearchReducer,
+    plan: &ToolExecutionPlan,
+    arguments: &ArtifactStoreArgs,
+) -> Result<(), ArtifactPublicationError> {
+    let event_id = EventId::new(arguments.event_id.clone());
+    if state.has_event_id(&event_id) {
+        return Err(ArtifactPublicationError {
+            code: "artifact_event_id_duplicate",
+            message: "event_id already exists in the Research stream; no Blob or Event was created"
+                .to_owned(),
+        });
+    }
+    let preflight = artifact_event(arguments, plan, zero_blob_id(), 0);
+    reducer
+        .validate_event(state, &preflight)
+        .map_err(|error| publication_error("artifact_provenance_rejected", error))
 }
 
 fn publication_error(code: &'static str, error: impl ToString) -> ArtifactPublicationError {

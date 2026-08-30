@@ -282,7 +282,7 @@ pub(super) fn cache_resource_fingerprint(project_root: &Path, arguments: &Value)
         .map(|bytes| blake3::hash(&bytes).to_hex().to_string())
 }
 
-fn load_state(project_root: &Path) -> Result<ResearchState, String> {
+pub(super) fn load_state(project_root: &Path) -> Result<ResearchState, String> {
     let project = Project::discover(project_root).map_err(|error| error.to_string())?;
     reduce_project_research(&project, &ResearchReducer)
 }

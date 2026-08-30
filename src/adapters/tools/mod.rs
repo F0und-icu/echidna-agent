@@ -3,8 +3,10 @@
 mod active;
 mod artifact;
 mod command;
+mod environment;
 mod file_write;
 mod filesystem;
+mod http_request;
 mod job;
 mod memory;
 mod output;
@@ -59,6 +61,8 @@ enum BuiltinTool {
     StopPty,
     ArtifactStore,
     ViewImage,
+    HttpRequest,
+    InspectEnvironment,
     MemoryRead,
     MemoryWrite,
     InspectProject,
@@ -99,6 +103,11 @@ impl ToolRegistry {
             (ToolName::new("stop_pty"), BuiltinTool::StopPty),
             (ToolName::new("artifact_store"), BuiltinTool::ArtifactStore),
             (ToolName::new("view_image"), BuiltinTool::ViewImage),
+            (ToolName::new("http_request"), BuiltinTool::HttpRequest),
+            (
+                ToolName::new("inspect_environment"),
+                BuiltinTool::InspectEnvironment,
+            ),
             (ToolName::new("memory_read"), BuiltinTool::MemoryRead),
             (ToolName::new("memory_write"), BuiltinTool::MemoryWrite),
             (
@@ -376,7 +385,8 @@ impl BuiltinTool {
             | Self::ArtifactStore
             | Self::MemoryRead
             | Self::MemoryWrite => ToolExposure::Deferred,
-            Self::ViewImage => ToolExposure::Direct,
+            Self::ViewImage | Self::InspectEnvironment => ToolExposure::Direct,
+            Self::HttpRequest => ToolExposure::Deferred,
         }
     }
 
@@ -405,6 +415,8 @@ impl BuiltinTool {
             Self::StopPty => pty::normalize_stop(arguments),
             Self::ArtifactStore => artifact::normalize(project_root, arguments),
             Self::ViewImage => view_image::normalize(project_root, arguments),
+            Self::HttpRequest => http_request::normalize(project_root, arguments),
+            Self::InspectEnvironment => environment::normalize(project_root, arguments),
             Self::MemoryRead => memory::normalize_read(project_root, arguments),
             Self::MemoryWrite => memory::normalize_write(project_root, arguments),
             Self::InspectProject => snapshot::normalize(project_root, arguments),
@@ -443,6 +455,8 @@ impl BuiltinTool {
             Self::StopPty => pty::execute_stop(ptys, plan).await,
             Self::ArtifactStore => artifact::execute(project_root, plan).await,
             Self::ViewImage => view_image::execute(project_root, plan).await,
+            Self::HttpRequest => http_request::execute(project_root, plan).await,
+            Self::InspectEnvironment => environment::execute(project_root, plan).await,
             Self::MemoryRead => memory::execute_read(project_root, plan).await,
             Self::MemoryWrite => memory::execute_write(project_root, plan).await,
             Self::InspectProject => snapshot::execute(project_root, specs, plan).await,
@@ -822,6 +836,28 @@ impl BuiltinTool {
                 ToolDeterminism::EnvironmentDependent,
                 120_000,
             ),
+            Self::HttpRequest => spec(
+                "http_request",
+                http_request::input_schema(),
+                http_request::output_schema(),
+                ToolParallelism::ResourceLocked,
+                Some("file:.cyber-agent/research.jsonl"),
+                ToolEffect::ExternalMutation,
+                ToolRetryPolicy::NeverAutoRetry,
+                ToolDeterminism::Nondeterministic,
+                35_000,
+            ),
+            Self::InspectEnvironment => spec(
+                "inspect_environment",
+                environment::input_schema(),
+                environment::output_schema(),
+                ToolParallelism::Parallel,
+                None,
+                ToolEffect::ReadOnly,
+                ToolRetryPolicy::ReplaySafe,
+                ToolDeterminism::EnvironmentDependent,
+                30_000,
+            ),
             Self::MemoryRead => spec(
                 "memory_read",
                 memory::read_input_schema(),
@@ -965,6 +1001,8 @@ impl BuiltinTool {
                     "partial_failure": boolean
                 }, "required": ["commands", "partial_failure"], "additionalProperties": false
             }),
+            Self::HttpRequest => http_request::output_schema(),
+            Self::InspectEnvironment => environment::output_schema(),
             Self::StartJob => json!({
                 "type": "object", "properties": {"job_id": string(false), "status": status(&["running"]), "pid": {"type": "integer", "minimum": 1}},
                 "required": ["job_id", "status", "pid"], "additionalProperties": false
@@ -1186,6 +1224,8 @@ fn canonical_description(name: &str) -> String {
         "stop_pty" => "stop a running PTY",
         "artifact_store" => "durable raw-output provenance",
         "view_image" => "one supported local image",
+        "http_request" => "one bounded HTTP research request",
+        "inspect_environment" => "the current vulnerability-research environment",
         "memory_read" => "bounded project Memory",
         "memory_write" => "a focused project Memory update",
         "inspect_project" => "current project metadata",
@@ -1289,6 +1329,16 @@ fn canonical_description(name: &str) -> String {
             "format validation or proof is needed.",
             "a local supported image.",
             "source and selected Artifacts.",
+        ),
+        "http_request" => (
+            "a crawl, scanner, Provider request, or vendor client is needed.",
+            "structured method, URL, bounded body, and explicit Artifact provenance.",
+            "status, final URL, safe metadata, timing, preview, and response Artifact.",
+        ),
+        "inspect_environment" => (
+            "arbitrary probing, command execution, or a persistent environment database is needed.",
+            "the fixed bounded OS, runtime, Git, proxy, toolchain, and connected-device snapshot.",
+            "structured availability and versions plus a stable environment fingerprint.",
         ),
         "memory_read" => (
             "a mutation or verified Research fact is needed.",

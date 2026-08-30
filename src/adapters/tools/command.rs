@@ -2,10 +2,12 @@
 
 use std::collections::VecDeque;
 use std::path::Path;
+use std::process::Stdio;
 
 use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 
 use crate::domain::tools::{
@@ -15,7 +17,7 @@ use crate::domain::tools::{
 use crate::ports::tool::ToolExecutorError;
 
 use super::filesystem::{display_path, resolve_path};
-use super::output::bounded_text;
+use super::output::{BoundedText, bounded_text};
 use super::resources::ResourceKeyResolver;
 use super::{decode_arguments, invalid_arguments, invalid_plan};
 
@@ -311,49 +313,155 @@ async fn run(
     max_bytes: usize,
 ) -> Result<Value, Value> {
     let cwd = resolve_path(project_root, arguments.cwd.as_deref().unwrap_or("."));
-    let mut command = Command::new(&arguments.argv[0]);
-    command
-        .args(&arguments.argv[1..])
-        .current_dir(&cwd)
-        .kill_on_drop(true);
-    match command.output().await {
-        Ok(output) if output.status.success() => Ok(output_value(
-            project_root,
-            &cwd,
-            output.status.code(),
-            &output.stdout,
-            &output.stderr,
-            max_bytes,
-        )),
-        Ok(output) => Err(output_value(
-            project_root,
-            &cwd,
-            output.status.code(),
-            &output.stdout,
-            &output.stderr,
-            max_bytes,
-        )),
-        Err(error) => Err(json!({"error": error.to_string(), "cwd": cwd.display().to_string()})),
+    let argv = arguments
+        .argv
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let output = run_probe_at(cwd.clone(), &argv, max_bytes).await;
+    if let Some(error) = output.error.as_deref() {
+        return Err(json!({"error": error, "cwd": cwd.display().to_string()}));
+    }
+    let value = output_value(project_root, &output.cwd, &output);
+    if output.exit_code == Some(0) {
+        Ok(value)
+    } else {
+        Err(value)
     }
 }
 
-fn output_value(
+pub(super) struct FixedProbeOutput {
+    pub(super) cwd: std::path::PathBuf,
+    pub(super) exit_code: Option<i32>,
+    pub(super) stdout: BoundedText,
+    pub(super) stderr: BoundedText,
+    pub(super) error: Option<String>,
+    pub(super) not_found: bool,
+}
+
+/// Executes one adapter-owned fixed probe.  This is deliberately narrower
+/// than `run_command`: callers provide a compile-time command list. Process
+/// lifetime, kill-on-drop and output bounds remain owned by this module.
+pub(super) async fn run_fixed_probe(
     project_root: &Path,
-    cwd: &Path,
-    exit_code: Option<i32>,
-    stdout_bytes: &[u8],
-    stderr_bytes: &[u8],
+    argv: &[&str],
     max_bytes: usize,
-) -> Value {
+) -> FixedProbeOutput {
+    let cwd = resolve_path(project_root, ".");
+    run_probe_at(cwd, argv, max_bytes).await
+}
+
+async fn run_probe_at(
+    cwd: std::path::PathBuf,
+    argv: &[&str],
+    max_bytes: usize,
+) -> FixedProbeOutput {
+    let Some(program) = argv.first() else {
+        return FixedProbeOutput {
+            cwd,
+            exit_code: None,
+            stdout: bounded_text(&[], max_bytes / 2),
+            stderr: bounded_text(&[], max_bytes / 2),
+            error: Some("fixed probe has no program".to_owned()),
+            not_found: false,
+        };
+    };
+    let mut command = Command::new(program);
+    command
+        .args(&argv[1..])
+        .current_dir(&cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            return FixedProbeOutput {
+                cwd,
+                exit_code: None,
+                stdout: bounded_text(&[], max_bytes / 2),
+                stderr: bounded_text(&[], max_bytes / 2),
+                not_found: error.kind() == std::io::ErrorKind::NotFound,
+                error: Some(error.to_string()),
+            };
+        }
+    };
+    let stdout = child
+        .stdout
+        .take()
+        .expect("fixed probe stdout is configured as piped");
+    let stderr = child
+        .stderr
+        .take()
+        .expect("fixed probe stderr is configured as piped");
     let max_each = max_bytes / 2;
-    let stdout = bounded_text(stdout_bytes, max_each);
-    let stderr = bounded_text(stderr_bytes, max_each);
+    let (stdout, stderr, status) = tokio::join!(
+        read_bounded_output(stdout, max_each),
+        read_bounded_output(stderr, max_each),
+        child.wait(),
+    );
+    let error = status
+        .as_ref()
+        .err()
+        .or_else(|| stdout.as_ref().err())
+        .or_else(|| stderr.as_ref().err())
+        .map(ToString::to_string);
+    if let Some(error) = error {
+        return FixedProbeOutput {
+            cwd,
+            exit_code: None,
+            stdout: bounded_text(&[], max_bytes / 2),
+            stderr: bounded_text(&[], max_bytes / 2),
+            error: Some(error),
+            not_found: false,
+        };
+    }
+    FixedProbeOutput {
+        cwd,
+        exit_code: status.expect("fixed probe wait result was checked").code(),
+        stdout: stdout.expect("fixed probe stdout result was checked"),
+        stderr: stderr.expect("fixed probe stderr result was checked"),
+        error: None,
+        not_found: false,
+    }
+}
+
+/// Drains a child pipe so the process cannot block while retaining at most
+/// the caller's byte budget in memory. The final UTF-8 view remains owned by
+/// the existing bounded-text normalizer.
+async fn read_bounded_output<Reader>(
+    mut reader: Reader,
+    maximum_bytes: usize,
+) -> std::io::Result<BoundedText>
+where
+    Reader: AsyncRead + Unpin,
+{
+    let mut captured = Vec::with_capacity(maximum_bytes.min(8 * 1024));
+    let mut original_bytes = 0_usize;
+    let mut buffer = [0_u8; 8 * 1024];
+    loop {
+        let read = reader.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        original_bytes = original_bytes.saturating_add(read);
+        let retained = maximum_bytes.saturating_sub(captured.len()).min(read);
+        captured.extend_from_slice(&buffer[..retained]);
+    }
+    let mut output = bounded_text(&captured, maximum_bytes);
+    output.original_bytes = original_bytes;
+    output.truncated |= original_bytes > captured.len();
+    Ok(output)
+}
+
+fn output_value(project_root: &Path, cwd: &Path, output: &FixedProbeOutput) -> Value {
     json!({
         "cwd": display_path(project_root, cwd),
-        "exit_code": exit_code,
-        "stdout": stdout.text,
-        "stderr": stderr.text,
-        "truncated": stdout.truncated || stderr.truncated,
+        "exit_code": output.exit_code,
+        "stdout": output.stdout.text,
+        "stderr": output.stderr.text,
+        "truncated": output.stdout.truncated || output.stderr.truncated,
     })
 }
 

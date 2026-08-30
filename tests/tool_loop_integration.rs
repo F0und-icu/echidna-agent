@@ -102,6 +102,7 @@ async fn builtin_tools_cover_files_search_argv_failures_and_bounded_output() {
             .collect::<Vec<_>>(),
         vec![
             "apply_patch",
+            "inspect_environment",
             "inspect_project",
             "list_files",
             "read_file",

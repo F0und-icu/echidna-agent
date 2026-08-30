@@ -177,6 +177,11 @@ fn stable_base_domain_and_phase_compile_into_one_orthogonal_contract() {
             visible_names.contains("view_image"),
             profile != DomainProfile::Source
         );
+        assert_eq!(
+            visible_names.contains("http_request"),
+            matches!(profile, DomainProfile::Web | DomainProfile::Mobile)
+        );
+        assert!(visible_names.contains("inspect_environment"));
     }
 }
 
@@ -307,6 +312,19 @@ fn four_by_five_tool_exposure_matrix_is_deterministic_and_phase_bounded() {
             assert_eq!(
                 exposed.contains("view_image"),
                 domain != DomainProfile::Source,
+                "{} / {}",
+                domain.id(),
+                phase.id(),
+            );
+            assert_eq!(
+                exposed.contains("http_request"),
+                matches!(domain, DomainProfile::Web | DomainProfile::Mobile),
+                "{} / {}",
+                domain.id(),
+                phase.id(),
+            );
+            assert!(
+                exposed.contains("inspect_environment"),
                 "{} / {}",
                 domain.id(),
                 phase.id(),

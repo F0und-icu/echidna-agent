@@ -104,7 +104,7 @@ fn domain_and_ports_keep_the_required_dependency_direction() {
         "deepseek",
         "responses",
         "previous_response_id",
-        "http",
+        "http::",
         "sse::",
         "sse_",
         "ssestream",

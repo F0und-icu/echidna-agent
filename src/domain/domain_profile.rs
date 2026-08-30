@@ -64,7 +64,10 @@ impl DomainProfile {
             Self::Source => {
                 ToolExposurePlan::new([(ToolName::new("view_image"), ToolExposure::Deferred)])
             }
-            Self::Web | Self::Mobile | Self::Binary => ToolExposurePlan::default(),
+            Self::Web | Self::Mobile => {
+                ToolExposurePlan::new([(ToolName::new("http_request"), ToolExposure::Direct)])
+            }
+            Self::Binary => ToolExposurePlan::default(),
         }
     }
 }

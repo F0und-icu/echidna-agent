@@ -5,14 +5,14 @@
 - Architecture version: `1.6.0`; v1/v1.1 remain remotely sealed, v1.2 through v1.6 are locally frozen with remote seal unauthorized
 - Phase: `IMPLEMENTATION`
 - Implementation: `STARTED`
-- Current milestone: `M4-S3c` General Research Tools
-- Current slice: `M4-S3c`
-- Slice state: `READY_NOT_AUTHORIZED`; F1e is remotely sealed and M4-S3c has not started
-- Lean governance: `PASS`; F1e retains one Responses encoder/decoder, one AgentLoop and one ConversationHistory owner while separating provider-visible completed output continuation
-- Local Git initialized: `yes`; `main` contains F1e Squash Merge `2f6a9e5` over the prior M4-S3a1-through-M4-S3b checkpoint and F1a-F1d delivery
-- Remote repository: `F0und-icu/cyber-agent` private; F1e is merged through PR `#48`, while no tag or release was created
+- Current milestone: `M4-S3d` Observation, AndroidManifest Extractor and TargetDelta
+- Current slice: `M4-S3d`
+- Slice state: `READY_NOT_AUTHORIZED`; M4-S3c is `COMPLETE_REMOTE_SUBMITTED` in Draft PR `#50`, while no M4-S3d implementation authority exists
+- Lean governance: `PASS`; M4-S3c reuses one Tool Registry, Artifact authority, process owner, AgentLoop, Responses encoder/decoder and ConversationHistory owner
+- Local Git initialized: `yes`; branch `agent/m4-s3c-general-research-tools` tracks its private remote over `main` status seal `13e1b8a`
+- Remote repository: `F0und-icu/cyber-agent` private; M4-S3c Draft PR `#50` is open over `main`, while no merge, tag or release was authorized
 - Documentation baseline commit: `55ff3be`
-- Current code base: F1e Squash Merge `2f6a9e5` on remote `main`; a status-only `[skip ci]` seal records the final stopped state
+- Current code base: M4-S3c implementation commit `05ae0e3` is pushed on Draft PR `#50`; its `[skip ci]` publication intentionally triggered no remote Gate while Actions remain paused
 - Upstream Codex reference baseline: `868c9edb0da913a5fc699a71664e65f44f6058b0`; read-only and not a Cyber Agent dependency
 
 ## Latest Local Design Update
@@ -21,7 +21,7 @@
 - Scope: Architecture v1.5/v1.6 adds only completed Responses reasoning continuation and the real-protocol correction for a redundant encrypted sidecar; no new Provider binding, configuration field, dependency, fact store or vendor branch exists.
 - Delivery boundary: `ModelInputIR` v3 represents plaintext completed reasoning only in provider-visible delivery. Conversation/Session History rejects it; Resume, Compaction and Primary replacement clear it.
 - Protocol boundary: the one Responses Adapter replays `reasoning -> function_call -> function_call_output`. Plaintext plus opaque encrypted sidecar uses the plaintext semantic item and keeps the sidecar Adapter-local; encrypted-only and unknown content fail explicitly.
-- Completion: F1e passed the complete local Cargo/Lean Gate and a configuration-driven DeepSeek Full-only `read_file` Live Tool Loop, then merged through PR `#48` as `2f6a9e5`. Remote run `33295806720` executed zero Steps because GitHub blocked it for billing/spending-limit reasons; the user explicitly authorized merging this PR without a rerun. M4-S3c remains unstarted.
+- Completion: F1e passed the complete local Cargo/Lean Gate and a configuration-driven DeepSeek Full-only `read_file` Live Tool Loop, then merged through PR `#48` as `2f6a9e5`. Remote run `33295806720` executed zero Steps because GitHub blocked it for billing/spending-limit reasons; the user explicitly authorized merging this PR without a rerun. M4-S3c subsequently completed its separately authorized local implementation, Gate and Live Test as recorded below.
 
 ## Prior Local Design Update
 
@@ -194,21 +194,60 @@
 
 ## Current Slice
 
-- Slice: `M4-S3c`
-- State: `READY_NOT_AUTHORIZED`; no production or test implementation has started.
-- Planned scope: the bounded general research tools defined in `IMPLEMENTATION_PLAN.md`; F1e completion does not authorize them.
+- Slice: `M4-S3d`
+- State: `READY_NOT_AUTHORIZED`; do not implement it without a new user instruction.
+- Candidate scope: the bounded Observation, AndroidManifest Extractor and TargetDelta path defined in `IMPLEMENTATION_PLAN.md`.
+- Boundary: the M4-S3c commit/push/Draft-PR publication authority is consumed; M4-S3d implementation, further Live Tests, Actions, merge, tag, release and architecture seal remain unauthorized.
 
 ## Current Authorization
 
-The F1e publication authority is consumed. On 2026-08-30 the user explicitly overrode the remote-Gate merge condition for PR `#48` after GitHub run `33295806720` executed zero Steps because of a billing/spending-limit block. The user also paused subsequent Actions until quota recovery. No current instruction authorizes M4-S3c, another Live request, further Git publication, a tag, release or architecture-manifest seal.
+The F1e publication authority and the 2026-08-30 M4-S3c implementation, review, one-real-model-Live-Test and private Draft-PR publication authorities are consumed. The earlier Actions pause remains in force.
 
-- Run mode: `REVIEW_ONLY`; no new implementation Slice is authorized
-- Git mode: `LOCAL_ONLY`; the F1e implementation and status seal consume the current Git authority
+- Run mode: `REVIEW_ONLY`; M4-S3d is not authorized
+- Git mode: `REVIEW_ONLY`; branch `agent/m4-s3c-general-research-tools` and Draft PR `#50` are the completed handoff, while merge remains unauthorized
 - GitHub Actions mode: `PAUSED_BY_OPERATOR`; do not trigger or rerun a Workflow until the user explicitly resumes it after quota recovery
-- Delegation mode: `OFF`; no new sub-agent work is authorized
-- Live test mode: `OFF`; the one selected F1e DeepSeek Tool Loop is complete
+- Delegation mode: `OFF`; the completed M4-S3c delegation does not authorize another Slice or agent
+- Live test mode: `OFF`; the one authorized M4-S3c request has completed
 - Configuration rule: Provider binding, model, Base URL and Capability Mapping remain Config v1 data. A Provider selects exactly one inline `api_key` or dedicated `credential_ref`; neither may infer Provider/model identity or use Codex login state.
-- Stop condition: leave M4-S3c unstarted and report the completed F1e seal plus the explicit remote-Gate waiver
+- Stop condition: stop with Draft PR `#50` open; do not merge, run Actions or begin M4-S3d
+
+## M4-S3c Lean Review
+
+### Semantic Owners and Reuse
+
+- `src/adapters/tools/http_request/` owns one provider-neutral bounded HTTP request: closed method/URL/header/query/body inputs, pre-follow URL and redirect validation, bounded timeout/request body/preview/capture, completed HTTP status/final URL/metadata/timing and one response-body Artifact. HTTP `4xx/5xx` remain successful completed protocol results; transport, timeout, capture and post-request Artifact publication failures remain real execution failures with one Receipt.
+- `src/adapters/tools/environment.rs` and its private `environment/{probe,schema}.rs` modules own one fixed environment projection over OS/runtime, Git, proxy-presence booleans, five fixed toolchains and ADB/xctrace device observations. Probe outputs are concurrently drained through the existing command-process owner under fixed memory bounds, normalized to strict version tokens, stably sorted and hashed once with BLAKE3; no raw stdout/stderr, proxy value, arbitrary Probe DSL or Environment store is exposed.
+- `src/adapters/tools/artifact.rs` remains the sole Artifact provenance and publication owner. It now provides network-before-action provenance preflight, repeats validation under the real writer before publication, and resolves ArtifactRef request bodies through authoritative Research state plus Blob identity with a consumer size check before Blob read. The HTTP Adapter does not construct a second Artifact/Event path.
+- The existing Tool Registry remains the single Schema/guidance/normalize/dispatch owner. `http_request` is `ExternalMutation + NeverAutoRetry + Nondeterministic + cache None`, Deferred by default and Direct only for Web/Mobile DomainProfiles. `inspect_environment` is `ReadOnly + ReplaySafe + EnvironmentDependent + cache None` and Direct in all Domains. Both consume the existing immutable ResolvedToolPlan, ResourceKey scheduling, ToolFailure, ExecutionReceipt, RequestAudit and Tool Call/Result pairing paths.
+
+### API, Dependencies and Scope
+
+- No Cargo dependency, feature, Config field, Event schema, fact store, Provider binding, model/router branch, service, Hook, workflow, scanner or external vulnerability-tool wrapper was added. Existing `reqwest`, BLAKE3, SHA-256 Artifact storage, Research replay and process execution are reused; Codex remains REFERENCE/REIMPLEMENT with no copied source or Port Ledger entry.
+- New production visibility is parent/crate-private and has current production consumers: the Artifact preflight/bounded-read helpers are consumed by `http_request`; the fixed process probe is consumed by `inspect_environment`; `research::load_state` is widened only to its sibling Artifact owner. No public or controlled test-only projection exists.
+- Main review removed an unused `Clone`, rejected a post-follow-only redirect check, made fixed process capture streaming and memory-bounded, tightened version parsing against secret-bearing stderr tokens, accepted real Apple physical/simulator identifiers and corrected the dependency-direction scan from the overbroad string `http` to the Rust path `http::` so a provider-neutral Domain Tool name is not mistaken for wire I/O.
+
+### Audit, Tests and Gate
+
+- Independent bounded Luna xhigh audit returned `CHANGES_REQUIRED`: oversized ArtifactRef bodies were read before the authoritative size check; successful probe stderr could be misclassified as a version; and `Command::output` collected fixed-probe output before truncation. All three were fixed with permanent regressions or the existing command integration suite. The optional repair-only follow-up exceeded its time limit and was terminated with no conclusion; it is not recorded as `APPROVE`. Main cross-boundary review closed the findings from source and regression evidence.
+- Permanent top-level tests cover exact Effect/Retry/Cache/Exposure contracts; success, `4xx/5xx`, redirect, unsafe pre-follow redirect rejection, timeout, binary/captured-prefix Artifact, JSON and ArtifactRef request bodies, pre-network provenance rejection, pre-read oversized Artifact rejection and credential non-echo; environment available/missing/version-failure, successful stderr secret rejection, proxy-value non-echo, stable order/fingerprint and ADB/xctrace device counts. Registry, Domain/Phase exposure, Tool accuracy, SamplingStepPlan, RequestAudit, History pairing, Replay and Responses affected suites all pass.
+- Complete local Gate: PASS on Rust `1.93.1`. `cargo fmt --all -- --check`, denied-warning Clippy, `cargo test --locked --all-targets --all-features` and `cargo build --locked` all exited `0`; 349 tests are discovered, 347 default-enabled tests pass and the two existing opt-in Live Smokes remain ignored. One existing CLI Ctrl-C race timed out once, then passed its exact reproduction and the complete rerun without code changes.
+- Lean scans: PASS. Production inline tests, forbidden Codex dependencies, real-secret patterns and vendor branches are absent; exactly one AgentLoop and no Environment store remain; Cargo dependency files and `codex/` are unchanged; `git diff --check` passes. No unresolved P0/P1 or governance debt remains.
+
+### Live Test and Local Seal
+
+- Result: `PASS`; one configuration-driven DeepSeek `deepseek-v4-flash` CLI Chat used the existing Config v1 Composition Root, Responses HTTP/SSE Adapter, one AgentLoop and a temporary isolated Web Project. `doctor` first reported the configured Primary ready with Vision disabled.
+- Turn 1 produced one real `research_update` ToolCall, a paired successful ToolResult and a real ExecutionReceipt, durably recording fixed TargetSnapshot `snapshot-m4-s3c-live-web`.
+- Turn 2 produced exactly two real ToolCalls, `inspect_environment {}` and one bounded `http_request` GET to loopback `http://127.0.0.1:18765/Cargo.toml`; both paired ToolResults and both real ExecutionReceipts succeeded under the same immutable ResolvedToolPlan. The HTTP Receipt references `artifact-m4-s3c-live-cargo-toml`.
+- HTTP evidence: status `200`, captured body `961` bytes, complete Artifact `artifact-m4-s3c-live-cargo-toml`, Blob `5c3d86e3f265b2fe6de83e64daaf39b6df6cfa01752cafcbcf16c25b72df0b5c`. The Blob SHA-256 exactly equals the served repository `Cargo.toml`; the Research stream durably links it to the fixed TargetSnapshot.
+- Environment evidence: the stable fixed projection returned fingerprint `b9a0196d6c5544e088d816446c680993207464895fc5b6c2eb59954df24ef48c`; the final model answer quoted the exact HTTP status, environment fingerprint, Artifact ID and Blob ID.
+- Audit/continuation evidence: four RequestAudit entries bind Full ModelInputIR v3 delivery and the same advertised Tool plan. The post-Tool audits preserve completed plaintext `reasoning -> ToolCall(s) -> ToolResult(s)` order, while durable Session History contains zero reasoning items and preserves all three call/result pairs.
+- Isolation: the public Provider request used only the explicit Cyber Agent inline credential selected by the local Config. The credential was not printed or copied into the repository, temporary Project facts, RequestAudit Blobs or shell profiles. Codex login state, `~/.codex` and `CODEX_HOME` were not read or changed. The loopback server was stopped; the temporary Project was removed from `/tmp` into the user Trash and remains recoverable, while the user-owned Provider config is retained.
+- Git/remote: `COMPLETE_REMOTE_SUBMITTED`; implementation commit `05ae0e3` is pushed on `agent/m4-s3c-general-research-tools`, and Draft PR `#50` targets `main`. The commit uses `[skip ci]`; the PR has no check run while Actions remain paused. No merge, tag, release or architecture seal occurred, and M4-S3d remains `READY_NOT_AUTHORIZED`.
+
+### Removed and Deferred
+
+- No vendor client, crawler/scanner framework, arbitrary environment probe, second HTTP stack, duplicate Artifact publisher, dedicated external-tool Rust wrapper, test-only public API or speculative abstraction remains.
+- Deferred exactly as planned: ObservationEnvelope/AndroidManifest Extractor/TargetDelta (M4-S3d), typed Evidence/provenance, retrieval/guidance Shadow work and M4-S4 long-flow acceptance. Generic remote-target scanning and additional toolchain/device protocols require separately measured consumers and a separately authorized Slice.
 
 ## M4-S3a1 Slice Start
 
@@ -1142,6 +1181,8 @@ The F1e publication authority is consumed. On 2026-08-30 the user explicitly ove
 
 ## Blockers
 
+- None for M4-S3c: implementation, independent bounded review, fixes, complete local Cargo/Lean Gate and the one authorized DeepSeek Live Chat all pass. Publication remains intentionally unperformed because it was not authorized.
+- M4-S3d is not blocked; it is `READY_NOT_AUTHORIZED` and awaits an explicit implementation instruction.
 - None for local F1a implementation; its full offline Gate is complete. Git publication remains intentionally unperformed because it was not authorized.
 - None for local F1b implementation; its full offline Gate is complete. F1c, Git publication and any real Live Test require separate current instructions.
 - None for M2-S5: implementation, stabilization and status PRs plus all post-merge `main` CI runs are complete.
@@ -1154,10 +1195,15 @@ The F1e publication authority is consumed. On 2026-08-30 the user explicitly ove
 - None for M3-S4; implementation PR `#39`, status PR `#40` and the single required PR-head Gate are complete.
 - None for M4-S1; implementation PR `#42`, exact-head CI, implementation merge and separate status PR `#43` complete the remote seal.
 - None for M4-S2; implementation commit `d99f395`, PR `#44`, sole PR-head CI `33165972124`, Squash Merge `2afe900` and separate status PR `#45` complete the remote seal.
-- None for F1e implementation: the local Gate, selected DeepSeek Full-only Tool Loop and operator-authorized remote merge are complete. Run `33295806720` is explicitly recorded as zero-Step billing/spending-limit failure, not PASS. M4-S3c, additional Live requests and further Actions remain unauthorized; no Codex credential is an allowed substitute.
+- None for F1e implementation: the local Gate, selected DeepSeek Full-only Tool Loop and operator-authorized remote merge are complete. Run `33295806720` is explicitly recorded as zero-Step billing/spending-limit failure, not PASS. M4-S3c was later separately authorized, completed and submitted as Draft PR `#50`; additional Live requests and further Actions remain unauthorized, and no Codex credential is an allowed substitute.
 
 ## Last Verification
 
+- M4-S3c local Gate: PASS on Rust `1.93.1`; formatting, denied-warning Clippy, 349 discovered tests with 347 default-enabled tests passing and two opt-in Live Smokes ignored, locked build and all Lean scans pass.
+- M4-S3c Tool Gate: PASS; `http_request` preserves bounded URL/body/redirect/timeout/capture and Artifact semantics without a second client/publisher, while `inspect_environment` preserves fixed bounded concurrent probes, secret-free normalized versions, stable ordering/fingerprint and no Environment store.
+- M4-S3c review: the independent bounded Luna audit found three concrete memory/secret-boundary issues; all were fixed with permanent regressions. Its optional repair follow-up timed out and is recorded as no conclusion, while the main cross-boundary review closed all findings from source and regression evidence.
+- M4-S3c Live Test: PASS; one Config-v1-selected DeepSeek Chat produced real `research_update`, `inspect_environment` and `http_request` calls with exact pairing and three successful Receipts. The bounded loopback HTTP result was `200`, its 961-byte Artifact/Blob exactly matched `Cargo.toml`, completed reasoning was replayed only in provider delivery, and the final answer accurately quoted all required values.
+- M4-S3c isolation/Git: PASS; the loopback service was stopped and the temporary Project moved out of `/tmp` into the recoverable user Trash after validation, while the user-owned local Provider config remains. No Codex credential state was accessed. Implementation commit `05ae0e3` and Draft PR `#50` are published with `[skip ci]`; no Workflow, merge, tag or release occurred.
 - F1e local Gate: PASS on Rust `1.93.1`; formatting, denied-warning Clippy, 313 discovered tests with 311 default-enabled tests passing and two configuration-driven Live Smokes ignored, locked build and all Lean scans pass.
 - F1e protocol/AgentLoop Gate: PASS; one Responses decoder accepts completed plaintext reasoning with an optional redundant Adapter-local encrypted sidecar, rejects encrypted-only/unknown content, and one encoder preserves reasoning/call/result order. Atomic completion, cancellation/failure isolation, Full/incremental/rejection, Context budget and Deferred ToolSpecs-change paths are covered.
 - F1e History/Audit/Replay Gate: PASS; reasoning never enters Conversation/Session/Research/Memory or user output. RequestAudit reads ModelInputIR v2/v3, narrows distinct Full delivery, and a real Replay provider regression proves v2-to-v3 request matching.
