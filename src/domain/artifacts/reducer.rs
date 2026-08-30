@@ -47,4 +47,10 @@ impl ArtifactState {
     pub(crate) fn get(&self, id: &ArtifactId) -> Option<&ArtifactRecord> {
         self.records.get(id)
     }
+
+    /// Bounded callers project metadata only; Blob bytes stay in the Artifact
+    /// Store Adapter and are never exposed by this fact projection.
+    pub(crate) fn records(&self) -> impl Iterator<Item = &ArtifactRecord> {
+        self.records.values()
+    }
 }

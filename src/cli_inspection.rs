@@ -8,22 +8,29 @@ use crate::adapters::artifact_store::LocalArtifactStore;
 use crate::adapters::project_event_store::{
     Project, ProjectEventStoreError, ProjectEventStream, read_existing_session_events,
 };
+use crate::adapters::project_memory::LocalProjectMemory;
 use crate::adapters::project_snapshot::{CacheDisposition, LocalProjectSnapshot};
 use crate::adapters::research_projection::load_research_state;
 use crate::adapters::tools::ToolRegistry;
 use crate::app::inspection::{self, AuditReferenceStatus, SnapshotDisposition, SnapshotFacts};
 use crate::app::observation::ObservationService;
 use crate::app::request_audit::RequestAuditService;
+use crate::app::retrieval::{
+    HistoricalSummaryCandidate, RetrievalMemoryDocument, RetrievalSources, project_shadow_report,
+};
 use crate::app::session::SessionProjection;
 use crate::domain::artifacts::ArtifactId;
 use crate::domain::events::StreamId;
 use crate::domain::observation::ValidatedObservationSet;
 use crate::domain::request_audit::RequestAuditBinding;
-use crate::domain::research::ResearchState;
+use crate::domain::research::{ResearchState, TargetSnapshotId};
 use crate::domain::session::SessionState;
 use crate::ports::artifact::ArtifactStore;
 use crate::ports::tool::ToolExecutor;
 use serde_json::json;
+
+const MAX_RETRIEVAL_OBSERVATION_SESSIONS: usize = 48;
+const MAX_RETRIEVAL_OBSERVATIONS: usize = 48;
 
 use super::{CliError, print_json};
 
@@ -133,6 +140,62 @@ pub(crate) fn print_android_manifest_target_delta(
     }))
 }
 
+pub(crate) fn print_retrieval_shadow(
+    query: &str,
+    current_target_snapshot: &str,
+    historical_sessions: &[String],
+    historical_comparison: bool,
+) -> Result<(), CliError> {
+    let project = require_retrieval_project()?;
+    let research = load_research_state(&project).map_err(retrieval_error)?;
+    let memory_documents = LocalProjectMemory::new(&project)
+        .read_retrieval_documents()
+        .map_err(retrieval_error)?
+        .into_iter()
+        .filter_map(
+            |document| match (document.document.content, document.document.hash) {
+                (Some(content), Some(hash)) => Some(RetrievalMemoryDocument {
+                    path: document.path.as_str().to_owned(),
+                    hash,
+                    content,
+                }),
+                (None, None) => None,
+                _ => None,
+            },
+        )
+        .collect();
+    let observations = read_current_observations(&project)?;
+    let historical_summaries = read_historical_summaries(&project, historical_sessions)?;
+    let report = project_shadow_report(
+        project.project_id().as_str(),
+        &research,
+        &TargetSnapshotId::new(current_target_snapshot),
+        query,
+        historical_comparison,
+        RetrievalSources {
+            memory_documents,
+            observations,
+            historical_summaries,
+        },
+    )
+    .map_err(retrieval_error)?;
+    print_json(&json!({
+        "command": "inspect retrieval",
+        "status": "ok",
+        "shadow": true,
+        "model_context_changed": false,
+        "effects": {
+            "provider_requests": 0,
+            "tool_actions": 0,
+            "research_writes": 0,
+            "memory_writes": 0,
+            "event_writes": 0,
+            "cache_writes": 0
+        },
+        "report": report,
+    }))
+}
+
 fn uninitialized_snapshot() -> SnapshotFacts {
     SnapshotFacts {
         disposition: SnapshotDisposition::Unavailable,
@@ -156,6 +219,97 @@ fn require_project() -> Result<Project, CliError> {
     discover_project()?.ok_or_else(|| CliError::Observation {
         message: "the current directory is not an initialized Cyber Agent project".to_owned(),
     })
+}
+
+fn require_retrieval_project() -> Result<Project, CliError> {
+    discover_project()?.ok_or_else(|| CliError::Retrieval {
+        message: "the current directory is not an initialized Cyber Agent project".to_owned(),
+    })
+}
+
+fn read_current_observations(
+    project: &Project,
+) -> Result<Vec<(String, crate::domain::vision::VisionObservation)>, CliError> {
+    let mut observations = Vec::new();
+    let mut session_ids = project.existing_session_ids().map_err(retrieval_error)?;
+    session_ids.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+    for session_id in session_ids
+        .into_iter()
+        .take(MAX_RETRIEVAL_OBSERVATION_SESSIONS)
+    {
+        let events = read_existing_session_events(project, &session_id).map_err(retrieval_error)?;
+        let projection = SessionProjection::replay(events).map_err(retrieval_error)?;
+        let state = projection.state();
+        for observation in state.vision_observations() {
+            if observations.len() == MAX_RETRIEVAL_OBSERVATIONS {
+                return Ok(observations);
+            }
+            observations.push((session_id.as_str().to_owned(), observation.clone()));
+        }
+    }
+    Ok(observations)
+}
+
+fn read_historical_summaries(
+    project: &Project,
+    requested_sessions: &[String],
+) -> Result<Vec<HistoricalSummaryCandidate>, CliError> {
+    let mut selected = requested_sessions.to_vec();
+    selected.sort();
+    selected.dedup();
+    selected
+        .into_iter()
+        .map(|session_id| {
+            let local = read_session_inspection(project, Some(&session_id))?;
+            if local.session_corrupt {
+                return Err(CliError::Retrieval {
+                    message: format!(
+                        "Session `{session_id}` cannot be reduced for historical retrieval"
+                    ),
+                });
+            }
+            let Some(summary) = local
+                .session_state
+                .as_ref()
+                .and_then(SessionState::latest_compaction)
+                .map(|compaction| compaction.summary())
+            else {
+                return Ok(None);
+            };
+            let target_snapshot_ids = summary
+                .evidence_spine()
+                .map(|spine| {
+                    spine
+                        .target_snapshot_refs()
+                        .iter()
+                        .map(|id| id.as_str().to_owned())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let content = match summary.narrative() {
+                Some(narrative) => [
+                    narrative.current_goal(),
+                    narrative.concise_progress(),
+                    &narrative.unresolved_questions().join("\n"),
+                    &narrative.next_step_notes().join("\n"),
+                ]
+                .join("\n"),
+                None => serde_json::to_string(summary).map_err(CliError::Json)?,
+            };
+            Ok(Some(HistoricalSummaryCandidate {
+                session_id,
+                target_snapshot_ids,
+                content,
+            }))
+        })
+        .collect::<Result<Vec<_>, CliError>>()
+        .map(|summaries| summaries.into_iter().flatten().collect())
+}
+
+fn retrieval_error(error: impl std::fmt::Display) -> CliError {
+    CliError::Retrieval {
+        message: error.to_string(),
+    }
 }
 
 fn read_android_manifest_observations(

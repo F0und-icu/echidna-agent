@@ -530,12 +530,30 @@ impl ResearchState {
         super::evidence_gap::project(self, references)
     }
 
-    pub(super) fn hypothesis_records(&self) -> impl Iterator<Item = &HypothesisRecord> {
+    pub(crate) fn retrieval_target_snapshot_records(
+        &self,
+    ) -> impl Iterator<Item = &TargetSnapshotRecord> {
+        self.target_snapshots.values()
+    }
+
+    pub(crate) fn hypothesis_records(&self) -> impl Iterator<Item = &HypothesisRecord> {
         self.hypotheses.values()
     }
 
-    pub(super) fn finding_records(&self) -> impl Iterator<Item = &FindingRecord> {
+    pub(crate) fn finding_records(&self) -> impl Iterator<Item = &FindingRecord> {
         self.findings.values()
+    }
+
+    pub(crate) fn retrieval_experiment_records(&self) -> impl Iterator<Item = &ExperimentRecord> {
+        self.experiments.values()
+    }
+
+    pub(crate) fn retrieval_next_action_records(&self) -> impl Iterator<Item = &NextActionRecord> {
+        self.next_actions.values()
+    }
+
+    pub(crate) fn retrieval_artifact_records(&self) -> impl Iterator<Item = &ArtifactRecord> {
+        self.artifacts.records()
     }
 
     pub(super) fn experiment(&self, id: &ExperimentId) -> Option<&ExperimentRecord> {

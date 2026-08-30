@@ -143,6 +143,21 @@ enum InspectCommand {
         #[arg(long)]
         candidate_artifact: String,
     },
+    /// Run the deterministic local security-retrieval Shadow without changing Context or facts.
+    Retrieval {
+        /// The local query to rank against bounded project facts.
+        #[arg(long)]
+        query: String,
+        /// The exact current TargetSnapshot ID used for eligibility filtering.
+        #[arg(long = "target-snapshot")]
+        target_snapshot: String,
+        /// One explicitly selected Session whose derived historical Summary may be considered.
+        #[arg(long = "historical-session", value_name = "SESSION_ID", num_args = 0..=16)]
+        historical_sessions: Vec<String>,
+        /// Permit an explicitly selected historical Summary bound to a non-current TargetSnapshot.
+        #[arg(long)]
+        historical_comparison: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -181,6 +196,8 @@ pub enum CliError {
     SessionSelectionRequired { session_count: usize },
     #[error("AndroidManifest Observation ingestion failed: {message}")]
     Observation { message: String },
+    #[error("deterministic retrieval Shadow inspection failed: {message}")]
+    Retrieval { message: String },
 }
 
 #[derive(Debug, Serialize)]
@@ -353,6 +370,20 @@ where
             &baseline_artifact,
             &candidate_session,
             &candidate_artifact,
+        ),
+        Some(CliCommand::Inspect {
+            inspection:
+                InspectCommand::Retrieval {
+                    query,
+                    target_snapshot,
+                    historical_sessions,
+                    historical_comparison,
+                },
+        }) => cli_inspection::print_retrieval_shadow(
+            &query,
+            &target_snapshot,
+            &historical_sessions,
+            historical_comparison,
         ),
         None => {
             let mut command = Cli::command();

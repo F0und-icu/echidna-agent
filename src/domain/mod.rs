@@ -19,6 +19,7 @@ pub mod project;
 pub mod request_audit;
 pub mod research;
 pub mod research_control;
+pub(crate) mod retrieval;
 pub mod sampling;
 pub mod session;
 pub mod snapshot;
