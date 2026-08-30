@@ -92,7 +92,7 @@ Codex Luna xhigh 或其他高推理 Codex 执行开发任务时，必须按顺�
 
 ## 6. 当前状态
 
-M0 至 M4-S2 以及 F1a/F1b/F1c/F1d 集成交付均已远端封存。F1e 已在本地完成、通过完整 Gate 和一次 DeepSeek Full-only Live Tool Loop；其 Git 发布已授权并等待准确 PR-head Gate，M4-S3c 与进一步 Live 请求仍未授权。
+M0 至 M4-S2 以及 F1a 至 F1e 均已远端封存。F1e 通过完整本地 Gate 和一次 DeepSeek Full-only Live Tool Loop；GitHub 因账单/额度原因让远端 Run `33295806720` 在零 Step 时失败，用户明确授权该次不重跑 Actions 的合并。后续 Actions 暂停，M4-S3c 与进一步 Live 请求仍未授权。
 
 Architecture v1.5/v1.6 已在本地冻结：completed reasoning 仅属于 Provider delivery，明文存在时冗余 opaque encrypted sidecar 不进入 Core；encrypted-only 与未知 content 继续显式失败。
 

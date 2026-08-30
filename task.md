@@ -30,10 +30,10 @@
 
 当前状态：
 
-- 阶段：Implementation；M0 至 M4-S2 和 F1a-F1d 已远端封存。
+- 阶段：Implementation；M0 至 M4-S2 和 F1a-F1e 已远端封存。
 - 当前代码基线已具备一个 AgentLoop、项目/会话/研究/审计事实、固定领域 Prompt Profiles、多模态组合、Replay/Eval、唯一 Provider Composition Root 和第一版 CLI Chat。
-- Architecture v1.5/v1.6 已在本地冻结：Provider-visible completed reasoning 与 Conversation History 分离，并仅在有完整 `reasoning_text` 时忽略冗余 Adapter-local encrypted sidecar；Git/远端封存仍未授权。
-- F1e 已完成本地实现、完整 Gate 和一次配置驱动 DeepSeek Full-only Tool Loop。当前 Slice 恢复为 M4-S3c `READY_NOT_AUTHORIZED`；具体事实始终以 `docs/development/STATUS.md` 为准。
+- Architecture v1.5/v1.6 已在本地冻结：Provider-visible completed reasoning 与 Conversation History 分离，并仅在有完整 `reasoning_text` 时忽略冗余 Adapter-local encrypted sidecar；architecture-manifest 远端封存仍未授权。
+- F1e 已完成本地 Gate、一次配置驱动 DeepSeek Full-only Tool Loop，并通过 PR `#48` 远端封存。GitHub Run `33295806720` 因账单/额度原因零 Step 失败，用户明确授权该次不重跑 Actions 的合并并暂停后续 Actions。当前 Slice 恢复为 M4-S3c `READY_NOT_AUTHORIZED`；具体事实始终以 `docs/development/STATUS.md` 为准。
 
 ## 1. 产品定义
 
@@ -2074,6 +2074,6 @@ M1 总完成标准：M1a、M1b、M1c 分别有可运行集成测试，任一后�
 
 ## 25. 下一步
 
-具体状态始终以 `docs/development/STATUS.md` 为准。F1a-F1d 已远端封存；F1e 已在本地完成，Git 发布已授权并等待准确 PR-head Gate。Architecture v1.2 至 v1.6 的远端架构封存仍未授权。
+具体状态始终以 `docs/development/STATUS.md` 为准。F1a-F1e 已远端封存；F1e 的远端 Gate 由用户在 GitHub 账单/额度导致零 Step 失败后明确单次豁免，后续 Actions 暂停。Architecture v1.2 至 v1.6 的远端架构封存仍未授权。
 
 下一候选是 M4-S3c 通用研究工具，状态为 `READY_NOT_AUTHORIZED`。之后依次是 M4-S3d、M4-S3e1/e2 typed evidence/provenance、M4-S3f retrieval Shadow、M4-S3g guidance Shadow 和 M4-S4 真实长流程验收；任何前一项完成都不自动授权下一项。

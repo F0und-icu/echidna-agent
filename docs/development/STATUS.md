@@ -7,12 +7,12 @@
 - Implementation: `STARTED`
 - Current milestone: `M4-S3c` General Research Tools
 - Current slice: `M4-S3c`
-- Slice state: `READY_NOT_AUTHORIZED`; F1e is locally complete and M4-S3c has not started
+- Slice state: `READY_NOT_AUTHORIZED`; F1e is remotely sealed and M4-S3c has not started
 - Lean governance: `PASS`; F1e retains one Responses encoder/decoder, one AgentLoop and one ConversationHistory owner while separating provider-visible completed output continuation
-- Local Git initialized: `yes`; `main` contains the remotely submitted M4-S3a1-through-M4-S3b checkpoint over the F1a-F1d delivery
-- Remote repository: `F0und-icu/cyber-agent` private; M4 checkpoint `892edaa` passed push CI `33290961921`, while no PR, tag or release was created
+- Local Git initialized: `yes`; `main` contains F1e Squash Merge `2f6a9e5` over the prior M4-S3a1-through-M4-S3b checkpoint and F1a-F1d delivery
+- Remote repository: `F0und-icu/cyber-agent` private; F1e is merged through PR `#48`, while no tag or release was created
 - Documentation baseline commit: `55ff3be`
-- Current code base: remote status checkpoint `c52fcbe` on `main`; F1e Git publication is authorized and being prepared on a short branch
+- Current code base: F1e Squash Merge `2f6a9e5` on remote `main`; a status-only `[skip ci]` seal records the final stopped state
 - Upstream Codex reference baseline: `868c9edb0da913a5fc699a71664e65f44f6058b0`; read-only and not a Cyber Agent dependency
 
 ## Latest Local Design Update
@@ -21,7 +21,7 @@
 - Scope: Architecture v1.5/v1.6 adds only completed Responses reasoning continuation and the real-protocol correction for a redundant encrypted sidecar; no new Provider binding, configuration field, dependency, fact store or vendor branch exists.
 - Delivery boundary: `ModelInputIR` v3 represents plaintext completed reasoning only in provider-visible delivery. Conversation/Session History rejects it; Resume, Compaction and Primary replacement clear it.
 - Protocol boundary: the one Responses Adapter replays `reasoning -> function_call -> function_call_output`. Plaintext plus opaque encrypted sidecar uses the plaintext semantic item and keeps the sidecar Adapter-local; encrypted-only and unknown content fail explicitly.
-- Completion: F1e passed the complete local Cargo/Lean Gate and a configuration-driven DeepSeek Full-only `read_file` Live Tool Loop. Git publication is authorized and pending the exact PR-head Gate; M4-S3c remains unstarted.
+- Completion: F1e passed the complete local Cargo/Lean Gate and a configuration-driven DeepSeek Full-only `read_file` Live Tool Loop, then merged through PR `#48` as `2f6a9e5`. Remote run `33295806720` executed zero Steps because GitHub blocked it for billing/spending-limit reasons; the user explicitly authorized merging this PR without a rerun. M4-S3c remains unstarted.
 
 ## Prior Local Design Update
 
@@ -37,6 +37,16 @@
 - Authorization: the user separately authorized remote submission of the completed M4-S3b checkpoint. Commit `892edaa` and its sole push CI `33290961921` are complete; this `[skip ci]` status correction consumes that authority. M4-S3c, further Git/PR/Actions, architecture remote seal and Live Provider requests require new authorization.
 
 ## Last Remote Delivery
+
+- Delivery: `F1e` Responses Reasoning Continuation.
+- Base commit: `c52fcbe`.
+- Scope: provider-visible completed plaintext reasoning, exact Full replay ordering, Conversation/Session isolation, RequestAudit v2/v3 compatibility and redundant encrypted-sidecar handling through the existing Responses Adapter and one AgentLoop.
+- Result: `COMPLETE_REMOTE_SEALED`; the complete local Cargo/Lean Gate passes 313 discovered tests with 311 default-enabled tests passing and two Live Smokes ignored. The selected configuration-driven DeepSeek Full-only Tool Loop also passed.
+- Remote Gate waiver: PR-head run `33295806720` ended before executing any Step because GitHub reported an account payment or Actions spending-limit block. On 2026-08-30 the user explicitly authorized merging PR `#48` without rerunning Actions and pausing subsequent Actions until quota recovery. This is an operator waiver, not a passing CI result.
+- Lean result: one Responses encoder/decoder, AgentLoop, ConversationHistory and Config Composition Root remain; no dependency, Provider branch, configuration field, second History, second AgentLoop or test-only public API was added.
+- Git: implementation commit `5bf760d`, PR `#48` and `[skip ci]` Squash Merge `2f6a9e5` form the implementation seal. No tag, release or architecture-manifest seal occurred.
+
+## Prior Remote Delivery
 
 - Delivery: integrated `F1a` through `F1d`.
 - Base commit: `08e9025`.
@@ -133,7 +143,7 @@
 - F1b one protocol-first Responses HTTP/SSE Adapter, provider-neutral reasoning events and configuration-only conforming-service selection (remotely sealed in integrated PR `#46`).
 - F1c first-version CLI Chat through the existing AgentLoop, durable Session/RequestAudit/Tool facts and one synthetic DeepSeek Live Chat (remotely sealed in integrated PR `#46`).
 - F1d compatible Config v1 inline `api_key` or referenced `credential_ref` selection through the existing Composition Root and Adapter boundary (remotely sealed in integrated PR `#46`).
-- F1e provider-visible Responses reasoning continuation, ModelInputIR v2/v3 compatibility and one DeepSeek Full-only Live Tool Loop (locally complete; Git publication authorized and pending remote Gate).
+- F1e provider-visible Responses reasoning continuation, ModelInputIR v2/v3 compatibility and one DeepSeek Full-only Live Tool Loop (remotely sealed through PR `#48` and Squash Merge `2f6a9e5`).
 
 ## Prior Fix Slice
 
@@ -165,12 +175,13 @@
 ## Last Completed Fix Slice
 
 - Slice: `F1e`
-- State: `COMPLETE_LOCAL`; no commit, push, PR, Actions, tag or release was authorized.
+- State: `COMPLETE_REMOTE_SEALED` through PR `#48` and Squash Merge `2f6a9e5`; the required remote Gate has an explicit one-time operator waiver rather than a PASS result.
 - Delivered scope: completed Responses `reasoning_text` is retained only in provider-visible delivery and replayed with the matching Function Call and Tool Result in exact order. Conversation/Session/Research/Memory and user output never receive reasoning.
 - Compatibility: new requests use ModelInputIR v3; historical RequestAudit v2 remains readable and real Replay request matching promotes v2 to v3 without changing the stored audit. Full RequestAudit differences retain the established state-diff reasons; Prompt/Tool-plan changes accept only an exact reasoning replay of the logical input.
 - Protocol: one generic Responses Adapter accepts plaintext reasoning with an optional redundant encrypted sidecar, rejects encrypted-only/unknown content, and contains no DeepSeek, Provider, model, URL or credential branch.
 - Verification: complete Gate passes on Rust `1.93.1` with 313 discovered tests, 311 default-enabled tests passing and two ignored opt-in Live Smokes; Lean scans pass. A selected DeepSeek `deepseek-v4-flash` Full-only Live Chat called `read_file`, replayed reasoning/call/result and returned the fixed synthetic file content.
 - Audit: the bounded independent Luna audit first found the Context-candidate reasoning-loss P1; the permanent over-budget regression and explicit failure fixed it. Its repair review returned `APPROVE` with no P0/P1. Main cross-boundary review additionally fixed Deferred `tool_search`/ToolsChanged replay and added its regression. Later optional addendum audit threads timed out and were terminated; none was counted as approval.
+- Git: implementation commit `5bf760d` was Squash Merged through PR `#48` as `2f6a9e5` with `[skip ci]`. Run `33295806720` executed no Steps because of the GitHub billing/spending-limit block; the user explicitly waived its rerun for this merge. No tag, release or architecture-manifest seal occurred.
 
 ### F1e Lean Review
 
@@ -189,14 +200,15 @@
 
 ## Current Authorization
 
-On 2026-08-30 the user authorized Git publication of the completed F1e Slice. This authority covers one short branch, reviewed commits, push, one exact PR-head GitHub Actions Gate, Squash Merge and a status-only `[skip ci]` seal. It does not authorize M4-S3c, another Live request, a tag, release or architecture-manifest seal.
+The F1e publication authority is consumed. On 2026-08-30 the user explicitly overrode the remote-Gate merge condition for PR `#48` after GitHub run `33295806720` executed zero Steps because of a billing/spending-limit block. The user also paused subsequent Actions until quota recovery. No current instruction authorizes M4-S3c, another Live request, further Git publication, a tag, release or architecture-manifest seal.
 
-- Run mode: `SEAL_F1E_ONLY`; no new implementation Slice is authorized
-- Git mode: `PUBLISH_F1E`; branch, commit, push, PR, one exact PR-head Gate, Squash Merge and a status-only `[skip ci]` correction are authorized
+- Run mode: `REVIEW_ONLY`; no new implementation Slice is authorized
+- Git mode: `LOCAL_ONLY`; the F1e implementation and status seal consume the current Git authority
+- GitHub Actions mode: `PAUSED_BY_OPERATOR`; do not trigger or rerun a Workflow until the user explicitly resumes it after quota recovery
 - Delegation mode: `OFF`; no new sub-agent work is authorized
 - Live test mode: `OFF`; the one selected F1e DeepSeek Tool Loop is complete
 - Configuration rule: Provider binding, model, Base URL and Capability Mapping remain Config v1 data. A Provider selects exactly one inline `api_key` or dedicated `credential_ref`; neither may infer Provider/model identity or use Codex login state.
-- Stop condition: complete the F1e remote seal, leave M4-S3c unstarted and report the exact Git/CI identities
+- Stop condition: leave M4-S3c unstarted and report the completed F1e seal plus the explicit remote-Gate waiver
 
 ## M4-S3a1 Slice Start
 
@@ -1142,7 +1154,7 @@ On 2026-08-30 the user authorized Git publication of the completed F1e Slice. Th
 - None for M3-S4; implementation PR `#39`, status PR `#40` and the single required PR-head Gate are complete.
 - None for M4-S1; implementation PR `#42`, exact-head CI, implementation merge and separate status PR `#43` complete the remote seal.
 - None for M4-S2; implementation commit `d99f395`, PR `#44`, sole PR-head CI `33165972124`, Squash Merge `2afe900` and separate status PR `#45` complete the remote seal.
-- None for F1e: offline Gate and the selected DeepSeek Full-only Tool Loop pass, and its Git publication is authorized. M4-S3c and any additional Live request remain unauthorized; no Codex credential is an allowed substitute.
+- None for F1e implementation: the local Gate, selected DeepSeek Full-only Tool Loop and operator-authorized remote merge are complete. Run `33295806720` is explicitly recorded as zero-Step billing/spending-limit failure, not PASS. M4-S3c, additional Live requests and further Actions remain unauthorized; no Codex credential is an allowed substitute.
 
 ## Last Verification
 
@@ -1151,7 +1163,7 @@ On 2026-08-30 the user authorized Git publication of the completed F1e Slice. Th
 - F1e History/Audit/Replay Gate: PASS; reasoning never enters Conversation/Session/Research/Memory or user output. RequestAudit reads ModelInputIR v2/v3, narrows distinct Full delivery, and a real Replay provider regression proves v2-to-v3 request matching.
 - F1e review: the bounded independent Luna audit found one Context-candidate P1, which was fixed with explicit `ProviderContinuationUnavailable` and a permanent regression; its repair review returned `APPROVE`. Main cross-boundary review found and fixed the deferred `tool_search`/ToolsChanged path. Optional post-fix addendum audit threads timed out and were terminated without being counted as approval.
 - F1e Live Test: PASS; explicit Config v1 selected `deepseek-v4-flash` with `incremental_input=false`. The first model step produced reasoning plus `read_file`, the existing Tool Registry executed the synthetic file read, and the second Full step replayed reasoning/call/result and returned the exact fixture content. The first attempt exposed a redundant encrypted sidecar and failed under v1.5; ADR-0016/v1.6 plus permanent fixtures narrowed that wire rule, after which the same generic path passed.
-- F1e isolation/Git: PASS; the inline credential was not displayed or copied into repository facts, and Codex login state, `~/.codex` and `CODEX_HOME` were untouched. Five temporary reasoning probe SSE files were permanently deleted; the user-owned local Provider config and synthetic project remain. No commit, push, PR, Actions, tag or release occurred.
+- F1e isolation/Git: PASS with an explicit CI waiver; the inline credential was not displayed or copied into repository facts, and Codex login state, `~/.codex` and `CODEX_HOME` were untouched. Five temporary reasoning probe SSE files were permanently deleted; the user-owned local Provider config and synthetic project remain. Commit `5bf760d`, PR `#48` and Squash Merge `2f6a9e5` are complete. Run `33295806720` executed zero Steps and is not counted as PASS; no tag or release occurred.
 
 - F1b local Gate: PASS on Rust `1.93.1`; formatting, denied-warning Clippy, 298 discovered tests with 296 default-enabled tests passing and two generic configuration-driven Live Smokes ignored, plus locked build and all Lean scans.
 - F1b protocol Gate: PASS; one `ResponsesHttpAdapter` owns request encoding, HTTP/SSE transport and decoding for every explicitly configured conforming service. Reasoning, Tool, text, Usage, Completed, unknown-event, cancellation, incremental and Full-only paths are covered without a vendor binding.
