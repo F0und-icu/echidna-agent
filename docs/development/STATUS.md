@@ -5,14 +5,14 @@
 - Architecture version: `1.6.0`; v1/v1.1 remain remotely sealed, v1.2 through v1.6 are locally frozen with remote seal unauthorized
 - Phase: `IMPLEMENTATION`
 - Implementation: `STARTED`
-- Current milestone: `M4-S3f` deterministic security retrieval Shadow
-- Current slice: `M4-S3f`
-- Slice state: M4-S3e2 is `COMPLETE_REMOTE_SEALED`; M4-S3f is `COMPLETE_LOCAL_READY_TO_SEAL`
-- Lean governance: `PASS`; M4-S3f passed independent repair audit, the complete local Gate and its final Lean Review without Context promotion
-- Local Git initialized: `yes`; branch `agent/m4-s3f-deterministic-retrieval` starts from the status seal `1488f43` over M4-S3e2 Squash Merge `1f382ee`
-- Remote repository: `F0und-icu/cyber-agent` private; M4-S3e2 is merged through PR `#53` as `1f382ee`, while no tag, release or Actions run was created
+- Current milestone: `M4-S3g` deterministic evidence-gap and experiment guidance Shadow
+- Current slice: `M4-S3g`
+- Slice state: M4-S3f is `COMPLETE_REMOTE_SEALED`; M4-S3g is `READY_AUTHORIZED`
+- Lean governance: `PASS`; M4-S3f passed independent repair audit, the complete local Gate, final Lean Review and remote seal without Context promotion
+- Local Git initialized: `yes`; status-seal branch `agent/m4-s3f-status-seal` starts from M4-S3f Squash Merge `02bdbaa`
+- Remote repository: `F0und-icu/cyber-agent` private; M4-S3f is merged through PR `#55` as `02bdbaa`, while no tag, release or Actions run was created
 - Documentation baseline commit: `55ff3be`
-- Current code base: status seal `1488f43` over M4-S3e2 Squash Merge `1f382ee` on `main`; M4-S3f implementation is complete and locally gated on its Slice branch
+- Current code base: M4-S3f Squash Merge `02bdbaa` on `main`; M4-S3g implementation has not started
 - Upstream Codex reference baseline: `868c9edb0da913a5fc699a71664e65f44f6058b0`; read-only and not a Cyber Agent dependency
 
 ## Latest Local Design Update
@@ -224,10 +224,10 @@
 - Live: the explicit user-owned `/Users/f0und/.config/cyber-agent/deepseek-live.toml` selects `deepseek-v4-flash` through the one `http_sse + responses` Composition Root with Full-only text capabilities and Vision disabled. `doctor` returned ready; the fixed synthetic Shadow Tool Loop passed 1/1, invoked only its replay Tool and remained derived non-evidence. No Codex credential/login state or real target was used, no secret entered Git or durable Project facts, and no Actions run occurred.
 - Governance debt: none blocking. The prerequisite remote seal is satisfied by PR `#53`/`1f382ee`; every subsequent Slice retains its own independent audit, Gate, Live decision, Lean Review and Git/PR seal.
 
-## Next Slice
+## Last Completed Slice
 
 - Slice: `M4-S3f` deterministic security retrieval Shadow.
-- State: `IN_PROGRESS`; implementation began from remotely sealed `main` on `agent/m4-s3f-deterministic-retrieval`.
+- State: `COMPLETE_REMOTE_SEALED`; PR `#55` was Squash Merged as `02bdbaa` without GitHub Actions under the active operator pause.
 - Scope lock: one fixed versioned pipeline owns eligibility/Target filtering, exact vulnerability identifiers, fielded BM25, bounded CJK/ASCII character n-grams, RRF, explicit authority/freshness tiers and stable-ID tie-break. It reads bounded Project Memory, Research, Artifact/Observation metadata and explicitly selected historical summaries; it remains local, Shadow-only, explainable, derived non-evidence and invisible to model Context.
 - Data and dependency budget: begin with bounded scans and a deletable in-memory derived index. No SQLite/FTS dependency, vector/graph database, remote embedding/reranker/judge, selector Registry, Provider/Tool call, persistent fact, autonomous action or Context promotion is allowed in this Slice.
 - Controlled quality contract: exact security identifiers must achieve `Recall@10 = 1.00`; the aggregate controlled suite targets `Recall@10 >= 0.90` and `Precision@10 >= 0.60`, with zero cross-Project or incompatible-current-Target candidates. Promotion remains forbidden in M4-S3f; a candidate promotion later additionally requires at least 20% lower repeated-read or estimated Context-token cost without recall regression. Missing these benefit thresholds keeps the implementation Shadow or triggers removal, but never permits metric inflation.
@@ -237,7 +237,7 @@
 
 ### M4-S3f Completion and Lean Review
 
-- State: `COMPLETE_LOCAL_READY_TO_SEAL`; the implementation remains on `agent/m4-s3f-deterministic-retrieval` until its authorized commit, private PR and Squash Merge. M4-S3g does not start before that remote seal.
+- State: `COMPLETE_REMOTE_SEALED`; commit `e11d592` was published through private PR `#55` and Squash Merged as `02bdbaa`. M4-S3g may now start from this sealed base on its own branch.
 - Semantic owners: `domain/retrieval` owns the one versioned fixed eligibility, exact-identifier, fielded-BM25, bounded CJK/ASCII n-gram, RRF, authority/freshness-tier and stable-ID pipeline. It canonicalizes bounded fields, reports true pre-tier component ranks and returns at most ten results. `app/retrieval` only projects bounded existing Project Memory, Research, Artifact/Vision Observation metadata and explicitly selected historical Summary facts. `project_memory` owns the confined read-only Markdown scan, while `cli_inspection` owns the zero-write local Shadow command and its pre-replay 48-Session/48-Observation bounds.
 - Reuse and API: existing Project isolation, strict Research/Session reducers, Artifact metadata projection, Summary v1/v2 readers, BLAKE3 canonical fingerprinting and the existing Context token estimator are reused. New retrieval contracts, source iterators and the current-consumer `RetrievalSources` composition parameter remain crate-private. No Port, Event, Config, Prompt, Cache format, dependency, Cargo feature, Codex port, Provider/Tool path, test-only public projection or future placeholder was added.
 - Controlled quality: eleven fixed Source/Web/Mobile/Binary cases declare thirteen required Top-10 references plus exact source, eligibility, tier, tier reason and matched-field expectations. Exact-identifier and aggregate `Recall@10` are `1.00`; aggregate `Precision@10` satisfies the fixed `>= 0.60` threshold without expanding acceptable sets after output. Cross-Project facts are compositionally isolated, incompatible current Targets are excluded, CJK/typo matches expose their actual fields, repeated identical requests are byte-stable and explicitly selected historical Session order does not change fingerprints, ranks or reasons.
@@ -245,14 +245,25 @@
 - Tests and Gate: the six M4-S3f tests and 28 affected inspection, Research, Compaction and multimodal tests pass. The complete Rust `1.93.1` Gate passes formatting, denied-warning Clippy, `cargo test --locked --all-targets --all-features`, `cargo build --locked`, production inline-test scan and `git diff --check`. The suite discovers 371 tests: 369 default-enabled tests pass and two explicit Live Smokes remain ignored.
 - Lean size review: `domain/retrieval/mod.rs`, `normalize.rs` and `rank.rs` separate contracts, normalization and the single ranking owner; `app/retrieval.rs` keeps the independently eligible source projections together. Their 300-line review signals were inspected rather than mechanically split: further splitting would expose private ranking state or duplicate source eligibility without a second consumer. The only parameter object groups the three currently consumed derived sources and replaced an eight-argument composition call without an unused abstraction.
 - Removed and deferred: the implementation removed the temporary exact-only result filter, the later exact-first hidden sort key, duplicated n-gram thresholds, `core.md` retrieval despite its always-injected Context role, a projection `expect` panic and an unused explicit-selection flag. Repeated-read reduction and Context-cost improvement remain honestly `unavailable` because no typed baseline/complete denominator exists; retrieval therefore stays Shadow and invisible to ModelInputIR. Persistent SQLite/FTS, vector/graph storage, remote embedding/reranker/judge, model-visible promotion and autonomous action remain deferred. No representative p95 evidence currently justifies a new index dependency.
-- Live and remote: no Provider Live request is required or run for this pure deterministic Shadow Slice. No credential, Codex login/session state, `~/.codex` or `CODEX_HOME` was read or modified, and no GitHub Actions run was triggered.
+- Live and remote: no Provider Live request was required or run for this pure deterministic Shadow Slice. PR `#55` was merged with `[skip ci]`; no credential, Codex login/session state, `~/.codex` or `CODEX_HOME` was read or modified, and no GitHub Actions run was triggered.
+
+## Next Slice
+
+- Slice: `M4-S3g` deterministic evidence-gap and experiment guidance Shadow.
+- State: `READY_AUTHORIZED`; implementation must start from remotely sealed `main` after this status seal is merged, on a fresh `agent/m4-s3g-guidance-shadow` branch. The sealed S3f behavior base is `02bdbaa`.
+- Scope lock: one separate pure projection reads only existing typed evidence gaps and existing typed `NextAction` or caller-supplied controlled Eval candidates. It applies hard invalidity and missing-prerequisite filters before one versioned deterministic factor vector: boundary importance, competing-hypothesis discrimination, expected gap closure, reproducibility, novelty, Target applicability, execution cost, mutation risk and version-drift risk.
+- Explainability contract: every candidate reports bounded factor values, stable Reason Codes, exclusion reasons, action fingerprint and deterministic tie-break. Unknown remains distinct from missing; duplicate action fingerprints, cross-Snapshot candidates, incompatible Targets and unmet prerequisites cannot silently enter ranking.
+- Controlled quality contract: fixed fixtures must cover unknown/missing gaps, prerequisites, duplicate fingerprints, cross-Snapshot applicability, mutation/version-drift risk and stable ties. The preferred candidate must close more declared critical gaps than a merely cheaper alternative. Gap-closure and cost metrics require explicit denominators; unavailable values remain unavailable rather than becoming zero.
+- Side-effect boundary: the report remains local, Shadow-only, operator-optional, derived non-evidence and invisible to `ModelInputIR`. It cannot execute a Tool, create an Experiment, change `ResearchPhase`, update Research/Memory, promote a Finding/Observation or modify retrieval state.
+- Dependency and abstraction budget: reuse the existing typed gap projection, NextAction records, Target applicability and canonical fingerprint primitives. Do not add an Event, Config, Port, Provider path, persistent index, learned ranker, model judge, autonomous experiment generator, Workflow DSL, candidate registry or future placeholder abstraction.
+- Gate and Live decision: execute focused tests, affected tests, independent bounded audit, repairs, the complete locked Cargo/Lean Gate and Lean Review. A Provider Live request is not required for this pure deterministic Shadow Slice; controlled Mock/Fixture/Replay evidence is authoritative for S3g.
 
 ## Current Authorization
 
 The F1e and M4-S3c authorities are consumed. PR `#51`/`32bc0f2` and PR `#52`/`7d5b6d0` consumed the M4-S3d and M4-S3e1 submission authorities. The user authorized completing, testing and independently sealing M4-S3e2, then proceeding in order through M4-S3f, M4-S3g and M4-S4; the earlier Actions pause remains in force.
 
 - Run mode: `IMPLEMENT_AND_SEAL_SEQUENTIALLY`; finish the current Slice before beginning the next
-- Git mode: `SLICE_BRANCH_PR_MERGE`; M4-S3f commit, push, private PR and merge are authorized only after its Gate, followed by a separate branch for each later Slice
+- Git mode: `SLICE_BRANCH_PR_MERGE`; M4-S3f is sealed through PR `#55`/`02bdbaa`, and each later Slice uses its own branch, commit, private PR and merge only after its Gate
 - GitHub Actions mode: `PAUSED_BY_OPERATOR`; do not trigger or rerun a Workflow until the user explicitly resumes it after quota recovery
 - Delegation mode: `AUTHORIZED_BOUNDED`; Terra xhigh owns cross-boundary implementation/audit and Luna xhigh only bounded modules/tests/docs as defined by repository governance; one-Agent runtime is unchanged
 - Live test mode: `AUTHORIZED_EXPLICIT_CONFIG`; Mock/Fixture/Replay remain default and each selected Live path uses only an explicit Cyber Agent Config v1 Provider
