@@ -9,10 +9,10 @@
 - Current slice: `M4-S3c`
 - Slice state: `READY_NOT_AUTHORIZED`; M4-S3b is locally complete after bounded implementation, independent audit corrections, main-agent cross-boundary review and the full Cargo/Lean Gate
 - Lean governance: `PASSED`; M4-S3b retains one ToolSpec/ToolFailure/Trace Eval owner, removes test-only or unconsumed public surface and keeps unobservable metrics explicitly Deferred
-- Local Git initialized: `yes`; `main` contains the user-authorized local M4-S3a1-through-M4-S3b checkpoint over the F1a-F1d remote delivery, while push/PR/Actions remain unauthorized
-- Remote repository: `F0und-icu/cyber-agent` private; F1a-F1d implementation PR `#46` passed its one exact PR-head CI and merged with `[skip ci]`
+- Local Git initialized: `yes`; `main` contains the remotely submitted M4-S3a1-through-M4-S3b checkpoint over the F1a-F1d delivery
+- Remote repository: `F0und-icu/cyber-agent` private; M4 checkpoint `892edaa` passed push CI `33290961921`, while no PR, tag or release was created
 - Documentation baseline commit: `55ff3be`
-- Current code base: locally completed M4-S3a1 through M4-S3b over remote status seal `ee04b7e`, which contains F1a-F1d Squash Merge `6eb4959`
+- Current code base: remote M4 checkpoint `892edaa` on `main`, containing locally completed M4-S3a1 through M4-S3b over prior status seal `ee04b7e`
 - Upstream Codex reference baseline: `868c9edb0da913a5fc699a71664e65f44f6058b0`; read-only and not a Cyber Agent dependency
 
 ## Latest Local Design Update
@@ -26,7 +26,7 @@
 - Evidence continuity: typed EvidenceLink relations and Session Summary v2 EvidenceSpine reference authoritative Research/Artifact/Receipt facts; bounded narrative remains lossy and non-authoritative.
 - Research optimization: fixed identifier → fielded BM25 → CJK/ASCII n-gram → RRF → authority/freshness retrieval and evidence-gap/NextAction guidance remain deterministic, local, explainable, Shadow-first and non-evidence.
 - Planned sequence: M4-S3a1 immutable sampling foundation; M4-S3a2 Research Control Plane; M4-S3b/c/d as already bounded; M4-S3e1/e2 evidence/provenance; M4-S3f retrieval; M4-S3g guidance; then separately authorized M4-S4 long-flow acceptance.
-- Authorization: the current user instruction narrows the earlier through-M4-S4 implementation authority to completing M4-S3b and authorizes one local Git checkpoint. That authority is consumed by this handoff; M4-S3c, push/PR/Actions/remote seal and Live Provider requests require new authorization.
+- Authorization: the user separately authorized remote submission of the completed M4-S3b checkpoint. Commit `892edaa` and its sole push CI `33290961921` are complete; this `[skip ci]` status correction consumes that authority. M4-S3c, further Git/PR/Actions, architecture remote seal and Live Provider requests require new authorization.
 
 ## Last Remote Delivery
 
@@ -159,14 +159,14 @@
 
 ## Current Authorization
 
-The user's instruction to finish M4-S3b and create a local Git checkpoint is consumed by this handoff. It does not authorize the next Slice or remote publication.
+The user's later instruction to submit the completed checkpoint remotely is consumed by commit `892edaa`, its successful sole CI and this `[skip ci]` status correction. It does not authorize the next Slice or further publication.
 
 - Run mode: `REVIEW_ONLY`; M4-S3c is `READY_NOT_AUTHORIZED`
-- Git mode: `LOCAL_CHECKPOINT_COMPLETE`; no further commit, branch, push, PR, merge, tag, release or GitHub Actions run is authorized
+- Git mode: `REMOTE_CHECKPOINT_COMPLETE`; no further commit, branch, push, PR, merge, tag, release or GitHub Actions run is authorized
 - Delegation mode: `OFF`; any future delegation requires a new explicit instruction and remains subject to the bounded Terra/Luna roles
 - Live test mode: `OFF`; no credential resolution or public Provider request is authorized
 - Configuration rule: Provider binding, model, Base URL and Capability Mapping remain Config v1 data. A Provider selects exactly one inline `api_key` or dedicated `credential_ref`; neither may infer Provider/model identity or use Codex login state.
-- Stop condition: report the local checkpoint and stop with M4-S3c unstarted
+- Stop condition: report the remote checkpoint and stop with M4-S3c unstarted
 
 ## M4-S3a1 Slice Start
 
@@ -293,7 +293,7 @@ The user's instruction to finish M4-S3b and create a local Git checkpoint is con
 
 - Removed test-only public projection access, unconsumed convenience APIs, a fake post-execution failure stage, a redundant wrapper and dead Tool description inputs instead of preserving future placeholders.
 - Deferred exactly because their durable signals do not exist: unmatched Replay termination, Observation promotion, Replay promotion, Vision promotion and same-Turn Deferred activation counts. Architecture v1.4 optional `field_errors`/`receipt_ref` vocabulary remains design-only until a real production consumer exists.
-- No Live Test, public Provider request, credential resolution, GitHub Actions, push, PR, tag or remote seal occurred. No file under `codex/`, Codex login state, `~/.codex` or `CODEX_HOME` was read or modified.
+- No Live Test, public Provider request, credential resolution, PR, tag or architecture remote seal occurred. The user-authorized implementation checkpoint `892edaa` was pushed directly to private `main`; its sole CI `33290961921` passed the macOS Rust Gate in 2m14s. This status-only correction uses `[skip ci]`. No file under `codex/`, Codex login state, `~/.codex` or `CODEX_HOME` was read or modified.
 
 ## F1d Lean Review
 
