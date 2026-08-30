@@ -5,14 +5,14 @@
 - Architecture version: `1.6.0`; v1/v1.1 remain remotely sealed, v1.2 through v1.6 are locally frozen with remote seal unauthorized
 - Phase: `IMPLEMENTATION`
 - Implementation: `STARTED`
-- Current milestone: `M4-S3d` Observation, AndroidManifest Extractor and TargetDelta
-- Current slice: `M4-S3d`
-- Slice state: `READY_NOT_AUTHORIZED`; M4-S3c is `COMPLETE_REMOTE_SUBMITTED` in Draft PR `#50`, while no M4-S3d implementation authority exists
-- Lean governance: `PASS`; M4-S3c reuses one Tool Registry, Artifact authority, process owner, AgentLoop, Responses encoder/decoder and ConversationHistory owner
-- Local Git initialized: `yes`; branch `agent/m4-s3c-general-research-tools` tracks its private remote over `main` status seal `13e1b8a`
-- Remote repository: `F0und-icu/cyber-agent` private; M4-S3c Draft PR `#50` is open over `main`, while no merge, tag or release was authorized
+- Current milestone: `M4-S3e1` typed EvidenceLink and evidence-gap projection
+- Current slice: `M4-S3e1`
+- Slice state: `READY_NOT_AUTHORIZED`; M4-S3d is `COMPLETE_LOCAL`, while no M4-S3e1 implementation authority exists
+- Lean governance: `PASS`; M4-S3d has one strict Observation/TargetDelta Domain owner, one read-only App validation path and no second fact store, process executor, scanner framework or public API
+- Local Git initialized: `yes`; local branch `agent/m4-s3d-observation-target-delta` starts from M4-S3c Squash Merge `1b7b032`
+- Remote repository: `F0und-icu/cyber-agent` private; M4-S3c is merged through PR `#50` as `1b7b032`, while no tag or release was created
 - Documentation baseline commit: `55ff3be`
-- Current code base: M4-S3c implementation commit `05ae0e3` is pushed on Draft PR `#50`; its `[skip ci]` publication intentionally triggered no remote Gate while Actions remain paused
+- Current code base: M4-S3c Squash Merge `1b7b032` plus the complete uncommitted local M4-S3d worktree; commit, remote publication and M4-S3e1 remain unauthorized
 - Upstream Codex reference baseline: `868c9edb0da913a5fc699a71664e65f44f6058b0`; read-only and not a Cyber Agent dependency
 
 ## Latest Local Design Update
@@ -139,6 +139,8 @@
 - M4-S3a1 immutable SamplingStepPlan/ResolvedToolPlan binding, current-Turn Deferred activation, fixed `generic-v1` renderer identity and behavior-preserving ContextSlot/ContextOrigin migration.
 - M4-S3a2 fixed Base Contract, orthogonal DomainProfile/ResearchPhase composition, Turn-boundary durable phase selection and bounded Tool exposure.
 - M4-S3b canonical Tool guidance, precise schemas, narrow structured ToolFailure and durable-Trace-only non-evidence Tool accuracy reports.
+- M4-S3c provider-neutral bounded `http_request` and deterministic `inspect_environment` through the existing Tool/Artifact/Receipt authorities (remotely sealed through PR `#50` and Squash Merge `1b7b032`).
+- M4-S3d strict AndroidManifest Observation ingestion and deterministic two-Snapshot TargetDelta with complete source provenance, exposed only through read-only local inspection commands (`COMPLETE_LOCAL`; remote publication unauthorized).
 - F1a strict Provider Config v1, one Provider Composition Root, shared credential source and configuration-driven generic Live Smokes (remotely sealed in integrated PR `#46`).
 - F1b one protocol-first Responses HTTP/SSE Adapter, provider-neutral reasoning events and configuration-only conforming-service selection (remotely sealed in integrated PR `#46`).
 - F1c first-version CLI Chat through the existing AgentLoop, durable Session/RequestAudit/Tool facts and one synthetic DeepSeek Live Chat (remotely sealed in integrated PR `#46`).
@@ -194,22 +196,58 @@
 
 ## Current Slice
 
-- Slice: `M4-S3d`
+- Slice: `M4-S3e1`
 - State: `READY_NOT_AUTHORIZED`; do not implement it without a new user instruction.
-- Candidate scope: the bounded Observation, AndroidManifest Extractor and TargetDelta path defined in `IMPLEMENTATION_PLAN.md`.
-- Boundary: the M4-S3c commit/push/Draft-PR publication authority is consumed; M4-S3d implementation, further Live Tests, Actions, merge, tag, release and architecture seal remain unauthorized.
+- Candidate scope: the bounded typed EvidenceLink, conservative legacy Upcaster and pure evidence-gap projection path defined in `IMPLEMENTATION_PLAN.md`.
+- Boundary: the M4-S3d implementation and verification authority is consumed; M4-S3e1 implementation, Live Tests, commit, push, PR, Actions, merge, tag, release and architecture seal remain unauthorized.
 
 ## Current Authorization
 
-The F1e publication authority and the 2026-08-30 M4-S3c implementation, review, one-real-model-Live-Test and private Draft-PR publication authorities are consumed. The earlier Actions pause remains in force.
+The F1e and M4-S3c implementation, Live Test, publication and merge authorities are consumed. The separately authorized M4-S3d implementation, bounded delegation, independent audit, fixes and complete local verification are also consumed. The earlier Actions pause remains in force.
 
-- Run mode: `REVIEW_ONLY`; M4-S3d is not authorized
-- Git mode: `REVIEW_ONLY`; branch `agent/m4-s3c-general-research-tools` and Draft PR `#50` are the completed handoff, while merge remains unauthorized
+- Run mode: `REVIEW_ONLY`; M4-S3e1 is not authorized
+- Git mode: `REVIEW_ONLY`; the complete M4-S3d changes remain uncommitted on `agent/m4-s3d-observation-target-delta`, while commit, push, PR, merge, tag and release remain unauthorized
 - GitHub Actions mode: `PAUSED_BY_OPERATOR`; do not trigger or rerun a Workflow until the user explicitly resumes it after quota recovery
-- Delegation mode: `OFF`; the completed M4-S3c delegation does not authorize another Slice or agent
-- Live test mode: `OFF`; the one authorized M4-S3c request has completed
+- Delegation mode: `OFF`; the completed M4-S3d delegation does not authorize another Slice or agent
+- Live test mode: `OFF`; M4-S3d completed entirely through local fixtures and required no model Provider request
 - Configuration rule: Provider binding, model, Base URL and Capability Mapping remain Config v1 data. A Provider selects exactly one inline `api_key` or dedicated `credential_ref`; neither may infer Provider/model identity or use Codex login state.
-- Stop condition: stop with Draft PR `#50` open; do not merge, run Actions or begin M4-S3d
+- Stop condition: stop with M4-S3d complete locally; do not implement M4-S3e1, run Live Tests or Actions, or perform Git publication
+
+## M4-S3d Slice Start
+
+- Base commit: M4-S3c Squash Merge `1b7b032`; `main` matches `origin/main` and PR `#50` is merged with no new Actions run.
+- Intended production touch points: one provider-neutral Observation/TargetDelta Domain owner, the existing Research/Artifact/Receipt reference validators, and one bounded AndroidManifest external Extractor composed through existing `run_commands` rather than a second process executor.
+- Scope lock: each Observation binds TargetSnapshot, ToolCall, real ExecutionReceipt, raw Artifact and exact Extractor ID/version; deterministic TargetDelta compares two Snapshot-bound Observation sets with stable ordering and full provenance. Do not add a second fact database, scanner framework, in-Rust manifest parser, generic Extractor registry, workflow, Provider path or new dependency.
+- Intended tests: strict schema/unknown-field/reference rejection; AndroidManifest success/failure/version fixtures; stable component/exported/permission/intent-filter deltas; exact provenance back to Snapshot/Call/Receipt/Artifact/Extractor; and proof that Observation/Delta never promotes a Finding or writes Research/Memory.
+
+## M4-S3d Lean Review
+
+### Semantic Owners and Production Path
+
+- `src/domain/observation.rs` owns the strict provider-neutral Observation batch/envelope contract and the first closed `android_manifest_component` kind. It validates exact schema versions, required and unknown fields, unique Observation/component/filter identities, bounded Extractor identity syntax and raw-Artifact evidence inclusion; it does not parse Android binary XML or write facts.
+- `src/domain/observation/delta.rs` owns one pure deterministic TargetDelta over two distinct Snapshot-bound Observation sets for the same target and exact Extractor identity/version. Stable component/kind/filter ordering and complete before/after provenance are produced once; added/removed components retain their full manifest details.
+- `src/app/observation.rs` owns the read-only cross-fact validation path. It verifies actual Artifact Blob size, the 512-KiB ingestion bound, TargetSnapshot and evidence-Artifact applicability, exact `extractor_id@version` toolchain provenance, the durable `run_commands` ToolCall/paired successful ToolResult and the matching real successful ExecutionReceipt.
+- The only current production consumer is the local CLI inspection path: `inspect android-manifest` validates one external result and `inspect target-delta` compares two validated results. Neither command appends Session/Research/Memory Events, creates a Finding or introduces an Observation store.
+
+### Reuse, API, Dependencies and Split Review
+
+- Reused the existing Research reducer, TargetSnapshot and ArtifactRecord facts, SHA-256-verified LocalArtifactStore, Session reducer and ConversationHistory pairing, real ExecutionReceipt records, generic `run_commands` execution and project discovery. No second process executor, artifact publisher, pairing validator, database, index or AgentLoop exists.
+- All new Observation/App/Delta production surface is `pub(crate)` and has a current CLI consumer. No external `pub`, Port method, Event, Config, Prompt, Cache, Provider binding, Cargo dependency, feature, Extractor Trait/Registry or test-only projection entry point was added.
+- The Observation schema and Delta algorithm are split by change reason: ingestion validity and comparison evolution are independent. No generic scanner/extractor framework, in-Rust aapt/JADX parser, Hook, workflow or future placeholder abstraction was retained.
+- Codex classification is `REIMPLEMENT/DOMAIN-SPECIFIC`; no Codex source was copied, no dependency was added and the Upstream Port Ledger is unchanged.
+
+### Audit, Tests and Complete Gate
+
+- The required sequence completed as专项测试 → affected tests → independent bounded Luna xhigh audit → fixes → complete Gate → Lean Review. The independent audit returned `CHANGES_REQUIRED`, not `APPROVE`: it found three P1 issues (actual Artifact size, Extractor-to-Artifact toolchain binding and incomplete added/removed component details) plus one P2 test-coverage gap.
+- All findings were fixed with permanent top-level regressions. Main cross-boundary review additionally required same-batch Call/Receipt identity, same-Snapshot evidence Artifacts, full intent-filter before/after provenance and stable input-order independence. The original audit result remains recorded honestly; resolved findings plus main review form the final acceptance, not a fabricated approval.
+- `tests/observation_target_delta.rs` retains five integration tests covering real existing `run_commands` execution, strict schema/unknown-kind/missing/duplicate rejection, forged/mismatched Snapshot/Artifact/Call/Result/Receipt paths, Blob hash/size and toolchain tampering, Extractor-version refusal, deterministic ordering, complete Delta provenance and absence of Research/Memory/Finding writes.
+- Complete local Gate passes on Rust `1.93.1`: formatting, denied-warning Clippy, 354 discovered tests with 352 default-enabled tests passing and two existing opt-in Live Smokes ignored, locked build, production inline-test scan, forbidden Codex dependency scan, credential scan, `git diff --check`, unchanged Cargo/architecture/ADR files and clean fixed `codex/` verification. The existing CLI Chat Ctrl-C loopback wait was raised from 5 to 15 seconds only to tolerate process-heavy full-Gate scheduling; its cancellation and resumability assertions are unchanged.
+
+### Removed and Deferred
+
+- No temporary inline tests, duplicate fixtures, public test access, unconsumed Observation type, Observation persistence, scanner wrapper, Extractor registry or speculative generalized Delta abstraction remains.
+- Deferred exactly as planned: explicit Observation-to-Research promotion telemetry remains unavailable/Deferred rather than fake zero; typed EvidenceLink and evidence-gap projection begin only in separately authorized M4-S3e1; Context provenance/Compaction, retrieval/guidance Shadow work and M4-S4 long-flow acceptance remain later Slices.
+- Governance debt: none blocking. M4-S3d is complete locally but intentionally uncommitted and unpublished.
 
 ## M4-S3c Lean Review
 
@@ -242,7 +280,7 @@ The F1e publication authority and the 2026-08-30 M4-S3c implementation, review, 
 - Environment evidence: the stable fixed projection returned fingerprint `b9a0196d6c5544e088d816446c680993207464895fc5b6c2eb59954df24ef48c`; the final model answer quoted the exact HTTP status, environment fingerprint, Artifact ID and Blob ID.
 - Audit/continuation evidence: four RequestAudit entries bind Full ModelInputIR v3 delivery and the same advertised Tool plan. The post-Tool audits preserve completed plaintext `reasoning -> ToolCall(s) -> ToolResult(s)` order, while durable Session History contains zero reasoning items and preserves all three call/result pairs.
 - Isolation: the public Provider request used only the explicit Cyber Agent inline credential selected by the local Config. The credential was not printed or copied into the repository, temporary Project facts, RequestAudit Blobs or shell profiles. Codex login state, `~/.codex` and `CODEX_HOME` were not read or changed. The loopback server was stopped; the temporary Project was removed from `/tmp` into the user Trash and remains recoverable, while the user-owned Provider config is retained.
-- Git/remote: `COMPLETE_REMOTE_SUBMITTED`; implementation commit `05ae0e3` is pushed on `agent/m4-s3c-general-research-tools`, and Draft PR `#50` targets `main`. The commit uses `[skip ci]`; the PR has no check run while Actions remain paused. No merge, tag, release or architecture seal occurred, and M4-S3d remains `READY_NOT_AUTHORIZED`.
+- Git/remote: `COMPLETE_REMOTE_SEALED`; implementation commit `05ae0e3`, PR `#50` and `[skip ci]` Squash Merge `1b7b032` complete the M4-S3c publication with no Actions run while the operator pause remains active. No tag, release or architecture seal occurred.
 
 ### Removed and Deferred
 
@@ -1181,8 +1219,9 @@ The F1e publication authority and the 2026-08-30 M4-S3c implementation, review, 
 
 ## Blockers
 
-- None for M4-S3c: implementation, independent bounded review, fixes, complete local Cargo/Lean Gate and the one authorized DeepSeek Live Chat all pass. Publication remains intentionally unperformed because it was not authorized.
-- M4-S3d is not blocked; it is `READY_NOT_AUTHORIZED` and awaits an explicit implementation instruction.
+- None for M4-S3d: implementation, independent bounded review, fixes and complete local Cargo/Lean Gate pass. Commit and publication remain intentionally unperformed because they were not authorized.
+- M4-S3e1 is not blocked; it is `READY_NOT_AUTHORIZED` and awaits an explicit implementation instruction.
+- None for M4-S3c: implementation, independent bounded review, fixes, complete local Cargo/Lean Gate, one authorized DeepSeek Live Chat, PR `#50` and Squash Merge `1b7b032` are complete. No Actions run was requested or triggered for that merge.
 - None for local F1a implementation; its full offline Gate is complete. Git publication remains intentionally unperformed because it was not authorized.
 - None for local F1b implementation; its full offline Gate is complete. F1c, Git publication and any real Live Test require separate current instructions.
 - None for M2-S5: implementation, stabilization and status PRs plus all post-merge `main` CI runs are complete.
@@ -1195,15 +1234,19 @@ The F1e publication authority and the 2026-08-30 M4-S3c implementation, review, 
 - None for M3-S4; implementation PR `#39`, status PR `#40` and the single required PR-head Gate are complete.
 - None for M4-S1; implementation PR `#42`, exact-head CI, implementation merge and separate status PR `#43` complete the remote seal.
 - None for M4-S2; implementation commit `d99f395`, PR `#44`, sole PR-head CI `33165972124`, Squash Merge `2afe900` and separate status PR `#45` complete the remote seal.
-- None for F1e implementation: the local Gate, selected DeepSeek Full-only Tool Loop and operator-authorized remote merge are complete. Run `33295806720` is explicitly recorded as zero-Step billing/spending-limit failure, not PASS. M4-S3c was later separately authorized, completed and submitted as Draft PR `#50`; additional Live requests and further Actions remain unauthorized, and no Codex credential is an allowed substitute.
+- None for F1e implementation: the local Gate, selected DeepSeek Full-only Tool Loop and operator-authorized remote merge are complete. Run `33295806720` is explicitly recorded as zero-Step billing/spending-limit failure, not PASS. M4-S3c was later separately authorized and merged through PR `#50`; M4-S3d is complete locally, while additional Live requests, Git publication and further Actions remain unauthorized, and no Codex credential is an allowed substitute.
 
 ## Last Verification
 
+- M4-S3d local Gate: PASS on Rust `1.93.1`; formatting, denied-warning Clippy, 354 discovered tests with 352 default-enabled tests passing and two opt-in Live Smokes ignored, locked build and all Lean scans pass.
+- M4-S3d Observation/Delta Gate: PASS; strict AndroidManifest batches retain exact Snapshot/Artifact/Call/Receipt/Extractor provenance, reject malformed or forged cross-fact inputs, compare full component/exported/permission/intent-filter state deterministically and never write Research, Memory or Finding state.
+- M4-S3d review: the independent bounded Luna audit returned `CHANGES_REQUIRED` with three P1 and one P2; actual Blob-size validation, toolchain binding, complete added/removed detail and the requested strict/permutation regressions are fixed. Main cross-boundary review closed the remaining provenance/ordering checks; no audit timeout or absence of feedback was counted as approval.
+- M4-S3d isolation/Git: PASS; no Provider request, Live credential, Actions run or Codex login access occurred. The complete changes remain uncommitted on `agent/m4-s3d-observation-target-delta`; M4-S3e1 and all remote publication remain unauthorized.
 - M4-S3c local Gate: PASS on Rust `1.93.1`; formatting, denied-warning Clippy, 349 discovered tests with 347 default-enabled tests passing and two opt-in Live Smokes ignored, locked build and all Lean scans pass.
 - M4-S3c Tool Gate: PASS; `http_request` preserves bounded URL/body/redirect/timeout/capture and Artifact semantics without a second client/publisher, while `inspect_environment` preserves fixed bounded concurrent probes, secret-free normalized versions, stable ordering/fingerprint and no Environment store.
 - M4-S3c review: the independent bounded Luna audit found three concrete memory/secret-boundary issues; all were fixed with permanent regressions. Its optional repair follow-up timed out and is recorded as no conclusion, while the main cross-boundary review closed all findings from source and regression evidence.
 - M4-S3c Live Test: PASS; one Config-v1-selected DeepSeek Chat produced real `research_update`, `inspect_environment` and `http_request` calls with exact pairing and three successful Receipts. The bounded loopback HTTP result was `200`, its 961-byte Artifact/Blob exactly matched `Cargo.toml`, completed reasoning was replayed only in provider delivery, and the final answer accurately quoted all required values.
-- M4-S3c isolation/Git: PASS; the loopback service was stopped and the temporary Project moved out of `/tmp` into the recoverable user Trash after validation, while the user-owned local Provider config remains. No Codex credential state was accessed. Implementation commit `05ae0e3` and Draft PR `#50` are published with `[skip ci]`; no Workflow, merge, tag or release occurred.
+- M4-S3c isolation/Git: PASS; the loopback service was stopped and the temporary Project moved out of `/tmp` into the recoverable user Trash after validation, while the user-owned local Provider config remains. No Codex credential state was accessed. Implementation commit `05ae0e3`, PR `#50` and Squash Merge `1b7b032` are complete with no Workflow run; no tag or release occurred.
 - F1e local Gate: PASS on Rust `1.93.1`; formatting, denied-warning Clippy, 313 discovered tests with 311 default-enabled tests passing and two configuration-driven Live Smokes ignored, locked build and all Lean scans pass.
 - F1e protocol/AgentLoop Gate: PASS; one Responses decoder accepts completed plaintext reasoning with an optional redundant Adapter-local encrypted sidecar, rejects encrypted-only/unknown content, and one encoder preserves reasoning/call/result order. Atomic completion, cancellation/failure isolation, Full/incremental/rejection, Context budget and Deferred ToolSpecs-change paths are covered.
 - F1e History/Audit/Replay Gate: PASS; reasoning never enters Conversation/Session/Research/Memory or user output. RequestAudit reads ModelInputIR v2/v3, narrows distinct Full delivery, and a real Replay provider regression proves v2-to-v3 request matching.

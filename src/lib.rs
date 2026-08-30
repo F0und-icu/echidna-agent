@@ -119,6 +119,30 @@ impl From<CliResearchPhase> for ResearchPhase {
 enum InspectCommand {
     /// Inspect the most recently successful Context compilation.
     Context,
+    /// Validate and render one externally produced AndroidManifest Observation Artifact.
+    AndroidManifest {
+        /// Session containing the source run_commands Call, Result, and Receipt.
+        #[arg(long)]
+        session: String,
+        /// Raw Artifact containing the strict Observation batch JSON.
+        #[arg(long)]
+        artifact: String,
+    },
+    /// Compare two validated AndroidManifest Observation Artifacts.
+    TargetDelta {
+        /// Session containing the baseline external Extractor execution.
+        #[arg(long)]
+        baseline_session: String,
+        /// Raw baseline Artifact containing strict Observation batch JSON.
+        #[arg(long)]
+        baseline_artifact: String,
+        /// Session containing the candidate external Extractor execution.
+        #[arg(long)]
+        candidate_session: String,
+        /// Raw candidate Artifact containing strict Observation batch JSON.
+        #[arg(long)]
+        candidate_artifact: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -155,6 +179,8 @@ pub enum CliError {
         "the current project has {session_count} Sessions; select one explicitly with `--session <session-id>`"
     )]
     SessionSelectionRequired { session_count: usize },
+    #[error("AndroidManifest Observation ingestion failed: {message}")]
+    Observation { message: String },
 }
 
 #[derive(Debug, Serialize)]
@@ -311,6 +337,23 @@ where
         Some(CliCommand::Inspect {
             inspection: InspectCommand::Context,
         }) => print_no_active_context(),
+        Some(CliCommand::Inspect {
+            inspection: InspectCommand::AndroidManifest { session, artifact },
+        }) => cli_inspection::print_android_manifest_observations(&session, &artifact),
+        Some(CliCommand::Inspect {
+            inspection:
+                InspectCommand::TargetDelta {
+                    baseline_session,
+                    baseline_artifact,
+                    candidate_session,
+                    candidate_artifact,
+                },
+        }) => cli_inspection::print_android_manifest_target_delta(
+            &baseline_session,
+            &baseline_artifact,
+            &candidate_session,
+            &candidate_artifact,
+        ),
         None => {
             let mut command = Cli::command();
             command.print_help()?;

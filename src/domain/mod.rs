@@ -13,6 +13,7 @@ pub mod history;
 pub mod image;
 pub mod memory;
 pub mod model;
+pub(crate) mod observation;
 pub mod profile;
 pub mod project;
 pub mod request_audit;

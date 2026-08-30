@@ -6,17 +6,24 @@
 
 use crate::adapters::artifact_store::LocalArtifactStore;
 use crate::adapters::project_event_store::{
-    Project, ProjectEventStoreError, ProjectEventStream, read_existing_session_events,
+    Project, ProjectEventStoreError, ProjectEventStream, read_existing_research_events,
+    read_existing_session_events,
 };
 use crate::adapters::project_snapshot::{CacheDisposition, LocalProjectSnapshot};
 use crate::adapters::tools::ToolRegistry;
 use crate::app::inspection::{self, AuditReferenceStatus, SnapshotDisposition, SnapshotFacts};
+use crate::app::observation::ObservationService;
 use crate::app::request_audit::RequestAuditService;
 use crate::app::session::SessionProjection;
+use crate::domain::artifacts::ArtifactId;
 use crate::domain::events::StreamId;
+use crate::domain::observation::ValidatedObservationSet;
 use crate::domain::request_audit::RequestAuditBinding;
+use crate::domain::research::{ResearchReducer, ResearchState};
 use crate::domain::session::SessionState;
+use crate::ports::artifact::ArtifactStore;
 use crate::ports::tool::ToolExecutor;
+use serde_json::json;
 
 use super::{CliError, print_json};
 
@@ -92,6 +99,40 @@ pub(crate) fn print_metrics(requested_session: Option<&str>) -> Result<(), CliEr
     ))
 }
 
+pub(crate) fn print_android_manifest_observations(
+    requested_session: &str,
+    artifact_id: &str,
+) -> Result<(), CliError> {
+    let project = require_project()?;
+    let observations =
+        read_android_manifest_observations(&project, requested_session, artifact_id)?;
+    print_json(&json!({
+        "command": "inspect android-manifest",
+        "status": "ok",
+        "observations": observations,
+    }))
+}
+
+pub(crate) fn print_android_manifest_target_delta(
+    baseline_session: &str,
+    baseline_artifact: &str,
+    candidate_session: &str,
+    candidate_artifact: &str,
+) -> Result<(), CliError> {
+    let project = require_project()?;
+    let baseline =
+        read_android_manifest_observations(&project, baseline_session, baseline_artifact)?;
+    let candidate =
+        read_android_manifest_observations(&project, candidate_session, candidate_artifact)?;
+    let delta =
+        ObservationService::target_delta(&baseline, &candidate).map_err(observation_error)?;
+    print_json(&json!({
+        "command": "inspect target-delta",
+        "status": "ok",
+        "delta": delta,
+    }))
+}
+
 fn uninitialized_snapshot() -> SnapshotFacts {
     SnapshotFacts {
         disposition: SnapshotDisposition::Unavailable,
@@ -108,6 +149,59 @@ fn discover_project() -> Result<Option<Project>, CliError> {
         Ok(project) => Ok(Some(project)),
         Err(ProjectEventStoreError::ProjectNotFound { .. }) => Ok(None),
         Err(error) => Err(error.into()),
+    }
+}
+
+fn require_project() -> Result<Project, CliError> {
+    discover_project()?.ok_or_else(|| CliError::Observation {
+        message: "the current directory is not an initialized Cyber Agent project".to_owned(),
+    })
+}
+
+fn read_android_manifest_observations(
+    project: &Project,
+    requested_session: &str,
+    artifact_id: &str,
+) -> Result<ValidatedObservationSet, CliError> {
+    let local = read_session_inspection(project, Some(requested_session))?;
+    if local.session_corrupt {
+        return Err(CliError::Observation {
+            message: format!("Session `{requested_session}` cannot be reduced"),
+        });
+    }
+    let session = local
+        .session_state
+        .as_ref()
+        .ok_or_else(|| CliError::Observation {
+            message: format!("Session `{requested_session}` has no durable Session state"),
+        })?;
+    let research = read_research_state(project)?;
+    let artifact_id = ArtifactId::new(artifact_id);
+    let artifact = research
+        .artifact(&artifact_id)
+        .ok_or_else(|| CliError::Observation {
+            message: format!("Artifact `{artifact_id}` is not present in Research"),
+        })?;
+    let bytes = LocalArtifactStore::for_project(project)
+        .read_blob(&artifact.blob_id)
+        .map_err(|error| CliError::Observation {
+            message: format!("Artifact `{artifact_id}` Blob could not be read: {error}"),
+        })?;
+    ObservationService::ingest_android_manifest(&research, session, artifact, &bytes)
+        .map_err(observation_error)
+}
+
+fn read_research_state(project: &Project) -> Result<ResearchState, CliError> {
+    ResearchReducer
+        .reduce(read_existing_research_events(project)?)
+        .map_err(|error| CliError::Observation {
+            message: format!("Research stream cannot be reduced: {error}"),
+        })
+}
+
+fn observation_error(error: impl std::fmt::Display) -> CliError {
+    CliError::Observation {
+        message: error.to_string(),
     }
 }
 

@@ -11,6 +11,7 @@ mod inspection_shared;
 mod inspection_snapshot;
 mod model_sample;
 pub mod model_streaming;
+pub(crate) mod observation;
 pub mod request_audit;
 pub mod session;
 mod tool_scheduler;

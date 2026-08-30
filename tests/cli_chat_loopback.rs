@@ -775,7 +775,9 @@ fn ctrl_c_cancels_an_active_request_and_keeps_the_session_resumable() {
         .unwrap();
     let request = server
         .requests
-        .recv_timeout(Duration::from_secs(5))
+        // The complete Gate runs several process-heavy integration tests in
+        // parallel; allow scheduling delay without weakening the assertion.
+        .recv_timeout(Duration::from_secs(15))
         .unwrap();
     assert!(request.starts_with("POST /v1/responses HTTP/1.1"));
     let signal_status = Command::new("/bin/kill")

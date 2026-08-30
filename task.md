@@ -1886,12 +1886,12 @@ M1 总完成标准：M1a、M1b、M1c 分别有可运行集成测试，任一后�
 - [ ] 使用本地可控样例执行端到端 Eval。
 - [ ] ReplayModelProvider、ReplayToolExecutor 和 TraceFixtureManifest。
 - [ ] Mechanical Replay、Context Recompile 和显式 Shadow Model Eval 三种隔离模式。
-- [ ] ObservationEnvelope 外部工具样例和两个 TargetSnapshot 的 TargetDelta。
+- [x] ObservationEnvelope 外部工具样例和两个 TargetSnapshot 的 TargetDelta。
 - [ ] Replay/Shadow 默认不写 Project Memory/Research，未匹配 Tool Call 不执行真实工具。
 - [ ] 建立全量/增量请求、单工具/批量工具、无缓存/有缓存的对照 Eval。
 - [ ] 统计模型往返、Token、acceptable first-action、参数失败/纠正、重复读取、Batch、Deferred Search、Snapshot Hit、Memory Retrieval 和重复 Hypothesis；unmatched Replay termination 与 Observation/Replay/Vision promotion 只有 typed durable signal 后才统计，否则保持 Deferred，绝不假 0。
 - [ ] `http_request` 和 `inspect_environment` 两个通用研究工具。
-- [ ] AndroidManifest 外部 Extractor，通过 `run_commands` 复用现有工具链，不在 Rust 内重写解析器。
+- [x] AndroidManifest 外部 Extractor，通过 `run_commands` 复用现有工具链，不在 Rust 内重写解析器。
 - [ ] typed EvidenceLink、legacy Upcaster 和 pure evidence-gap projection。
 - [ ] ContextSlot/Origin/Authority/Retention/Freshness、ContextDeliveryMap 和 Evidence-Spine Summary v2。
 - [ ] exact identifier + fielded BM25 + CJK/ASCII n-gram + RRF + authority/freshness retrieval Shadow。
@@ -2062,8 +2062,8 @@ M1 总完成标准：M1a、M1b、M1c 分别有可运行集成测试，任一后�
 - [ ] M4-S3f Shadow 的首个 recall/precision、重复读取/Token promotion 阈值，以及是否有实测延迟证明需要可重建 SQLite FTS。
 - [ ] `fast` Profile 是否自动处理 Compaction 和 Memory 更新。
 - [ ] Tool Result Cache 对哪些确定性工具实际有收益及启用阈值。
-- [ ] 第一批 Observation Kind 和外部 Extractor Schema。
-- [ ] 第一个 TargetDelta 样例选择 Mobile、Web 还是 Binary。
+- [x] 第一批 Observation Kind 和外部 Extractor Schema：严格 v1 `android_manifest_component` Observation batch，绑定 `run_commands`、真实 Receipt、原始 Artifact、TargetSnapshot 和 `extractor_id@version`。
+- [x] 第一个 TargetDelta 样例：Mobile / AndroidManifest component、exported、permission 和 intent-filter 差分。
 - [ ] Shadow Model Eval 的固定 Trace Suite 和成本上限。
 - [ ] 是否有足够现有 Research Ledger 字段支持纯函数自动 Phase projection；在此之前保持默认 Mapping + 显式选择。
 - [ ] Tool Accuracy controlled cases 的 acceptable first-action 集合和首个基线阈值。
@@ -2076,4 +2076,4 @@ M1 总完成标准：M1a、M1b、M1c 分别有可运行集成测试，任一后�
 
 具体状态始终以 `docs/development/STATUS.md` 为准。F1a-F1e 已远端封存；F1e 的远端 Gate 由用户在 GitHub 账单/额度导致零 Step 失败后明确单次豁免，后续 Actions 暂停。Architecture v1.2 至 v1.6 的远端架构封存仍未授权。
 
-下一候选是 M4-S3c 通用研究工具，状态为 `READY_NOT_AUTHORIZED`。之后依次是 M4-S3d、M4-S3e1/e2 typed evidence/provenance、M4-S3f retrieval Shadow、M4-S3g guidance Shadow 和 M4-S4 真实长流程验收；任何前一项完成都不自动授权下一项。
+M4-S3d 已在本地完成并通过完整 Gate，但尚未提交或远端发布。下一候选是 M4-S3e1 typed EvidenceLink 与证据缺口投影，状态为 `READY_NOT_AUTHORIZED`；之后依次是 M4-S3e2 provenance/Evidence-Spine Compaction、M4-S3f retrieval Shadow、M4-S3g guidance Shadow 和 M4-S4 真实长流程验收。任何前一项完成都不自动授权下一项。
