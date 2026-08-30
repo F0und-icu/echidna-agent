@@ -1,5 +1,6 @@
 //! Validated provider-neutral Context fragment inputs.
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize};
@@ -7,6 +8,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::domain::artifacts::ArtifactId;
 use crate::domain::model::ContentItem;
 
+use super::delivery_map::ContextProvenance;
 use super::error::ContextPlannerError;
 use super::estimator;
 use super::fingerprint::hash;
@@ -77,6 +79,10 @@ impl ContextContentHash {
     ) -> Result<Self, ContextPlannerError> {
         Self::new(hash(&(content, artifact_reference))?)
     }
+
+    pub(super) fn for_value(value: &impl Serialize) -> Result<Self, ContextPlannerError> {
+        Self::new(hash(value)?)
+    }
 }
 
 impl<'de> Deserialize<'de> for ContextContentHash {
@@ -114,7 +120,7 @@ pub enum ContextFragmentSource {
 
 /// Placement alone controls the stable request order. Semantic provenance is
 /// represented independently by [`ContextOrigin`].
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextSlot {
     BaseInstructions,
@@ -157,23 +163,19 @@ impl ContextSlot {
 }
 
 /// Semantic producer identity, deliberately independent from placement.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextOrigin {
-    BasePrompt,
-    PersonalPreferences,
-    ProjectPrompt,
-    ModePrompt,
-    DomainPrompt,
-    PhasePrompt,
-    ResearchWorldState,
-    ProjectSnapshot,
-    ProjectMemoryCore,
-    RetrievedMemory,
-    SessionSummary,
-    RecentHistory,
-    UserInput,
-    TurnLocalUpdates,
+    PromptResource,
+    OperatorInput,
+    ProjectFile,
+    ProjectMemory,
+    ResearchProjection,
+    SessionProjection,
+    ArtifactProjection,
+    ToolResult,
+    ModelOutput,
+    ReplayFixture,
 }
 
 impl ContextFragmentSource {
@@ -197,20 +199,16 @@ impl ContextFragmentSource {
 
     pub const fn origin(self) -> ContextOrigin {
         match self {
-            Self::BasePrompt => ContextOrigin::BasePrompt,
-            Self::PersonalPreferences => ContextOrigin::PersonalPreferences,
-            Self::ProjectPrompt => ContextOrigin::ProjectPrompt,
-            Self::ModePrompt => ContextOrigin::ModePrompt,
-            Self::DomainPrompt => ContextOrigin::DomainPrompt,
-            Self::PhasePrompt => ContextOrigin::PhasePrompt,
-            Self::ResearchWorldState => ContextOrigin::ResearchWorldState,
-            Self::ProjectSnapshot => ContextOrigin::ProjectSnapshot,
-            Self::ProjectMemoryCore => ContextOrigin::ProjectMemoryCore,
-            Self::RetrievedMemory => ContextOrigin::RetrievedMemory,
-            Self::SessionSummary => ContextOrigin::SessionSummary,
-            Self::RecentHistory => ContextOrigin::RecentHistory,
-            Self::UserInput => ContextOrigin::UserInput,
-            Self::TurnLocalUpdates => ContextOrigin::TurnLocalUpdates,
+            Self::BasePrompt | Self::ModePrompt | Self::DomainPrompt | Self::PhasePrompt => {
+                ContextOrigin::PromptResource
+            }
+            Self::PersonalPreferences | Self::UserInput => ContextOrigin::OperatorInput,
+            Self::ProjectPrompt | Self::ProjectSnapshot => ContextOrigin::ProjectFile,
+            Self::ProjectMemoryCore | Self::RetrievedMemory => ContextOrigin::ProjectMemory,
+            Self::ResearchWorldState => ContextOrigin::ResearchProjection,
+            Self::SessionSummary | Self::RecentHistory | Self::TurnLocalUpdates => {
+                ContextOrigin::SessionProjection
+            }
         }
     }
 }
@@ -252,6 +250,10 @@ pub struct ContextFragment {
     pub(super) slot: ContextSlot,
     #[serde(skip)]
     pub(super) origin: ContextOrigin,
+    #[serde(skip)]
+    pub(super) provenance: ContextProvenance,
+    #[serde(skip)]
+    pub(super) content_item_provenance: BTreeMap<u32, ContextProvenance>,
     pub(super) priority: ContextFragmentPriority,
     pub(super) cache_policy: FragmentCachePolicy,
     pub(super) content_hash: ContextContentHash,
@@ -293,11 +295,20 @@ impl ContextFragment {
         }
         let content_hash = ContextContentHash::for_fragment(&content, artifact_reference.as_ref())?;
         let token_estimate = estimator::estimate_fragment_tokens(&content)?;
+        let provenance = ContextProvenance::for_fragment_parts(
+            source,
+            slot,
+            origin,
+            &content_hash,
+            artifact_reference.as_ref(),
+        )?;
         Ok(Self {
             id,
             source,
             slot,
             origin,
+            provenance,
+            content_item_provenance: BTreeMap::new(),
             priority,
             cache_policy,
             content_hash,
@@ -321,6 +332,59 @@ impl ContextFragment {
 
     pub const fn origin(&self) -> ContextOrigin {
         self.origin
+    }
+
+    pub fn provenance(&self) -> &ContextProvenance {
+        &self.provenance
+    }
+
+    pub fn with_provenance(
+        mut self,
+        provenance: ContextProvenance,
+    ) -> Result<Self, ContextPlannerError> {
+        if provenance.slot() != self.slot {
+            return Err(ContextPlannerError::ContextProvenanceSlotMismatch);
+        }
+        self.provenance = provenance;
+        Ok(self)
+    }
+
+    pub(crate) fn with_content_item_provenance(
+        mut self,
+        ordinal: u32,
+        provenance: ContextProvenance,
+    ) -> Result<Self, ContextPlannerError> {
+        if provenance.slot() != self.slot {
+            return Err(ContextPlannerError::ContextProvenanceSlotMismatch);
+        }
+        let ContextFragmentContent::ContentItems { items } = &self.content else {
+            return Err(ContextPlannerError::InvalidFragmentChannel {
+                fragment_source: self.source,
+            });
+        };
+        if usize::try_from(ordinal)
+            .ok()
+            .is_none_or(|index| index >= items.len())
+        {
+            return Err(ContextPlannerError::ContextSubitemOrdinalOutOfBounds);
+        }
+        if self
+            .content_item_provenance
+            .insert(ordinal, provenance)
+            .is_some()
+        {
+            return Err(ContextPlannerError::DuplicateContextSubitemProvenance);
+        }
+        Ok(self)
+    }
+
+    pub(super) fn content_item_provenance(&self, ordinal: u32) -> Option<&ContextProvenance> {
+        self.content_item_provenance.get(&ordinal)
+    }
+
+    pub(crate) fn reidentify(mut self, id: ContextFragmentId) -> Self {
+        self.id = id;
+        self
     }
 
     pub const fn priority(&self) -> ContextFragmentPriority {

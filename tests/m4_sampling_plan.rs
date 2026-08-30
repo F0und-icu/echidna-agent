@@ -223,7 +223,7 @@ fn sampling_plan_binds_exact_context_tools_renderer_and_independent_context_axes
         .unwrap(),
     ];
     assert_eq!(fragments[0].slot(), ContextSlot::BaseInstructions);
-    assert_eq!(fragments[0].origin(), ContextOrigin::BasePrompt);
+    assert_eq!(fragments[0].origin(), ContextOrigin::PromptResource);
     let planner = ContextPlanner::current();
     let context = planner
         .compile(

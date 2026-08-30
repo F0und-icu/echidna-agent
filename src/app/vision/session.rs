@@ -98,12 +98,16 @@ where
         }
         let primary_profile = request.route.primary_profile.clone();
         let primary_capability_hash = request.route.primary_capability_hash.clone();
+        let route_event_id = request.route.route_event_id.clone();
+        let source_artifact_id = request.source_artifact_id.clone();
         self.record_route(request.route, request.route_occurred_at, projection, sink)?;
         Ok(InitialImagePrimaryContext::direct(
+            source_artifact_id,
             request.delivery_artifact_id,
+            route_event_id,
             primary_profile,
             primary_capability_hash,
-        ))
+        )?)
     }
 
     /// Commits a new Secondary route, then exactly one RequestAudit and one
@@ -152,6 +156,7 @@ where
         match analysis {
             Ok(output) => {
                 let observation = output.observation;
+                let observation_event_id = request.terminal.event_id.clone();
                 self.append_terminal(
                     SessionEvent::VisionObservationRecorded {
                         observation: observation.clone(),
@@ -162,6 +167,7 @@ where
                 )?;
                 let primary_context = InitialImagePrimaryContext::secondary(
                     &observation,
+                    observation_event_id,
                     primary_profile,
                     primary_capability_hash,
                 )?;

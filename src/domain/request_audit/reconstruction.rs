@@ -81,6 +81,13 @@ impl RequestAuditManifest {
                 RequestAuditError::DeliveredInputHashMismatch,
             ));
         }
+        if let Some(map) = self.context_delivery_map() {
+            map.validate_against(&input).map_err(|error| {
+                RequestAuditReconstructionError::Audit(RequestAuditError::ContextDeliveryMap {
+                    message: error.to_string(),
+                })
+            })?;
+        }
         Ok(input)
     }
 }

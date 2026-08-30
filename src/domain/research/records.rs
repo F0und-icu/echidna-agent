@@ -152,6 +152,36 @@ pub enum ResearchRecordRef {
     Finding(FindingId),
 }
 
+/// A closed typed reference to any Research fact that may survive Context
+/// compaction. Unlike `ResearchRecordRef`, this includes the target boundary
+/// and operator NextAction facts needed by an Evidence Spine.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(
+    tag = "kind",
+    content = "id",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum ResearchFactRef {
+    TargetSnapshot(TargetSnapshotId),
+    Hypothesis(HypothesisId),
+    Experiment(ExperimentId),
+    Finding(FindingId),
+    NextAction(NextActionId),
+}
+
+impl ResearchFactRef {
+    pub fn id(&self) -> &str {
+        match self {
+            Self::TargetSnapshot(id) => id.as_str(),
+            Self::Hypothesis(id) => id.as_str(),
+            Self::Experiment(id) => id.as_str(),
+            Self::Finding(id) => id.as_str(),
+            Self::NextAction(id) => id.as_str(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", content = "id", rename_all = "snake_case")]
 pub enum MergeRecordRef {

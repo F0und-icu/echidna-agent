@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::domain::model::ModelRequestRequirements;
 use crate::domain::tools::ToolSpec;
 
+use super::delivery_map::ContextDeliveryMap;
 use super::error::ContextPlannerError;
 use super::fragment::{
     ContextContentHash, ContextFragmentId, ContextFragmentSource, ContextOrigin, ContextSlot,
@@ -278,6 +279,7 @@ pub struct ContextPlan {
     pub(super) append_only_candidate: AppendOnlyCandidate,
     pub(super) context_decision_manifest: ContextDecisionManifest,
     pub(super) model_input: crate::domain::model::ModelInputIR,
+    pub(super) delivery_map: ContextDeliveryMap,
 }
 
 impl ContextPlan {
@@ -323,5 +325,9 @@ impl ContextPlan {
 
     pub fn model_input(&self) -> crate::domain::model::ModelInputIR {
         self.model_input.clone()
+    }
+
+    pub fn delivery_map(&self) -> &ContextDeliveryMap {
+        &self.delivery_map
     }
 }

@@ -343,6 +343,32 @@ fn request_audit_rejects_unknown_schema_reordered_duplicate_and_mismatched_conte
         .validate()
         .expect("historical ModelInputIR v2 audit identities remain readable");
 
+    let mut historical_manifest_v2 = encoded.clone();
+    historical_manifest_v2["schema_version"] = json!(2);
+    historical_manifest_v2["prompt_renderer"] = json!({"id": "generic", "version": 1});
+    historical_manifest_v2["resolved_tool_plan_fingerprint"] = json!("a".repeat(64));
+    let historical_manifest_v2: RequestAuditManifest =
+        serde_json::from_value(historical_manifest_v2).unwrap();
+    historical_manifest_v2
+        .validate()
+        .expect("RequestAudit v2 remains readable without a delivery map");
+    assert!(historical_manifest_v2.context_delivery_map().is_none());
+    assert_eq!(
+        service.reconstruct(&historical_manifest_v2).unwrap(),
+        input("instructions", "user input")
+    );
+
+    let mut incomplete_manifest_v3 = encoded.clone();
+    incomplete_manifest_v3["schema_version"] = json!(3);
+    incomplete_manifest_v3["prompt_renderer"] = json!({"id": "generic", "version": 1});
+    incomplete_manifest_v3["resolved_tool_plan_fingerprint"] = json!("a".repeat(64));
+    let incomplete_manifest_v3: RequestAuditManifest =
+        serde_json::from_value(incomplete_manifest_v3).unwrap();
+    assert!(matches!(
+        incomplete_manifest_v3.validate(),
+        Err(RequestAuditError::SamplingIdentityMismatch)
+    ));
+
     let mut conflicting_duplicate = encoded.clone();
     conflicting_duplicate["adapter_version"] = json!("conflicting-adapter-v2");
     let conflicting_duplicate: RequestAuditManifest =
@@ -366,11 +392,11 @@ fn request_audit_rejects_unknown_schema_reordered_duplicate_and_mismatched_conte
     assert_eq!(sink.events.len(), 1);
 
     let mut unknown_schema = encoded.clone();
-    unknown_schema["schema_version"] = json!(3);
+    unknown_schema["schema_version"] = json!(4);
     let unknown_schema: RequestAuditManifest = serde_json::from_value(unknown_schema).unwrap();
     assert!(matches!(
         unknown_schema.validate(),
-        Err(RequestAuditError::UnsupportedManifestSchema { schema_version: 3 })
+        Err(RequestAuditError::UnsupportedManifestSchema { schema_version: 4 })
     ));
 
     let mut forged_renderer = encoded.clone();

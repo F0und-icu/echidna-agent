@@ -1,3 +1,5 @@
+#[path = "support/compaction.rs"]
+mod compaction_support;
 #[path = "m3_world_state_mode/request_audit.rs"]
 mod request_audit;
 #[path = "m3_world_state_mode/session_compaction.rs"]
@@ -18,7 +20,7 @@ use cyber_agent::app::agent_loop::{AgentLoop, AgentTurnOutcome};
 use cyber_agent::app::cancellation::AgentCancellation;
 use cyber_agent::app::doctor::{AgentProfileDoctorStatus, inspect_agent_model_profile};
 use cyber_agent::domain::context::{
-    BaselineAssessment, BaselineInvalidationReason, ContextBudget, ContextFragment,
+    AuthorityLevel, BaselineAssessment, BaselineInvalidationReason, ContextBudget, ContextFragment,
     ContextFragmentContent, ContextFragmentId, ContextFragmentPriority, ContextFragmentSource,
     ContextPlanner, FragmentCachePolicy, InternalRequestMetadata, ModelIdentity, ModelProfile,
     ProviderSession, ProviderSessionId, ProviderSessionRef, ProviderSessionRole, StepSnapshot,

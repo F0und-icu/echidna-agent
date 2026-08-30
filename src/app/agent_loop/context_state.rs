@@ -5,11 +5,14 @@
 //! diff when the committed and current Plans both prove that the corresponding
 //! full state projection was completely selected.
 
+use std::collections::BTreeMap;
+
 use crate::app::context_compilation::{ContextCacheSummary, resolve_context_fragment};
 use crate::domain::context::{
-    ContextBudget, ContextDecision, ContextFragment, ContextFragmentContent, ContextFragmentId,
-    ContextFragmentPriority, ContextFragmentSource, ContextPlan, ContextPlanner,
-    ContextPlannerError, ContextSourceFingerprint, FragmentCachePolicy, FullLogicalManifest,
+    ContextBudget, ContextDecision, ContextDeliveryMap, ContextFragment, ContextFragmentContent,
+    ContextFragmentId, ContextFragmentPriority, ContextFragmentSource, ContextPlan, ContextPlanner,
+    ContextPlannerError, ContextProvenance, ContextSourceFingerprint, FragmentCachePolicy,
+    FullLogicalManifest,
 };
 use crate::domain::model::{
     ContentItem, ModelCapabilities, ModelInputIR, ModelRequestRequirements,
@@ -29,6 +32,7 @@ pub(super) struct ContextCompilationInput<'a> {
     pub(super) project_snapshot: Option<&'a ProjectSnapshotContext>,
     pub(super) session_summary: Option<&'a SessionSummary>,
     pub(super) history: &'a [ContentItem],
+    pub(super) history_provenance: &'a BTreeMap<usize, ContextProvenance>,
     pub(super) turn_history_start: usize,
     pub(super) planner: &'a ContextPlanner,
     pub(super) cache: Option<&'a dyn ContextFragmentCache>,
@@ -41,11 +45,14 @@ pub(super) struct ContextCompilationInput<'a> {
 /// The committed and current local facts needed to prove one state-diff
 /// replacement is safe for incremental delivery.
 pub(super) struct StateDiffDeliveryInput<'a> {
+    pub(super) step_id: &'a str,
     pub(super) full_input: &'a ModelInputIR,
+    pub(super) full_delivery_map: &'a ContextDeliveryMap,
     pub(super) current_plan: &'a ContextPlan,
     pub(super) planner: &'a ContextPlanner,
     pub(super) budget: ContextBudget,
     pub(super) committed_input: Option<&'a ModelInputIR>,
+    pub(super) committed_delivery_map: Option<&'a ContextDeliveryMap>,
     pub(super) committed_history_len: usize,
     pub(super) committed_manifest: Option<&'a FullLogicalManifest>,
     pub(super) committed_world_state: Option<&'a ResearchWorldState>,
@@ -53,6 +60,7 @@ pub(super) struct StateDiffDeliveryInput<'a> {
     pub(super) committed_project_snapshot: Option<&'a ProjectSnapshotContext>,
     pub(super) project_snapshot: Option<&'a ProjectSnapshotContext>,
     pub(super) history: &'a [ContentItem],
+    pub(super) history_provenance: &'a BTreeMap<usize, ContextProvenance>,
     pub(super) turn_history_start: usize,
 }
 
@@ -65,6 +73,7 @@ pub(super) fn compile_context(
         project_snapshot,
         session_summary,
         history,
+        history_provenance,
         turn_history_start,
         planner,
         cache,
@@ -113,30 +122,49 @@ pub(super) fn compile_context(
         )?;
     }
     if let Some(session_summary) = session_summary {
-        push_content_fragment(
-            &mut fragments,
-            "session:summary",
+        let mut summary_fragment = ContextFragment::new(
+            ContextFragmentId::new("session:summary")?,
             ContextFragmentSource::SessionSummary,
-            &[session_summary.context_item()?],
+            ContextFragmentPriority::Required,
+            FragmentCachePolicy::DoNotCache,
+            ContextFragmentContent::ContentItems {
+                items: vec![session_summary.context_item()?],
+            },
         )?;
+        if let Some(provenance) = session_summary.context_provenance()? {
+            summary_fragment = summary_fragment.with_provenance(provenance)?;
+        }
+        fragments.push(summary_fragment);
     }
     push_content_fragment(
         &mut fragments,
-        "history:recent",
-        ContextFragmentSource::RecentHistory,
-        &history[..turn_history_start],
+        ContentFragmentInput {
+            id: "history:recent".to_owned(),
+            source: ContextFragmentSource::RecentHistory,
+            items: &history[..turn_history_start],
+            history_start: 0,
+            history_provenance,
+        },
     )?;
     push_content_fragment(
         &mut fragments,
-        "input:current-user",
-        ContextFragmentSource::UserInput,
-        &history[turn_history_start..=turn_history_start],
+        ContentFragmentInput {
+            id: "input:current-user".to_owned(),
+            source: ContextFragmentSource::UserInput,
+            items: &history[turn_history_start..=turn_history_start],
+            history_start: turn_history_start,
+            history_provenance,
+        },
     )?;
     push_content_fragment(
         &mut fragments,
-        "turn:local-updates",
-        ContextFragmentSource::TurnLocalUpdates,
-        &history[turn_history_start + 1..],
+        ContentFragmentInput {
+            id: "turn:local-updates".to_owned(),
+            source: ContextFragmentSource::TurnLocalUpdates,
+            items: &history[turn_history_start + 1..],
+            history_start: turn_history_start + 1,
+            history_provenance,
+        },
     )?;
 
     let plan = planner.compile(
@@ -152,13 +180,16 @@ pub(super) fn compile_context(
 
 pub(super) fn state_diff_delivery_input(
     input: StateDiffDeliveryInput<'_>,
-) -> Result<Option<ModelInputIR>, AgentLoopError> {
+) -> Result<Option<(ModelInputIR, ContextDeliveryMap)>, AgentLoopError> {
     let StateDiffDeliveryInput {
+        step_id,
         full_input,
+        full_delivery_map,
         current_plan,
         planner,
         budget,
         committed_input,
+        committed_delivery_map,
         committed_history_len,
         committed_manifest,
         committed_world_state,
@@ -166,6 +197,7 @@ pub(super) fn state_diff_delivery_input(
         committed_project_snapshot,
         project_snapshot,
         history,
+        history_provenance,
         turn_history_start,
     } = input;
     let Some(committed_input) = committed_input else {
@@ -175,6 +207,10 @@ pub(super) fn state_diff_delivery_input(
         .content_items
         .iter()
         .any(|item| matches!(item, ContentItem::Reasoning { .. }));
+    let Some(committed_delivery_map) = committed_delivery_map else {
+        return continuation_unavailable_or_none(retains_reasoning);
+    };
+    committed_delivery_map.validate_against(committed_input)?;
     let Some(committed_manifest) = committed_manifest else {
         return continuation_unavailable_or_none(retains_reasoning);
     };
@@ -182,7 +218,7 @@ pub(super) fn state_diff_delivery_input(
         return continuation_unavailable_or_none(retains_reasoning);
     }
 
-    let mut state_items = Vec::new();
+    let mut state_fragments = Vec::new();
     match (committed_world_state, world_state) {
         (Some(previous), Some(current)) => {
             let previous_full = previous.full_fragment()?;
@@ -193,7 +229,7 @@ pub(super) fn state_diff_delivery_input(
                 return continuation_unavailable_or_none(retains_reasoning);
             }
             if let Some(fragment) = current.diff_fragment(previous)? {
-                append_context_items(&mut state_items, fragment)?;
+                state_fragments.push(fragment);
             }
         }
         (None, None) => {}
@@ -209,32 +245,82 @@ pub(super) fn state_diff_delivery_input(
                 return continuation_unavailable_or_none(retains_reasoning);
             }
             if let Some(fragment) = current.diff_fragment(previous)? {
-                append_context_items(&mut state_items, fragment)?;
+                state_fragments.push(fragment);
             }
         }
         (None, None) => {}
         _ => return continuation_unavailable_or_none(retains_reasoning),
     }
     let mut candidate = committed_input.clone();
+    let mut delivery_map = committed_delivery_map.clone();
+    delivery_map.replace_instructions_from(full_delivery_map);
     if committed_history_len <= turn_history_start {
-        candidate
-            .content_items
-            .extend_from_slice(&history[committed_history_len..turn_history_start]);
-        candidate.content_items.extend(state_items);
-        candidate
-            .content_items
-            .extend_from_slice(&history[turn_history_start..]);
+        append_delivery_items(
+            &mut candidate,
+            &mut delivery_map,
+            planner,
+            ContentFragmentInput {
+                id: format!("delivery:{step_id}:history-before-turn"),
+                source: ContextFragmentSource::RecentHistory,
+                items: &history[committed_history_len..turn_history_start],
+                history_start: committed_history_len,
+                history_provenance,
+            },
+        )?;
+        for (index, fragment) in state_fragments.into_iter().enumerate() {
+            append_delivery_fragment(
+                &mut candidate,
+                &mut delivery_map,
+                planner,
+                fragment.reidentify(ContextFragmentId::new(format!(
+                    "delivery:{step_id}:state-diff:{index}"
+                ))?),
+            )?;
+        }
+        append_delivery_items(
+            &mut candidate,
+            &mut delivery_map,
+            planner,
+            ContentFragmentInput {
+                id: format!("delivery:{step_id}:turn-updates"),
+                source: ContextFragmentSource::TurnLocalUpdates,
+                items: &history[turn_history_start..],
+                history_start: turn_history_start,
+                history_provenance,
+            },
+        )?;
     } else {
-        candidate
-            .content_items
-            .extend_from_slice(&history[committed_history_len..]);
-        candidate.content_items.extend(state_items);
+        append_delivery_items(
+            &mut candidate,
+            &mut delivery_map,
+            planner,
+            ContentFragmentInput {
+                id: format!("delivery:{step_id}:history-after-commit"),
+                source: ContextFragmentSource::TurnLocalUpdates,
+                items: &history[committed_history_len..],
+                history_start: committed_history_len,
+                history_provenance,
+            },
+        )?;
+        for (index, fragment) in state_fragments.into_iter().enumerate() {
+            append_delivery_fragment(
+                &mut candidate,
+                &mut delivery_map,
+                planner,
+                fragment.reidentify(ContextFragmentId::new(format!(
+                    "delivery:{step_id}:state-diff:{index}"
+                ))?),
+            )?;
+        }
     }
     candidate.instructions = full_input.instructions.clone();
     candidate.tool_specs = full_input.tool_specs.clone();
     candidate.requirements = full_input.requirements;
     match planner.validate_rendered_model_input(&candidate, budget) {
-        Ok(()) => Ok(Some(candidate)),
+        Ok(()) => {
+            delivery_map.validate_against(&candidate)?;
+            Ok(Some((candidate, delivery_map)))
+        }
         Err(ContextPlannerError::RenderedInputExceedsBudget { .. }) if retains_reasoning => {
             Err(AgentLoopError::ProviderContinuationUnavailable)
         }
@@ -245,7 +331,7 @@ pub(super) fn state_diff_delivery_input(
 
 fn continuation_unavailable_or_none(
     retains_reasoning: bool,
-) -> Result<Option<ModelInputIR>, AgentLoopError> {
+) -> Result<Option<(ModelInputIR, ContextDeliveryMap)>, AgentLoopError> {
     if retains_reasoning {
         Err(AgentLoopError::ProviderContinuationUnavailable)
     } else {
@@ -278,24 +364,51 @@ fn push_cached_fragment(
     Ok(())
 }
 
+struct ContentFragmentInput<'a> {
+    id: String,
+    source: ContextFragmentSource,
+    items: &'a [ContentItem],
+    history_start: usize,
+    history_provenance: &'a BTreeMap<usize, ContextProvenance>,
+}
+
+impl ContentFragmentInput<'_> {
+    fn into_fragment(self) -> Result<Option<ContextFragment>, AgentLoopError> {
+        if self.items.is_empty() {
+            return Ok(None);
+        }
+        let mut fragment = ContextFragment::new(
+            ContextFragmentId::new(self.id)?,
+            self.source,
+            ContextFragmentPriority::Required,
+            FragmentCachePolicy::DoNotCache,
+            ContextFragmentContent::ContentItems {
+                items: self.items.to_vec(),
+            },
+        )?;
+        let history_end = self
+            .history_start
+            .checked_add(self.items.len())
+            .ok_or(AgentLoopError::ContextStateMismatch)?;
+        let slot = fragment.slot();
+        for (history_index, provenance) in self
+            .history_provenance
+            .range(self.history_start..history_end)
+        {
+            let ordinal = u32::try_from(history_index - self.history_start)
+                .map_err(|_| ContextPlannerError::ContextPositionOverflow)?;
+            fragment =
+                fragment.with_content_item_provenance(ordinal, provenance.repositioned(slot))?;
+        }
+        Ok(Some(fragment))
+    }
+}
+
 fn push_content_fragment(
     fragments: &mut Vec<ContextFragment>,
-    id: &str,
-    source: ContextFragmentSource,
-    items: &[ContentItem],
+    input: ContentFragmentInput<'_>,
 ) -> Result<(), AgentLoopError> {
-    if items.is_empty() {
-        return Ok(());
-    }
-    fragments.push(ContextFragment::new(
-        ContextFragmentId::new(id)?,
-        source,
-        ContextFragmentPriority::Required,
-        FragmentCachePolicy::DoNotCache,
-        ContextFragmentContent::ContentItems {
-            items: items.to_vec(),
-        },
-    )?);
+    fragments.extend(input.into_fragment()?);
     Ok(())
 }
 
@@ -340,15 +453,26 @@ fn committed_fragment_was_completely_included(
     })
 }
 
-fn append_context_items(
-    destination: &mut Vec<ContentItem>,
+fn append_delivery_fragment(
+    candidate: &mut ModelInputIR,
+    delivery_map: &mut ContextDeliveryMap,
+    planner: &ContextPlanner,
     fragment: ContextFragment,
 ) -> Result<(), AgentLoopError> {
-    match fragment.content() {
-        ContextFragmentContent::ContentItems { items } => {
-            destination.extend(items.clone());
-            Ok(())
-        }
-        ContextFragmentContent::Instructions { .. } => Err(AgentLoopError::ContextStateMismatch),
+    let (items, entries) = planner.render_additive_fragment(&fragment)?;
+    candidate.content_items.extend(items);
+    delivery_map.append_content_entries(entries)?;
+    Ok(())
+}
+
+fn append_delivery_items(
+    candidate: &mut ModelInputIR,
+    delivery_map: &mut ContextDeliveryMap,
+    planner: &ContextPlanner,
+    input: ContentFragmentInput<'_>,
+) -> Result<(), AgentLoopError> {
+    if let Some(fragment) = input.into_fragment()? {
+        append_delivery_fragment(candidate, delivery_map, planner, fragment)?;
     }
+    Ok(())
 }

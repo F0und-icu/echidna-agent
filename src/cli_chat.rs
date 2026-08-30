@@ -18,7 +18,9 @@ use crate::adapters::artifact_store::LocalArtifactStore;
 use crate::adapters::fragment_cache::LocalFragmentCache;
 use crate::adapters::project_event_store::{Project, ProjectEventStream};
 use crate::adapters::project_snapshot::LocalProjectSnapshot;
-use crate::adapters::research_projection::load_research_state;
+use crate::adapters::research_projection::{
+    CompactionValidationFacts, load_compaction_validation_facts, load_research_state,
+};
 use crate::adapters::tools::ToolRegistry;
 use crate::app::agent_loop::{
     AgentLoop, AgentLoopError, AgentTurnOutcome, AssistantTextDeltaStage, ToolExecutionReceiptStage,
@@ -61,7 +63,7 @@ pub(crate) async fn run(
         None => new_session_id(),
     };
     let session = DurableChatSession::new(project, session_id.clone())?;
-    let (session_state, provider_session, disposition) =
+    let (session_state, provider_session, disposition, compaction_validation) =
         session.start_or_resume(explicit_resume)?;
 
     let tools = ToolRegistry::for_project(session.project.root());
@@ -76,7 +78,8 @@ pub(crate) async fn run(
     .with_domain_profile(domain);
     agent.queue_agent_model_profile(composition.agent_profile().clone())?;
     if disposition == SessionDisposition::Resumed {
-        agent.resume_from_session(&session_state, provider_session)?;
+        let validation = compaction_validation.as_ref().map(|facts| facts.context());
+        agent.resume_from_session(&session_state, provider_session, validation.as_ref())?;
     }
 
     let binding = RequestAuditBinding::new(
@@ -264,7 +267,15 @@ impl DurableChatSession {
     fn start_or_resume(
         &self,
         explicit_resume: bool,
-    ) -> Result<(SessionState, ProviderSession, SessionDisposition), ChatError> {
+    ) -> Result<
+        (
+            SessionState,
+            ProviderSession,
+            SessionDisposition,
+            Option<CompactionValidationFacts>,
+        ),
+        ChatError,
+    > {
         if explicit_resume
             && !self
                 .project
@@ -292,11 +303,22 @@ impl DurableChatSession {
             ProviderSessionRole::Primary,
             sequence.get(),
         );
+        let mut compaction_validation = None;
         let (event, disposition) = if explicit_resume {
             if projection.state().lifecycle() != SessionLifecycle::Active {
                 return Err(ChatError::SessionNotActive {
                     session_id: self.session_id.as_str().to_owned(),
                 });
+            }
+            if let Some(compaction) = projection
+                .state()
+                .latest_compaction()
+                .filter(|compaction| compaction.summary().schema_version() == 2)
+            {
+                let facts = load_compaction_validation_facts(&self.project)
+                    .map_err(ChatError::ResearchProjection)?;
+                compaction.validate_references(&facts.context())?;
+                compaction_validation = Some(facts);
             }
             (
                 SessionEvent::Resumed {
@@ -331,7 +353,12 @@ impl DurableChatSession {
         projection
             .append(&mut store, event)
             .map_err(ChatError::from_session_append)?;
-        Ok((projection.state().clone(), provider_session, disposition))
+        Ok((
+            projection.state().clone(),
+            provider_session,
+            disposition,
+            compaction_validation,
+        ))
     }
 
     /// Makes the selected Phase durable before AgentLoop can apply it or send

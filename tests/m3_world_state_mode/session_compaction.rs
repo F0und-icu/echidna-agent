@@ -1,32 +1,18 @@
 use super::*;
 
-use cyber_agent::domain::ArtifactId;
-use cyber_agent::domain::research::TargetSnapshotId;
-use cyber_agent::domain::session::{SessionSummary, SessionSummaryDraft, UnfinishedExecutionRef};
-use cyber_agent::domain::tools::ExecutionId;
+use super::compaction_support::{CompactionFacts, legacy_v1_summary_value};
+use cyber_agent::domain::session::{SessionSummary, SessionSummaryDraft};
+
+fn compaction_facts() -> CompactionFacts {
+    CompactionFacts::new("m3-agent-loop")
+}
 
 fn compaction_draft() -> SessionSummaryDraft {
     compaction_draft_with_goal("confirm the reproducible vulnerability boundary")
 }
 
 fn compaction_draft_with_goal(goal: &str) -> SessionSummaryDraft {
-    SessionSummaryDraft::new(
-        goal,
-        "com.example.fixture",
-        "42",
-        TargetSnapshotId::new("target-snapshot-42"),
-        "Android 15 ordinary-app path",
-    )
-    .unwrap()
-    .with_verified_facts(["the latest build receives the deep link"])
-    .with_active_hypotheses(["a trusted bridge may reach private data"])
-    .with_failed_paths(["ADB-only behavior is excluded"])
-    .with_artifacts([ArtifactId::new("artifact:deep-link-log")])
-    .with_modified_files(["notes/retest.md"])
-    .with_unfinished_execution([UnfinishedExecutionRef::Execution(ExecutionId::new(
-        "execution:traffic-capture",
-    ))])
-    .with_next_steps(["verify final data exposure without ADB"])
+    compaction_facts().summary_draft(goal)
 }
 
 fn session_event(
@@ -101,8 +87,9 @@ fn compacted_session_state_with_draft_and_retention(
             ),
         ])
         .unwrap();
+    let facts = compaction_facts();
     let compaction = state
-        .next_compaction(draft, requested_recent_items)
+        .next_compaction(draft, requested_recent_items, &facts.validation())
         .unwrap();
     SessionReducer
         .apply(
@@ -159,7 +146,10 @@ fn resumed_compacted_session_state(
             ),
         ])
         .unwrap();
-    let compaction = state.next_compaction(compaction_draft(), 1).unwrap();
+    let facts = compaction_facts();
+    let compaction = state
+        .next_compaction(compaction_draft(), 1, &facts.validation())
+        .unwrap();
     SessionReducer
         .apply(
             &mut state,
@@ -185,6 +175,58 @@ fn resumed_compacted_session_state(
         )
         .unwrap();
     state
+}
+
+fn resumed_legacy_compacted_session_state(
+    stream: &str,
+    primary_id: &str,
+    generation: u64,
+) -> SessionState {
+    let events = vec![
+        session_event(
+            stream,
+            SessionEvent::Started {
+                primary_provider_session: primary_ref("primary-before-resume", 1),
+            },
+            "legacy-started",
+            1,
+        ),
+        session_event(
+            stream,
+            SessionEvent::Resumed {
+                primary_provider_session: primary_ref(primary_id, generation),
+            },
+            "legacy-resumed",
+            2,
+        ),
+        session_event(
+            stream,
+            SessionEvent::HistoryItemRecorded {
+                item: ContentItem::user_text("legacy retained history"),
+            },
+            "legacy-history",
+            3,
+        ),
+    ];
+    let state = SessionReducer.reduce(events.clone()).unwrap();
+    let raw_compaction = cyber_agent::domain::events::EventEnvelope::current(
+        EventId::new("legacy-compaction"),
+        StreamId::new(stream),
+        EventSequence::new(4),
+        OccurredAt::new("2026-08-23T00:00:00Z"),
+        cyber_agent::domain::events::EventType::new("session.compaction_created"),
+        serde_json::json!({
+            "schema_version": 1,
+            "summary": legacy_v1_summary_value(),
+            "source_history_item_count": state.history().items().len(),
+            "source_event_sequence": 3,
+            "retained_from_normalized_history_index": 0,
+            "retained_history": state.history().items(),
+        }),
+    );
+    SessionReducer
+        .reduce(events.into_iter().chain(std::iter::once(raw_compaction)))
+        .unwrap()
 }
 
 fn make_agent<'provider, 'tools>(
@@ -215,7 +257,7 @@ fn contains_summary(items: &[ContentItem], summary: &SessionSummary) -> bool {
             ContentItem::Text {
                 role: cyber_agent::domain::model::MessageRole::User,
                 text,
-            } if text.starts_with("derived_session_summary_v1:") && text.contains(fingerprint)
+            } if text.starts_with("derived_session_summary_v2:") && text.contains(fingerprint)
         )
     })
 }
@@ -223,6 +265,7 @@ fn contains_summary(items: &[ContentItem], summary: &SessionSummary) -> bool {
 #[tokio::test]
 async fn candidate_summary_does_not_touch_an_active_baseline_but_durable_compaction_forces_one_full()
  {
+    let facts = compaction_facts();
     let root = TemporaryDirectory::new("m3-session-compaction");
     let tools = ToolRegistry::for_project(root.path());
     let provider = ScriptedProvider::new(
@@ -242,7 +285,9 @@ async fn candidate_summary_does_not_touch_an_active_baseline_but_durable_compact
 
     let session = compacted_session_state("session:compaction-runtime", "primary-compaction", 1);
     let candidate_draft = compaction_draft();
-    let candidate = session.next_compaction(candidate_draft.clone(), 1).unwrap();
+    let candidate = session
+        .next_compaction(candidate_draft.clone(), 1, &facts.validation())
+        .unwrap();
     assert_eq!(candidate.summary().revision(), 2);
     agent.update_session_summary_candidate(candidate_draft);
     agent
@@ -254,7 +299,9 @@ async fn candidate_summary_does_not_touch_an_active_baseline_but_durable_compact
         Some(BaselineAssessment::AppendOnlyCandidate { .. })
     ));
 
-    agent.apply_compaction(&session).unwrap();
+    agent
+        .apply_compaction(&session, Some(&facts.validation()))
+        .unwrap();
     agent
         .run_turn(
             "first real request after compaction",
@@ -268,7 +315,9 @@ async fn candidate_summary_does_not_touch_an_active_baseline_but_durable_compact
             reason: BaselineInvalidationReason::CompactionReset,
         })
     );
-    agent.apply_compaction(&session).unwrap();
+    agent
+        .apply_compaction(&session, Some(&facts.validation()))
+        .unwrap();
     agent
         .run_turn("second request after compaction", AgentCancellation::new())
         .await
@@ -287,6 +336,7 @@ async fn candidate_summary_does_not_touch_an_active_baseline_but_durable_compact
 
 #[test]
 fn compaction_application_is_idempotent_only_for_the_exact_durable_fact() {
+    let facts = compaction_facts();
     let root = TemporaryDirectory::new("m3-session-compaction-conflict");
     let tools = ToolRegistry::for_project(root.path());
     let provider = ScriptedProvider::new(incremental_capabilities(), []);
@@ -297,7 +347,7 @@ fn compaction_application_is_idempotent_only_for_the_exact_durable_fact() {
         "a local candidate must match the durable Compaction",
     ));
     assert!(matches!(
-        mismatched_candidate_agent.apply_compaction(&state),
+        mismatched_candidate_agent.apply_compaction(&state, Some(&facts.validation())),
         Err(
             cyber_agent::app::agent_loop::AgentLoopConfigurationError::CompactionSummaryCandidateMismatch
         )
@@ -317,7 +367,9 @@ fn compaction_application_is_idempotent_only_for_the_exact_durable_fact() {
         2,
     );
     let mut later = state.clone();
-    let next = later.next_compaction(compaction_draft(), 1).unwrap();
+    let next = later
+        .next_compaction(compaction_draft(), 1, &facts.validation())
+        .unwrap();
     SessionReducer
         .apply(
             &mut later,
@@ -330,29 +382,36 @@ fn compaction_application_is_idempotent_only_for_the_exact_durable_fact() {
         )
         .unwrap();
 
-    agent.apply_compaction(&state).unwrap();
-    agent.apply_compaction(&state).unwrap();
+    agent
+        .apply_compaction(&state, Some(&facts.validation()))
+        .unwrap();
+    agent
+        .apply_compaction(&state, Some(&facts.validation()))
+        .unwrap();
     assert!(matches!(
-        agent.apply_compaction(&conflicting),
+        agent.apply_compaction(&conflicting, Some(&facts.validation())),
         Err(
             cyber_agent::app::agent_loop::AgentLoopConfigurationError::ConflictingCompaction { .. }
         )
     ));
     assert!(matches!(
-        agent.apply_compaction(&conflicting_retention),
+        agent.apply_compaction(&conflicting_retention, Some(&facts.validation())),
         Err(
             cyber_agent::app::agent_loop::AgentLoopConfigurationError::ConflictingCompaction { .. }
         )
     ));
-    agent.apply_compaction(&later).unwrap();
+    agent
+        .apply_compaction(&later, Some(&facts.validation()))
+        .unwrap();
     assert!(matches!(
-        agent.apply_compaction(&state),
+        agent.apply_compaction(&state, Some(&facts.validation())),
         Err(cyber_agent::app::agent_loop::AgentLoopConfigurationError::StaleCompaction { .. })
     ));
 }
 
 #[tokio::test]
 async fn failed_empty_and_cancelled_compaction_full_do_not_consume_the_reset() {
+    let facts = compaction_facts();
     let session = compacted_session_state("session:compaction-retry", "primary-compaction", 1);
 
     let root = TemporaryDirectory::new("m3-session-compaction-failed");
@@ -365,7 +424,9 @@ async fn failed_empty_and_cancelled_compaction_full_do_not_consume_the_reset() {
         ],
     );
     let mut agent = make_agent(&provider, &tools, "primary-compaction", 1);
-    agent.apply_compaction(&session).unwrap();
+    agent
+        .apply_compaction(&session, Some(&facts.validation()))
+        .unwrap();
     assert!(matches!(
         agent
             .run_turn("failed full", AgentCancellation::new())
@@ -401,7 +462,9 @@ async fn failed_empty_and_cancelled_compaction_full_do_not_consume_the_reset() {
         ],
     );
     let mut agent = make_agent(&provider, &tools, "primary-compaction", 1);
-    agent.apply_compaction(&session).unwrap();
+    agent
+        .apply_compaction(&session, Some(&facts.validation()))
+        .unwrap();
     assert!(matches!(
         agent.run_turn("empty full", AgentCancellation::new()).await,
         Err(cyber_agent::app::agent_loop::AgentLoopError::EmptyModelResponse)
@@ -430,7 +493,9 @@ async fn failed_empty_and_cancelled_compaction_full_do_not_consume_the_reset() {
         [completed_response("after cancel", "response-after-cancel")],
     );
     let mut agent = make_agent(&provider, &tools, "primary-compaction", 1);
-    agent.apply_compaction(&session).unwrap();
+    agent
+        .apply_compaction(&session, Some(&facts.validation()))
+        .unwrap();
     let cancellation = AgentCancellation::new();
     cancellation.cancel();
     assert!(matches!(
@@ -457,6 +522,7 @@ async fn failed_empty_and_cancelled_compaction_full_do_not_consume_the_reset() {
 
 #[tokio::test]
 async fn resume_restores_the_compacted_view_with_session_resumed_and_rejects_another_stream() {
+    let facts = compaction_facts();
     let root = TemporaryDirectory::new("m3-session-compaction-resume");
     let tools = ToolRegistry::for_project(root.path());
     let provider = ScriptedProvider::new(
@@ -474,6 +540,7 @@ async fn resume_restores_the_compacted_view_with_session_resumed_and_rejects_ano
                 ProviderSessionRole::Primary,
                 2,
             ),
+            Some(&facts.validation()),
         )
         .unwrap();
     assert!(agent.history().items().iter().any(|item| matches!(
@@ -506,7 +573,86 @@ async fn resume_restores_the_compacted_view_with_session_resumed_and_rejects_ano
     let another =
         compacted_session_state("session:another-compaction", "primary-resumed-runtime", 2);
     assert!(matches!(
-        agent.apply_compaction(&another),
+        agent.apply_compaction(&another, Some(&facts.validation())),
         Err(cyber_agent::app::agent_loop::AgentLoopConfigurationError::CompactionSessionStreamMismatch { .. })
     ));
+}
+
+#[test]
+fn summary_v2_resume_requires_current_references_before_mutating_the_agent_loop() {
+    let facts = compaction_facts();
+    let wrong_facts = CompactionFacts::new("wrong-project");
+    let root = TemporaryDirectory::new("m4-summary-v2-resume-validation");
+    let tools = ToolRegistry::for_project(root.path());
+    let provider = ScriptedProvider::new(incremental_capabilities(), []);
+    let mut agent = make_agent(&provider, &tools, "primary-before-runtime", 1);
+    let session =
+        resumed_compacted_session_state("session:v2-resume-validation", "primary-v2-runtime", 2);
+    let resumed_provider = || {
+        ProviderSession::new(
+            ProviderSessionId::new("primary-v2-runtime"),
+            ProviderSessionRole::Primary,
+            2,
+        )
+    };
+
+    assert!(matches!(
+        agent.resume_from_session(&session, resumed_provider(), None),
+        Err(
+            cyber_agent::app::agent_loop::AgentLoopConfigurationError::CompactionValidationContextRequired
+        )
+    ));
+    assert!(agent.history().items().is_empty());
+    assert!(agent.last_sampling_step_plan().is_none());
+
+    assert!(matches!(
+        agent.resume_from_session(
+            &session,
+            resumed_provider(),
+            Some(&wrong_facts.validation()),
+        ),
+        Err(
+            cyber_agent::app::agent_loop::AgentLoopConfigurationError::Session(
+                cyber_agent::domain::session::SessionError::CompactionEvidenceCrossProject { .. }
+            )
+        )
+    ));
+    assert!(agent.history().items().is_empty());
+    assert!(agent.last_sampling_step_plan().is_none());
+
+    agent
+        .resume_from_session(&session, resumed_provider(), Some(&facts.validation()))
+        .unwrap();
+    assert!(agent.history().items().iter().any(|item| matches!(
+        item,
+        ContentItem::Text { text, .. } if text == "recent durable history"
+    )));
+}
+
+#[test]
+fn legacy_summary_v1_resume_remains_readable_without_reference_validation() {
+    let root = TemporaryDirectory::new("m4-summary-v1-resume");
+    let tools = ToolRegistry::for_project(root.path());
+    let provider = ScriptedProvider::new(incremental_capabilities(), []);
+    let mut agent = make_agent(&provider, &tools, "primary-before-runtime", 1);
+    let session =
+        resumed_legacy_compacted_session_state("session:v1-resume", "primary-v1-runtime", 2);
+
+    agent
+        .resume_from_session(
+            &session,
+            ProviderSession::new(
+                ProviderSessionId::new("primary-v1-runtime"),
+                ProviderSessionRole::Primary,
+                2,
+            ),
+            None,
+        )
+        .unwrap();
+
+    assert!(agent.history().items().iter().any(|item| matches!(
+        item,
+        ContentItem::Text { text, .. } if text == "legacy retained history"
+    )));
+    assert!(agent.last_sampling_step_plan().is_none());
 }

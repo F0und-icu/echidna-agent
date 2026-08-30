@@ -1,6 +1,7 @@
 //! Pure, provider-neutral Context planning and decision manifests.
 
 mod cache_key;
+mod delivery_map;
 mod error;
 mod estimator;
 mod fingerprint;
@@ -35,6 +36,11 @@ use crate::domain::tools::ToolSpec;
 
 pub use cache_key::{
     CONTEXT_FRAGMENT_CACHE_KEY_VERSION, ContextFragmentCacheKey, ContextSourceFingerprint,
+};
+pub use delivery_map::{
+    AuthorityLevel, CONTEXT_DELIVERY_MAP_SCHEMA_VERSION, ContextContentDelivery,
+    ContextDeliveryMap, ContextInstructionSpan, ContextProvenance, ContextReferences,
+    ContextSubitemId, ContextTransform, FreshnessIdentity, RetentionClass, SemanticClass,
 };
 pub use error::ContextPlannerError;
 pub use fragment::{
@@ -177,13 +183,14 @@ impl ContextPlanner {
                 .map(ContextDecisionFingerprintEntry::from)
                 .collect(),
         })?;
-        let model_input = render::render_model_input(
+        let rendered = render::render_model_input(
             &fragments,
             &candidates,
             canonical_tools.ordered_specs,
             requirements,
+            &self.renderer,
         )?;
-        self.validate_rendered_model_input(&model_input, budget)?;
+        self.validate_rendered_model_input(&rendered.model_input, budget)?;
         Ok(ContextPlan {
             context_fingerprint: fingerprint.clone(),
             prompt_cache_key: hash(&(
@@ -200,8 +207,24 @@ impl ContextPlanner {
                 fixed_input_tokens,
                 candidates,
             },
-            model_input,
+            model_input: rendered.model_input,
+            delivery_map: rendered.delivery_map,
         })
+    }
+
+    /// Renders one already-selected additive content Fragment through the
+    /// same generic-v1 owner used by complete Context compilation.
+    pub(crate) fn render_additive_fragment(
+        &self,
+        fragment: &ContextFragment,
+    ) -> Result<
+        (
+            Vec<crate::domain::model::ContentItem>,
+            Vec<ContextContentDelivery>,
+        ),
+        ContextPlannerError,
+    > {
+        render::render_included_content_fragment(fragment)
     }
 
     /// Revalidates a concrete rendered Provider input with the same canonical

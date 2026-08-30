@@ -46,7 +46,8 @@ pub(super) const CURRENT_SESSION_PAYLOAD_SCHEMA_VERSION: u16 = 1;
 mod compaction;
 
 pub use compaction::{
-    SessionCompaction, SessionSummary, SessionSummaryDraft, UnfinishedExecutionRef,
+    CompactionValidationContext, EvidenceSpine, NarrativeSummary, ResearchStreamIdentity,
+    SessionCompaction, SessionSummary, SessionSummaryDraft,
 };
 
 /// A read-only projection of one existing Receipt fact. It deliberately
@@ -417,6 +418,7 @@ impl SessionState {
         &self,
         summary: SessionSummaryDraft,
         requested_recent_items: usize,
+        validation: &CompactionValidationContext<'_>,
     ) -> Result<SessionCompaction, SessionError> {
         require_transition(
             self.lifecycle,
@@ -433,7 +435,7 @@ impl SessionState {
             .ok_or(SessionError::CompactionSourceSequenceMissing)?;
         SessionCompaction::from_history(
             &self.history,
-            SessionSummary::from_draft(summary, revision)?,
+            SessionSummary::from_draft(summary, revision, validation)?,
             source_event_sequence,
             requested_recent_items,
         )
@@ -1196,6 +1198,48 @@ pub enum SessionError {
     CompactionSummaryEntryDuplicate { field: &'static str, value: String },
     #[error("Session Compaction Summary is {actual} bytes, above the {maximum}-byte local bound")]
     CompactionSummaryTooLarge { actual: usize, maximum: usize },
+    #[error("Session Compaction requires a non-empty authoritative Research stream")]
+    CompactionResearchStreamEmpty,
+    #[error("Session Compaction Research stream changed from `{expected}` to `{received}`")]
+    CompactionResearchStreamChanged {
+        expected: StreamId,
+        received: StreamId,
+    },
+    #[error(
+        "Session Compaction Research sequence must be contiguous: expected {expected}, received {received}"
+    )]
+    CompactionResearchSequenceMismatch { expected: u64, received: u64 },
+    #[error("Session Compaction Research stream watermark must be non-zero")]
+    CompactionResearchWatermarkRequired,
+    #[error("Session Compaction Research stream hash is invalid: {message}")]
+    CompactionResearchStreamHash { message: String },
+    #[error("Session Compaction Evidence Spine requires at least one TargetSnapshot reference")]
+    CompactionEvidenceSpineTargetRequired,
+    #[error("Session Compaction Evidence Spine project `{received}` does not match `{expected}`")]
+    CompactionEvidenceCrossProject {
+        expected: crate::domain::project::ProjectId,
+        received: crate::domain::project::ProjectId,
+    },
+    #[error(
+        "Session Compaction Evidence Spine Research stream `{received}` does not match `{expected}`"
+    )]
+    CompactionEvidenceResearchStreamMismatch {
+        expected: StreamId,
+        received: StreamId,
+    },
+    #[error(
+        "Session Compaction Evidence Spine Research revision is stale: expected watermark {expected_watermark}, received {received_watermark}"
+    )]
+    CompactionEvidenceStaleResearchRevision {
+        expected_watermark: EventSequence,
+        received_watermark: EventSequence,
+    },
+    #[error("Session Compaction Evidence Spine reference `{id}` has the wrong Research type")]
+    CompactionEvidenceTypeMismatch { id: String },
+    #[error("Session Compaction Evidence Spine {kind} reference `{id}` is missing")]
+    CompactionEvidenceReferenceMissing { kind: &'static str, id: String },
+    #[error("Session Compaction Context provenance is invalid: {message}")]
+    CompactionContextProvenance { message: String },
     #[error("Session Compaction requires the preceding durable Event sequence")]
     CompactionSourceSequenceMissing,
     #[error(

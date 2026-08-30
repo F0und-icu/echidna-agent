@@ -102,8 +102,13 @@ impl RenderedRequestAudit {
             .collect();
         let schema_version = if self.attempt.prompt_renderer.is_some()
             && self.attempt.resolved_tool_plan_fingerprint.is_some()
+            && self.attempt.context_delivery_map.is_some()
         {
             REQUEST_AUDIT_MANIFEST_SCHEMA_VERSION
+        } else if self.attempt.prompt_renderer.is_some()
+            && self.attempt.resolved_tool_plan_fingerprint.is_some()
+        {
+            2
         } else {
             1
         };
@@ -124,6 +129,7 @@ impl RenderedRequestAudit {
             delivery: self.attempt.delivery,
             prompt_renderer: self.attempt.prompt_renderer,
             resolved_tool_plan_fingerprint: self.attempt.resolved_tool_plan_fingerprint,
+            context_delivery_map: self.attempt.context_delivery_map,
             components,
         };
         manifest.validate()?;

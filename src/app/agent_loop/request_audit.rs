@@ -1,7 +1,6 @@
 //! Fixed RequestAudit attempt construction for the one AgentLoop.
 
-use crate::domain::context::BaselineAssessment;
-use crate::domain::model::ModelCapabilities;
+use crate::domain::context::{BaselineAssessment, ContextDeliveryMap};
 use crate::domain::request_audit::{
     RequestAuditAttempt, RequestAuditDelivery, RequestAuditRunContext,
 };
@@ -29,7 +28,7 @@ where
         sampling_step: &SamplingStepPlan,
         full_input: &crate::domain::model::ModelInputIR,
         request: &ModelRequest,
-        capabilities: &ModelCapabilities,
+        delivery_map: &ContextDeliveryMap,
         assessment: &BaselineAssessment,
     ) -> Result<(), AgentLoopError> {
         let Some((context, record_attempt)) = audit.as_mut() else {
@@ -48,12 +47,12 @@ where
             context,
             self.model.clone(),
             self.profile.clone(),
-            capabilities.clone(),
+            sampling_step.capabilities().clone(),
             full_input.clone(),
             request.input().clone(),
             delivery,
         )?
-        .bind_sampling_step(sampling_step)?;
+        .bind_sampling_step(sampling_step, delivery_map.clone())?;
         record_attempt(attempt)
     }
 }

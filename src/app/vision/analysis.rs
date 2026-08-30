@@ -10,16 +10,20 @@ use crate::app::model_streaming::{ModelStreamOutcome, ModelStreamingService};
 use crate::domain::artifacts::ArtifactId;
 use crate::domain::canonical_json::canonical_blake3_hash;
 use crate::domain::context::{
-    ModelIdentity, ModelProfile, ProviderSessionRef, ProviderSessionRole,
+    AuthorityLevel, ContextFragment, ContextFragmentContent, ContextFragmentId,
+    ContextFragmentPriority, ContextFragmentSource, ContextOrigin, ContextPlan, ContextPlanner,
+    ContextProvenance, ContextReferences, ContextSlot, FragmentCachePolicy, FreshnessIdentity,
+    ModelIdentity, ModelProfile, ProviderSessionRef, ProviderSessionRole, RetentionClass,
+    SemanticClass,
 };
 use crate::domain::events::EventId;
 use crate::domain::model::{
-    ContentItem, MessageRole, ModelCapabilityError, ModelEvent, ModelInputIR,
-    ModelRequestRequirements,
+    ContentItem, MessageRole, ModelCapabilityError, ModelEvent, ModelRequestRequirements,
 };
 use crate::domain::request_audit::{
     RequestAuditAttempt, RequestAuditDelivery, RequestAuditManifest, RequestAuditRunContext,
 };
+use crate::domain::tools::{DeferredActivationSet, ResolvedToolPlan, ToolExposurePlan, ToolSpec};
 use crate::domain::vision::{
     VISION_FACT_SCHEMA_VERSION, VisionAnalysisFailure, VisionObservation, VisionObservationId,
     VisionRegion,
@@ -84,24 +88,83 @@ impl VisionAnalysisInput {
         Ok(())
     }
 
-    fn model_input(&self) -> ModelInputIR {
-        ModelInputIR::current(
-            VISION_INSTRUCTIONS,
-            vec![
-                ContentItem::Text {
-                    role: MessageRole::User,
-                    text: self.task.clone(),
-                },
-                ContentItem::ImageArtifact {
-                    role: MessageRole::User,
-                    artifact_id: self.delivery_artifact_id.clone(),
-                },
-            ],
-            ModelRequestRequirements {
-                structured_output: true,
-                ..ModelRequestRequirements::default()
+    fn context_plan(
+        &self,
+        capabilities: &crate::domain::model::ModelCapabilities,
+    ) -> Result<ContextPlan, VisionAnalysisError> {
+        let mut artifact_refs = vec![self.source_artifact_id.clone()];
+        if !artifact_refs.contains(&self.delivery_artifact_id) {
+            artifact_refs.push(self.delivery_artifact_id.clone());
+        }
+        let image_provenance = ContextProvenance::new(
+            ContextSlot::UserInput,
+            ContextOrigin::ArtifactProjection,
+            SemanticClass::AuthoritativeReference,
+            AuthorityLevel::FactReference,
+            RetentionClass::Stable,
+            FreshnessIdentity::new(self.delivery_artifact_id.as_str())
+                .map_err(context_error)?
+                .with_producer_version("vision-analysis:1"),
+            ContextReferences::new(
+                Vec::new(),
+                artifact_refs,
+                Vec::new(),
+                vec![self.route_event_id.clone()],
+            )
+            .map_err(context_error)?,
+        )
+        .map_err(context_error)?;
+        let input_fragment = ContextFragment::new(
+            ContextFragmentId::new(format!("vision:input:{}", self.observation_id.as_str()))
+                .map_err(context_error)?,
+            ContextFragmentSource::UserInput,
+            ContextFragmentPriority::Required,
+            FragmentCachePolicy::DoNotCache,
+            ContextFragmentContent::ContentItems {
+                items: vec![
+                    ContentItem::Text {
+                        role: MessageRole::User,
+                        text: self.task.clone(),
+                    },
+                    ContentItem::ImageArtifact {
+                        role: MessageRole::User,
+                        artifact_id: self.delivery_artifact_id.clone(),
+                    },
+                ],
             },
         )
+        .and_then(|fragment| fragment.with_content_item_provenance(1, image_provenance))
+        .map_err(context_error)?;
+        let fragments = vec![
+            ContextFragment::new(
+                ContextFragmentId::new("vision:instructions:v1").map_err(context_error)?,
+                ContextFragmentSource::BasePrompt,
+                ContextFragmentPriority::Required,
+                FragmentCachePolicy::ContentAddressed,
+                ContextFragmentContent::Instructions {
+                    text: VISION_INSTRUCTIONS.to_owned(),
+                },
+            )
+            .map_err(context_error)?,
+            input_fragment,
+        ];
+        let planner = ContextPlanner::current();
+        let budget = planner
+            .default_budget(capabilities)
+            .map_err(context_error)?;
+        planner
+            .compile(
+                fragments,
+                budget,
+                capabilities,
+                Vec::new(),
+                ModelRequestRequirements {
+                    structured_output: true,
+                    ..ModelRequestRequirements::default()
+                },
+                None,
+            )
+            .map_err(context_error)
     }
 }
 
@@ -145,13 +208,22 @@ where
             canonical_blake3_hash(&input.task).map_err(|error| VisionAnalysisError::TaskHash {
                 message: error.to_string(),
             })?;
-        let model_input = input.model_input();
         let capabilities = self.provider.capabilities();
         let actual_capability_hash = capabilities.semantic_hash();
         if actual_capability_hash != input.capability_hash {
             return Err(VisionAnalysisError::CapabilityIdentityMismatch);
         }
+        let context_plan = input.context_plan(&capabilities)?;
+        let model_input = context_plan.model_input();
         capabilities.validate_input(&model_input)?;
+        let no_tool_plan = ResolvedToolPlan::resolve(
+            Vec::<ToolSpec>::new(),
+            &ToolExposurePlan::default(),
+            &DeferredActivationSet::default(),
+        )
+        .map_err(|error| VisionAnalysisError::AuditShape {
+            message: error.to_string(),
+        })?;
         let attempt = RequestAuditAttempt::new(
             audit_context,
             input.model.clone(),
@@ -163,6 +235,7 @@ where
                 crate::domain::context::BaselineInvalidationReason::NoBaseline,
             ),
         )
+        .and_then(|attempt| attempt.bind_scoped_no_tool_context(&context_plan, &no_tool_plan))
         .map_err(|error| VisionAnalysisError::AuditShape {
             message: error.to_string(),
         })?;
@@ -373,6 +446,12 @@ pub(super) fn decode_model_reply(raw: &str) -> Result<VisionModelReply, VisionAn
     Ok(reply)
 }
 
+fn context_error(error: impl Display) -> VisionAnalysisError {
+    VisionAnalysisError::Context {
+        message: error.to_string(),
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum VisionAnalysisError {
     #[error("Vision input `{field}` must not be empty")]
@@ -387,6 +466,8 @@ pub enum VisionAnalysisError {
     DeliveryArtifactNotSelected,
     #[error("the selected Vision Provider capability identity does not match the request")]
     CapabilityIdentityMismatch,
+    #[error("Vision Context cannot be compiled through generic-v1: {message}")]
+    Context { message: String },
     #[error(transparent)]
     Capability(#[from] ModelCapabilityError),
     #[error("failed to calculate canonical Vision task hash: {message}")]

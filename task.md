@@ -2076,4 +2076,4 @@ M1 总完成标准：M1a、M1b、M1c 分别有可运行集成测试，任一后�
 
 具体状态始终以 `docs/development/STATUS.md` 为准。F1a-F1e 已远端封存；F1e 的远端 Gate 由用户在 GitHub 账单/额度导致零 Step 失败后明确单次豁免，后续 Actions 暂停。Architecture v1.2 至 v1.6 的远端架构封存仍未授权。
 
-M4-S3e1 已在本地完成、通过独立 Terra xhigh 审计和完整 Gate，但尚未提交或远端发布。下一候选是 M4-S3e2 provenance/Evidence-Spine Compaction，状态为 `READY_NOT_AUTHORIZED`；之后依次是 M4-S3f retrieval Shadow、M4-S3g guidance Shadow 和 M4-S4 真实长流程验收。任何前一项完成都不自动授权下一项。
+M4-S3e1 已通过独立 Terra xhigh 审计、完整 Gate，并经 PR `#52`/Squash Merge `7d5b6d0` 远端封存。M4-S3e2 provenance/Evidence-Spine Compaction 已完成独立 Terra xhigh 审计、完整本地 Gate、合成 DeepSeek Live Tool Loop 与 Lean Review，正在执行授权的远端封存；封存后依次是 M4-S3f retrieval Shadow、M4-S3g guidance Shadow 和 M4-S4 真实长流程验收。每一项仍须使用独立分支、审计、Gate、必要 Live 与 Git/PR seal，前一项完成不跳过下一项的质量门。

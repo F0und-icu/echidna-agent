@@ -10,6 +10,38 @@ pub enum ContextPlannerError {
     EmptyFragmentId,
     #[error("Context content hash must be a lowercase 64-character BLAKE3 digest")]
     InvalidContentHash,
+    #[error("Context Subitem ID does not match its Fragment and ordinal")]
+    InvalidContextSubitemId,
+    #[error("Context Subitem provenance ordinal is outside the Fragment content")]
+    ContextSubitemOrdinalOutOfBounds,
+    #[error("Context Subitem provenance is assigned more than once")]
+    DuplicateContextSubitemProvenance,
+    #[error("Context provenance field `{field}` must not be empty")]
+    ContextProvenanceFieldRequired { field: &'static str },
+    #[error("Context reference list `{field}` repeats `{value}`")]
+    DuplicateContextReference { field: &'static str, value: String },
+    #[error("fact-reference Context provenance requires at least one typed reference")]
+    FactReferenceMissingContextReference,
+    #[error("Context semantic class and authority level are inconsistent")]
+    InvalidContextAuthorityCombination,
+    #[error("explicit Context provenance slot does not match Fragment placement")]
+    ContextProvenanceSlotMismatch,
+    #[error("Context Fragment/Subitem identity appears more than once in one delivery map")]
+    DuplicateContextSubitem,
+    #[error("Context byte or ContentItem position exceeds the schema bound")]
+    ContextPositionOverflow,
+    #[error("ContextDeliveryMap schema or renderer is unsupported")]
+    UnsupportedContextDeliveryMap,
+    #[error("ContextDeliveryMap does not exactly cover the rendered instructions and items")]
+    ContextDeliveryCoverageMismatch,
+    #[error("ContextDeliveryMap instruction gaps are not generic-v1 separators")]
+    ContextDeliverySeparatorMismatch,
+    #[error("ContextDeliveryMap content hash does not match the rendered component")]
+    ContextDeliveryContentHashMismatch,
+    #[error("ContextDeliveryMap cannot be projected onto the supplied Provider delivery")]
+    ContextDeliveryProjectionMismatch,
+    #[error("Context transform is inconsistent with its channel or provenance")]
+    InvalidContextTransform,
     #[error("Context source `{fragment_source:?}` has the wrong ModelInputIR channel")]
     InvalidFragmentChannel {
         fragment_source: ContextFragmentSource,

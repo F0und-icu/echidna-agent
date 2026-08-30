@@ -20,7 +20,8 @@ use super::records::{
     EvidenceLink, EvidenceRef, ExecutionReceiptId, ExperimentCapsuleRecord, ExperimentId,
     ExperimentRecord, ExperimentUpdate, FindingId, FindingRecord, FindingUpdate, HypothesisId,
     HypothesisRecord, HypothesisUpdate, MergeRecordRef, NextActionId, NextActionRecord,
-    NextActionUpdate, ResearchRecordRef, TargetSnapshotId, TargetSnapshotRecord, require_text,
+    NextActionUpdate, ResearchFactRef, ResearchRecordRef, TargetSnapshotId, TargetSnapshotRecord,
+    require_text,
 };
 use super::upcast::{VersionedPayload, decode_and_upcast};
 
@@ -478,6 +479,28 @@ impl ResearchState {
             .values()
             .filter(|record| record.action_fingerprint == fingerprint)
             .collect()
+    }
+
+    /// Resolves the closed reference vocabulary shared by Context provenance
+    /// and Evidence-Spine Compaction without exposing the backing maps.
+    pub(crate) fn contains_fact_reference(&self, reference: &ResearchFactRef) -> bool {
+        match reference {
+            ResearchFactRef::TargetSnapshot(id) => self.target_snapshots.contains_key(id),
+            ResearchFactRef::Hypothesis(id) => self.hypotheses.contains_key(id),
+            ResearchFactRef::Experiment(id) => self.experiments.contains_key(id),
+            ResearchFactRef::Finding(id) => self.findings.contains_key(id),
+            ResearchFactRef::NextAction(id) => self.next_actions.contains_key(id),
+        }
+    }
+
+    pub(crate) fn contains_any_fact_id(&self, id: &str) -> bool {
+        self.target_snapshots
+            .keys()
+            .any(|value| value.as_str() == id)
+            || self.hypotheses.keys().any(|value| value.as_str() == id)
+            || self.experiments.keys().any(|value| value.as_str() == id)
+            || self.findings.keys().any(|value| value.as_str() == id)
+            || self.next_actions.keys().any(|value| value.as_str() == id)
     }
 
     fn contains_research_reference(&self, reference: &ResearchRecordRef) -> bool {

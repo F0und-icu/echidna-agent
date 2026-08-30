@@ -3,7 +3,9 @@
 use crate::domain::context::BaselineInvalidationReason;
 use crate::domain::events::StreamId;
 use crate::domain::history::ConversationHistory;
-use crate::domain::session::{SessionCompaction, SessionLifecycle, SessionState};
+use crate::domain::session::{
+    CompactionValidationContext, SessionCompaction, SessionLifecycle, SessionState,
+};
 use crate::ports::model::ModelProvider;
 use crate::ports::tool::ToolExecutor;
 
@@ -40,6 +42,7 @@ where
     pub fn apply_compaction(
         &mut self,
         session: &SessionState,
+        validation: Option<&CompactionValidationContext<'_>>,
     ) -> Result<(), AgentLoopConfigurationError> {
         if session.lifecycle() != SessionLifecycle::Active {
             return Err(AgentLoopConfigurationError::ActiveSessionCompactionRequired);
@@ -70,8 +73,17 @@ where
         let compaction = session
             .latest_compaction()
             .ok_or(AgentLoopConfigurationError::CompactionRequired)?;
+        if compaction.summary().requires_reference_validation() {
+            let validation = validation
+                .ok_or(AgentLoopConfigurationError::CompactionValidationContextRequired)?;
+            compaction.validate_references(validation)?;
+        }
         if let Some(candidate) = &self.pending_session_summary
-            && !compaction.summary().matches_draft(candidate)?
+            && !compaction.summary().matches_draft(
+                candidate,
+                validation
+                    .ok_or(AgentLoopConfigurationError::CompactionValidationContextRequired)?,
+            )?
         {
             return Err(AgentLoopConfigurationError::CompactionSummaryCandidateMismatch);
         }
@@ -97,6 +109,7 @@ where
         let normalized_items = session.normalized_history_items()?;
         let history = ConversationHistory::from_complete_content_items(&normalized_items)?;
         self.history = history;
+        self.history_provenance.clear();
         self.session_summary = Some(compaction.summary().clone());
         self.pending_session_summary = None;
         self.bound_session_stream = Some(stream_id);

@@ -16,8 +16,8 @@ pub use records::{
     ExperimentRecord, ExperimentResult, ExperimentUpdate, FindingDraft, FindingId, FindingRecord,
     FindingStatus, FindingUpdate, HypothesisDraft, HypothesisId, HypothesisRecord,
     HypothesisStatus, HypothesisUpdate, MergeRecordRef, NextActionDraft, NextActionId,
-    NextActionRecord, NextActionStatus, NextActionUpdate, ResearchRecordRef, TargetKind,
-    TargetSnapshotDraft, TargetSnapshotId, TargetSnapshotRecord,
+    NextActionRecord, NextActionStatus, NextActionUpdate, ResearchFactRef, ResearchRecordRef,
+    TargetKind, TargetSnapshotDraft, TargetSnapshotId, TargetSnapshotRecord,
 };
 pub(crate) use reducer::ResearchReferenceCatalog;
 pub use reducer::{

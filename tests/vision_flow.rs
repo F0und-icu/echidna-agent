@@ -22,8 +22,8 @@ use cyber_agent::app::vision::{
 };
 use cyber_agent::domain::artifacts::{ArtifactId, BlobId};
 use cyber_agent::domain::context::{
-    ModelIdentity, ModelProfile, ProviderSession, ProviderSessionId, ProviderSessionRef,
-    ProviderSessionRole,
+    AuthorityLevel, ContextOrigin, ModelIdentity, ModelProfile, ProviderSession, ProviderSessionId,
+    ProviderSessionRef, ProviderSessionRole, SemanticClass,
 };
 use cyber_agent::domain::domain_profile::DomainProfile;
 use cyber_agent::domain::events::{EventEnvelope, EventId, EventSequence, OccurredAt, StreamId};
@@ -33,7 +33,9 @@ use cyber_agent::domain::model::{
 use cyber_agent::domain::profile::{VisionMode, VisionRoute, VisionRouteReason};
 use cyber_agent::domain::project::ProjectId;
 use cyber_agent::domain::request_audit::{
-    RequestAdapterVersion, RequestAuditBinding, RequestAuditRunContext,
+    REQUEST_AUDIT_MANIFEST_SCHEMA_VERSION, RequestAdapterVersion, RequestAuditBinding,
+    RequestAuditError, RequestAuditManifest, RequestAuditReconstructionError,
+    RequestAuditRunContext,
 };
 use cyber_agent::domain::session::{SessionError, SessionEvent};
 use cyber_agent::domain::tools::{
@@ -440,6 +442,111 @@ async fn secondary_path_commits_route_audit_observation_then_primary_without_sen
     assert_eq!(projection.state().vision_observations().len(), 1);
     assert!(projection.state().vision_failures().is_empty());
     assert_eq!(projection.state().request_audits().len(), 2);
+    let vision_audit = projection
+        .state()
+        .request_audits()
+        .iter()
+        .find(|audit| audit.audit_event_id().as_str() == "vision-audit")
+        .unwrap();
+    assert_eq!(
+        vision_audit.schema_version(),
+        REQUEST_AUDIT_MANIFEST_SCHEMA_VERSION
+    );
+    assert!(vision_audit.resolved_tool_plan_fingerprint().is_some());
+    let vision_map = vision_audit.context_delivery_map().unwrap();
+    vision_map
+        .validate_against(vision_requests[0].input())
+        .unwrap();
+    assert_eq!(vision_map.instruction_spans().len(), 1);
+    assert_eq!(vision_map.content_items().len(), 2);
+    assert_eq!(
+        vision_map.content_items()[0].provenance().origin(),
+        ContextOrigin::OperatorInput
+    );
+    assert_eq!(
+        vision_map.content_items()[1].provenance().origin(),
+        ContextOrigin::ArtifactProjection
+    );
+    assert_eq!(
+        vision_map.content_items()[1].provenance().authority_level(),
+        AuthorityLevel::FactReference
+    );
+    assert_eq!(
+        vision_map.content_items()[1]
+            .provenance()
+            .references()
+            .artifact_refs(),
+        [
+            ArtifactId::new("artifact:original"),
+            ArtifactId::new("artifact:budgeted")
+        ]
+    );
+    assert_eq!(
+        vision_map.content_items()[1]
+            .provenance()
+            .references()
+            .source_event_refs(),
+        [EventId::new("vision-route")]
+    );
+
+    let mut forged_transform = serde_json::to_value(vision_audit).unwrap();
+    forged_transform["context_delivery_map"]["content_items"][1]["transform"] = serde_json::json!({
+        "kind": "artifact_reference",
+        "artifact_id": "artifact:budgeted"
+    });
+    let forged_transform: RequestAuditManifest = serde_json::from_value(forged_transform).unwrap();
+    forged_transform
+        .validate()
+        .expect("exact delivered bytes are required to validate an ArtifactReference transform");
+    assert!(matches!(
+        audit_service.reconstruct(&forged_transform),
+        Err(RequestAuditReconstructionError::Audit(
+            RequestAuditError::ContextDeliveryMap { .. }
+        ))
+    ));
+    let primary_audit = projection
+        .state()
+        .request_audits()
+        .iter()
+        .find(|audit| audit.audit_event_id().as_str() == "primary-audit")
+        .unwrap();
+    let primary_map = primary_audit.context_delivery_map().unwrap();
+    primary_map
+        .validate_against(primary_requests[0].input())
+        .unwrap();
+    let observation_position = primary_requests[0]
+        .input()
+        .content_items
+        .iter()
+        .position(|item| {
+            matches!(item, ContentItem::Text { text, .. } if text.contains("unverified_model_observation"))
+        })
+        .unwrap();
+    let observation_provenance = primary_map.content_items()[observation_position].provenance();
+    assert_eq!(observation_provenance.origin(), ContextOrigin::ModelOutput);
+    assert_eq!(
+        observation_provenance.semantic_class(),
+        SemanticClass::ModelObservation
+    );
+    assert_eq!(
+        observation_provenance.authority_level(),
+        AuthorityLevel::ModelObservation
+    );
+    assert!(
+        observation_provenance
+            .references()
+            .artifact_refs()
+            .iter()
+            .any(|artifact| artifact.as_str() == "artifact:original")
+    );
+    assert_eq!(
+        observation_provenance.references().source_event_refs(),
+        [
+            EventId::new("vision-route"),
+            EventId::new("vision-audit"),
+            EventId::new("vision-observation"),
+        ]
+    );
     assert!(blobs.writes() > 0);
 
     let event_count = sink.events.len();
@@ -567,6 +674,40 @@ async fn direct_path_audits_one_primary_image_and_never_calls_a_secondary_provid
     assert_eq!(projection.state().vision_routes().len(), 1);
     assert!(projection.state().vision_observations().is_empty());
     assert_eq!(projection.state().request_audits().len(), 2);
+    let primary_audit = projection
+        .state()
+        .request_audits()
+        .iter()
+        .find(|audit| audit.audit_event_id().as_str() == "primary-audit-1")
+        .unwrap();
+    let image_position = requests[0]
+        .input()
+        .content_items
+        .iter()
+        .position(|item| {
+            matches!(
+                item,
+                ContentItem::ImageArtifact { artifact_id, .. }
+                    if artifact_id.as_str() == "artifact:budgeted"
+            )
+        })
+        .unwrap();
+    let image_provenance = primary_audit
+        .context_delivery_map()
+        .unwrap()
+        .content_items()[image_position]
+        .provenance();
+    assert_eq!(
+        image_provenance.references().artifact_refs(),
+        [
+            ArtifactId::new("artifact:original"),
+            ArtifactId::new("artifact:budgeted"),
+        ]
+    );
+    assert_eq!(
+        image_provenance.references().source_event_refs(),
+        [EventId::new("vision-route")]
+    );
 }
 
 #[tokio::test]

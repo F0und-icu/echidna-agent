@@ -883,6 +883,7 @@ async fn resume_replaces_the_primary_identity_forces_full_then_allows_fresh_incr
                 ProviderSessionRole::Primary,
                 2,
             ),
+            None,
         ),
         Err(cyber_agent::app::agent_loop::AgentLoopConfigurationError::ReplayedSessionProviderMismatch { .. })
     ));
@@ -894,6 +895,7 @@ async fn resume_replaces_the_primary_identity_forces_full_then_allows_fresh_incr
                 ProviderSessionRole::Primary,
                 2,
             ),
+            None,
         )
         .unwrap();
     assert!(agent.last_sampling_step_plan().is_none());
@@ -965,6 +967,7 @@ async fn failed_resumed_full_keeps_session_resumed_pending_for_the_next_attempt(
                 ProviderSessionRole::Primary,
                 2,
             ),
+            None,
         )
         .unwrap();
 
@@ -1047,6 +1050,7 @@ async fn resume_from_replayed_session_history_replaces_runtime_history_and_force
                 ProviderSessionRole::Primary,
                 2,
             ),
+            None,
         )
         .unwrap();
     agent
@@ -1066,6 +1070,28 @@ async fn resume_from_replayed_session_history_replaces_runtime_history_and_force
                 item,
                 ContentItem::Text { text, .. } if text == "durably recorded user input"
             ))
+    );
+    let restored_position = requests[1]
+        .input()
+        .content_items
+        .iter()
+        .position(|item| {
+            matches!(
+                item,
+                ContentItem::Text { text, .. } if text == "durably recorded user input"
+            )
+        })
+        .unwrap();
+    let restored_provenance = agent
+        .last_context_plan()
+        .unwrap()
+        .delivery_map()
+        .content_items()[restored_position]
+        .provenance();
+    assert_eq!(
+        restored_provenance.authority_level(),
+        AuthorityLevel::UnclassifiedLegacy,
+        "Resume must not guess that a durable user-role item was an operator assertion"
     );
     assert_eq!(
         agent.last_baseline_assessment(),

@@ -13,12 +13,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 
 use crate::domain::context::{
-    BaselineAssessment, BaselineInvalidationReason, ContextError, ContextPlan, ContextPlanner,
-    FullLogicalManifest, InternalRequestMetadata, ModelIdentity, ModelProfile, ProviderSession,
-    ProviderSessionId, ProviderSessionRole, StepSnapshot, TurnContext, TurnId,
+    AuthorityLevel, BaselineAssessment, BaselineInvalidationReason, ContextDeliveryMap,
+    ContextError, ContextOrigin, ContextPlan, ContextPlanner, ContextProvenance, ContextReferences,
+    ContextSlot, FreshnessIdentity, FullLogicalManifest, InternalRequestMetadata, ModelIdentity,
+    ModelProfile, ProviderSession, ProviderSessionId, ProviderSessionRole, RetentionClass,
+    SemanticClass, StepSnapshot, TurnContext, TurnId,
 };
 use crate::domain::domain_profile::DomainProfile;
-use crate::domain::events::StreamId;
+use crate::domain::events::{EventId, StreamId};
 use crate::domain::history::{ConversationHistory, HistoryError};
 use crate::domain::model::{ContentItem, MessageRole, ModelInputIR};
 use crate::domain::profile::{AgentModelProfile, AgentModelProfileError};
@@ -27,7 +29,9 @@ use crate::domain::request_audit::{
 };
 use crate::domain::research_control::{PromptComposition, ResearchControlError, ResearchPhase};
 use crate::domain::sampling::{SamplingStepPlan, TurnConfigurationSnapshot};
-use crate::domain::session::{SessionError, SessionState, SessionSummary, SessionSummaryDraft};
+use crate::domain::session::{
+    CompactionValidationContext, SessionError, SessionState, SessionSummary, SessionSummaryDraft,
+};
 use crate::domain::tools::{
     DeferredActivationSet, ExecutionId, IdempotencyKey, ResolvedToolPlan, ToolCall,
     ToolExecutionOutcome, ToolExposurePlan, ToolFailure, ToolFailureRetryability, ToolResult,
@@ -60,28 +64,47 @@ static NEXT_PRIMARY_RUNTIME_SESSION: AtomicU64 = AtomicU64::new(1);
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InitialImagePrimaryContext {
     content_item: ContentItem,
+    provenance: ContextProvenance,
     primary_profile: ModelProfile,
     primary_capability_hash: String,
 }
 
 impl InitialImagePrimaryContext {
     pub(crate) fn direct(
-        artifact_id: ArtifactId,
+        source_artifact_id: ArtifactId,
+        delivery_artifact_id: ArtifactId,
+        route_event_id: EventId,
         primary_profile: ModelProfile,
         primary_capability_hash: String,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, AgentLoopError> {
+        let mut artifact_refs = vec![source_artifact_id];
+        if !artifact_refs.contains(&delivery_artifact_id) {
+            artifact_refs.push(delivery_artifact_id.clone());
+        }
+        let provenance = ContextProvenance::new(
+            ContextSlot::TurnUpdates,
+            ContextOrigin::ArtifactProjection,
+            SemanticClass::AuthoritativeReference,
+            AuthorityLevel::FactReference,
+            RetentionClass::Recent,
+            FreshnessIdentity::new(delivery_artifact_id.as_str())?
+                .with_producer_version("vision-route:1"),
+            ContextReferences::new(Vec::new(), artifact_refs, Vec::new(), vec![route_event_id])?,
+        )?;
+        Ok(Self {
             content_item: ContentItem::ImageArtifact {
                 role: MessageRole::User,
-                artifact_id,
+                artifact_id: delivery_artifact_id,
             },
+            provenance,
             primary_profile,
             primary_capability_hash,
-        }
+        })
     }
 
     pub(crate) fn secondary(
         observation: &VisionObservation,
+        observation_event_id: EventId,
         primary_profile: ModelProfile,
         primary_capability_hash: String,
     ) -> Result<Self, AgentLoopError> {
@@ -90,11 +113,33 @@ impl InitialImagePrimaryContext {
                 message: error.to_string(),
             }
         })?;
+        let mut artifact_refs = vec![observation.source_artifact_id.clone()];
+        artifact_refs.extend(observation.derived_artifact_ids.iter().cloned());
+        let provenance = ContextProvenance::new(
+            ContextSlot::TurnUpdates,
+            ContextOrigin::ModelOutput,
+            SemanticClass::ModelObservation,
+            AuthorityLevel::ModelObservation,
+            RetentionClass::Recent,
+            FreshnessIdentity::new(&observation.task_hash)?
+                .with_producer_version("vision-observation:1"),
+            ContextReferences::new(
+                Vec::new(),
+                artifact_refs,
+                Vec::new(),
+                vec![
+                    observation.route_event_id.clone(),
+                    observation.request_audit_event_id.clone(),
+                    observation_event_id,
+                ],
+            )?,
+        )?;
         Ok(Self {
             content_item: ContentItem::Text {
                 role: MessageRole::User,
                 text,
             },
+            provenance,
             primary_profile,
             primary_capability_hash,
         })
@@ -104,13 +149,13 @@ impl InitialImagePrimaryContext {
         self,
         primary_profile: &ModelProfile,
         primary_capability_hash: &str,
-    ) -> Result<ContentItem, AgentLoopError> {
+    ) -> Result<(ContentItem, ContextProvenance), AgentLoopError> {
         if &self.primary_profile != primary_profile
             || self.primary_capability_hash != primary_capability_hash
         {
             return Err(AgentLoopError::InitialImagePrimaryIdentityMismatch);
         }
-        Ok(self.content_item)
+        Ok((self.content_item, self.provenance))
     }
 }
 
@@ -177,9 +222,11 @@ pub struct AgentLoop<'provider, 'tools, Provider: ?Sized, Tools: ?Sized> {
     pending_agent_model_profile: Option<AgentModelProfile>,
     active_tool_exposure_plan: ToolExposurePlan,
     committed_delivery_input: Option<ModelInputIR>,
+    committed_delivery_map: Option<ContextDeliveryMap>,
     committed_history_len: usize,
     committed_world_state: Option<ResearchWorldState>,
     committed_project_snapshot: Option<ProjectSnapshotContext>,
+    history_provenance: BTreeMap<usize, ContextProvenance>,
     bound_session_stream: Option<StreamId>,
     applied_compaction: Option<AppliedCompaction>,
 }
@@ -269,9 +316,11 @@ where
             pending_agent_model_profile: None,
             active_tool_exposure_plan,
             committed_delivery_input: None,
+            committed_delivery_map: None,
             committed_history_len: 0,
             committed_world_state: None,
             committed_project_snapshot: None,
+            history_provenance: BTreeMap::new(),
             bound_session_stream: None,
             applied_compaction: None,
         })
@@ -288,6 +337,7 @@ where
         &mut self,
         session: &SessionState,
         mut provider_session: ProviderSession,
+        validation: Option<&CompactionValidationContext<'_>>,
     ) -> Result<(), AgentLoopConfigurationError> {
         if session.lifecycle() != crate::domain::session::SessionLifecycle::Active
             || !session.has_resumed()
@@ -309,6 +359,13 @@ where
             .stream_id()
             .cloned()
             .ok_or(AgentLoopConfigurationError::CompactionSessionStreamMissing)?;
+        if let Some(compaction) = session.latest_compaction()
+            && compaction.summary().requires_reference_validation()
+        {
+            let validation = validation
+                .ok_or(AgentLoopConfigurationError::CompactionValidationContextRequired)?;
+            compaction.validate_references(validation)?;
+        }
         let normalized_items = session.normalized_history_items()?;
         let history = ConversationHistory::from_complete_content_items(&normalized_items)?;
         let applied_compaction = session
@@ -317,6 +374,7 @@ where
             .transpose()?;
         provider_session.reset(BaselineInvalidationReason::SessionResumed);
         self.history = history;
+        self.history_provenance.clear();
         self.provider_session = provider_session;
         self.bound_session_stream = Some(stream_id);
         self.session_summary = session
@@ -572,7 +630,7 @@ where
         user_text: impl Into<String>,
         cancellation: AgentCancellation,
         mut audit: Option<RequestAuditStage<'_>>,
-        initial_image: Option<ContentItem>,
+        initial_image: Option<(ContentItem, ContextProvenance)>,
         mut view_image_follow_up: Option<&mut ViewImageFollowUp<'_>>,
         stages: StreamingStages<'_>,
     ) -> Result<AgentTurnOutcome, AgentLoopError> {
@@ -587,10 +645,16 @@ where
                 executions: Vec::new(),
             });
         }
+        let user_text = user_text.into();
+        let user_provenance = ContextProvenance::operator_input(&user_text)?;
         let turn_history_start = self.history.items().len();
         self.history.append_user_text(user_text);
-        if let Some(initial_image) = initial_image {
+        self.history_provenance
+            .insert(turn_history_start, user_provenance);
+        if let Some((initial_image, provenance)) = initial_image {
+            let history_index = self.history.items().len();
             self.history.append_content_item(initial_image)?;
+            self.history_provenance.insert(history_index, provenance);
         }
         let capabilities = self.provider.capabilities();
         let context_budget = self.context_planner.default_budget(&capabilities)?;
@@ -621,6 +685,7 @@ where
                     project_snapshot: self.project_snapshot.as_ref(),
                     session_summary: self.session_summary.as_ref(),
                     history: self.history.items(),
+                    history_provenance: &self.history_provenance,
                     turn_history_start,
                     planner: &self.context_planner,
                     cache: self.fragment_cache.as_deref(),
@@ -643,6 +708,7 @@ where
             )?;
             let plan = sampling_step.context_plan();
             let full_input = plan.model_input();
+            let full_delivery_map = plan.delivery_map().clone();
             let full_snapshot = StepSnapshot::capture_with_renderer(
                 &turn,
                 request_index,
@@ -660,66 +726,98 @@ where
                     .iter()
                     .any(|item| matches!(item, ContentItem::Reasoning { .. }))
             });
-            let (mut delivery_input, mut snapshot, assessment) = if retains_reasoning
-                || matches!(
-                    full_assessment,
-                    BaselineAssessment::FullRequest {
-                        reason: BaselineInvalidationReason::InputNotAppendOnly
-                    }
-                ) {
-                match context_state::state_diff_delivery_input(
-                    context_state::StateDiffDeliveryInput {
-                        full_input: &full_input,
-                        current_plan: plan,
-                        planner: &self.context_planner,
-                        budget: context_budget,
-                        committed_input: self.committed_delivery_input.as_ref(),
-                        committed_history_len: self.committed_history_len,
-                        committed_manifest: self.committed_context_manifest.as_ref(),
-                        committed_world_state: self.committed_world_state.as_ref(),
-                        world_state: self.world_state.as_ref(),
-                        committed_project_snapshot: self.committed_project_snapshot.as_ref(),
-                        project_snapshot: self.project_snapshot.as_ref(),
-                        history: self.history.items(),
-                        turn_history_start,
-                    },
-                )? {
-                    Some(candidate_input) => {
-                        let candidate_snapshot = StepSnapshot::capture_with_renderer(
-                            &turn,
-                            request_index,
-                            &candidate_input,
-                            &capabilities,
-                            sampling_step.prompt_renderer(),
-                            InternalRequestMetadata::default(),
-                        )?;
-                        let candidate_assessment = self
-                            .provider_session
-                            .assess_delivery(&candidate_snapshot, capabilities.incremental_input);
-                        match candidate_assessment {
-                            BaselineAssessment::AppendOnlyCandidate { .. } => {
-                                (candidate_input, candidate_snapshot, candidate_assessment)
-                            }
-                            BaselineAssessment::FullRequest { reason }
-                                if reason.permits_state_diff_full_delivery()
-                                    || (reason.permits_distinct_full_delivery()
-                                        && candidate_input.is_reasoning_replay_of(&full_input)) =>
-                            {
-                                (candidate_input, candidate_snapshot, candidate_assessment)
-                            }
-                            _ if retains_reasoning => {
-                                return Err(AgentLoopError::ProviderContinuationUnavailable);
-                            }
-                            _ => (full_input.clone(), full_snapshot, full_assessment),
+            let (mut delivery_input, mut delivery_map, mut snapshot, assessment) =
+                if retains_reasoning
+                    || matches!(
+                        full_assessment,
+                        BaselineAssessment::FullRequest {
+                            reason: BaselineInvalidationReason::InputNotAppendOnly
                         }
+                    )
+                {
+                    match context_state::state_diff_delivery_input(
+                        context_state::StateDiffDeliveryInput {
+                            step_id: sampling_step.step_id(),
+                            full_input: &full_input,
+                            full_delivery_map: &full_delivery_map,
+                            current_plan: plan,
+                            planner: &self.context_planner,
+                            budget: context_budget,
+                            committed_input: self.committed_delivery_input.as_ref(),
+                            committed_delivery_map: self.committed_delivery_map.as_ref(),
+                            committed_history_len: self.committed_history_len,
+                            committed_manifest: self.committed_context_manifest.as_ref(),
+                            committed_world_state: self.committed_world_state.as_ref(),
+                            world_state: self.world_state.as_ref(),
+                            committed_project_snapshot: self.committed_project_snapshot.as_ref(),
+                            project_snapshot: self.project_snapshot.as_ref(),
+                            history: self.history.items(),
+                            history_provenance: &self.history_provenance,
+                            turn_history_start,
+                        },
+                    )? {
+                        Some((candidate_input, candidate_map)) => {
+                            let candidate_snapshot = StepSnapshot::capture_with_renderer(
+                                &turn,
+                                request_index,
+                                &candidate_input,
+                                &capabilities,
+                                sampling_step.prompt_renderer(),
+                                InternalRequestMetadata::default(),
+                            )?;
+                            let candidate_assessment = self.provider_session.assess_delivery(
+                                &candidate_snapshot,
+                                capabilities.incremental_input,
+                            );
+                            match candidate_assessment {
+                                BaselineAssessment::AppendOnlyCandidate { .. } => (
+                                    candidate_input,
+                                    candidate_map,
+                                    candidate_snapshot,
+                                    candidate_assessment,
+                                ),
+                                BaselineAssessment::FullRequest { reason }
+                                    if reason.permits_state_diff_full_delivery()
+                                        || (reason.permits_distinct_full_delivery()
+                                            && candidate_input
+                                                .is_reasoning_replay_of(&full_input)) =>
+                                {
+                                    (
+                                        candidate_input,
+                                        candidate_map,
+                                        candidate_snapshot,
+                                        candidate_assessment,
+                                    )
+                                }
+                                _ if retains_reasoning => {
+                                    return Err(AgentLoopError::ProviderContinuationUnavailable);
+                                }
+                                _ => (
+                                    full_input.clone(),
+                                    full_delivery_map.clone(),
+                                    full_snapshot,
+                                    full_assessment,
+                                ),
+                            }
+                        }
+                        None => (
+                            full_input.clone(),
+                            full_delivery_map.clone(),
+                            full_snapshot,
+                            full_assessment,
+                        ),
                     }
-                    None => (full_input.clone(), full_snapshot, full_assessment),
-                }
-            } else {
-                (full_input.clone(), full_snapshot, full_assessment)
-            };
+                } else {
+                    (
+                        full_input.clone(),
+                        full_delivery_map.clone(),
+                        full_snapshot,
+                        full_assessment,
+                    )
+                };
             self.last_baseline_assessment = Some(assessment.clone());
-            let request = self.request_for_assessment(&delivery_input, &assessment)?;
+            let (request, request_delivery_map) =
+                self.request_for_assessment(&delivery_input, &delivery_map, &assessment)?;
             reserve_provider_request(&mut provider_requests)?;
             self.last_context_plan = Some(plan.clone());
             self.last_sampling_step_plan = Some(sampling_step.clone());
@@ -728,7 +826,7 @@ where
                 &sampling_step,
                 &full_input,
                 &request,
-                &capabilities,
+                &request_delivery_map,
                 &assessment,
             )?;
             let mut forward_text_delta = |event: &crate::domain::model::ModelEvent| {
@@ -780,6 +878,7 @@ where
                             .any(|item| matches!(item, ContentItem::Reasoning { .. }))
                         {
                             delivery_input = full_input.clone();
+                            delivery_map = full_delivery_map.clone();
                             snapshot = StepSnapshot::capture_with_renderer(
                                 &turn,
                                 request_index,
@@ -791,12 +890,13 @@ where
                         }
                         reserve_provider_request(&mut provider_requests)?;
                         let fallback_request = ModelRequest::full(delivery_input.clone());
+                        delivery_map.validate_against(&delivery_input)?;
                         self.record_request_audit_attempt(
                             &mut audit,
                             &sampling_step,
                             &full_input,
                             &fallback_request,
-                            &capabilities,
+                            &delivery_map,
                             &fallback_assessment,
                         )?;
                         ModelStreamingService::new(self.provider)
@@ -839,8 +939,14 @@ where
             self.provider_session
                 .record_completed_sample(&snapshot, server_output_items.clone())?;
             self.commit_continuation(&completion);
-            delivery_input.content_items.extend(server_output_items);
+            delivery_input
+                .content_items
+                .extend(server_output_items.clone());
+            delivery_map
+                .append_model_output_items(sampling_step.step_id(), &server_output_items)?;
+            delivery_map.validate_against(&delivery_input)?;
             self.committed_delivery_input = Some(delivery_input);
+            self.committed_delivery_map = Some(delivery_map);
             self.committed_history_len = self.history.items().len();
             self.committed_world_state = self.world_state.clone();
             self.committed_project_snapshot = self.project_snapshot.clone();
@@ -912,8 +1018,11 @@ where
             })?;
             let context = stage(selection).await?;
             let primary_capability_hash = self.provider.capabilities().semantic_hash();
-            let content = context.into_content_item(&self.profile, &primary_capability_hash)?;
+            let (content, provenance) =
+                context.into_content_item(&self.profile, &primary_capability_hash)?;
+            let history_index = self.history.items().len();
             self.history.append_content_item(content)?;
+            self.history_provenance.insert(history_index, provenance);
         }
         Ok(())
     }
@@ -978,6 +1087,7 @@ where
         self.continuation = None;
         self.committed_context_manifest = None;
         self.committed_delivery_input = None;
+        self.committed_delivery_map = None;
         self.committed_history_len = self.history.items().len();
         self.committed_world_state = None;
         self.committed_project_snapshot = None;
@@ -987,10 +1097,15 @@ where
     fn request_for_assessment(
         &self,
         full_input: &ModelInputIR,
+        full_delivery_map: &ContextDeliveryMap,
         assessment: &BaselineAssessment,
-    ) -> Result<ModelRequest, AgentLoopError> {
+    ) -> Result<(ModelRequest, ContextDeliveryMap), AgentLoopError> {
+        full_delivery_map.validate_against(full_input)?;
         Ok(match assessment {
-            BaselineAssessment::FullRequest { .. } => ModelRequest::full(full_input.clone()),
+            BaselineAssessment::FullRequest { .. } => (
+                ModelRequest::full(full_input.clone()),
+                full_delivery_map.clone(),
+            ),
             BaselineAssessment::AppendOnlyCandidate { delta_items } => {
                 let continuation = self
                     .continuation
@@ -1000,7 +1115,8 @@ where
                     .ok_or(AgentLoopError::ContinuationIdentityMissing)?;
                 let mut delta = full_input.clone();
                 delta.content_items = delta_items.clone();
-                ModelRequest::incremental(delta, continuation)
+                let delivery_map = full_delivery_map.for_incremental_delta(full_input, &delta)?;
+                (ModelRequest::incremental(delta, continuation), delivery_map)
             }
         })
     }
@@ -1205,6 +1321,8 @@ pub enum AgentLoopConfigurationError {
     },
     #[error("apply_compaction requires a durable session.compaction_created fact")]
     CompactionRequired,
+    #[error("Session Summary v2 requires current Project, Research stream and Receipt facts")]
+    CompactionValidationContextRequired,
     #[error("the durable Compaction Summary does not match the active local candidate")]
     CompactionSummaryCandidateMismatch,
     #[error("Compaction requires an Active replayed SessionState")]

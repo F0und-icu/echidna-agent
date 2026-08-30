@@ -5,14 +5,14 @@
 - Architecture version: `1.6.0`; v1/v1.1 remain remotely sealed, v1.2 through v1.6 are locally frozen with remote seal unauthorized
 - Phase: `IMPLEMENTATION`
 - Implementation: `STARTED`
-- Current milestone: `M4-S3e1` typed EvidenceLink and evidence-gap projection is complete locally
+- Current milestone: `M4-S3e2` complete Context provenance and Evidence-Spine Compaction
 - Current slice: `M4-S3e2`
-- Slice state: M4-S3e1 is `COMPLETE_LOCAL`; M4-S3e2 is `READY_NOT_AUTHORIZED`
-- Lean governance: `PASS`; M4-S3e1 has one Research evidence-relation/applicability owner, one conservative Upcaster, one pure Gap projection and no second evidence or Receipt store
-- Local Git initialized: `yes`; local branch `agent/m4-s3e1-typed-evidence` starts from M4-S3d Squash Merge `32bc0f2`
-- Remote repository: `F0und-icu/cyber-agent` private; M4-S3d is merged through PR `#51` as `32bc0f2`, while no tag, release or Actions run was created
+- Slice state: M4-S3e1 is `COMPLETE_REMOTE_SEALED`; M4-S3e2 is `COMPLETE_LOCAL_GATED` and awaiting its authorized remote seal
+- Lean governance: `PASS`; M4-S3e2 scope is locked to one Context provenance/map owner, additive RequestAudit persistence and one reference-only Session Summary v2 path
+- Local Git initialized: `yes`; local branch `agent/m4-s3e2-context-evidence-spine` starts from M4-S3e1 Squash Merge `7d5b6d0`
+- Remote repository: `F0und-icu/cyber-agent` private; M4-S3e1 is merged through PR `#52` as `7d5b6d0`, while no tag, release or Actions run was created
 - Documentation baseline commit: `55ff3be`
-- Current code base: M4-S3d Squash Merge `32bc0f2` on `main`; M4-S3e1 is complete, gated and uncommitted on the local Slice branch
+- Current code base: M4-S3e1 Squash Merge `7d5b6d0` on `main`; the complete M4-S3e2 implementation, independent approval, local Gate and Live Tool Loop are on the local delivery branch
 - Upstream Codex reference baseline: `868c9edb0da913a5fc699a71664e65f44f6058b0`; read-only and not a Cyber Agent dependency
 
 ## Latest Local Design Update
@@ -198,21 +198,43 @@
 ## Current Slice
 
 - Slice: `M4-S3e2`
-- State: `READY_NOT_AUTHORIZED`; no implementation has started.
-- Candidate scope: the complete Context provenance and Evidence-Spine Compaction path defined in `IMPLEMENTATION_PLAN.md`.
-- Boundary: M4-S3e2 implementation, Live Tests, M4-S3e1 Git publication, Actions, merge, tag, release and architecture seal remain unauthorized.
+- State: `COMPLETE_LOCAL_GATED`; independent audit, complete local Gate, one configuration-driven synthetic Live Tool Loop and Lean Review pass. The authorized remote seal remains pending.
+- Scope lock: complete Context provenance through deterministic Fragment/Subitem identities and one validated ContextDeliveryMap; persist it additively through RequestAudit; replace new Compaction summaries with a typed EvidenceSpine plus bounded non-authoritative Narrative while retaining strict legacy v1 readability.
+- Intended production touch points: the existing ContextPlanner/generic-v1 renderer, SamplingStepPlan and RequestAudit owner; the existing Session Compaction/Resume path; the existing Research/Artifact/Receipt reducers only through typed reference validation.
+- Boundary: no second renderer, Provider DeliveryItemId in Domain, copied Research claim strings, second fact store, autonomous Compaction workflow, retrieval/guidance work, new dependency, Actions run, tag, release or architecture seal.
+- Acceptance: exact instruction/content provenance coverage including truncation and ArtifactRef transforms; RequestAudit v1/v2 compatibility plus v3 map reconstruction; Summary v1 readability and Summary v2 missing/cross-Project/stale/type-mismatch rejection; complete local Cargo/Lean Gate after independent audit.
+
+### M4-S3e2 Pre-Audit Checkpoint
+
+- State remains `IN_PROGRESS`; this checkpoint is not an audit approval, complete Gate, Lean Review or Slice completion.
+- Basic checks pass at the current worktree: `cargo fmt --all -- --check`, `cargo check --locked --all-targets --all-features` and `git diff --check`.
+- The five bounded Slice suites pass 38/38 tests: `context_planner`, `m4_sampling_plan`, `request_audit`, `session_compaction` and `vision_flow`.
+- The thirteen affected suites pass 159 default-enabled tests with one explicit Live Smoke ignored: `cli_chat_loopback`, `m3_world_state_mode`, `m4_research_control`, `tool_loop_integration`, `trace_replay`, `session_resume`, `inspection_cli`, `inspection_audited_cli`, `project_event_store`, `research_evidence`, `provider_baseline`, `m3_multimodal` and `event_upcasting`.
+- Main-thread pre-review found no blocking ownership drift: one `generic-v1` renderer and delivery-map owner remain; Full, Incremental, Provider fallback, state-diff and scoped Vision paths carry validated maps; Summary v2 reuses authoritative Research/Artifact/Receipt projections and CLI Resume validates before its durable Resume Event.
+- No dependency, Provider/configuration path, Codex port, inline `src/` test, Actions run, Live request, commit, push or remote publication was added. Independent read-only audit remains separately unauthorized, so the complete Gate and Lean Review have not started.
+
+### M4-S3e2 Completion and Lean Review
+
+- Semantic owners: `domain/context/planner` remains the sole `generic-v1` ordering/render/budget/transform and `ContextDeliveryMap` owner. It now assigns deterministic Fragment/Subitem identities, validates orthogonal provenance, covers final instruction spans and ContentItem positions, and binds canonical Artifact-reference transforms. `domain/request_audit` alone persists and reconstructs additive v3 delivery maps while v1/v2 remain readable. `domain/session/compaction` alone owns reference-only Summary v2 `EvidenceSpine` plus bounded non-authoritative `NarrativeSummary`; authoritative Research, Artifact and Receipt projections remain its validation inputs rather than copied facts.
+- Reuse: the existing one AgentLoop, SamplingStepPlan, ContextPlanner, Prompt renderer, RequestAudit Blob layout, Session reducer/Resume path, Research/Artifact/Receipt projections, Provider composition and scoped Vision flow are reused. Full, Incremental, provider-rejection fallback, state-diff and Vision requests carry the same validated delivery-map semantics. `ContentFragmentInput` is one private current-consumer parameter object shared by full and incremental History provenance construction.
+- API and dependencies: no crate, Cargo feature, Provider/config field, credential source, Event/fact store, Port, renderer Trait/Registry, Hook or Codex port was added. New production surface is limited to the typed Context provenance/map, RequestAudit v3 and Summary v2 contracts with current App/Domain consumers; visibility remains crate-private where the production boundary permits. No test-only public projection or future placeholder type remains.
+- Removed/deferred: Summary v2 removes duplicated authoritative `verified_facts`/hypothesis/path strings in favor of validated references; legacy Summary v1 remains strictly readable without semantic promotion. Retrieval and evidence-gap guidance remain M4-S3f/g Shadow work; Provider DeliveryItemId, autonomous Compaction, second renderer, new database and model-visible Shadow output remain deferred. No experimental inline test or duplicate transform validator remains.
+- Independent audit: Terra xhigh first returned `CHANGES_REQUIRED` for incomplete scoped-Vision source/route provenance and an `ArtifactReference` transform that could be relabeled without checking the actual delivered item. Both were fixed with permanent ContextPlanner, Vision and RequestAudit-reconstruction regressions. Its repair review confirmed those P1 closed but found two denied-warning Clippy failures; redundant RequestAudit capabilities now come from immutable `SamplingStepPlan`, full/incremental fragment inputs share one private parameter object, and test closure borrows end by lexical scope. The final bounded re-audit returned `APPROVE` with no P0/P1.
+- Tests and Gate: the five Slice suites pass 38/38; the thirteen affected suites pass 159 default-enabled tests with one Live Smoke ignored. The complete pinned-toolchain Gate passes `cargo fmt --all -- --check`, denied-warning Clippy, `cargo test --locked --all-targets --all-features`, `cargo build --locked`, inline-test scan and `git diff --check`. The suite discovers 368 tests: 366 default-enabled pass and two opt-in Live Smokes remain ignored.
+- Live: the explicit user-owned `/Users/f0und/.config/cyber-agent/deepseek-live.toml` selects `deepseek-v4-flash` through the one `http_sse + responses` Composition Root with Full-only text capabilities and Vision disabled. `doctor` returned ready; the fixed synthetic Shadow Tool Loop passed 1/1, invoked only its replay Tool and remained derived non-evidence. No Codex credential/login state or real target was used, no secret entered Git or durable Project facts, and no Actions run occurred.
+- Governance debt: none blocking. M4-S3f cannot start until this Slice is remotely sealed; every subsequent Slice retains its own independent audit, Gate, Live decision, Lean Review and Git/PR seal.
 
 ## Current Authorization
 
-The F1e and M4-S3c authorities are consumed. PR `#51` and Squash Merge `32bc0f2` consumed the M4-S3d submission authority. The M4-S3e1 local implementation and Terra xhigh read-only audit authorities are now consumed; the earlier Actions pause remains in force.
+The F1e and M4-S3c authorities are consumed. PR `#51`/`32bc0f2` and PR `#52`/`7d5b6d0` consumed the M4-S3d and M4-S3e1 submission authorities. The user authorized completing, testing and independently sealing M4-S3e2, then proceeding in order through M4-S3f, M4-S3g and M4-S4; the earlier Actions pause remains in force.
 
-- Run mode: `REVIEW_ONLY`; no implementation Slice is currently authorized
-- Git mode: `LOCAL_WORKTREE_ONLY`; the M4-S3e1 branch is authorized, while its commit, push, PR, merge, tag and release remain unauthorized
+- Run mode: `IMPLEMENT_AND_SEAL_SEQUENTIALLY`; finish the current Slice before beginning the next
+- Git mode: `SLICE_BRANCH_PR_MERGE`; M4-S3e2 commit, push, private PR and merge are authorized, followed by a separate branch for each later Slice
 - GitHub Actions mode: `PAUSED_BY_OPERATOR`; do not trigger or rerun a Workflow until the user explicitly resumes it after quota recovery
-- Delegation mode: `OFF`; the completed M4-S3e1 Terra xhigh audit authority does not authorize another sub-agent turn
-- Live test mode: `OFF`; M4-S3e1 used only local Event/Research/Artifact/Receipt fixtures and pure projections
+- Delegation mode: `AUTHORIZED_BOUNDED`; Terra xhigh owns cross-boundary implementation/audit and Luna xhigh only bounded modules/tests/docs as defined by repository governance; one-Agent runtime is unchanged
+- Live test mode: `AUTHORIZED_EXPLICIT_CONFIG`; Mock/Fixture/Replay remain default and each selected Live path uses only an explicit Cyber Agent Config v1 Provider
 - Configuration rule: Provider binding, model, Base URL and Capability Mapping remain Config v1 data. A Provider selects exactly one inline `api_key` or dedicated `credential_ref`; neither may infer Provider/model identity or use Codex login state.
-- Stop condition: wait for separate M4-S3e1 Git publication or M4-S3e2 implementation authority; do not infer either from local completion
+- Stop condition: complete and remotely seal each Slice independently; stop at M4-S4 acceptance, recording any unavailable Vision Live path honestly rather than fabricating PASS
 
 ## M4-S3e1 Slice Start
 

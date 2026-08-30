@@ -138,11 +138,26 @@ async fn audited_agent_loop_records_each_full_incremental_and_provider_rejected_
         .unwrap(),
         RequestAdapterVersion::new("fixture-adapter-v1").unwrap(),
     );
-    let mut audits = Vec::new();
+    let binding = audit_context.binding().clone();
+    let blobs = AuditBlobStore::default();
+    let service = RequestAuditService::new(&blobs, binding.clone());
+    let mut projection = audit_projection(binding.session_stream_id().clone());
+    let mut sink = AuditSink::default();
+    let mut manifests = Vec::new();
+    let mut audit_index = 0_u32;
     {
         let mut record = |attempt| {
-            audits.push(attempt);
-            Ok(())
+            audit_index += 1;
+            service
+                .record(
+                    attempt,
+                    EventId::new(format!("audit-loop-request-{audit_index}")),
+                    OccurredAt::new(format!("2026-08-23T00:00:0{audit_index}Z")),
+                    &mut projection,
+                    &mut sink,
+                )
+                .map(|manifest| manifests.push(manifest))
+                .map_err(RequestAuditServiceError::into_agent_loop_error)
         };
         agent
             .run_turn_audited(
@@ -169,24 +184,35 @@ async fn audited_agent_loop_records_each_full_incremental_and_provider_rejected_
     assert!(!requests[0].is_incremental());
     assert!(requests[1].is_incremental());
     assert!(!requests[2].is_incremental());
-    assert_eq!(audits.len(), requests.len());
+    assert_eq!(manifests.len(), requests.len());
     assert_eq!(
-        audits[0].delivery().reason(),
+        manifests[0].delivery().reason(),
         RequestAuditDeliveryReason::Full(BaselineInvalidationReason::NoBaseline)
     );
     assert_eq!(
-        audits[1].delivery().reason(),
+        manifests[1].delivery().reason(),
         RequestAuditDeliveryReason::AppendOnlyCandidate
     );
     assert_eq!(
-        audits[2].delivery().reason(),
+        manifests[2].delivery().reason(),
         RequestAuditDeliveryReason::Full(BaselineInvalidationReason::ProviderRejected)
     );
-    assert!(
-        audits.iter().all(|attempt| {
-            attempt.binding().session_stream_id().as_str() == "session:audit-loop"
-        })
-    );
+    for (manifest, request) in manifests.iter().zip(&requests) {
+        assert_eq!(manifest.schema_version(), 3);
+        assert_eq!(
+            manifest.binding().session_stream_id().as_str(),
+            "session:audit-loop"
+        );
+        let reconstructed = service.reconstruct(manifest).unwrap();
+        assert_eq!(&reconstructed, request.input());
+        manifest
+            .context_delivery_map()
+            .expect("RequestAudit v3 retains the actual delivered map")
+            .validate_against(&reconstructed)
+            .unwrap();
+    }
+    assert_eq!(projection.state().request_audits(), manifests);
+    assert_eq!(sink.events.len(), requests.len());
 }
 
 #[tokio::test]
@@ -238,7 +264,7 @@ async fn audited_agent_loop_commits_through_the_real_request_audit_service_befor
     assert_eq!(provider.requests().len(), 1);
     assert_eq!(projection.state().request_audits().len(), 1);
     let manifest = &projection.state().request_audits()[0];
-    assert_eq!(manifest.schema_version(), 2);
+    assert_eq!(manifest.schema_version(), 3);
     assert_eq!(manifest.prompt_renderer().unwrap().id(), "generic");
     assert_eq!(manifest.prompt_renderer().unwrap().version(), 1);
     assert_eq!(
@@ -247,8 +273,313 @@ async fn audited_agent_loop_commits_through_the_real_request_audit_service_befor
             .last_sampling_step_plan()
             .map(|step| step.resolved_tool_plan().fingerprint())
     );
+    let reconstructed = service.reconstruct(manifest).unwrap();
+    manifest
+        .context_delivery_map()
+        .expect("AgentLoop RequestAudit must persist delivered provenance")
+        .validate_against(&reconstructed)
+        .unwrap();
+    assert_eq!(&reconstructed, provider.requests()[0].input());
     assert_eq!(sink.events.len(), 1);
     assert!(blobs.blob_count() > 0);
+}
+
+#[tokio::test]
+async fn request_audit_v3_reconstruction_rejects_delivery_map_tampering() {
+    let root = TemporaryDirectory::new("m4-request-audit-v3-tamper");
+    let tools = ToolRegistry::for_project(root.path());
+    let provider = ScriptedProvider::new(
+        incremental_capabilities(),
+        [completed_response("recorded", "response-recorded")],
+    );
+    let mut agent = AgentLoop::new(&provider, &tools);
+    let binding = RequestAuditBinding::new(
+        ProjectId::new("project-audit-v3-tamper"),
+        StreamId::new("session:audit-v3-tamper"),
+    )
+    .unwrap();
+    let audit_context = RequestAuditRunContext::new(
+        binding.clone(),
+        RequestAdapterVersion::new("fixture-adapter-v1").unwrap(),
+    );
+    let blobs = AuditBlobStore::default();
+    let service = RequestAuditService::new(&blobs, binding.clone());
+    let mut projection = audit_projection(binding.session_stream_id().clone());
+    let mut sink = AuditSink::default();
+    {
+        let mut record = |attempt| {
+            service
+                .record(
+                    attempt,
+                    EventId::new("audit-v3-tamper-request"),
+                    OccurredAt::new("2026-08-23T00:00:01Z"),
+                    &mut projection,
+                    &mut sink,
+                )
+                .map(|_| ())
+                .map_err(RequestAuditServiceError::into_agent_loop_error)
+        };
+        agent
+            .run_turn_audited(
+                "user input",
+                AgentCancellation::new(),
+                &audit_context,
+                &mut record,
+            )
+            .await
+            .unwrap();
+    }
+
+    let encoded = serde_json::to_value(&projection.state().request_audits()[0]).unwrap();
+    assert_eq!(encoded["schema_version"], serde_json::json!(3));
+
+    let mut wrong_position = encoded.clone();
+    wrong_position["context_delivery_map"]["content_items"][0]["final_position"] =
+        serde_json::json!(1);
+    let wrong_position: cyber_agent::domain::request_audit::RequestAuditManifest =
+        serde_json::from_value(wrong_position).unwrap();
+    assert!(matches!(
+        wrong_position.validate(),
+        Err(cyber_agent::domain::request_audit::RequestAuditError::ContextDeliveryMap { .. })
+    ));
+    assert!(matches!(
+        service.reconstruct(&wrong_position),
+        Err(
+            cyber_agent::domain::request_audit::RequestAuditReconstructionError::Audit(
+                cyber_agent::domain::request_audit::RequestAuditError::ContextDeliveryMap { .. }
+            )
+        )
+    ));
+
+    let mut wrong_hash = encoded.clone();
+    wrong_hash["context_delivery_map"]["content_items"][0]["content_hash"] =
+        serde_json::json!("a".repeat(64));
+    let wrong_hash: cyber_agent::domain::request_audit::RequestAuditManifest =
+        serde_json::from_value(wrong_hash).unwrap();
+    wrong_hash
+        .validate()
+        .expect("content bytes are required to detect a forged map hash");
+    assert!(matches!(
+        service.reconstruct(&wrong_hash),
+        Err(
+            cyber_agent::domain::request_audit::RequestAuditReconstructionError::Audit(
+                cyber_agent::domain::request_audit::RequestAuditError::ContextDeliveryMap { .. }
+            )
+        )
+    ));
+
+    let mut wrong_provenance = encoded;
+    wrong_provenance["context_delivery_map"]["content_items"][0]["provenance"]["authority_level"] =
+        serde_json::json!("fact_reference");
+    let wrong_provenance: cyber_agent::domain::request_audit::RequestAuditManifest =
+        serde_json::from_value(wrong_provenance).unwrap();
+    assert!(matches!(
+        wrong_provenance.validate(),
+        Err(cyber_agent::domain::request_audit::RequestAuditError::ContextDeliveryMap { .. })
+    ));
+    assert!(matches!(
+        service.reconstruct(&wrong_provenance),
+        Err(
+            cyber_agent::domain::request_audit::RequestAuditReconstructionError::Audit(
+                cyber_agent::domain::request_audit::RequestAuditError::ContextDeliveryMap { .. }
+            )
+        )
+    ));
+}
+
+#[tokio::test]
+async fn full_only_state_diff_audit_map_matches_the_actual_candidate() {
+    let root = TemporaryDirectory::new("m4-request-audit-state-diff");
+    let tools = ToolRegistry::for_project(root.path());
+    let provider = ScriptedProvider::new(
+        capabilities(false),
+        [
+            completed_response("first", "response-first"),
+            completed_response("second", "response-second"),
+        ],
+    );
+    let mut agent = AgentLoop::new(&provider, &tools).with_world_state(world_state("a"));
+    let binding = RequestAuditBinding::new(
+        ProjectId::new("project-audit-state-diff"),
+        StreamId::new("session:audit-state-diff"),
+    )
+    .unwrap();
+    let audit_context = RequestAuditRunContext::new(
+        binding.clone(),
+        RequestAdapterVersion::new("fixture-adapter-v1").unwrap(),
+    );
+    let blobs = AuditBlobStore::default();
+    let service = RequestAuditService::new(&blobs, binding.clone());
+    let mut projection = audit_projection(binding.session_stream_id().clone());
+    let mut sink = AuditSink::default();
+    {
+        let mut audit_index = 0_u32;
+        let mut record = |attempt| {
+            audit_index += 1;
+            service
+                .record(
+                    attempt,
+                    EventId::new(format!("audit-state-diff-{audit_index}")),
+                    OccurredAt::new(format!("2026-08-23T00:00:0{audit_index}Z")),
+                    &mut projection,
+                    &mut sink,
+                )
+                .map(|_| ())
+                .map_err(RequestAuditServiceError::into_agent_loop_error)
+        };
+
+        agent
+            .run_turn_audited(
+                "first user input",
+                AgentCancellation::new(),
+                &audit_context,
+                &mut record,
+            )
+            .await
+            .unwrap();
+        agent.set_world_state(world_state("b"));
+        agent
+            .run_turn_audited(
+                "second user input",
+                AgentCancellation::new(),
+                &audit_context,
+                &mut record,
+            )
+            .await
+            .unwrap();
+    }
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(!requests[1].is_incremental());
+    assert!(
+        requests[1]
+            .input()
+            .content_items
+            .iter()
+            .any(|item| matches!(
+                item,
+                ContentItem::Text { text, .. } if text.contains("research_world_state_diff")
+            ))
+    );
+    let manifest = &projection.state().request_audits()[1];
+    assert_eq!(
+        manifest.delivery().reason(),
+        RequestAuditDeliveryReason::Full(BaselineInvalidationReason::IncrementalInputUnsupported)
+    );
+    let reconstructed = service.reconstruct(manifest).unwrap();
+    assert_eq!(&reconstructed, requests[1].input());
+    manifest
+        .context_delivery_map()
+        .unwrap()
+        .validate_against(&reconstructed)
+        .unwrap();
+}
+
+#[tokio::test]
+async fn full_reasoning_tool_continuation_audit_preserves_order_and_provenance() {
+    let root = TemporaryDirectory::new("m4-request-audit-reasoning-continuation");
+    let tools = ToolRegistry::for_project(root.path());
+    let provider = ScriptedProvider::new(
+        capabilities(false),
+        [
+            vec![
+                Ok(ModelStreamEvent::Event(ModelEvent::ReasoningItem {
+                    text: "inspect the available research tools".to_owned(),
+                })),
+                Ok(ModelStreamEvent::Event(ModelEvent::ToolCall {
+                    call: ToolCall::new(
+                        ToolCallId::new("reasoning-tool-search"),
+                        ToolName::new("tool_search"),
+                        serde_json::json!({"query": "file inspection"}),
+                    ),
+                })),
+                Ok(ModelStreamEvent::Completed(ModelResponseCompletion::new(
+                    ProviderResponseId::new("response-reasoning-tool"),
+                ))),
+            ],
+            completed_response("tool result considered", "response-after-tool"),
+        ],
+    );
+    let mut agent = AgentLoop::new(&provider, &tools);
+    let binding = RequestAuditBinding::new(
+        ProjectId::new("project-audit-reasoning"),
+        StreamId::new("session:audit-reasoning"),
+    )
+    .unwrap();
+    let audit_context = RequestAuditRunContext::new(
+        binding.clone(),
+        RequestAdapterVersion::new("fixture-adapter-v1").unwrap(),
+    );
+    let blobs = AuditBlobStore::default();
+    let service = RequestAuditService::new(&blobs, binding.clone());
+    let mut projection = audit_projection(binding.session_stream_id().clone());
+    let mut sink = AuditSink::default();
+    {
+        let mut audit_index = 0_u32;
+        let mut record = |attempt| {
+            audit_index += 1;
+            service
+                .record(
+                    attempt,
+                    EventId::new(format!("audit-reasoning-{audit_index}")),
+                    OccurredAt::new(format!("2026-08-23T00:00:0{audit_index}Z")),
+                    &mut projection,
+                    &mut sink,
+                )
+                .map(|_| ())
+                .map_err(RequestAuditServiceError::into_agent_loop_error)
+        };
+
+        agent
+            .run_turn_audited(
+                "inspect the project",
+                AgentCancellation::new(),
+                &audit_context,
+                &mut record,
+            )
+            .await
+            .unwrap();
+    }
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(!requests[1].is_incremental());
+    let items = &requests[1].input().content_items;
+    let reasoning_position = items
+        .iter()
+        .position(|item| matches!(item, ContentItem::Reasoning { .. }))
+        .unwrap();
+    assert!(
+        matches!(items.get(reasoning_position + 1), Some(ContentItem::ToolCall { call }) if call.call_id.as_str() == "reasoning-tool-search")
+    );
+    assert!(
+        matches!(items.get(reasoning_position + 2), Some(ContentItem::ToolResult { result }) if result.call_id.as_str() == "reasoning-tool-search")
+    );
+
+    let manifest = &projection.state().request_audits()[1];
+    let reconstructed = service.reconstruct(manifest).unwrap();
+    assert_eq!(&reconstructed, requests[1].input());
+    let map = manifest.context_delivery_map().unwrap();
+    map.validate_against(&reconstructed).unwrap();
+    assert_eq!(
+        map.content_items()[reasoning_position]
+            .provenance()
+            .authority_level(),
+        cyber_agent::domain::context::AuthorityLevel::ModelObservation
+    );
+    assert_eq!(
+        map.content_items()[reasoning_position + 1]
+            .provenance()
+            .authority_level(),
+        cyber_agent::domain::context::AuthorityLevel::ModelObservation
+    );
+    assert_eq!(
+        map.content_items()[reasoning_position + 2]
+            .provenance()
+            .authority_level(),
+        cyber_agent::domain::context::AuthorityLevel::DerivedNonEvidence
+    );
 }
 
 #[tokio::test]

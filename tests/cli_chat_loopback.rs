@@ -2,6 +2,7 @@
 mod provider_config;
 mod support;
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
@@ -10,6 +11,17 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use cyber_agent::adapters::project_event_store::{Project, ProjectEventStream};
+use cyber_agent::domain::events::{EventEnvelope, EventId, EventType, OccurredAt, StreamId};
+use cyber_agent::domain::research::{
+    ResearchEvent, ResearchReducer, TargetKind, TargetSnapshotDraft, TargetSnapshotId,
+    TargetSnapshotRecord,
+};
+use cyber_agent::domain::session::{
+    CompactionValidationContext, EvidenceSpine, NarrativeSummary, ResearchStreamIdentity,
+    SessionEvent, SessionReducer, SessionSummaryDraft,
+};
+use cyber_agent::ports::{EventSink, EventSource};
 use serde_json::Value;
 use support::TemporaryDirectory;
 
@@ -289,6 +301,133 @@ fn assert_tree_does_not_contain(root: &std::path::Path, needle: &[u8]) {
             );
         }
     }
+}
+
+fn append_research_snapshot(project: &Project, label: &str) -> TargetSnapshotId {
+    let snapshot_id = TargetSnapshotId::new(format!("snapshot-{label}"));
+    let record = TargetSnapshotRecord::from_draft(TargetSnapshotDraft {
+        id: snapshot_id.clone(),
+        target_id: "fixture.target".to_owned(),
+        kind: TargetKind::Source,
+        locator: format!("src/{label}"),
+        version: "1.0.0".to_owned(),
+        build_id: format!("build-{label}"),
+        target_artifact_ids: Vec::new(),
+        environment_fingerprint: "fixture-environment".to_owned(),
+        device_fingerprint: "fixture-device".to_owned(),
+        captured_at: "2026-08-31T00:00:00Z".to_owned(),
+        notes: String::new(),
+    })
+    .unwrap();
+    let event = ResearchEvent::TargetSnapshotRecorded(record);
+    let mut writer = project.open_writer().unwrap();
+    let mut store = writer.open_research(None).unwrap();
+    let envelope = EventEnvelope::current(
+        EventId::new(format!("research-{label}")),
+        ProjectEventStream::Research.stream_id(),
+        store.next_sequence().unwrap(),
+        OccurredAt::new("2026-08-31T00:00:00Z"),
+        EventType::new(event.event_type().as_str()),
+        event.encode_payload().unwrap(),
+    );
+    EventSink::append_event(&mut store, &envelope).unwrap();
+    snapshot_id
+}
+
+fn append_v2_compaction(project: &Project, session: &str, target: TargetSnapshotId) {
+    let research_events = {
+        let mut writer = project.open_writer().unwrap();
+        let store = writer.open_research(None).unwrap();
+        EventSource::read_events(&store, &ProjectEventStream::Research.stream_id()).unwrap()
+    };
+    let research_stream =
+        ResearchStreamIdentity::from_events(project.project_id().clone(), &research_events)
+            .unwrap();
+    let research_state = ResearchReducer.reduce(research_events).unwrap();
+    let receipt_ids = BTreeSet::new();
+    let validation = CompactionValidationContext::new(
+        project.project_id(),
+        &research_stream,
+        &research_state,
+        &receipt_ids,
+    );
+    let draft = SessionSummaryDraft::new(
+        EvidenceSpine::new(
+            research_stream.clone(),
+            vec![target],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap(),
+        NarrativeSummary::new(
+            "resume fixture",
+            "reference-only summary",
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let state = {
+        let session_id = StreamId::new(session);
+        let stream_id = ProjectEventStream::Session(session_id.clone()).stream_id();
+        let mut writer = project.open_writer().unwrap();
+        let store = writer.open_session(session_id, None).unwrap();
+        SessionReducer
+            .reduce(EventSource::read_events(&store, &stream_id).unwrap())
+            .unwrap()
+    };
+    let compaction = state.next_compaction(draft, 0, &validation).unwrap();
+
+    let session_id = StreamId::new(session);
+    let stream_id = ProjectEventStream::Session(session_id.clone()).stream_id();
+    let mut writer = project.open_writer().unwrap();
+    let mut store = writer.open_session(session_id, None).unwrap();
+    let sequence = store.next_sequence().unwrap();
+    let envelope = SessionEvent::CompactionCreated { compaction }
+        .into_envelope(
+            EventId::new("cli-compaction"),
+            stream_id,
+            sequence,
+            OccurredAt::new("2026-08-31T00:00:01Z"),
+        )
+        .unwrap();
+    EventSink::append_event(&mut store, &envelope).unwrap();
+}
+
+#[test]
+fn stale_v2_compaction_is_rejected_before_a_durable_resume_event() {
+    let root = TemporaryDirectory::new("cli-chat-stale-compaction");
+    initialize_project(root.path());
+    let config = write_config(root.path(), "http://127.0.0.1:1/v1");
+    let created = run_chat(root.path(), &config, "/exit\n", &[]);
+    assert!(created.status.success());
+    let session = session_id(root.path());
+    let project = Project::discover(root.path()).unwrap();
+
+    let bound_target = append_research_snapshot(&project, "bound");
+    append_v2_compaction(&project, &session, bound_target);
+    append_research_snapshot(&project, "newer");
+    let before = session_events(root.path(), &session);
+
+    let resumed = run_chat(root.path(), &config, "/exit\n", &["--session", &session]);
+    assert!(!resumed.status.success());
+    assert!(
+        String::from_utf8_lossy(&resumed.stderr).contains("Research revision is stale"),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    let after = session_events(root.path(), &session);
+    assert_eq!(after, before);
+    assert!(
+        after
+            .iter()
+            .all(|event| event["event_type"] != "session.resumed")
+    );
 }
 
 #[test]

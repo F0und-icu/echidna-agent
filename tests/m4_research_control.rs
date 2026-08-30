@@ -675,6 +675,7 @@ async fn resume_restores_the_latest_durable_phase_before_capturing_a_step() {
         .resume_from_session(
             &state,
             ProviderSession::new(primary.id, ProviderSessionRole::Primary, primary.generation),
+            None,
         )
         .unwrap();
     agent

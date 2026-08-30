@@ -1,16 +1,19 @@
 use cyber_agent::domain::artifacts::ArtifactId;
 use cyber_agent::domain::context::{
-    AppendOnlyCandidate, ContextBudget, ContextContentHash, ContextDecision, ContextFragment,
-    ContextFragmentContent, ContextFragmentId, ContextFragmentPriority, ContextFragmentSource,
-    ContextPlanner, ContextPlannerError, ContextPlannerVersions, ContextReasonCode,
-    FragmentCachePolicy, LogicalAppendOnlyRejection, LogicalBaselineRelation,
+    AppendOnlyCandidate, AuthorityLevel, ContextBudget, ContextContentHash, ContextDecision,
+    ContextDeliveryMap, ContextFragment, ContextFragmentContent, ContextFragmentId,
+    ContextFragmentPriority, ContextFragmentSource, ContextOrigin, ContextPlanner,
+    ContextPlannerError, ContextPlannerVersions, ContextProvenance, ContextReasonCode,
+    ContextReferences, ContextSlot, ContextTransform, FragmentCachePolicy, FreshnessIdentity,
+    LogicalAppendOnlyRejection, LogicalBaselineRelation, RetentionClass, SemanticClass,
 };
 use cyber_agent::domain::model::{
-    CapabilityMappingVersion, ContentItem, ModelCapabilities, ModelRequestRequirements,
+    CapabilityMappingVersion, ContentItem, MessageRole, ModelCapabilities, ModelRequestRequirements,
 };
+use cyber_agent::domain::research::{HypothesisId, ResearchFactRef, TargetSnapshotId};
 use cyber_agent::domain::tools::{
     ToolCachePolicy, ToolCall, ToolCallId, ToolDeterminism, ToolEffect, ToolExposure, ToolName,
-    ToolOutputPolicy, ToolParallelism, ToolRetryPolicy, ToolSpec,
+    ToolOutputPolicy, ToolParallelism, ToolResult, ToolResultStatus, ToolRetryPolicy, ToolSpec,
 };
 use serde_json::json;
 
@@ -828,5 +831,411 @@ fn planner_reuses_history_pairing_validation_for_external_content_items() {
             None,
         ),
         Err(ContextPlannerError::InvalidHistoryPairing { .. })
+    ));
+}
+
+#[test]
+fn delivery_map_exactly_covers_instruction_bytes_and_content_positions() {
+    let content = ContextFragment::new(
+        ContextFragmentId::new("two-items").unwrap(),
+        ContextFragmentSource::UserInput,
+        ContextFragmentPriority::Required,
+        FragmentCachePolicy::DoNotCache,
+        ContextFragmentContent::ContentItems {
+            items: vec![
+                ContentItem::user_text("first"),
+                ContentItem::user_text("second"),
+            ],
+        },
+    )
+    .unwrap();
+    let plan = compile(
+        vec![
+            fragment(
+                "base-map",
+                ContextFragmentSource::BasePrompt,
+                ContextFragmentPriority::Required,
+            ),
+            fragment(
+                "project-map",
+                ContextFragmentSource::ProjectPrompt,
+                ContextFragmentPriority::Required,
+            ),
+            content,
+        ],
+        ContextBudget::new(128, 0, 0).unwrap(),
+    );
+    let input = plan.model_input();
+    let map = plan.delivery_map();
+    map.validate_against(&input).unwrap();
+
+    assert_eq!(
+        map.instruction_byte_length(),
+        input.instructions.len() as u64
+    );
+    assert_eq!(map.instruction_spans().len(), 2);
+    let first = &map.instruction_spans()[0];
+    let second = &map.instruction_spans()[1];
+    assert_eq!(first.byte_start(), 0);
+    assert_eq!(first.byte_end() + 2, second.byte_start());
+    assert_eq!(second.byte_end(), input.instructions.len() as u64);
+    assert_eq!(
+        &input.instructions.as_bytes()[first.byte_end() as usize..second.byte_start() as usize],
+        b"\n\n"
+    );
+    assert_eq!(first.provenance().origin(), ContextOrigin::PromptResource);
+    assert_eq!(
+        first.provenance().semantic_class(),
+        SemanticClass::Instruction
+    );
+
+    assert_eq!(map.content_items().len(), input.content_items.len());
+    assert_eq!(map.content_items()[0].final_position(), 0);
+    assert_eq!(map.content_items()[1].final_position(), 1);
+    assert_ne!(
+        map.content_items()[0].subitem_id(),
+        map.content_items()[1].subitem_id()
+    );
+    assert_eq!(
+        map.content_items()[0].provenance().authority_level(),
+        AuthorityLevel::OperatorAssertion
+    );
+}
+
+#[test]
+fn delivery_map_uses_utf8_byte_spans_and_typed_item_provenance() {
+    let call_id = ToolCallId::new("call:provenance");
+    let tool_name = ToolName::new("alpha");
+    let image_id = ArtifactId::new("artifact:用户截图");
+    let fragments = vec![
+        ContextFragment::new(
+            ContextFragmentId::new("utf8-base").unwrap(),
+            ContextFragmentSource::BasePrompt,
+            ContextFragmentPriority::Required,
+            FragmentCachePolicy::ContentAddressed,
+            ContextFragmentContent::Instructions {
+                text: "基础约束🔐".to_owned(),
+            },
+        )
+        .unwrap(),
+        ContextFragment::new(
+            ContextFragmentId::new("utf8-project").unwrap(),
+            ContextFragmentSource::ProjectPrompt,
+            ContextFragmentPriority::Required,
+            FragmentCachePolicy::ContentAddressed,
+            ContextFragmentContent::Instructions {
+                text: "项目说明".to_owned(),
+            },
+        )
+        .unwrap(),
+        ContextFragment::new(
+            ContextFragmentId::new("typed-history").unwrap(),
+            ContextFragmentSource::RecentHistory,
+            ContextFragmentPriority::Required,
+            FragmentCachePolicy::DoNotCache,
+            ContextFragmentContent::ContentItems {
+                items: vec![
+                    ContentItem::assistant_text("model observation"),
+                    ContentItem::Reasoning {
+                        text: "completed reasoning".to_owned(),
+                    },
+                    ContentItem::ToolCall {
+                        call: ToolCall::new(call_id.clone(), tool_name.clone(), json!({})),
+                    },
+                    ContentItem::ToolResult {
+                        result: ToolResult {
+                            call_id,
+                            tool_name,
+                            status: ToolResultStatus::Succeeded,
+                            output: json!({"ok": true}),
+                        },
+                    },
+                ],
+            },
+        )
+        .unwrap(),
+        ContextFragment::new(
+            ContextFragmentId::new("typed-user-input").unwrap(),
+            ContextFragmentSource::UserInput,
+            ContextFragmentPriority::Required,
+            FragmentCachePolicy::DoNotCache,
+            ContextFragmentContent::ContentItems {
+                items: vec![
+                    ContentItem::user_text("operator assertion"),
+                    ContentItem::ImageArtifact {
+                        role: MessageRole::User,
+                        artifact_id: image_id.clone(),
+                    },
+                ],
+            },
+        )
+        .unwrap(),
+    ];
+    let mut multimodal = capabilities();
+    multimodal.image_input = true;
+    multimodal.context_window = 512;
+    let plan = planner()
+        .compile(
+            fragments,
+            ContextBudget::new(512, 0, 0).unwrap(),
+            &multimodal,
+            vec![tool("alpha")],
+            ModelRequestRequirements::default(),
+            None,
+        )
+        .unwrap();
+    let input = plan.model_input();
+    let map = plan.delivery_map();
+    map.validate_against(&input).unwrap();
+
+    for span in map.instruction_spans() {
+        assert!(
+            input
+                .instructions
+                .get(span.byte_start() as usize..span.byte_end() as usize)
+                .is_some(),
+            "byte spans must remain valid UTF-8 boundaries"
+        );
+    }
+    assert_eq!(
+        map.instruction_spans()[0].byte_end() + 2,
+        map.instruction_spans()[1].byte_start()
+    );
+
+    let entries = map.content_items();
+    assert_eq!(
+        entries[0].provenance().authority_level(),
+        AuthorityLevel::ModelObservation
+    );
+    assert_eq!(
+        entries[1].provenance().authority_level(),
+        AuthorityLevel::ModelObservation
+    );
+    assert_eq!(
+        entries[2].provenance().authority_level(),
+        AuthorityLevel::ModelObservation
+    );
+    assert_eq!(entries[3].provenance().origin(), ContextOrigin::ToolResult);
+    assert_eq!(
+        entries[3].provenance().authority_level(),
+        AuthorityLevel::DerivedNonEvidence
+    );
+    assert_eq!(
+        entries[4].provenance().origin(),
+        ContextOrigin::OperatorInput
+    );
+    assert_eq!(
+        entries[4].provenance().authority_level(),
+        AuthorityLevel::OperatorAssertion
+    );
+    assert_eq!(
+        entries[5].provenance().origin(),
+        ContextOrigin::ArtifactProjection
+    );
+    assert_eq!(
+        entries[5].provenance().authority_level(),
+        AuthorityLevel::FactReference
+    );
+    assert_eq!(
+        entries[5].provenance().references().artifact_refs(),
+        [image_id]
+    );
+
+    let mut forged_transform = serde_json::to_value(map).unwrap();
+    forged_transform["content_items"][5]["transform"] = json!({
+        "kind": "artifact_reference",
+        "artifact_id": "artifact:用户截图"
+    });
+    let forged_transform: ContextDeliveryMap = serde_json::from_value(forged_transform).unwrap();
+    assert!(matches!(
+        forged_transform.validate_against(&input),
+        Err(ContextPlannerError::InvalidContextTransform)
+    ));
+}
+
+#[test]
+fn delivery_map_retains_truncation_and_artifact_reference_transforms() {
+    let base = fragment(
+        "base-transform",
+        ContextFragmentSource::BasePrompt,
+        ContextFragmentPriority::Required,
+    );
+    let user = fragment(
+        "user-transform",
+        ContextFragmentSource::UserInput,
+        ContextFragmentPriority::Required,
+    );
+    let artifact_id = ArtifactId::new("artifact:transform");
+    let artifact = ContextFragment::with_artifact_reference(
+        ContextFragmentId::new("artifact-transform").unwrap(),
+        ContextFragmentSource::ProjectSnapshot,
+        ContextFragmentPriority::High,
+        FragmentCachePolicy::ContentAddressed,
+        ContextFragmentContent::ContentItems {
+            items: vec![ContentItem::user_text("artifact payload ".repeat(32))],
+        },
+        Some(artifact_id.clone()),
+    )
+    .unwrap();
+    let truncated = ContextFragment::new(
+        ContextFragmentId::new("truncate-transform").unwrap(),
+        ContextFragmentSource::RetrievedMemory,
+        ContextFragmentPriority::Normal,
+        FragmentCachePolicy::ContentAddressed,
+        ContextFragmentContent::ContentItems {
+            items: vec![ContentItem::user_text("bounded memory ".repeat(32))],
+        },
+    )
+    .unwrap();
+    let reference_equivalent = ContextFragment::new(
+        ContextFragmentId::new("reference-equivalent").unwrap(),
+        ContextFragmentSource::UserInput,
+        ContextFragmentPriority::Normal,
+        FragmentCachePolicy::DoNotCache,
+        ContextFragmentContent::ContentItems {
+            items: vec![ContentItem::user_text(format!(
+                "Artifact reference: {artifact_id}"
+            ))],
+        },
+    )
+    .unwrap();
+    let budget = base
+        .token_estimate()
+        .saturating_add(user.token_estimate())
+        .saturating_add(reference_equivalent.token_estimate())
+        .saturating_add(20);
+    let plan = compile(
+        vec![base, user, artifact, truncated],
+        ContextBudget::new(budget, 0, 0).unwrap(),
+    );
+    let map = plan.delivery_map();
+    map.validate_against(&plan.model_input()).unwrap();
+    let artifact_entry = map
+        .content_items()
+        .iter()
+        .find(|entry| {
+            matches!(
+                entry.transform(),
+                ContextTransform::ArtifactReference { artifact_id: id } if id == &artifact_id
+            )
+        })
+        .unwrap();
+    assert!(
+        artifact_entry
+            .provenance()
+            .references()
+            .artifact_refs()
+            .contains(&artifact_id)
+    );
+    assert!(map.content_items().iter().any(|entry| matches!(
+        entry.transform(),
+        ContextTransform::Truncated {
+            retained_tokens: 20
+        }
+    )));
+}
+
+#[test]
+fn delivery_map_rejects_position_hash_subitem_and_provenance_tampering() {
+    let plan = compile(
+        vec![
+            ContextFragment::new(
+                ContextFragmentId::new("tamper-items").unwrap(),
+                ContextFragmentSource::UserInput,
+                ContextFragmentPriority::Required,
+                FragmentCachePolicy::DoNotCache,
+                ContextFragmentContent::ContentItems {
+                    items: vec![
+                        ContentItem::user_text("first"),
+                        ContentItem::user_text("second"),
+                    ],
+                },
+            )
+            .unwrap(),
+        ],
+        ContextBudget::new(128, 0, 0).unwrap(),
+    );
+    let input = plan.model_input();
+    let encoded = serde_json::to_value(plan.delivery_map()).unwrap();
+
+    let mut wrong_position = encoded.clone();
+    wrong_position["content_items"][0]["final_position"] = json!(1);
+    let wrong_position: ContextDeliveryMap = serde_json::from_value(wrong_position).unwrap();
+    assert!(matches!(
+        wrong_position.validate_against(&input),
+        Err(ContextPlannerError::ContextDeliveryCoverageMismatch)
+    ));
+
+    let mut wrong_hash = encoded.clone();
+    wrong_hash["content_items"][0]["content_hash"] = json!("a".repeat(64));
+    let wrong_hash: ContextDeliveryMap = serde_json::from_value(wrong_hash).unwrap();
+    assert!(matches!(
+        wrong_hash.validate_against(&input),
+        Err(ContextPlannerError::ContextDeliveryContentHashMismatch)
+    ));
+
+    let mut duplicate = encoded;
+    duplicate["content_items"][1]["fragment_id"] =
+        duplicate["content_items"][0]["fragment_id"].clone();
+    duplicate["content_items"][1]["subitem_ordinal"] =
+        duplicate["content_items"][0]["subitem_ordinal"].clone();
+    duplicate["content_items"][1]["subitem_id"] =
+        duplicate["content_items"][0]["subitem_id"].clone();
+    let duplicate: ContextDeliveryMap = serde_json::from_value(duplicate).unwrap();
+    assert!(matches!(
+        duplicate.validate_against(&input),
+        Err(ContextPlannerError::DuplicateContextSubitem)
+    ));
+
+    assert!(matches!(
+        ContextProvenance::new(
+            ContextSlot::Summary,
+            ContextOrigin::SessionProjection,
+            SemanticClass::DerivedProjection,
+            AuthorityLevel::FactReference,
+            RetentionClass::EvidenceSpine,
+            FreshnessIdentity::new("revision").unwrap(),
+            ContextReferences::default(),
+        ),
+        Err(ContextPlannerError::FactReferenceMissingContextReference)
+    ));
+    assert!(matches!(
+        ContextProvenance::new(
+            ContextSlot::History,
+            ContextOrigin::ModelOutput,
+            SemanticClass::Conversation,
+            AuthorityLevel::ModelObservation,
+            RetentionClass::Recent,
+            FreshnessIdentity::new("revision").unwrap(),
+            ContextReferences::default(),
+        ),
+        Err(ContextPlannerError::InvalidContextAuthorityCombination)
+    ));
+
+    let shared_id = "typed-reference-id";
+    ContextReferences::new(
+        vec![
+            ResearchFactRef::TargetSnapshot(TargetSnapshotId::new(shared_id)),
+            ResearchFactRef::Hypothesis(HypothesisId::new(shared_id)),
+        ],
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    )
+    .expect("the typed reference kind is part of identity");
+    assert!(matches!(
+        ContextReferences::new(
+            vec![
+                ResearchFactRef::TargetSnapshot(TargetSnapshotId::new(shared_id)),
+                ResearchFactRef::TargetSnapshot(TargetSnapshotId::new(shared_id)),
+            ],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        ),
+        Err(ContextPlannerError::DuplicateContextReference {
+            field: "references.research_fact_refs",
+            ..
+        })
     ));
 }
