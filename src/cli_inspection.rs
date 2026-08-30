@@ -6,10 +6,10 @@
 
 use crate::adapters::artifact_store::LocalArtifactStore;
 use crate::adapters::project_event_store::{
-    Project, ProjectEventStoreError, ProjectEventStream, read_existing_research_events,
-    read_existing_session_events,
+    Project, ProjectEventStoreError, ProjectEventStream, read_existing_session_events,
 };
 use crate::adapters::project_snapshot::{CacheDisposition, LocalProjectSnapshot};
+use crate::adapters::research_projection::load_research_state;
 use crate::adapters::tools::ToolRegistry;
 use crate::app::inspection::{self, AuditReferenceStatus, SnapshotDisposition, SnapshotFacts};
 use crate::app::observation::ObservationService;
@@ -19,7 +19,7 @@ use crate::domain::artifacts::ArtifactId;
 use crate::domain::events::StreamId;
 use crate::domain::observation::ValidatedObservationSet;
 use crate::domain::request_audit::RequestAuditBinding;
-use crate::domain::research::{ResearchReducer, ResearchState};
+use crate::domain::research::ResearchState;
 use crate::domain::session::SessionState;
 use crate::ports::artifact::ArtifactStore;
 use crate::ports::tool::ToolExecutor;
@@ -192,11 +192,9 @@ fn read_android_manifest_observations(
 }
 
 fn read_research_state(project: &Project) -> Result<ResearchState, CliError> {
-    ResearchReducer
-        .reduce(read_existing_research_events(project)?)
-        .map_err(|error| CliError::Observation {
-            message: format!("Research stream cannot be reduced: {error}"),
-        })
+    load_research_state(project).map_err(|error| CliError::Observation {
+        message: format!("Research stream cannot be reduced: {error}"),
+    })
 }
 
 fn observation_error(error: impl std::fmt::Display) -> CliError {

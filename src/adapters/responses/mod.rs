@@ -15,7 +15,7 @@ use crate::adapters::credentials::CredentialSource;
 use crate::domain::artifacts::ArtifactId;
 use crate::domain::model::ModelCapabilities;
 use crate::domain::request_audit::RequestAdapterVersion;
-use crate::domain::research::{ResearchReducer, ResearchState};
+use crate::domain::research::ResearchState;
 use crate::ports::artifact::ArtifactStore;
 use crate::ports::model::{
     ModelEventStream, ModelProvider, ModelProviderError, ModelRequest, ModelStreamEvent,
@@ -93,10 +93,7 @@ fn resolve_project_image_artifact(
     project: &crate::adapters::project_event_store::Project,
     artifact_id: &ArtifactId,
 ) -> Result<(String, Vec<u8>), ModelProviderError> {
-    let events = crate::adapters::project_event_store::read_existing_research_events(project)
-        .map_err(request_encoding_error)?;
-    let state: ResearchState = ResearchReducer
-        .reduce(events)
+    let state: ResearchState = crate::adapters::research_projection::load_research_state(project)
         .map_err(request_encoding_error)?;
     let record = state.artifact(artifact_id).ok_or_else(|| {
         request_encoding_error(format!(

@@ -202,9 +202,9 @@ async fn research_update_rejects_initial_hypothesis_missing_experiment_without_a
     let (_root, project) = initialized_project("research-missing-hypothesis-evidence");
     let tools = ToolRegistry::for_project(project.root());
     let mut record = hypothesis("hypothesis-missing-evidence", "Evidence boundary", "sink");
-    record["evidence_refs"] = json!([{
-        "kind": "experiment",
-        "id": "experiment-missing"
+    record["evidence_links"] = json!([{
+        "relation": "supports",
+        "evidence": {"kind": "experiment", "id": "experiment-missing"}
     }]);
 
     let outcome = execute_outcome(
@@ -437,7 +437,7 @@ async fn updates_replay_as_new_events_and_preserve_confirmed_finding_requirement
         (
             "event-hypothesis-update",
             json!({"kind": "update_hypothesis", "update": {
-                "id": "hyp-1", "status": "testing", "evidence_refs_add": [{"kind": "artifact", "id": "artifact-hyp"}], "next_action": "action-1"
+                "id": "hyp-1", "status": "testing", "evidence_links_add": [{"relation": "supports", "evidence": {"kind": "experiment", "id": "experiment-1"}}], "next_action": "action-1"
             }}),
         ),
         (
@@ -450,7 +450,7 @@ async fn updates_replay_as_new_events_and_preserve_confirmed_finding_requirement
             "event-finding-update",
             json!({"kind": "update_finding", "update": {
                 "id": "finding-1", "status": "confirmed", "target_snapshot_ids_add": ["snapshot-1"],
-                "evidence_refs_add": [{"kind": "experiment", "id": "experiment-1"}], "impact": "validated cross-app intent execution"
+                "evidence_links_add": [{"relation": "supports", "evidence": {"kind": "experiment", "id": "experiment-1"}}], "impact": "validated cross-app intent execution"
             }}),
         ),
         (
@@ -607,7 +607,7 @@ async fn invalid_persisted_research_is_read_only_and_projects_remain_isolated() 
         (
             "research-unsupported-payload",
             "research.target_snapshot_recorded",
-            json!({"research_schema_version": 2, "data": {}}),
+            json!({"research_schema_version": 3, "data": {}}),
         ),
         (
             "research-invalid-reference",
@@ -700,7 +700,7 @@ async fn persisted_records_cannot_forge_merge_provenance() {
         rationale: "fixture".to_owned(),
         status: HypothesisStatus::Active,
         priority: 1,
-        evidence_refs: Vec::new(),
+        evidence_links: Vec::new(),
         last_action: None,
         next_action: None,
     })
@@ -812,17 +812,44 @@ fn research_tool_schemas_are_fixed_and_execution_metadata_is_exact() {
         assert_eq!(entry["additionalProperties"], false);
         assert_eq!(entry["properties"]["id"]["minLength"], 1);
     }
+    let evidence_link = &update.input_schema["$defs"]["evidence_link"];
+    assert_eq!(
+        evidence_link["properties"]["relation"]["enum"],
+        json!([
+            "supports",
+            "contradicts",
+            "positive_control",
+            "negative_control",
+            "environment_control",
+            "reachability_proof",
+            "prerequisite_proof",
+            "impact_proof"
+        ])
+    );
+    assert_eq!(
+        evidence_link["properties"]["evidence"]["$ref"],
+        "#/$defs/evidence_ref"
+    );
+    assert_eq!(evidence_link["required"], json!(["relation", "evidence"]));
+    assert_eq!(evidence_link["additionalProperties"], false);
     let operation = &update.input_schema["properties"]["operation"]["oneOf"];
     for reference in [
-        &operation[1]["properties"]["record"]["properties"]["evidence_refs"],
-        &operation[2]["properties"]["update"]["properties"]["evidence_refs_add"],
-        &operation[5]["properties"]["record"]["properties"]["evidence_refs"],
-        &operation[5]["properties"]["record"]["properties"]["negative_refs"],
-        &operation[6]["properties"]["update"]["properties"]["evidence_refs_add"],
-        &operation[6]["properties"]["update"]["properties"]["negative_refs_add"],
+        &operation[1]["properties"]["record"]["properties"]["evidence_links"],
+        &operation[2]["properties"]["update"]["properties"]["evidence_links_add"],
+        &operation[5]["properties"]["record"]["properties"]["evidence_links"],
+        &operation[6]["properties"]["update"]["properties"]["evidence_links_add"],
     ] {
-        assert_eq!(reference["items"]["$ref"], "#/$defs/evidence_ref");
+        assert_eq!(reference["items"]["$ref"], "#/$defs/evidence_link");
     }
+    assert_eq!(
+        get.output_schema["required"],
+        json!([
+            "status",
+            "state",
+            "stream_event_count",
+            "evidence_gap_reports"
+        ])
+    );
     assert!(update.input_schema["properties"].get("execution").is_some());
     assert_eq!(
         update.resource_key_template.as_deref(),

@@ -12,11 +12,14 @@ use crate::adapters::project_event_store::{Project, ProjectEventStream};
 use crate::adapters::project_memory::{
     LocalProjectMemory, MemoryDocument, content_hash, replacement_diff,
 };
+use crate::adapters::research_projection::load_reference_catalog;
 use crate::domain::events::{EventEnvelope, EventId, EventType, OccurredAt};
 use crate::domain::memory::{
     MemoryEvent, MemoryPath, MemoryReducer, MemoryRevision, MemoryState, validate_content_hash,
 };
-use crate::domain::research::{ResearchEvent, ResearchReducer, ResearchState};
+use crate::domain::research::{
+    ResearchEvent, ResearchReducer, ResearchReferenceCatalog, ResearchState,
+};
 use crate::domain::tools::{ResourceKey, ToolExecutionOutcome, ToolExecutionPlan};
 use crate::ports::artifact::ArtifactStore;
 use crate::ports::tool::ToolExecutorError;
@@ -100,7 +103,11 @@ pub(super) async fn execute_read(
         Ok(store) => store,
         Err(error) => return memory_failure(plan, "memory_stream_unavailable", error),
     };
-    let (mut research_state, mut memory_state) = match reduce_states(&store) {
+    let references = match load_reference_catalog(&project) {
+        Ok(references) => references,
+        Err(error) => return memory_failure(plan, "memory_receipts_invalid", error),
+    };
+    let (mut research_state, mut memory_state) = match reduce_states(&store, &references) {
         Ok(states) => states,
         Err(error) => return memory_failure(plan, "memory_state_invalid", error),
     };
@@ -177,7 +184,11 @@ pub(super) async fn execute_write(
         Ok(store) => store,
         Err(error) => return memory_failure(plan, "memory_stream_unavailable", error),
     };
-    let (mut research_state, mut memory_state) = match reduce_states(&store) {
+    let references = match load_reference_catalog(&project) {
+        Ok(references) => references,
+        Err(error) => return memory_failure(plan, "memory_receipts_invalid", error),
+    };
+    let (mut research_state, mut memory_state) = match reduce_states(&store, &references) {
         Ok(states) => states,
         Err(error) => return memory_failure(plan, "memory_state_invalid", error),
     };
@@ -322,6 +333,7 @@ fn validate_expected_hash(tool_name: &str, value: Option<&str>) -> Result<(), To
 
 fn reduce_states(
     store: &crate::adapters::project_event_store::JsonlEventStore<'_>,
+    references: &ResearchReferenceCatalog,
 ) -> Result<(ResearchState, MemoryState), String> {
     let events = EventSource::read_events(store, &ProjectEventStream::Research.stream_id())
         .map_err(|error| error.to_string())?;
@@ -333,14 +345,14 @@ fn reduce_states(
         let already_applied = research_state.has_event_id(&envelope.event_id);
         if envelope.event_type.as_str() == "StreamRecovered" {
             research_reducer
-                .apply(&mut research_state, envelope)
+                .apply_with_references(&mut research_state, envelope, references)
                 .map_err(|error| error.to_string())?;
             continue;
         }
         let event = ResearchEvent::decode(envelope.event_type.as_str(), envelope.payload.clone())
             .map_err(|error| error.to_string())?;
         research_reducer
-            .apply(&mut research_state, envelope)
+            .apply_with_references(&mut research_state, envelope, references)
             .map_err(|error| error.to_string())?;
         if !already_applied && let ResearchEvent::Memory(event) = event {
             memory_reducer

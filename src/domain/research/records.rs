@@ -100,11 +100,48 @@ pub enum NextActionStatus {
 /// Evidence may point to a typed future fact without pulling Blob or Lineage
 /// storage into this Slice.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(tag = "kind", content = "id", rename_all = "snake_case")]
+#[serde(
+    tag = "kind",
+    content = "id",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum EvidenceRef {
     Artifact(ArtifactId),
     Experiment(ExperimentId),
     ExecutionReceipt(ExecutionReceiptId),
+}
+
+/// The explicit semantic role asserted for one authoritative evidence
+/// reference. A relation is created only by a Research update; derived
+/// observations, summaries, replay and model prose cannot infer one.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceRelation {
+    Supports,
+    Contradicts,
+    PositiveControl,
+    NegativeControl,
+    EnvironmentControl,
+    ReachabilityProof,
+    PrerequisiteProof,
+    ImpactProof,
+}
+
+impl EvidenceRelation {
+    pub(crate) const fn supports_claim(self) -> bool {
+        matches!(
+            self,
+            Self::Supports | Self::ReachabilityProof | Self::PrerequisiteProof | Self::ImpactProof
+        )
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvidenceLink {
+    pub relation: EvidenceRelation,
+    pub evidence: EvidenceRef,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -200,7 +237,7 @@ pub struct HypothesisDraft {
     pub status: HypothesisStatus,
     pub priority: i32,
     #[serde(default)]
-    pub evidence_refs: Vec<EvidenceRef>,
+    pub evidence_links: Vec<EvidenceLink>,
     #[serde(default)]
     pub last_action: Option<NextActionId>,
     #[serde(default)]
@@ -222,7 +259,7 @@ pub struct HypothesisRecord {
     pub status: HypothesisStatus,
     pub priority: i32,
     #[serde(default)]
-    pub evidence_refs: Vec<EvidenceRef>,
+    pub evidence_links: Vec<EvidenceLink>,
     #[serde(default)]
     pub last_action: Option<NextActionId>,
     #[serde(default)]
@@ -251,7 +288,7 @@ impl HypothesisRecord {
             rationale: draft.rationale,
             status: draft.status,
             priority: draft.priority,
-            evidence_refs: draft.evidence_refs,
+            evidence_links: draft.evidence_links,
             last_action: draft.last_action,
             next_action: draft.next_action,
             merged_into: None,
@@ -274,7 +311,7 @@ pub struct HypothesisUpdate {
     #[serde(default)]
     pub status: Option<HypothesisStatus>,
     #[serde(default)]
-    pub evidence_refs_add: Vec<EvidenceRef>,
+    pub evidence_links_add: Vec<EvidenceLink>,
     #[serde(default)]
     pub last_action: Option<NextActionId>,
     #[serde(default)]
@@ -284,9 +321,9 @@ pub struct HypothesisUpdate {
 impl HypothesisUpdate {
     pub(crate) fn validate(&self) -> Result<(), ResearchError> {
         require_id("HypothesisUpdate id", self.id.as_str())?;
-        validate_evidence_refs(&self.evidence_refs_add)?;
+        validate_evidence_links(&self.evidence_links_add)?;
         if self.status.is_none()
-            && self.evidence_refs_add.is_empty()
+            && self.evidence_links_add.is_empty()
             && self.last_action.is_none()
             && self.next_action.is_none()
         {
@@ -481,9 +518,7 @@ pub struct FindingDraft {
     pub prerequisites: Vec<String>,
     pub impact: String,
     #[serde(default)]
-    pub evidence_refs: Vec<EvidenceRef>,
-    #[serde(default)]
-    pub negative_refs: Vec<EvidenceRef>,
+    pub evidence_links: Vec<EvidenceLink>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -504,9 +539,7 @@ pub struct FindingRecord {
     pub prerequisites: Vec<String>,
     pub impact: String,
     #[serde(default)]
-    pub evidence_refs: Vec<EvidenceRef>,
-    #[serde(default)]
-    pub negative_refs: Vec<EvidenceRef>,
+    pub evidence_links: Vec<EvidenceLink>,
     #[serde(default)]
     pub merged_into: Option<MergeRecordRef>,
 }
@@ -532,8 +565,7 @@ impl FindingRecord {
             target_snapshot_ids: draft.target_snapshot_ids,
             prerequisites: draft.prerequisites,
             impact: draft.impact,
-            evidence_refs: draft.evidence_refs,
-            negative_refs: draft.negative_refs,
+            evidence_links: draft.evidence_links,
             merged_into: None,
         };
         record.validate()?;
@@ -558,9 +590,7 @@ pub struct FindingUpdate {
     #[serde(default)]
     pub prerequisites_add: Vec<String>,
     #[serde(default)]
-    pub evidence_refs_add: Vec<EvidenceRef>,
-    #[serde(default)]
-    pub negative_refs_add: Vec<EvidenceRef>,
+    pub evidence_links_add: Vec<EvidenceLink>,
     #[serde(default)]
     pub impact: Option<String>,
 }
@@ -568,16 +598,14 @@ pub struct FindingUpdate {
 impl FindingUpdate {
     pub(crate) fn validate(&self) -> Result<(), ResearchError> {
         require_id("FindingUpdate id", self.id.as_str())?;
-        validate_evidence_refs(&self.evidence_refs_add)?;
-        validate_evidence_refs(&self.negative_refs_add)?;
+        validate_evidence_links(&self.evidence_links_add)?;
         if let Some(impact) = &self.impact {
             require_text("FindingUpdate impact", impact)?;
         }
         if self.status.is_none()
             && self.target_snapshot_ids_add.is_empty()
             && self.prerequisites_add.is_empty()
-            && self.evidence_refs_add.is_empty()
-            && self.negative_refs_add.is_empty()
+            && self.evidence_links_add.is_empty()
             && self.impact.is_none()
         {
             return Err(ResearchError::InvalidRecord {
@@ -686,7 +714,7 @@ fn validate_hypothesis_fields(record: &HypothesisRecord) -> Result<(), ResearchE
     require_text("Hypothesis entry_point", &record.entry_point)?;
     require_text("Hypothesis sensitive_sink", &record.sensitive_sink)?;
     require_text("Hypothesis rationale", &record.rationale)?;
-    validate_evidence_refs(&record.evidence_refs)
+    validate_evidence_links(&record.evidence_links)
 }
 
 fn validate_experiment_fields(
@@ -748,17 +776,19 @@ fn validate_finding_fields(record: &FindingRecord) -> Result<(), ResearchError> 
     require_text("Finding entry_point", &record.entry_point)?;
     require_text("Finding sensitive_sink", &record.sensitive_sink)?;
     require_text("Finding impact", &record.impact)?;
-    validate_evidence_refs(&record.evidence_refs)?;
-    validate_evidence_refs(&record.negative_refs)?;
+    validate_evidence_links(&record.evidence_links)?;
     if matches!(
         record.status,
         FindingStatus::Reproduced | FindingStatus::Confirmed
-    ) && (record.target_snapshot_ids.is_empty() || record.evidence_refs.is_empty())
+    ) && (record.target_snapshot_ids.is_empty()
+        || !record
+            .evidence_links
+            .iter()
+            .any(|link| link.relation.supports_claim()))
     {
         return Err(ResearchError::InvalidRecord {
-            message:
-                "reproduced or confirmed Finding requires TargetSnapshot and Evidence references"
-                    .to_owned(),
+            message: "reproduced or confirmed Finding requires TargetSnapshot and claim-supporting EvidenceLink"
+                .to_owned(),
         });
     }
     Ok(())
@@ -795,6 +825,18 @@ pub(crate) fn validate_evidence_refs(refs: &[EvidenceRef]) -> Result<(), Researc
             EvidenceRef::ExecutionReceipt(id) => {
                 require_id("ExecutionReceipt evidence reference", id.as_str())?
             }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_evidence_links(links: &[EvidenceLink]) -> Result<(), ResearchError> {
+    for (index, link) in links.iter().enumerate() {
+        validate_evidence_refs(std::slice::from_ref(&link.evidence))?;
+        if links[..index].contains(link) {
+            return Err(ResearchError::InvalidRecord {
+                message: format!("duplicate EvidenceLink `{link:?}`"),
+            });
         }
     }
     Ok(())

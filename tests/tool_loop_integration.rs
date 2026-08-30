@@ -18,7 +18,7 @@ use cyber_agent::domain::context::{
     ProviderSessionRole,
 };
 use cyber_agent::domain::domain_profile::DomainProfile;
-use cyber_agent::domain::events::{EventEnvelope, StreamId};
+use cyber_agent::domain::events::StreamId;
 use cyber_agent::domain::model::{
     CapabilityMappingVersion, ContentItem, ModelCapabilities, ModelEvent, ModelInputIR,
 };
@@ -887,99 +887,6 @@ async fn agent_loop_executes_research_update_through_the_fixed_registry() {
     assert!(persisted.contains("research.target_snapshot_recorded"));
     assert!(persisted.contains("snapshot-agent-loop"));
     assert_eq!(agent.history().ensure_all_tool_calls_paired(), Ok(()));
-}
-
-#[tokio::test]
-async fn agent_loop_cache_hit_creates_a_fresh_receipt_linked_to_the_source_execution() {
-    let project = TestProject::new("agent-loop-tool-cache");
-    Project::initialize(&project.root).unwrap();
-    let tools = ToolRegistry::for_project_with_session(
-        &project.root,
-        StreamId::new("agent-loop-tool-cache"),
-    )
-    .unwrap();
-    let source = tools
-        .execute(plan(&tools, "cache-source", "research_get", json!({})))
-        .await;
-    assert_eq!(source.result.status, ToolResultStatus::Succeeded);
-    assert!(source.receipt.cache_source.is_none());
-
-    let requested_call = tool_call("cache-hit", "research_get", json!({}));
-    let provider = ScriptedProvider::new([
-        vec![ModelEvent::ToolCall {
-            call: requested_call,
-        }],
-        vec![ModelEvent::TextDelta {
-            text: "cache result observed".to_owned(),
-        }],
-    ]);
-    let mut agent = AgentLoop::new(&provider, &tools);
-    let outcome = agent
-        .run_turn("Read the current Research state.", AgentCancellation::new())
-        .await
-        .unwrap();
-    let AgentTurnOutcome::Completed { executions, .. } = outcome else {
-        panic!("the scripted cache-hit turn should complete")
-    };
-    assert_eq!(executions.len(), 1);
-    let hit = &executions[0];
-    assert_eq!(hit.receipt.execution_id.as_str(), "execution:cache-hit");
-    assert_ne!(hit.receipt.execution_id, source.receipt.execution_id);
-    assert_eq!(
-        hit.receipt
-            .cache_source
-            .as_ref()
-            .map(|reference| reference.source_execution_id.as_str()),
-        Some("execution-cache-source")
-    );
-    assert_eq!(hit.result.call_id.as_str(), "cache-hit");
-    let events = fs::read_to_string(
-        project
-            .root
-            .join(".cyber-agent/sessions/agent-loop-tool-cache/events.jsonl"),
-    )
-    .unwrap()
-    .lines()
-    .map(|line| serde_json::from_str::<EventEnvelope<Value>>(line).unwrap())
-    .collect::<Vec<_>>();
-    assert_eq!(events.len(), 2);
-    assert_eq!(
-        events[0].event_type.as_str(),
-        "tool.execution_receipt_recorded"
-    );
-    assert_eq!(events[1].event_type.as_str(), "tool.result_cache_hit");
-    assert_eq!(
-        hit.receipt
-            .cache_source
-            .as_ref()
-            .map(|source| source.source_receipt_event_id.clone()),
-        Some(events[0].event_id.clone())
-    );
-    let source = hit.receipt.cache_source.as_ref().unwrap();
-    assert_eq!(
-        events[1].payload["receipt"]["execution_id"],
-        "execution:cache-hit"
-    );
-    assert_eq!(
-        events[1].payload["receipt"]["cache_source"]["source_stream_id"],
-        source.source_stream_id.as_str()
-    );
-    assert_eq!(
-        events[1].payload["receipt"]["cache_source"]["source_receipt_event_id"],
-        events[0].event_id.as_str()
-    );
-    assert_eq!(
-        events[1].payload["receipt"]["cache_source"]["source_execution_id"],
-        source.source_execution_id.as_str()
-    );
-    assert_eq!(
-        events[1].payload["receipt"]["cache_source"]["source_plan_fingerprint"],
-        source.source_plan_fingerprint
-    );
-    assert_eq!(
-        events[1].payload["receipt"]["cache_source"]["cache_key"],
-        source.cache_key.as_str()
-    );
 }
 
 #[tokio::test]

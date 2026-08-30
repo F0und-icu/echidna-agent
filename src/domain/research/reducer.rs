@@ -14,15 +14,17 @@ use crate::domain::events::{EventEnvelope, EventId, OccurredAt};
 use crate::domain::memory::{
     MEMORY_PAYLOAD_SCHEMA_VERSION, MemoryError, MemoryEvent, MemoryEventType,
 };
+use crate::domain::tools::ExecutionReceipt;
 
 use super::records::{
-    EvidenceRef, ExperimentCapsuleRecord, ExperimentId, ExperimentRecord, ExperimentUpdate,
-    FindingId, FindingRecord, FindingUpdate, HypothesisId, HypothesisRecord, HypothesisUpdate,
-    MergeRecordRef, NextActionId, NextActionRecord, NextActionUpdate, ResearchRecordRef,
-    TargetSnapshotId, TargetSnapshotRecord, require_text,
+    EvidenceLink, EvidenceRef, ExecutionReceiptId, ExperimentCapsuleRecord, ExperimentId,
+    ExperimentRecord, ExperimentUpdate, FindingId, FindingRecord, FindingUpdate, HypothesisId,
+    HypothesisRecord, HypothesisUpdate, MergeRecordRef, NextActionId, NextActionRecord,
+    NextActionUpdate, ResearchRecordRef, TargetSnapshotId, TargetSnapshotRecord, require_text,
 };
+use super::upcast::{VersionedPayload, decode_and_upcast};
 
-pub const RESEARCH_SCHEMA_VERSION: u16 = 1;
+pub const RESEARCH_SCHEMA_VERSION: u16 = 2;
 const RESEARCH_STREAM_ID: &str = "research";
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
@@ -47,6 +49,8 @@ pub enum ResearchError {
     DuplicateActionFingerprint { fingerprint: String },
     #[error("Research reference `{reference}` does not exist")]
     MissingReference { reference: String },
+    #[error("ExecutionReceipt reference `{id}` is ambiguous across Session streams")]
+    DuplicateExecutionReceiptReference { id: String },
     #[error("Research records cannot be merged across kinds")]
     IncompatibleMergeKinds,
     #[error("Research record `{from}` is already merged")]
@@ -59,6 +63,35 @@ pub enum ResearchError {
     Artifact(#[from] ArtifactEventError),
     #[error(transparent)]
     Memory(#[from] MemoryError),
+}
+
+/// Project-scoped, read-only references resolved from authoritative Session
+/// facts before pure Research reduction. It is never serialized or persisted
+/// into the Research stream.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ResearchReferenceCatalog {
+    execution_receipts: BTreeMap<ExecutionReceiptId, ExecutionReceipt>,
+}
+
+impl ResearchReferenceCatalog {
+    pub(crate) fn insert_execution_receipt(
+        &mut self,
+        id: ExecutionReceiptId,
+        receipt: ExecutionReceipt,
+    ) -> Result<(), ResearchError> {
+        if self
+            .execution_receipts
+            .insert(id.clone(), receipt)
+            .is_some()
+        {
+            return Err(ResearchError::DuplicateExecutionReceiptReference { id: id.to_string() });
+        }
+        Ok(())
+    }
+
+    pub(super) fn execution_receipt(&self, id: &ExecutionReceiptId) -> Option<&ExecutionReceipt> {
+        self.execution_receipts.get(id)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -132,7 +165,7 @@ pub enum ResearchEvent {
     HypothesisUpdated(HypothesisUpdate),
     ExperimentRecorded {
         experiment: ExperimentRecord,
-        capsule: ExperimentCapsuleRecord,
+        capsule: Box<ExperimentCapsuleRecord>,
         rerun_reason: Option<String>,
     },
     ExperimentUpdated(ExperimentUpdate),
@@ -222,7 +255,7 @@ impl ResearchEvent {
                 rerun_reason,
             } => serde_json::to_value(ExperimentRecordedPayload {
                 experiment: experiment.clone(),
-                capsule: capsule.clone(),
+                capsule: capsule.as_ref().clone(),
                 rerun_reason: rerun_reason.clone(),
             }),
             Self::ExperimentUpdated(update) => serde_json::to_value(update),
@@ -260,15 +293,7 @@ impl ResearchEvent {
 
     pub fn decode(event_type: &str, payload: Value) -> Result<Self, ResearchError> {
         let event_type = ResearchEventType::parse(event_type)?;
-        let versioned: VersionedPayload =
-            serde_json::from_value(payload).map_err(|error| ResearchError::MalformedPayload {
-                message: error.to_string(),
-            })?;
-        if versioned.research_schema_version != RESEARCH_SCHEMA_VERSION {
-            return Err(ResearchError::UnsupportedPayloadVersion {
-                received: versioned.research_schema_version,
-            });
-        }
+        let versioned = decode_and_upcast(event_type.as_str(), payload, RESEARCH_SCHEMA_VERSION)?;
         match event_type {
             ResearchEventType::TargetSnapshotRecorded => {
                 decode_record(versioned.data).map(Self::TargetSnapshotRecorded)
@@ -288,7 +313,7 @@ impl ResearchEvent {
                 decode_record(versioned.data).map(|payload: ExperimentRecordedPayload| {
                     Self::ExperimentRecorded {
                         experiment: payload.experiment,
-                        capsule: payload.capsule,
+                        capsule: Box::new(payload.capsule),
                         rerun_reason: payload.rerun_reason,
                     }
                 })
@@ -463,10 +488,99 @@ impl ResearchState {
         }
     }
 
-    fn contains_evidence_reference(&self, reference: &EvidenceRef) -> bool {
+    fn contains_evidence_reference(
+        &self,
+        references: &ResearchReferenceCatalog,
+        reference: &EvidenceRef,
+    ) -> bool {
         match reference {
-            EvidenceRef::Artifact(_) | EvidenceRef::ExecutionReceipt(_) => true,
+            EvidenceRef::Artifact(id) => self.artifacts.get(id).is_some(),
             EvidenceRef::Experiment(id) => self.experiments.contains_key(id),
+            EvidenceRef::ExecutionReceipt(id) => references.execution_receipt(id).is_some(),
+        }
+    }
+
+    pub(crate) fn evidence_gap_reports(
+        &self,
+        references: &ResearchReferenceCatalog,
+    ) -> Vec<super::evidence_gap::EvidenceGapReport> {
+        super::evidence_gap::project(self, references)
+    }
+
+    pub(super) fn hypothesis_records(&self) -> impl Iterator<Item = &HypothesisRecord> {
+        self.hypotheses.values()
+    }
+
+    pub(super) fn finding_records(&self) -> impl Iterator<Item = &FindingRecord> {
+        self.findings.values()
+    }
+
+    pub(super) fn experiment(&self, id: &ExperimentId) -> Option<&ExperimentRecord> {
+        self.experiments.get(id)
+    }
+
+    pub(super) fn capsule_for_experiment(
+        &self,
+        experiment: &ExperimentRecord,
+    ) -> Option<&ExperimentCapsuleRecord> {
+        self.capsules.get(&experiment.capsule_id)
+    }
+
+    pub(super) fn artifact_applies(
+        &self,
+        id: &ArtifactId,
+        target_id: &str,
+        target_version: Option<&str>,
+    ) -> bool {
+        self.artifacts.get(id).is_some_and(|artifact| {
+            self.target_snapshot_applies(&artifact.target_snapshot_id, target_id, target_version)
+        })
+    }
+
+    pub(super) fn target_snapshot_applies(
+        &self,
+        id: &TargetSnapshotId,
+        target_id: &str,
+        target_version: Option<&str>,
+    ) -> bool {
+        self.target_snapshot(id).is_some_and(|snapshot| {
+            snapshot.target_id == target_id
+                && target_version.is_none_or(|version| snapshot.version == version)
+        })
+    }
+
+    pub(super) fn experiment_applies(
+        &self,
+        experiment: &ExperimentRecord,
+        target_id: &str,
+        target_version: Option<&str>,
+    ) -> bool {
+        self.target_snapshot_applies(&experiment.target_snapshot_id, target_id, target_version)
+    }
+
+    pub(super) fn evidence_reference_applies(
+        &self,
+        references: &ResearchReferenceCatalog,
+        reference: &EvidenceRef,
+        target_id: &str,
+        target_version: Option<&str>,
+    ) -> bool {
+        match reference {
+            EvidenceRef::Artifact(id) => self.artifact_applies(id, target_id, target_version),
+            EvidenceRef::Experiment(id) => self.experiments.get(id).is_some_and(|experiment| {
+                self.experiment_applies(experiment, target_id, target_version)
+            }),
+            EvidenceRef::ExecutionReceipt(id) => {
+                references.execution_receipt(id).is_some()
+                    && self.capsules.values().any(|capsule| {
+                        capsule.execution_receipt_ids.contains(id)
+                            && self.experiments.get(&capsule.experiment_id).is_some_and(
+                                |experiment| {
+                                    self.experiment_applies(experiment, target_id, target_version)
+                                },
+                            )
+                    })
+            }
         }
     }
 
@@ -511,9 +625,20 @@ impl ResearchReducer {
     where
         Events: IntoIterator<Item = EventEnvelope<Value>>,
     {
+        self.reduce_with_references(events, &ResearchReferenceCatalog::default())
+    }
+
+    pub(crate) fn reduce_with_references<Events>(
+        &self,
+        events: Events,
+        references: &ResearchReferenceCatalog,
+    ) -> Result<ResearchState, ResearchError>
+    where
+        Events: IntoIterator<Item = EventEnvelope<Value>>,
+    {
         let mut state = ResearchState::default();
         for event in events {
-            self.apply(&mut state, event)?;
+            self.apply_with_references(&mut state, event, references)?;
         }
         Ok(state)
     }
@@ -522,6 +647,15 @@ impl ResearchReducer {
         &self,
         state: &mut ResearchState,
         envelope: EventEnvelope<Value>,
+    ) -> Result<(), ResearchError> {
+        self.apply_with_references(state, envelope, &ResearchReferenceCatalog::default())
+    }
+
+    pub(crate) fn apply_with_references(
+        &self,
+        state: &mut ResearchState,
+        envelope: EventEnvelope<Value>,
+        references: &ResearchReferenceCatalog,
     ) -> Result<(), ResearchError> {
         if envelope.stream_id.as_str() != RESEARCH_STREAM_ID {
             return Err(ResearchError::UnexpectedStream {
@@ -559,7 +693,7 @@ impl ResearchReducer {
         if event_id_is_idempotent(state, &envelope.event_id, &digest)? {
             return Ok(());
         }
-        self.apply_event(state, event)?;
+        self.apply_event_with_references(state, event, references)?;
         state
             .applied_event_digests
             .insert(envelope.event_id, digest);
@@ -571,6 +705,15 @@ impl ResearchReducer {
         state: &mut ResearchState,
         event: ResearchEvent,
     ) -> Result<(), ResearchError> {
+        self.apply_event_with_references(state, event, &ResearchReferenceCatalog::default())
+    }
+
+    pub(crate) fn apply_event_with_references(
+        &self,
+        state: &mut ResearchState,
+        event: ResearchEvent,
+        references: &ResearchReferenceCatalog,
+    ) -> Result<(), ResearchError> {
         event.validate_intrinsic()?;
         match event {
             ResearchEvent::TargetSnapshotRecorded(record) => {
@@ -581,11 +724,11 @@ impl ResearchReducer {
                 record,
                 keep_independent,
             } => {
-                validate_hypothesis_recorded(state, &record, keep_independent)?;
+                validate_hypothesis_recorded(state, references, &record, keep_independent)?;
                 state.hypotheses.insert(record.id.clone(), record);
             }
             ResearchEvent::HypothesisUpdated(update) => {
-                let record = stage_hypothesis_update(state, &update)?;
+                let record = stage_hypothesis_update(state, references, &update)?;
                 state.hypotheses.insert(record.id.clone(), record);
             }
             ResearchEvent::ExperimentRecorded {
@@ -595,12 +738,13 @@ impl ResearchReducer {
             } => {
                 validate_experiment_recorded(
                     state,
+                    references,
                     &experiment,
                     &capsule,
                     rerun_reason.as_deref(),
                 )?;
                 state.experiments.insert(experiment.id.clone(), experiment);
-                state.capsules.insert(capsule.id.clone(), capsule);
+                state.capsules.insert(capsule.id.clone(), *capsule);
             }
             ResearchEvent::ExperimentUpdated(update) => {
                 let record = stage_experiment_update(state, &update)?;
@@ -610,11 +754,11 @@ impl ResearchReducer {
                 record,
                 keep_independent,
             } => {
-                validate_finding_recorded(state, &record, keep_independent)?;
+                validate_finding_recorded(state, references, &record, keep_independent)?;
                 state.findings.insert(record.id.clone(), record);
             }
             ResearchEvent::FindingUpdated(update) => {
-                let record = stage_finding_update(state, &update)?;
+                let record = stage_finding_update(state, references, &update)?;
                 state.findings.insert(record.id.clone(), record);
             }
             ResearchEvent::NextActionRecorded(record) => {
@@ -650,6 +794,15 @@ impl ResearchReducer {
         state: &ResearchState,
         event: &ResearchEvent,
     ) -> Result<(), ResearchError> {
+        self.validate_event_with_references(state, event, &ResearchReferenceCatalog::default())
+    }
+
+    pub(crate) fn validate_event_with_references(
+        &self,
+        state: &ResearchState,
+        event: &ResearchEvent,
+        references: &ResearchReferenceCatalog,
+    ) -> Result<(), ResearchError> {
         event.validate_intrinsic()?;
         match event {
             ResearchEvent::TargetSnapshotRecorded(record) => {
@@ -658,24 +811,30 @@ impl ResearchReducer {
             ResearchEvent::HypothesisRecorded {
                 record,
                 keep_independent,
-            } => validate_hypothesis_recorded(state, record, *keep_independent),
+            } => validate_hypothesis_recorded(state, references, record, *keep_independent),
             ResearchEvent::HypothesisUpdated(update) => {
-                stage_hypothesis_update(state, update).map(|_| ())
+                stage_hypothesis_update(state, references, update).map(|_| ())
             }
             ResearchEvent::ExperimentRecorded {
                 experiment,
                 capsule,
                 rerun_reason,
-            } => validate_experiment_recorded(state, experiment, capsule, rerun_reason.as_deref()),
+            } => validate_experiment_recorded(
+                state,
+                references,
+                experiment,
+                capsule,
+                rerun_reason.as_deref(),
+            ),
             ResearchEvent::ExperimentUpdated(update) => {
                 stage_experiment_update(state, update).map(|_| ())
             }
             ResearchEvent::FindingRecorded {
                 record,
                 keep_independent,
-            } => validate_finding_recorded(state, record, *keep_independent),
+            } => validate_finding_recorded(state, references, record, *keep_independent),
             ResearchEvent::FindingUpdated(update) => {
-                stage_finding_update(state, update).map(|_| ())
+                stage_finding_update(state, references, update).map(|_| ())
             }
             ResearchEvent::NextActionRecorded(record) => {
                 validate_next_action_recorded(state, record)
@@ -752,16 +911,20 @@ fn validate_target_snapshot_recorded(
 
 fn validate_hypothesis_recorded(
     state: &ResearchState,
+    references: &ResearchReferenceCatalog,
     record: &HypothesisRecord,
     keep_independent: bool,
 ) -> Result<(), ResearchError> {
     if state.hypotheses.contains_key(&record.id) {
         return Err(duplicate_id(record.id.as_str()));
     }
-    for evidence in &record.evidence_refs {
-        ensure_reference(
-            state.contains_evidence_reference(evidence),
-            &format!("{evidence:?}"),
+    for link in &record.evidence_links {
+        validate_evidence_reference_for_subject(
+            state,
+            references,
+            &link.evidence,
+            &record.target_id,
+            None,
         )?;
     }
     if !keep_independent && !state.hypotheses_by_dedup_key(&record.dedup_key).is_empty() {
@@ -774,23 +937,30 @@ fn validate_hypothesis_recorded(
 
 fn stage_hypothesis_update(
     state: &ResearchState,
+    references: &ResearchReferenceCatalog,
     update: &HypothesisUpdate,
 ) -> Result<HypothesisRecord, ResearchError> {
-    for evidence in &update.evidence_refs_add {
-        ensure_reference(
-            state.contains_evidence_reference(evidence),
-            &format!("{evidence:?}"),
-        )?;
-    }
     let mut record = state.hypotheses.get(&update.id).cloned().ok_or_else(|| {
         ResearchError::MissingReference {
             reference: update.id.to_string(),
         }
     })?;
+    for link in &update.evidence_links_add {
+        validate_evidence_reference_for_subject(
+            state,
+            references,
+            &link.evidence,
+            &record.target_id,
+            None,
+        )?;
+    }
     if let Some(status) = update.status {
         record.status = status;
     }
-    extend_unique(&mut record.evidence_refs, update.evidence_refs_add.clone());
+    reject_existing_evidence_links(&record.evidence_links, &update.evidence_links_add)?;
+    record
+        .evidence_links
+        .extend(update.evidence_links_add.clone());
     if let Some(last_action) = &update.last_action {
         record.last_action = Some(last_action.clone());
     }
@@ -803,6 +973,7 @@ fn stage_hypothesis_update(
 
 fn validate_experiment_recorded(
     state: &ResearchState,
+    references: &ResearchReferenceCatalog,
     experiment: &ExperimentRecord,
     capsule: &ExperimentCapsuleRecord,
     rerun_reason: Option<&str>,
@@ -813,16 +984,39 @@ fn validate_experiment_recorded(
     if state.capsules.contains_key(&capsule.id) {
         return Err(duplicate_id(capsule.id.as_str()));
     }
-    ensure_reference(
-        state.hypotheses.contains_key(&experiment.hypothesis_id),
-        experiment.hypothesis_id.as_str(),
-    )?;
+    let hypothesis = state
+        .hypotheses
+        .get(&experiment.hypothesis_id)
+        .ok_or_else(|| ResearchError::MissingReference {
+            reference: experiment.hypothesis_id.to_string(),
+        })?;
     ensure_reference(
         state
             .target_snapshots
             .contains_key(&experiment.target_snapshot_id),
         experiment.target_snapshot_id.as_str(),
     )?;
+    ensure_target_snapshot_applicable(
+        state,
+        &experiment.target_snapshot_id,
+        &hypothesis.target_id,
+        None,
+    )?;
+    for receipt_id in &capsule.execution_receipt_ids {
+        let receipt = references.execution_receipt(receipt_id).ok_or_else(|| {
+            ResearchError::MissingReference {
+                reference: format!("ExecutionReceipt({receipt_id})"),
+            }
+        })?;
+        if !capsule.execution_ids.contains(&receipt.execution_id) {
+            return Err(ResearchError::InvalidRecord {
+                message: format!(
+                    "ExperimentCapsule Receipt `{receipt_id}` resolves to Execution `{}`, which is absent from execution_ids",
+                    receipt.execution_id
+                ),
+            });
+        }
+    }
     if state
         .experiments
         .values()
@@ -860,6 +1054,7 @@ fn stage_experiment_update(
 
 fn validate_finding_recorded(
     state: &ResearchState,
+    references: &ResearchReferenceCatalog,
     record: &FindingRecord,
     keep_independent: bool,
 ) -> Result<(), ResearchError> {
@@ -871,15 +1066,20 @@ fn validate_finding_recorded(
             state.target_snapshot(snapshot_id).is_some(),
             snapshot_id.as_str(),
         )?;
+        ensure_target_snapshot_applicable(
+            state,
+            snapshot_id,
+            &record.target_id,
+            Some(&record.target_version),
+        )?;
     }
-    for evidence in record
-        .evidence_refs
-        .iter()
-        .chain(record.negative_refs.iter())
-    {
-        ensure_reference(
-            state.contains_evidence_reference(evidence),
-            &format!("{evidence:?}"),
+    for link in &record.evidence_links {
+        validate_evidence_reference_for_subject(
+            state,
+            references,
+            &link.evidence,
+            &record.target_id,
+            Some(&record.target_version),
         )?;
     }
     if !keep_independent && !state.findings_by_dedup_key(&record.dedup_key).is_empty() {
@@ -892,24 +1092,9 @@ fn validate_finding_recorded(
 
 fn stage_finding_update(
     state: &ResearchState,
+    references: &ResearchReferenceCatalog,
     update: &FindingUpdate,
 ) -> Result<FindingRecord, ResearchError> {
-    for snapshot_id in &update.target_snapshot_ids_add {
-        ensure_reference(
-            state.target_snapshot(snapshot_id).is_some(),
-            snapshot_id.as_str(),
-        )?;
-    }
-    for evidence in update
-        .evidence_refs_add
-        .iter()
-        .chain(update.negative_refs_add.iter())
-    {
-        ensure_reference(
-            state.contains_evidence_reference(evidence),
-            &format!("{evidence:?}"),
-        )?;
-    }
     let mut record =
         state
             .findings
@@ -918,6 +1103,27 @@ fn stage_finding_update(
             .ok_or_else(|| ResearchError::MissingReference {
                 reference: update.id.to_string(),
             })?;
+    for snapshot_id in &update.target_snapshot_ids_add {
+        ensure_reference(
+            state.target_snapshot(snapshot_id).is_some(),
+            snapshot_id.as_str(),
+        )?;
+        ensure_target_snapshot_applicable(
+            state,
+            snapshot_id,
+            &record.target_id,
+            Some(&record.target_version),
+        )?;
+    }
+    for link in &update.evidence_links_add {
+        validate_evidence_reference_for_subject(
+            state,
+            references,
+            &link.evidence,
+            &record.target_id,
+            Some(&record.target_version),
+        )?;
+    }
     if let Some(status) = update.status {
         record.status = status;
     }
@@ -926,8 +1132,10 @@ fn stage_finding_update(
         update.target_snapshot_ids_add.clone(),
     );
     extend_unique(&mut record.prerequisites, update.prerequisites_add.clone());
-    extend_unique(&mut record.evidence_refs, update.evidence_refs_add.clone());
-    extend_unique(&mut record.negative_refs, update.negative_refs_add.clone());
+    reject_existing_evidence_links(&record.evidence_links, &update.evidence_links_add)?;
+    record
+        .evidence_links
+        .extend(update.evidence_links_add.clone());
     if let Some(impact) = &update.impact {
         record.impact = impact.clone();
     }
@@ -999,6 +1207,47 @@ fn ensure_reference(exists: bool, reference: &str) -> Result<(), ResearchError> 
     }
 }
 
+fn validate_evidence_reference_for_subject(
+    state: &ResearchState,
+    references: &ResearchReferenceCatalog,
+    reference: &EvidenceRef,
+    target_id: &str,
+    target_version: Option<&str>,
+) -> Result<(), ResearchError> {
+    ensure_reference(
+        state.contains_evidence_reference(references, reference),
+        &format!("{reference:?}"),
+    )?;
+    if state.evidence_reference_applies(references, reference, target_id, target_version) {
+        Ok(())
+    } else {
+        Err(ResearchError::InvalidRecord {
+            message: format!(
+                "Evidence reference `{reference:?}` is not applicable to target `{target_id}`{}",
+                target_version.map_or_else(String::new, |version| format!(" version `{version}`"))
+            ),
+        })
+    }
+}
+
+fn ensure_target_snapshot_applicable(
+    state: &ResearchState,
+    snapshot_id: &TargetSnapshotId,
+    target_id: &str,
+    target_version: Option<&str>,
+) -> Result<(), ResearchError> {
+    if state.target_snapshot_applies(snapshot_id, target_id, target_version) {
+        Ok(())
+    } else {
+        Err(ResearchError::InvalidRecord {
+            message: format!(
+                "TargetSnapshot `{snapshot_id}` is not applicable to target `{target_id}`{}",
+                target_version.map_or_else(String::new, |version| format!(" version `{version}`"))
+            ),
+        })
+    }
+}
+
 fn same_merge_kind(left: &MergeRecordRef, right: &MergeRecordRef) -> bool {
     matches!(
         (left, right),
@@ -1022,6 +1271,19 @@ fn extend_unique<T: Eq>(destination: &mut Vec<T>, additions: Vec<T>) {
         if !destination.contains(&addition) {
             destination.push(addition);
         }
+    }
+}
+
+fn reject_existing_evidence_links(
+    existing: &[EvidenceLink],
+    additions: &[EvidenceLink],
+) -> Result<(), ResearchError> {
+    if let Some(duplicate) = additions.iter().find(|link| existing.contains(link)) {
+        Err(ResearchError::InvalidRecord {
+            message: format!("EvidenceLink already exists `{duplicate:?}`"),
+        })
+    } else {
+        Ok(())
     }
 }
 
@@ -1070,13 +1332,6 @@ fn semantic_event_digest(
         message: error.to_string(),
     })?;
     Ok(blake3::hash(&bytes).to_hex().to_string())
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct VersionedPayload {
-    research_schema_version: u16,
-    data: Value,
 }
 
 #[derive(Deserialize, Serialize)]

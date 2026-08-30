@@ -5,14 +5,14 @@
 - Architecture version: `1.6.0`; v1/v1.1 remain remotely sealed, v1.2 through v1.6 are locally frozen with remote seal unauthorized
 - Phase: `IMPLEMENTATION`
 - Implementation: `STARTED`
-- Current milestone: `M4-S3e1` typed EvidenceLink and evidence-gap projection
-- Current slice: `M4-S3e1`
-- Slice state: `READY_NOT_AUTHORIZED`; M4-S3d is `COMPLETE_LOCAL`, while no M4-S3e1 implementation authority exists
-- Lean governance: `PASS`; M4-S3d has one strict Observation/TargetDelta Domain owner, one read-only App validation path and no second fact store, process executor, scanner framework or public API
-- Local Git initialized: `yes`; local branch `agent/m4-s3d-observation-target-delta` starts from M4-S3c Squash Merge `1b7b032`
-- Remote repository: `F0und-icu/cyber-agent` private; M4-S3c is merged through PR `#50` as `1b7b032`, while no tag or release was created
+- Current milestone: `M4-S3e1` typed EvidenceLink and evidence-gap projection is complete locally
+- Current slice: `M4-S3e2`
+- Slice state: M4-S3e1 is `COMPLETE_LOCAL`; M4-S3e2 is `READY_NOT_AUTHORIZED`
+- Lean governance: `PASS`; M4-S3e1 has one Research evidence-relation/applicability owner, one conservative Upcaster, one pure Gap projection and no second evidence or Receipt store
+- Local Git initialized: `yes`; local branch `agent/m4-s3e1-typed-evidence` starts from M4-S3d Squash Merge `32bc0f2`
+- Remote repository: `F0und-icu/cyber-agent` private; M4-S3d is merged through PR `#51` as `32bc0f2`, while no tag, release or Actions run was created
 - Documentation baseline commit: `55ff3be`
-- Current code base: M4-S3c Squash Merge `1b7b032` plus the complete uncommitted local M4-S3d worktree; commit, remote publication and M4-S3e1 remain unauthorized
+- Current code base: M4-S3d Squash Merge `32bc0f2` on `main`; M4-S3e1 is complete, gated and uncommitted on the local Slice branch
 - Upstream Codex reference baseline: `868c9edb0da913a5fc699a71664e65f44f6058b0`; read-only and not a Cyber Agent dependency
 
 ## Latest Local Design Update
@@ -141,6 +141,7 @@
 - M4-S3b canonical Tool guidance, precise schemas, narrow structured ToolFailure and durable-Trace-only non-evidence Tool accuracy reports.
 - M4-S3c provider-neutral bounded `http_request` and deterministic `inspect_environment` through the existing Tool/Artifact/Receipt authorities (remotely sealed through PR `#50` and Squash Merge `1b7b032`).
 - M4-S3d strict AndroidManifest Observation ingestion and deterministic two-Snapshot TargetDelta with complete source provenance, exposed only through read-only local inspection commands (`COMPLETE_LOCAL`; remote publication unauthorized).
+- M4-S3e1 additive typed EvidenceLink, conservative v1-to-v2 Research Upcast, real Session Receipt/target applicability validation and pure evidence-gap projection (`COMPLETE_LOCAL`; remote publication unauthorized).
 - F1a strict Provider Config v1, one Provider Composition Root, shared credential source and configuration-driven generic Live Smokes (remotely sealed in integrated PR `#46`).
 - F1b one protocol-first Responses HTTP/SSE Adapter, provider-neutral reasoning events and configuration-only conforming-service selection (remotely sealed in integrated PR `#46`).
 - F1c first-version CLI Chat through the existing AgentLoop, durable Session/RequestAudit/Tool facts and one synthetic DeepSeek Live Chat (remotely sealed in integrated PR `#46`).
@@ -196,22 +197,59 @@
 
 ## Current Slice
 
-- Slice: `M4-S3e1`
-- State: `READY_NOT_AUTHORIZED`; do not implement it without a new user instruction.
-- Candidate scope: the bounded typed EvidenceLink, conservative legacy Upcaster and pure evidence-gap projection path defined in `IMPLEMENTATION_PLAN.md`.
-- Boundary: the M4-S3d implementation and verification authority is consumed; M4-S3e1 implementation, Live Tests, commit, push, PR, Actions, merge, tag, release and architecture seal remain unauthorized.
+- Slice: `M4-S3e2`
+- State: `READY_NOT_AUTHORIZED`; no implementation has started.
+- Candidate scope: the complete Context provenance and Evidence-Spine Compaction path defined in `IMPLEMENTATION_PLAN.md`.
+- Boundary: M4-S3e2 implementation, Live Tests, M4-S3e1 Git publication, Actions, merge, tag, release and architecture seal remain unauthorized.
 
 ## Current Authorization
 
-The F1e and M4-S3c implementation, Live Test, publication and merge authorities are consumed. The separately authorized M4-S3d implementation, bounded delegation, independent audit, fixes and complete local verification are also consumed. The earlier Actions pause remains in force.
+The F1e and M4-S3c authorities are consumed. PR `#51` and Squash Merge `32bc0f2` consumed the M4-S3d submission authority. The M4-S3e1 local implementation and Terra xhigh read-only audit authorities are now consumed; the earlier Actions pause remains in force.
 
-- Run mode: `REVIEW_ONLY`; M4-S3e1 is not authorized
-- Git mode: `REVIEW_ONLY`; the complete M4-S3d changes remain uncommitted on `agent/m4-s3d-observation-target-delta`, while commit, push, PR, merge, tag and release remain unauthorized
+- Run mode: `REVIEW_ONLY`; no implementation Slice is currently authorized
+- Git mode: `LOCAL_WORKTREE_ONLY`; the M4-S3e1 branch is authorized, while its commit, push, PR, merge, tag and release remain unauthorized
 - GitHub Actions mode: `PAUSED_BY_OPERATOR`; do not trigger or rerun a Workflow until the user explicitly resumes it after quota recovery
-- Delegation mode: `OFF`; the completed M4-S3d delegation does not authorize another Slice or agent
-- Live test mode: `OFF`; M4-S3d completed entirely through local fixtures and required no model Provider request
+- Delegation mode: `OFF`; the completed M4-S3e1 Terra xhigh audit authority does not authorize another sub-agent turn
+- Live test mode: `OFF`; M4-S3e1 used only local Event/Research/Artifact/Receipt fixtures and pure projections
 - Configuration rule: Provider binding, model, Base URL and Capability Mapping remain Config v1 data. A Provider selects exactly one inline `api_key` or dedicated `credential_ref`; neither may infer Provider/model identity or use Codex login state.
-- Stop condition: stop with M4-S3d complete locally; do not implement M4-S3e1, run Live Tests or Actions, or perform Git publication
+- Stop condition: wait for separate M4-S3e1 Git publication or M4-S3e2 implementation authority; do not infer either from local completion
+
+## M4-S3e1 Slice Start
+
+- Base commit: M4-S3d Squash Merge `32bc0f2`; `main` matches `origin/main`, PR `#51` is merged and no Actions run was created.
+- Intended production touch points: the existing Research record/event payload, chained Research reader/upcaster, Research reducer/reference validator, `research_update` schema/Adapter and one pure derived evidence-gap projection.
+- Scope lock: add only the fixed supports/contradicts/positive_control/negative_control/environment_control/reachability_proof/prerequisite_proof/impact_proof relations; conservatively upcast historical positive/negative vectors; distinguish unknown from missing gaps. Do not add a second evidence store, graph database, model judge, autonomous transition, Context/Compaction work or Observation/Vision/Replay promotion.
+- Compatibility: original Research Events remain immutable; historical `evidence_refs` become supports and `negative_refs` become contradicts only in the current projection. Control/proof roles require new explicit `research_update` input.
+- Intended tests: every relation and reference kind, duplicate/cross-project/type/missing-reference failure, complete v1-to-current fixture upcast, original-stream immutability, explicit-only controls and proof that the gap projection cannot write Research/Memory, change Phase or promote derived observations.
+
+## M4-S3e1 Lean Review
+
+### Semantic Owners and Production Path
+
+- `src/domain/research/records.rs` owns Research payload v2, the eight fixed `EvidenceRelation` values and strict `EvidenceLink`/nested `EvidenceRef` decoding. `src/domain/research/upcast.rs` is the sole chained v1-to-v2 owner: legacy positive references become `supports`, negative references become `contradicts`, controls are never guessed and original JSONL bytes remain unchanged.
+- `src/domain/research/reducer.rs` owns reference existence, exact duplicate rejection and one target/version applicability predicate shared by record, update and Gap paths. Finding updates are staged before mutation; cross-target/version evidence fails atomically. `ResearchEvent::ExperimentRecorded` boxes its Capsule only as an internal enum-size optimization; encoded payload bytes and schema remain unchanged.
+- `src/adapters/research_projection.rs` composes the current Project's authoritative Session Receipt facts with Research replay. Receipt identity is the persistent Session Event ID; every Capsule Receipt resolves to a real Receipt whose Execution ID occurs in the same Capsule, and a duplicate Receipt Event ID across Session streams is rejected as ambiguous. This catalog is derived per read and is never serialized as a second Receipt store.
+- `src/domain/research/evidence_gap.rs` is one pure, deterministic, non-evidence projection over typed Research facts. It preserves the twelve fixed ordered Gap kinds, distinguishes `unknown` from `missing`, filters repeatability and Artifact/Receipt provenance through the same target/version applicability owner, and has no writer or Phase transition.
+- The current production consumers are the fixed `research_update` writer and `research_get` reader plus existing Artifact, Memory, Responses image resolution, CLI Chat and CLI inspection Research loads. They all reuse the same reference-aware Research reduction path.
+
+### Cache Correction, Reuse, API and Dependencies
+
+- Independent audit proved that the old `research_get` result-cache key covered only Research JSONL while the result now also depends on every Project Session Receipt stream. `research_get` therefore uses `ToolCachePolicy::None` and always performs the current strict projection. Folding all Session bytes into the key was rejected because the Tool's own later Receipt would make the key unstable.
+- Because `research_get` was the only production consumer, the unconsumed `LocalToolResultCache`, its Session audit adapter, Registry binding, lookup/store path and cache-only tests were removed instead of retained as dormant infrastructure. Historical `ToolCacheSource`, `ToolCacheValidation`, `ToolResultCacheHit` and Receipt payload decoding remain for old Session/Trace compatibility; Fragment/Context caches are unaffected.
+- Existing Research, Session, Artifact, Memory, AgentLoop, Tool Registry and Project Event Store owners are reused. No Cargo dependency, feature, Provider/configuration field, Port, Event store, graph/vector database, model judge, workflow, Hook/Registry or public test-only projection was added. Cargo, architecture and ADR files are unchanged; Codex reuse is `REFERENCE` only and the Upstream Port Ledger is unchanged.
+
+### Audit, Tests and Complete Gate
+
+- The required sequence completed as专项测试 → affected tests → independent Terra xhigh audit → fixes → audit repair review → complete Gate → Lean Review. The first audit returned `CHANGES_REQUIRED` with three P1 findings: nested unknown EvidenceRef fields, unverified Capsule Receipt strings and missing target/version applicability. Their repairs and permanent regressions passed.
+- Repair review found one further P1 stale-cache path. Removing the unsafe cache path and adding the cross-Session duplicate-Receipt regression received `APPROVE` with no P0/P1/P2. Main cross-boundary review then made Experiment Artifact/Capsule provenance target-aware; the final bounded Terra xhigh review again returned `APPROVE` with no P0/P1/P2.
+- Permanent top-level tests cover all eight relations, exact/request duplicates, wrong/missing/cross-Project references, strict nested fields, v1 immutable Upcast, real/mismatched/ambiguous Receipt facts, target/version record and update atomicity, cross-target Artifact provenance, repeatability filtering, stable Gap ordering and read-only behavior. The increased fixed Research Tool Schema required only raising one old constrained Context fixture from 16K to 18K so it still reaches and verifies its original World-State truncation boundary.
+- Complete local Gate passes on Rust `1.93.1`: formatting, denied-warning Clippy, 354 discovered tests with 352 default-enabled tests passing and two existing opt-in Live Smokes ignored, plus locked build. Production inline-test scan, forbidden Codex dependency scan, changed-file credential scan, `git diff --check`, unchanged Cargo/architecture/ADR files and clean fixed `codex/` commit `868c9edb0da913a5fc699a71664e65f44f6058b0` all pass.
+
+### Removed and Deferred
+
+- Removed the unsafe `research_get` persistent-result cache runtime, its sole-consumer adapter/session audit and cache-only execution tests. No temporary inline test, second Evidence/Receipt authority, public fixture surface, model-inferred relation or future placeholder abstraction remains.
+- Deferred exactly as planned: ContextDeliveryMap/Evidence-Spine Compaction is M4-S3e2; retrieval and guidance Shadow are M4-S3f/g; M4-S4 remains the long-flow acceptance Slice. M4-S3e1 commit, push, PR, Actions, Live Test, merge, tag, release and architecture seal remain unauthorized.
+- Governance debt: none blocking. Tool Result Cache benefit/eligibility remains an explicit future measurement question rather than an active runtime abstraction.
 
 ## M4-S3d Slice Start
 
@@ -247,7 +285,7 @@ The F1e and M4-S3c implementation, Live Test, publication and merge authorities 
 
 - No temporary inline tests, duplicate fixtures, public test access, unconsumed Observation type, Observation persistence, scanner wrapper, Extractor registry or speculative generalized Delta abstraction remains.
 - Deferred exactly as planned: explicit Observation-to-Research promotion telemetry remains unavailable/Deferred rather than fake zero; typed EvidenceLink and evidence-gap projection begin only in separately authorized M4-S3e1; Context provenance/Compaction, retrieval/guidance Shadow work and M4-S4 long-flow acceptance remain later Slices.
-- Governance debt: none blocking. M4-S3d is complete locally but intentionally uncommitted and unpublished.
+- Governance debt: none blocking. M4-S3d is remotely sealed through PR `#51` and Squash Merge `32bc0f2`; no Actions run, tag, release or architecture seal was created.
 
 ## M4-S3c Lean Review
 

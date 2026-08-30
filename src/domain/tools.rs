@@ -309,18 +309,6 @@ impl ToolExecutionPlan {
         Ok(plan)
     }
 
-    /// Binds one verified read-dependency fingerprint to a plan before it is
-    /// executed. The concrete Tool adapter owns obtaining and validating this
-    /// value; Domain only owns its cache-eligibility and identity semantics.
-    pub(crate) fn bind_cache_resource_fingerprint(
-        &mut self,
-        cache_resource_fingerprint: String,
-    ) -> Result<(), ToolContractError> {
-        self.cache_resource_fingerprint = Some(cache_resource_fingerprint);
-        self.plan_fingerprint = fingerprint(&PlanFingerprintInput::from(&*self))?;
-        Ok(())
-    }
-
     pub fn bind_resolved_tool_plan(
         &mut self,
         resolved: &ResolvedToolPlan,
@@ -364,15 +352,6 @@ impl ToolExecutionPlan {
             && self.cache_policy == spec.cache_policy
             && self.timeout_ms == spec.timeout_ms
             && self.output_policy == spec.output_policy
-    }
-
-    /// A persistent Tool result is eligible only when every declared
-    /// constraint is simultaneously true. Cache policy alone is never enough.
-    pub(crate) fn result_cache_eligible(&self) -> bool {
-        self.effect == ToolEffect::ReadOnly
-            && self.determinism == ToolDeterminism::Deterministic
-            && self.cache_policy == ToolCachePolicy::ContentAddressed
-            && self.cache_resource_fingerprint.is_some()
     }
 }
 
@@ -564,10 +543,6 @@ impl ExecutionReceiptEventPayload {
         }
     }
 
-    pub(crate) fn is_current_for(&self, receipt: &ExecutionReceipt) -> bool {
-        self.schema_version == Self::CURRENT_SCHEMA_VERSION && &self.receipt == receipt
-    }
-
     /// Strictly decodes the already-published Session Receipt payload without
     /// exposing or duplicating its schema in another Session owner.
     pub(crate) fn decode_current(
@@ -611,14 +586,6 @@ pub struct ToolCacheValidation {
     pub cache_resource_fingerprint: String,
     pub observed_before_fingerprint: String,
     pub observed_after_fingerprint: String,
-}
-
-impl ToolCacheValidation {
-    pub(crate) fn is_verified_for(&self, plan: &ToolExecutionPlan) -> bool {
-        plan.cache_resource_fingerprint.as_deref() == Some(self.cache_resource_fingerprint.as_str())
-            && self.observed_before_fingerprint == self.cache_resource_fingerprint
-            && self.observed_after_fingerprint == self.cache_resource_fingerprint
-    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -757,48 +724,6 @@ impl ToolExecutionOutcome {
                 output: source.result.output.clone(),
             },
         }
-    }
-
-    /// Produces a fresh audit identity for a verified persistent Cache hit.
-    /// The paired Tool Result uses the new Tool Call ID while the new Receipt
-    /// references, rather than clones, the prior execution identity.
-    pub(crate) fn cached_for(
-        plan: ToolExecutionPlan,
-        source: &Self,
-        cache_key: ToolResultCacheKey,
-        source_stream_id: StreamId,
-        source_receipt_event_id: EventId,
-    ) -> Self {
-        let receipt = ExecutionReceipt {
-            execution_id: plan.execution_id,
-            plan_fingerprint: plan.plan_fingerprint,
-            resolved_tool_plan_fingerprint: plan.resolved_tool_plan_fingerprint,
-            status: ToolResultStatus::Succeeded,
-            exit_reason: None,
-            output_artifact_ids: source.receipt.output_artifact_ids.clone(),
-            environment_change: None,
-            rerun_reason: plan.rerun_reason,
-            cache_source: Some(ToolCacheSource {
-                cache_key,
-                source_stream_id,
-                source_receipt_event_id,
-                source_execution_id: source.receipt.execution_id.clone(),
-                source_plan_fingerprint: source.receipt.plan_fingerprint.clone(),
-            }),
-            cache_validation: None,
-            file_mutations: Vec::new(),
-        };
-        let result = ToolResult {
-            call_id: plan.call.call_id,
-            tool_name: plan.call.name,
-            status: ToolResultStatus::Succeeded,
-            output: source.result.output.clone(),
-        };
-        Self { receipt, result }
-    }
-
-    pub(crate) fn record_cache_validation(&mut self, validation: ToolCacheValidation) {
-        self.receipt.cache_validation = Some(validation);
     }
 
     pub(crate) fn record_file_mutations(&mut self, file_mutations: Vec<FileMutationAudit>) {

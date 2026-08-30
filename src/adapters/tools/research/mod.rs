@@ -2,24 +2,21 @@
 
 mod schema;
 
-use std::fs;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::adapters::project_event_store::{
-    Project, ProjectEventStream, read_existing_research_events,
-};
+use crate::adapters::project_event_store::{Project, ProjectEventStream};
+use crate::adapters::research_projection::{load_reference_catalog, load_research_state};
 use crate::domain::events::{EventEnvelope, EventId, EventType, OccurredAt};
 use crate::domain::research::{
     ExperimentCapsuleDraft, ExperimentDraft, ExperimentUpdate, FindingDraft, FindingUpdate,
     HypothesisDraft, HypothesisUpdate, NextActionDraft, NextActionUpdate, ResearchError,
-    ResearchEvent, ResearchReducer, ResearchState, TargetSnapshotDraft, TargetSnapshotRecord,
+    ResearchEvent, ResearchReducer, ResearchReferenceCatalog, ResearchState, TargetSnapshotDraft,
+    TargetSnapshotRecord,
 };
-use crate::domain::tools::{
-    ResourceKey, ToolCacheValidation, ToolExecutionOutcome, ToolExecutionPlan,
-};
+use crate::domain::tools::{ResourceKey, ToolExecutionOutcome, ToolExecutionPlan};
 use crate::ports::tool::ToolExecutorError;
 use crate::ports::{EventSink, EventSource};
 
@@ -120,40 +117,19 @@ pub(super) async fn execute_get(
             Err(error) => return invalid_plan(plan, error),
         };
     let _ = arguments;
-    let expected_resource_fingerprint = plan.cache_resource_fingerprint.clone();
-    let observed_before_fingerprint = expected_resource_fingerprint
-        .as_ref()
-        .and_then(|_| cache_resource_fingerprint(project_root, &plan.call.arguments));
-    match load_state(project_root) {
-        Ok(state) => {
+    match load_state_with_references(project_root) {
+        Ok((state, references)) => {
             let stream_event_count = state.applied_event_count();
-            let observed_after_fingerprint = expected_resource_fingerprint
-                .as_ref()
-                .and_then(|_| cache_resource_fingerprint(project_root, &plan.call.arguments));
-            let mut outcome = ToolExecutionOutcome::succeeded(
+            let evidence_gap_reports = state.evidence_gap_reports(&references);
+            ToolExecutionOutcome::succeeded(
                 plan,
                 json!({
                     "status": "ok",
                     "state": state,
                     "stream_event_count": stream_event_count,
+                    "evidence_gap_reports": evidence_gap_reports,
                 }),
-            );
-            if let (
-                Some(cache_resource_fingerprint),
-                Some(observed_before_fingerprint),
-                Some(observed_after_fingerprint),
-            ) = (
-                expected_resource_fingerprint,
-                observed_before_fingerprint,
-                observed_after_fingerprint,
-            ) {
-                outcome.record_cache_validation(ToolCacheValidation {
-                    cache_resource_fingerprint,
-                    observed_before_fingerprint,
-                    observed_after_fingerprint,
-                });
-            }
-            outcome
+            )
         }
         Err(error) => research_failure(plan, "research_read_failed", error),
     }
@@ -181,7 +157,11 @@ pub(super) async fn execute_update(
         Err(error) => return research_failure(plan, "research_stream_unavailable", error),
     };
     let reducer = ResearchReducer;
-    let mut state = match reduce_store(&store, &reducer) {
+    let references = match load_reference_catalog(&project) {
+        Ok(references) => references,
+        Err(error) => return research_failure(plan, "research_receipts_invalid", error),
+    };
+    let mut state = match reduce_store(&store, &reducer, &references) {
         Ok(state) => state,
         Err(error) => return research_failure(plan, "research_state_invalid", error),
     };
@@ -212,7 +192,7 @@ pub(super) async fn execute_update(
         Ok(OperationEvent::Append(event)) => event,
         Err(error) => return research_failure(plan, "research_record_invalid", error),
     };
-    if let Err(error) = reducer.validate_event(&state, &event) {
+    if let Err(error) = reducer.validate_event_with_references(&state, &event, &references) {
         return match error {
             ResearchError::DedupConflict { .. } => {
                 ToolExecutionOutcome::succeeded(plan, dedup_conflict_output(&state, &event))
@@ -243,7 +223,7 @@ pub(super) async fn execute_update(
     if let Err(error) = EventSink::append_event(&mut store, &envelope) {
         return research_failure(plan, "research_append_failed", error);
     }
-    if let Err(error) = reducer.apply(&mut state, envelope) {
+    if let Err(error) = reducer.apply_with_references(&mut state, envelope, &references) {
         return ToolExecutionOutcome::failed(
             plan,
             "research_apply_after_append_failed",
@@ -270,38 +250,34 @@ fn research_resource(project_root: &Path) -> Vec<ResourceKey> {
     vec![ResourceKeyResolver::new(project_root).file(".cyber-agent/research.jsonl")]
 }
 
-/// The cache resource for `research_get` is the exact authoritative JSONL
-/// byte stream. A hit avoids its strict scan/upcast/reducer work, while a
-/// changed stream receives a distinct project-scoped derived key.
-pub(super) fn cache_resource_fingerprint(project_root: &Path, arguments: &Value) -> Option<String> {
-    let _: ResearchGetArgs = serde_json::from_value(arguments.clone()).ok()?;
-    let project = Project::discover(project_root).ok()?;
-    let path = project.root().join(".cyber-agent/research.jsonl");
-    fs::read(path)
-        .ok()
-        .map(|bytes| blake3::hash(&bytes).to_hex().to_string())
-}
-
 pub(super) fn load_state(project_root: &Path) -> Result<ResearchState, String> {
     let project = Project::discover(project_root).map_err(|error| error.to_string())?;
-    reduce_project_research(&project, &ResearchReducer)
+    load_research_state(&project)
 }
 
-fn reduce_project_research(
-    project: &Project,
-    reducer: &ResearchReducer,
-) -> Result<ResearchState, String> {
-    let events = read_existing_research_events(project).map_err(|error| error.to_string())?;
-    reducer.reduce(events).map_err(|error| error.to_string())
+fn load_state_with_references(
+    project_root: &Path,
+) -> Result<(ResearchState, ResearchReferenceCatalog), String> {
+    let project = Project::discover(project_root).map_err(|error| error.to_string())?;
+    let references = load_reference_catalog(&project)?;
+    let events = crate::adapters::project_event_store::read_existing_research_events(&project)
+        .map_err(|error| error.to_string())?;
+    let state = ResearchReducer
+        .reduce_with_references(events, &references)
+        .map_err(|error| error.to_string())?;
+    Ok((state, references))
 }
 
 pub(super) fn reduce_store(
     store: &crate::adapters::project_event_store::JsonlEventStore<'_>,
     reducer: &ResearchReducer,
+    references: &ResearchReferenceCatalog,
 ) -> Result<ResearchState, String> {
     let events = EventSource::read_events(store, &ProjectEventStream::Research.stream_id())
         .map_err(|error| error.to_string())?;
-    reducer.reduce(events).map_err(|error| error.to_string())
+    reducer
+        .reduce_with_references(events, references)
+        .map_err(|error| error.to_string())
 }
 
 enum OperationEvent {
@@ -344,7 +320,7 @@ fn event_from_operation(
                 crate::domain::research::ExperimentRecord::from_drafts(experiment, *capsule)?;
             ResearchEvent::ExperimentRecorded {
                 experiment,
-                capsule,
+                capsule: Box::new(capsule),
                 rerun_reason,
             }
         }

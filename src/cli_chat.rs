@@ -16,9 +16,9 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::adapters::artifact_store::LocalArtifactStore;
 use crate::adapters::fragment_cache::LocalFragmentCache;
-use crate::adapters::project_event_store::read_existing_research_events;
 use crate::adapters::project_event_store::{Project, ProjectEventStream};
 use crate::adapters::project_snapshot::LocalProjectSnapshot;
+use crate::adapters::research_projection::load_research_state;
 use crate::adapters::tools::ToolRegistry;
 use crate::app::agent_loop::{
     AgentLoop, AgentLoopError, AgentTurnOutcome, AssistantTextDeltaStage, ToolExecutionReceiptStage,
@@ -33,7 +33,6 @@ use crate::domain::project::ProjectId;
 use crate::domain::request_audit::{
     RequestAuditAttempt, RequestAuditBinding, RequestAuditRunContext,
 };
-use crate::domain::research::{ResearchReducer, ResearchState};
 use crate::domain::research_control::{ResearchPhase, ResearchPhaseSelection};
 use crate::domain::session::{SessionEvent, SessionLifecycle, SessionState};
 use crate::domain::tools::ToolExecutionOutcome;
@@ -65,7 +64,7 @@ pub(crate) async fn run(
     let (session_state, provider_session, disposition) =
         session.start_or_resume(explicit_resume)?;
 
-    let tools = ToolRegistry::for_project_with_session(session.project.root(), session_id.clone())?;
+    let tools = ToolRegistry::for_project(session.project.root());
     let mut agent = AgentLoop::with_primary_context(
         composition.primary_provider(),
         &tools,
@@ -218,8 +217,7 @@ fn refresh_agent_context<Provider>(
 where
     Provider: ModelProvider + ?Sized,
 {
-    let research_events = read_existing_research_events(project)?;
-    let research_state: ResearchState = ResearchReducer.reduce(research_events)?;
+    let research_state = load_research_state(project).map_err(ChatError::ResearchProjection)?;
     agent.set_world_state(ResearchWorldState::from_research_state(&research_state)?);
     let timestamp = occurred_at();
     let snapshot =
@@ -547,6 +545,8 @@ pub(crate) enum ChatError {
     ProjectSnapshot(#[from] crate::adapters::project_snapshot::LocalProjectSnapshotError),
     #[error(transparent)]
     Research(#[from] crate::domain::research::ResearchError),
+    #[error("Research projection is invalid: {0}")]
+    ResearchProjection(String),
     #[error(transparent)]
     WorldState(#[from] crate::domain::world_state::WorldStateError),
     #[error("Session `{session_id}` does not exist in the current project")]

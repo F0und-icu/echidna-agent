@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 
 use crate::adapters::artifact_store::LocalArtifactStore;
 use crate::adapters::project_event_store::{Project, ProjectEventStream};
+use crate::adapters::research_projection::load_reference_catalog;
 use crate::domain::artifacts::{ArtifactEvent, ArtifactId, ArtifactRecord, BlobId};
 use crate::domain::events::{EventEnvelope, EventId, EventType, OccurredAt};
 use crate::domain::research::{ResearchEvent, ResearchReducer, TargetSnapshotId};
@@ -71,7 +72,9 @@ pub(crate) fn preflight_artifact(
         .open_research(None)
         .map_err(|error| publication_error("artifact_stream_unavailable", error))?;
     let reducer = ResearchReducer;
-    let state = reduce_store(&store, &reducer)
+    let references = load_reference_catalog(&project)
+        .map_err(|error| publication_error("artifact_receipts_invalid", error))?;
+    let state = reduce_store(&store, &reducer, &references)
         .map_err(|error| publication_error("artifact_state_invalid", error))?;
     validate_preflight(&state, &reducer, plan, arguments)
 }
@@ -194,14 +197,16 @@ where
         .open_research(None)
         .map_err(|error| publication_error("artifact_stream_unavailable", error))?;
     let reducer = ResearchReducer;
-    let mut state = reduce_store(&store, &reducer)
+    let references = load_reference_catalog(&project)
+        .map_err(|error| publication_error("artifact_receipts_invalid", error))?;
+    let mut state = reduce_store(&store, &reducer, &references)
         .map_err(|error| publication_error("artifact_state_invalid", error))?;
     validate_preflight(&state, &reducer, plan, arguments)?;
     let blob = publish_blob(&project)
         .map_err(|error| publication_error("artifact_blob_publish_failed", error))?;
     let event = artifact_event(arguments, plan, blob.blob_id.clone(), blob.size_bytes);
     reducer
-        .validate_event(&state, &event)
+        .validate_event_with_references(&state, &event, &references)
         .map_err(|error| publication_error("artifact_provenance_rejected", error))?;
     let sequence = store
         .next_sequence()
@@ -221,7 +226,7 @@ where
     EventSink::append_event(&mut store, &envelope)
         .map_err(|error| publication_error("artifact_append_failed", error))?;
     reducer
-        .apply(&mut state, envelope)
+        .apply_with_references(&mut state, envelope, &references)
         .map_err(|error| publication_error("artifact_apply_after_append_failed", error))?;
     let ResearchEvent::Artifact(artifact_event) = event else {
         unreachable!("Artifact publisher receives Artifact Events")

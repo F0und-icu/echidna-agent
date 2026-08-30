@@ -4,7 +4,6 @@ use std::fs;
 
 use cyber_agent::adapters::project_event_store::Project;
 use cyber_agent::adapters::tools::ToolRegistry;
-use cyber_agent::domain::events::StreamId;
 use cyber_agent::domain::tools::{
     ExecutionId, ToolCachePolicy, ToolCall, ToolCallId, ToolDeterminism, ToolEffect, ToolName,
     ToolResultStatus,
@@ -17,10 +16,6 @@ fn initialized_project(label: &str) -> (TemporaryDirectory, Project) {
     let root = TemporaryDirectory::new(label);
     let project = Project::initialize(root.path()).unwrap();
     (root, project)
-}
-
-fn session_tools(project: &Project) -> ToolRegistry {
-    ToolRegistry::for_project_with_session(project.root(), StreamId::new("tool-cache")).unwrap()
 }
 
 fn call(id: &str, name: &str, arguments: Value) -> ToolCall {
@@ -307,27 +302,22 @@ async fn write_paths_reject_absolute_and_symlinked_targets() {
 }
 
 #[tokio::test]
-async fn only_verified_deterministic_read_only_research_gets_persisted_cache_hits() {
-    let (_root, project) = initialized_project("tool-cache-hit");
-    let first_tools = session_tools(&project);
-    let first = execute(&first_tools, "research-first", "research_get", json!({})).await;
+async fn research_get_is_never_persistently_cached_and_rerun_stays_explicit() {
+    let (_root, project) = initialized_project("research-get-no-cache");
+    let tools = ToolRegistry::for_project(project.root());
+    let first = execute(&tools, "research-first", "research_get", json!({})).await;
     assert_eq!(first.result.status, ToolResultStatus::Succeeded);
     assert!(first.receipt.cache_source.is_none());
-    assert!(first.receipt.cache_validation.is_some());
-    drop(first_tools);
+    assert!(first.receipt.cache_validation.is_none());
 
-    let second_tools = session_tools(&project);
-    let hit = execute(&second_tools, "research-hit", "research_get", json!({})).await;
-    assert_eq!(hit.result.status, ToolResultStatus::Succeeded);
-    let source = hit.receipt.cache_source.as_ref().unwrap();
-    assert_eq!(source.source_execution_id, first.receipt.execution_id);
-    assert_ne!(hit.receipt.execution_id, first.receipt.execution_id);
-    assert_ne!(hit.receipt.plan_fingerprint, first.receipt.plan_fingerprint);
-    assert_eq!(hit.result.call_id.as_str(), "research-hit");
-    assert_eq!(hit.result.output, first.result.output);
-    assert!(hit.receipt.cache_validation.is_none());
+    let second = execute(&tools, "research-second", "research_get", json!({})).await;
+    assert_eq!(second.result.status, ToolResultStatus::Succeeded);
+    assert!(second.receipt.cache_source.is_none());
+    assert!(second.receipt.cache_validation.is_none());
+    assert_ne!(second.receipt.execution_id, first.receipt.execution_id);
+    assert_eq!(second.result.output, first.result.output);
 
-    let specs = second_tools.specs();
+    let specs = tools.specs();
     let research = specs
         .iter()
         .find(|spec| spec.name.as_str() == "research_get")
@@ -337,22 +327,20 @@ async fn only_verified_deterministic_read_only_research_gets_persisted_cache_hit
         (
             ToolEffect::ReadOnly,
             ToolDeterminism::Deterministic,
-            ToolCachePolicy::ContentAddressed,
+            ToolCachePolicy::None,
         )
     );
-    assert!(specs.iter().all(|spec| {
-        spec.cache_policy != ToolCachePolicy::ContentAddressed
-            || (spec.effect == ToolEffect::ReadOnly
-                && spec.determinism == ToolDeterminism::Deterministic)
-    }));
-}
-
-#[tokio::test]
-async fn explicit_rerun_bypasses_a_persistent_cache() {
-    let (_root, project) = initialized_project("tool-cache-explicit-rerun");
-    let tools = session_tools(&project);
-    let source = execute(&tools, "rerun-source", "research_get", json!({})).await;
-    assert!(source.receipt.cache_source.is_none());
+    assert!(
+        specs
+            .iter()
+            .all(|spec| spec.cache_policy == ToolCachePolicy::None)
+    );
+    assert!(
+        !project
+            .root()
+            .join(".cyber-agent/cache/tool-results")
+            .exists()
+    );
 
     let rerun = execute(
         &tools,
@@ -370,15 +358,6 @@ async fn explicit_rerun_bypasses_a_persistent_cache() {
             .as_ref()
             .map(|reason| reason.as_str()),
         Some("verify current stream")
-    );
-
-    let hit = execute(&tools, "rerun-following-hit", "research_get", json!({})).await;
-    assert_eq!(
-        hit.receipt
-            .cache_source
-            .as_ref()
-            .map(|source| source.source_execution_id.as_str()),
-        Some("execution-rerun-source")
     );
 }
 
@@ -404,9 +383,9 @@ async fn apply_patch_rejects_crlf_content_before_publishing() {
 }
 
 #[tokio::test]
-async fn mutating_research_updates_never_cache_and_invalidate_research_get_results() {
-    let (_root, project) = initialized_project("tool-cache-research-invalidation");
-    let tools = session_tools(&project);
+async fn research_get_observes_every_research_update_without_cache() {
+    let (_root, project) = initialized_project("research-get-fresh-reduction");
+    let tools = ToolRegistry::for_project(project.root());
     let before = execute(&tools, "research-before-update", "research_get", json!({})).await;
     assert!(before.receipt.cache_source.is_none());
 
@@ -452,21 +431,16 @@ async fn mutating_research_updates_never_cache_and_invalidate_research_get_resul
             .is_some()
     );
 
-    let hit = execute(
+    let repeated = execute(
         &tools,
-        "research-after-update-hit",
+        "research-after-update-repeated",
         "research_get",
         json!({}),
     )
     .await;
-    assert_eq!(hit.result.status, ToolResultStatus::Succeeded);
-    assert_eq!(
-        hit.receipt
-            .cache_source
-            .as_ref()
-            .map(|source| source.source_execution_id.as_str()),
-        Some("execution-research-after-update")
-    );
+    assert_eq!(repeated.result.status, ToolResultStatus::Succeeded);
+    assert!(repeated.receipt.cache_source.is_none());
+    assert_eq!(repeated.result.output, changed.result.output);
 
     let after_cache = execute(
         &tools,
@@ -485,111 +459,4 @@ async fn mutating_research_updates_never_cache_and_invalidate_research_get_resul
     )
     .await;
     assert_eq!(after_cache.result.status, ToolResultStatus::Succeeded);
-}
-
-#[tokio::test]
-async fn missing_or_corrupt_source_receipt_event_is_a_cache_miss() {
-    let (_root, project) = initialized_project("tool-cache-source-event-integrity");
-    let tools = session_tools(&project);
-    let source = execute(&tools, "source-event", "research_get", json!({})).await;
-    assert!(source.receipt.cache_source.is_none());
-    let events = project
-        .root()
-        .join(".cyber-agent/sessions/tool-cache/events.jsonl");
-    fs::remove_file(&events).unwrap();
-    let missing = execute(&tools, "source-event-missing", "research_get", json!({})).await;
-    assert!(missing.receipt.cache_source.is_none());
-    fs::write(&events, b"{not json}\n").unwrap();
-    let corrupt = execute(&tools, "source-event-corrupt", "research_get", json!({})).await;
-    assert!(corrupt.receipt.cache_source.is_none());
-}
-
-#[tokio::test]
-async fn session_cache_audit_serializes_concurrent_source_and_hit_events() {
-    let (_root, project) = initialized_project("tool-cache-audit-serialization");
-    let tools = session_tools(&project);
-    let (first, second) = tokio::join!(
-        execute(&tools, "serialized-first", "research_get", json!({})),
-        execute(&tools, "serialized-second", "research_get", json!({})),
-    );
-    assert_eq!(first.result.status, ToolResultStatus::Succeeded);
-    assert_eq!(second.result.status, ToolResultStatus::Succeeded);
-    let events = fs::read_to_string(
-        project
-            .root()
-            .join(".cyber-agent/sessions/tool-cache/events.jsonl"),
-    )
-    .unwrap()
-    .lines()
-    .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
-    .collect::<Vec<_>>();
-    assert_eq!(events.len(), 2);
-    assert_eq!(events[0]["sequence"], 1);
-    assert_eq!(events[1]["sequence"], 2);
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn failed_cache_hit_event_append_never_returns_a_cache_hit() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let (_root, project) = initialized_project("tool-cache-hit-event-failure");
-    let tools = session_tools(&project);
-    execute(&tools, "source-hit-failure", "research_get", json!({})).await;
-    let events = project
-        .root()
-        .join(".cyber-agent/sessions/tool-cache/events.jsonl");
-    fs::set_permissions(&events, fs::Permissions::from_mode(0o444)).unwrap();
-    let outcome = execute(&tools, "hit-event-failure", "research_get", json!({})).await;
-    fs::set_permissions(&events, fs::Permissions::from_mode(0o644)).unwrap();
-    assert!(outcome.receipt.cache_source.is_none());
-}
-
-#[tokio::test]
-async fn deleted_or_tampered_cache_safely_degrades_to_a_new_source_receipt_and_projects_do_not_share()
- {
-    let (_root_a, project_a) = initialized_project("tool-cache-a");
-    let tools_a = session_tools(&project_a);
-    let first = execute(&tools_a, "a-first", "research_get", json!({})).await;
-    assert!(first.receipt.cache_source.is_none());
-    let cache_directory = project_a.root().join(".cyber-agent/cache/tool-results");
-    let cache_file = fs::read_dir(&cache_directory)
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path();
-    let mut parseable_tampering: Value =
-        serde_json::from_slice(&fs::read(&cache_file).unwrap()).unwrap();
-    parseable_tampering["source"]["result"]["output"]["status"] = json!("tampered");
-    fs::write(
-        &cache_file,
-        serde_json::to_vec(&parseable_tampering).unwrap(),
-    )
-    .unwrap();
-    let after_tampering = execute(&tools_a, "a-tampered", "research_get", json!({})).await;
-    assert!(after_tampering.receipt.cache_source.is_none());
-    assert_eq!(after_tampering.result.output["status"], "ok");
-
-    fs::write(&cache_file, b"not json").unwrap();
-    let after_corruption = execute(&tools_a, "a-corrupt", "research_get", json!({})).await;
-    assert!(after_corruption.receipt.cache_source.is_none());
-    fs::remove_dir_all(&cache_directory).unwrap();
-    let after_deletion = execute(&tools_a, "a-deleted", "research_get", json!({})).await;
-    assert!(after_deletion.receipt.cache_source.is_none());
-    assert!(cache_directory.exists());
-
-    let (_root_b, project_b) = initialized_project("tool-cache-b");
-    let tools_b = session_tools(&project_b);
-    let b_first = execute(&tools_b, "b-first", "research_get", json!({})).await;
-    assert!(b_first.receipt.cache_source.is_none());
-    let b_cache_file = fs::read_dir(project_b.root().join(".cyber-agent/cache/tool-results"))
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path();
-    fs::write(&b_cache_file, fs::read(&cache_file).unwrap()).unwrap();
-    let isolated = execute(&tools_b, "b-isolated", "research_get", json!({})).await;
-    assert!(isolated.receipt.cache_source.is_none());
 }

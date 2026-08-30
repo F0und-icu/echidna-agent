@@ -25,9 +25,6 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::adapters::project_event_store::ProjectEventStoreError;
-use crate::adapters::tool_result_cache::LocalToolResultCache;
-use crate::domain::events::StreamId;
 use crate::domain::tools::{
     ExecutionId, ResolvedToolPlan, ResourceKey, ToolCachePolicy, ToolCall, ToolDeterminism,
     ToolEffect, ToolExecutionOutcome, ToolExecutionPlan, ToolExposure, ToolName, ToolOutputPolicy,
@@ -77,7 +74,6 @@ pub struct ToolRegistry {
     jobs: job::BackgroundJobs,
     ptys: pty::PtySessions,
     active_leases: ActiveProcessLeases,
-    result_cache: Option<LocalToolResultCache>,
 }
 
 impl ToolRegistry {
@@ -124,27 +120,12 @@ impl ToolRegistry {
         .into_iter()
         .collect();
         Self {
-            result_cache: None,
             project_root,
             tools,
             jobs: job::BackgroundJobs::new(),
             ptys: pty::PtySessions::new(),
             active_leases: ActiveProcessLeases::new(),
         }
-    }
-
-    /// Enables the persistent Tool Result Cache only for one caller-bound
-    /// Session. Ordinary registries remain cache-free so a hit can
-    /// never outlive its mandatory Session audit chain.
-    pub fn for_project_with_session(
-        project_root: impl Into<PathBuf>,
-        session_id: StreamId,
-    ) -> Result<Self, ProjectEventStoreError> {
-        let project_root = project_root.into();
-        let result_cache = LocalToolResultCache::bind(&project_root, session_id)?;
-        let mut registry = Self::for_project(project_root);
-        registry.result_cache = Some(result_cache);
-        Ok(registry)
     }
 
     fn canonical_spec(name: &ToolName, tool: BuiltinTool) -> ToolSpec {
@@ -203,15 +184,6 @@ impl ToolRegistry {
                 }
             })?;
         }
-        if let Some(fingerprint) =
-            tool.cache_resource_fingerprint(&self.project_root, &plan.call.arguments)
-        {
-            plan.bind_cache_resource_fingerprint(fingerprint)
-                .map_err(|error| ToolExecutorError::PlanFailure {
-                    tool_name: spec.name.to_string(),
-                    message: error.to_string(),
-                })?;
-        }
         Ok(plan)
     }
 }
@@ -266,21 +238,6 @@ impl ToolExecutor for ToolRegistry {
             {
                 return active_resource_busy(plan, conflict);
             }
-            // An explicit rerun is a deliberate fresh execution. It must not
-            // be silently satisfied by a persistent derived result.
-            let cache_plan = (self.result_cache.is_some()
-                && plan.rerun_reason.is_none()
-                && plan.result_cache_eligible())
-            .then(|| plan.clone());
-            if let (Some(cache), Some(_)) = (self.result_cache.as_ref(), cache_plan.as_ref())
-                && tool
-                    .cache_resource_fingerprint(&self.project_root, &plan.call.arguments)
-                    .as_deref()
-                    == plan.cache_resource_fingerprint.as_deref()
-                && let Some(outcome) = cache.lookup(&plan)
-            {
-                return outcome;
-            }
             let timeout_plan = plan.clone();
             if tool == BuiltinTool::ToolSearch {
                 let deferred = plan.deferred_tool_specs().to_vec();
@@ -295,7 +252,7 @@ impl ToolExecutor for ToolRegistry {
             } else {
                 Vec::new()
             };
-            let outcome = match tokio::time::timeout(
+            match tokio::time::timeout(
                 Duration::from_millis(plan.timeout_ms),
                 tool.execute(
                     &self.project_root,
@@ -310,11 +267,7 @@ impl ToolExecutor for ToolRegistry {
             {
                 Ok(outcome) => outcome,
                 Err(_) => ToolExecutionOutcome::cancelled(timeout_plan, "tool_timeout"),
-            };
-            if let (Some(cache), Some(cache_plan)) = (self.result_cache.as_ref(), cache_plan) {
-                cache.store(&cache_plan, &outcome);
             }
-            outcome
         })
     }
 }
@@ -891,7 +844,7 @@ impl BuiltinTool {
                 ToolDeterminism::EnvironmentDependent,
                 30_000,
             ),
-            Self::ResearchGet => cacheable(spec(
+            Self::ResearchGet => spec(
                 "research_get",
                 research::get_input_schema(),
                 research::get_output_schema(),
@@ -901,7 +854,7 @@ impl BuiltinTool {
                 ToolRetryPolicy::ReplaySafe,
                 ToolDeterminism::Deterministic,
                 10_000,
-            )),
+            ),
             Self::ResearchUpdate => spec(
                 "research_update",
                 research::update_input_schema(),
@@ -1047,13 +1000,6 @@ impl BuiltinTool {
                 "type": "object", "properties": {"status": {"type": "string"}, "event_appended": boolean, "event_id": {"type": "string"}, "message": {"type": "string"}},
                 "additionalProperties": false
             }),
-        }
-    }
-
-    fn cache_resource_fingerprint(self, project_root: &Path, arguments: &Value) -> Option<String> {
-        match self {
-            Self::ResearchGet => research::cache_resource_fingerprint(project_root, arguments),
-            _ => None,
         }
     }
 }
@@ -1388,11 +1334,6 @@ fn canonical_description(name: &str) -> String {
         strip_heading(prefer, "Prefer:"),
         strip_heading(produces, "Produces:"),
     )
-}
-
-fn cacheable(mut spec: ToolSpec) -> ToolSpec {
-    spec.cache_policy = ToolCachePolicy::ContentAddressed;
-    spec
 }
 
 fn with_execution_control(mut schema: Value) -> Value {

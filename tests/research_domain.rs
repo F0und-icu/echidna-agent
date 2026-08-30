@@ -3,11 +3,12 @@ use cyber_agent::domain::events::{
     EventEnvelope, EventId, EventSequence, EventType, OccurredAt, StreamId,
 };
 use cyber_agent::domain::research::{
-    CapsuleId, EvidenceRef, ExecutionReceiptId, ExperimentCapsuleDraft, ExperimentDraft,
-    ExperimentId, ExperimentRecord, ExperimentResult, FindingDraft, FindingId, FindingRecord,
-    FindingStatus, FindingUpdate, HypothesisDraft, HypothesisId, HypothesisRecord,
-    HypothesisStatus, NextActionId, NextActionUpdate, ResearchError, ResearchEvent,
-    ResearchReducer, TargetKind, TargetSnapshotDraft, TargetSnapshotId, TargetSnapshotRecord,
+    CapsuleId, EvidenceLink, EvidenceRef, EvidenceRelation, ExecutionReceiptId,
+    ExperimentCapsuleDraft, ExperimentDraft, ExperimentId, ExperimentRecord, ExperimentResult,
+    FindingDraft, FindingId, FindingRecord, FindingStatus, FindingUpdate, HypothesisDraft,
+    HypothesisId, HypothesisRecord, HypothesisStatus, NextActionId, NextActionUpdate,
+    ResearchError, ResearchEvent, ResearchReducer, TargetKind, TargetSnapshotDraft,
+    TargetSnapshotId, TargetSnapshotRecord,
 };
 use cyber_agent::domain::tools::ExecutionId;
 use serde_json::{Value, json};
@@ -175,8 +176,7 @@ fn candidate_finding() -> FindingRecord {
         target_snapshot_ids: Vec::new(),
         prerequisites: Vec::new(),
         impact: "candidate impact".to_owned(),
-        evidence_refs: Vec::new(),
-        negative_refs: Vec::new(),
+        evidence_links: Vec::new(),
     })
     .unwrap()
 }
@@ -193,7 +193,13 @@ fn hypothesis_with_evidence(evidence_refs: Vec<EvidenceRef>) -> HypothesisRecord
         rationale: "fixture rationale".to_owned(),
         status: HypothesisStatus::Active,
         priority: 1,
-        evidence_refs,
+        evidence_links: evidence_refs
+            .into_iter()
+            .map(|evidence| EvidenceLink {
+                relation: EvidenceRelation::Supports,
+                evidence,
+            })
+            .collect(),
         last_action: None,
         next_action: None,
     })
@@ -247,8 +253,7 @@ fn reducer_update_errors_leave_serialized_state_unchanged() {
                     status: Some(FindingStatus::Confirmed),
                     target_snapshot_ids_add: Vec::new(),
                     prerequisites_add: Vec::new(),
-                    evidence_refs_add: Vec::new(),
-                    negative_refs_add: Vec::new(),
+                    evidence_links_add: Vec::new(),
                     impact: None,
                 }),
             )
@@ -357,7 +362,7 @@ fn duplicate_event_ids_revalidate_structure_and_semantics_before_idempotence() {
         EventSequence::new(2),
         OccurredAt::new("2026-08-22T00:00:00Z"),
         EventType::new("research.target_snapshot_recorded"),
-        json!({"research_schema_version": 2, "data": {}}),
+        json!({"research_schema_version": 3, "data": {}}),
     ));
     assert_duplicate_event_is_rejected(EventEnvelope::current(
         EventId::new("event-duplicate"),

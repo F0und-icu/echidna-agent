@@ -1892,7 +1892,7 @@ M1 总完成标准：M1a、M1b、M1c 分别有可运行集成测试，任一后�
 - [ ] 统计模型往返、Token、acceptable first-action、参数失败/纠正、重复读取、Batch、Deferred Search、Snapshot Hit、Memory Retrieval 和重复 Hypothesis；unmatched Replay termination 与 Observation/Replay/Vision promotion 只有 typed durable signal 后才统计，否则保持 Deferred，绝不假 0。
 - [ ] `http_request` 和 `inspect_environment` 两个通用研究工具。
 - [x] AndroidManifest 外部 Extractor，通过 `run_commands` 复用现有工具链，不在 Rust 内重写解析器。
-- [ ] typed EvidenceLink、legacy Upcaster 和 pure evidence-gap projection。
+- [x] typed EvidenceLink、legacy Upcaster 和 pure evidence-gap projection。
 - [ ] ContextSlot/Origin/Authority/Retention/Freshness、ContextDeliveryMap 和 Evidence-Spine Summary v2。
 - [ ] exact identifier + fielded BM25 + CJK/ASCII n-gram + RRF + authority/freshness retrieval Shadow。
 - [ ] deterministic evidence-gap/NextAction guidance Shadow，无 autonomous execution。
@@ -2076,4 +2076,4 @@ M1 总完成标准：M1a、M1b、M1c 分别有可运行集成测试，任一后�
 
 具体状态始终以 `docs/development/STATUS.md` 为准。F1a-F1e 已远端封存；F1e 的远端 Gate 由用户在 GitHub 账单/额度导致零 Step 失败后明确单次豁免，后续 Actions 暂停。Architecture v1.2 至 v1.6 的远端架构封存仍未授权。
 
-M4-S3d 已在本地完成并通过完整 Gate，但尚未提交或远端发布。下一候选是 M4-S3e1 typed EvidenceLink 与证据缺口投影，状态为 `READY_NOT_AUTHORIZED`；之后依次是 M4-S3e2 provenance/Evidence-Spine Compaction、M4-S3f retrieval Shadow、M4-S3g guidance Shadow 和 M4-S4 真实长流程验收。任何前一项完成都不自动授权下一项。
+M4-S3e1 已在本地完成、通过独立 Terra xhigh 审计和完整 Gate，但尚未提交或远端发布。下一候选是 M4-S3e2 provenance/Evidence-Spine Compaction，状态为 `READY_NOT_AUTHORIZED`；之后依次是 M4-S3f retrieval Shadow、M4-S3g guidance Shadow 和 M4-S4 真实长流程验收。任何前一项完成都不自动授权下一项。

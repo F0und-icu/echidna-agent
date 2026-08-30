@@ -14,7 +14,8 @@ pub(super) fn update_input_schema() -> Value {
     json!({
         "type": "object",
         "$defs": {
-            "evidence_ref": evidence_ref_schema()
+            "evidence_ref": evidence_ref_schema(),
+            "evidence_link": evidence_link_schema()
         },
         "properties": {
             "event_id": {"type": "string", "minLength": 1},
@@ -46,9 +47,13 @@ pub(super) fn get_output_schema() -> Value {
         "properties": {
             "status": {"type": "string", "const": "ok"},
             "state": research_state_schema(),
-            "stream_event_count": {"type": "integer", "minimum": 0}
+            "stream_event_count": {"type": "integer", "minimum": 0},
+            "evidence_gap_reports": {
+                "type": "array",
+                "items": {"$ref": "#/$defs/evidence_gap_report"}
+            }
         },
-        "required": ["status", "state", "stream_event_count"],
+        "required": ["status", "state", "stream_event_count", "evidence_gap_reports"],
         "additionalProperties": false
     })
 }
@@ -127,6 +132,8 @@ pub(super) fn update_output_schema() -> Value {
 fn research_output_defs() -> Value {
     json!({
         "evidence_ref": evidence_ref_schema(),
+        "evidence_link": evidence_link_schema(),
+        "evidence_gap_report": evidence_gap_report_schema(),
         "target_snapshot": target_snapshot_record_schema(),
         "hypothesis": hypothesis_record_schema(),
         "experiment": experiment_record_schema(),
@@ -194,11 +201,11 @@ fn hypothesis_record_schema() -> Value {
             "rationale": string_schema(),
             "status": {"type": "string", "enum": ["active", "testing", "supported", "rejected", "blocked"]},
             "priority": {"type": "integer"},
-            "evidence_refs": evidence_refs_schema(),
+            "evidence_links": evidence_links_schema(),
             "last_action": nullable_string_schema(), "next_action": nullable_string_schema(),
             "merged_into": nullable_merge_ref_schema()
         },
-        "required": ["id", "title", "target_id", "attack_surface", "vulnerability_class", "entry_point", "sensitive_sink", "dedup_key", "rationale", "status", "priority", "evidence_refs", "last_action", "next_action", "merged_into"],
+        "required": ["id", "title", "target_id", "attack_surface", "vulnerability_class", "entry_point", "sensitive_sink", "dedup_key", "rationale", "status", "priority", "evidence_links", "last_action", "next_action", "merged_into"],
         "additionalProperties": false
     })
 }
@@ -245,10 +252,10 @@ fn finding_record_schema() -> Value {
             "vulnerability_class": string_schema(), "entry_point": string_schema(),
             "sensitive_sink": string_schema(), "dedup_key": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
             "target_snapshot_ids": string_array_schema(), "prerequisites": string_array_schema(),
-            "impact": string_schema(), "evidence_refs": evidence_refs_schema(),
-            "negative_refs": evidence_refs_schema(), "merged_into": nullable_merge_ref_schema()
+            "impact": string_schema(), "evidence_links": evidence_links_schema(),
+            "merged_into": nullable_merge_ref_schema()
         },
-        "required": ["id", "title", "status", "target_id", "target_version", "vulnerability_class", "entry_point", "sensitive_sink", "dedup_key", "target_snapshot_ids", "prerequisites", "impact", "evidence_refs", "negative_refs", "merged_into"],
+        "required": ["id", "title", "status", "target_id", "target_version", "vulnerability_class", "entry_point", "sensitive_sink", "dedup_key", "target_snapshot_ids", "prerequisites", "impact", "evidence_links", "merged_into"],
         "additionalProperties": false
     })
 }
@@ -320,7 +327,7 @@ fn hypothesis_operation_schema() -> Value {
                 "entry_point": string_schema(), "sensitive_sink": string_schema(),
                 "rationale": string_schema(),
                 "status": {"type": "string", "enum": ["active", "testing", "supported", "rejected", "blocked"]},
-                "priority": {"type": "integer"}, "evidence_refs": evidence_refs_schema(),
+                "priority": {"type": "integer"}, "evidence_links": evidence_links_schema(),
                 "last_action": {"type": "string", "minLength": 1},
                 "next_action": {"type": "string", "minLength": 1}
             },
@@ -339,7 +346,7 @@ fn hypothesis_update_operation_schema() -> Value {
             "properties": {
                 "id": string_schema(),
                 "status": {"type": "string", "enum": ["active", "testing", "supported", "rejected", "blocked"]},
-                "evidence_refs_add": evidence_refs_schema(),
+                "evidence_links_add": evidence_links_schema(),
                 "last_action": {"type": "string", "minLength": 1},
                 "next_action": {"type": "string", "minLength": 1}
             },
@@ -417,7 +424,7 @@ fn finding_operation_schema() -> Value {
                 "target_id": string_schema(), "target_version": string_schema(),
                 "vulnerability_class": string_schema(), "entry_point": string_schema(), "sensitive_sink": string_schema(),
                 "target_snapshot_ids": string_array_schema(), "prerequisites": string_array_schema(),
-                "impact": string_schema(), "evidence_refs": evidence_refs_schema(), "negative_refs": evidence_refs_schema()
+                "impact": string_schema(), "evidence_links": evidence_links_schema()
             },
             "required": ["id", "title", "status", "target_id", "target_version", "vulnerability_class", "entry_point", "sensitive_sink", "impact"],
             "additionalProperties": false
@@ -436,8 +443,7 @@ fn finding_update_operation_schema() -> Value {
                 "status": {"type": "string", "enum": ["candidate", "reproduced", "confirmed", "discarded"]},
                 "target_snapshot_ids_add": string_array_schema(),
                 "prerequisites_add": string_array_schema(),
-                "evidence_refs_add": evidence_refs_schema(),
-                "negative_refs_add": evidence_refs_schema(),
+                "evidence_links_add": evidence_links_schema(),
                 "impact": {"type": "string", "minLength": 1}
             },
             "required": ["id"],
@@ -533,8 +539,80 @@ fn string_array_schema() -> Value {
     json!({"type": "array", "items": string_schema()})
 }
 
-fn evidence_refs_schema() -> Value {
-    json!({"type": "array", "items": {"$ref": "#/$defs/evidence_ref"}})
+fn evidence_links_schema() -> Value {
+    json!({"type": "array", "items": {"$ref": "#/$defs/evidence_link"}})
+}
+
+fn evidence_link_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "relation": {
+                "type": "string",
+                "enum": [
+                    "supports", "contradicts", "positive_control", "negative_control",
+                    "environment_control", "reachability_proof", "prerequisite_proof",
+                    "impact_proof"
+                ]
+            },
+            "evidence": {"$ref": "#/$defs/evidence_ref"}
+        },
+        "required": ["relation", "evidence"],
+        "additionalProperties": false
+    })
+}
+
+fn evidence_gap_report_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "research_id": evidence_gap_research_ref_schema(),
+            "gaps": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {
+                            "type": "string",
+                            "enum": [
+                                "entry_unproven", "sink_unproven", "reachability_unproven",
+                                "prerequisite_unproven", "positive_control_missing",
+                                "negative_control_missing", "environment_control_missing",
+                                "impact_unproven", "repeatability_missing",
+                                "target_or_version_binding_missing",
+                                "artifact_or_receipt_provenance_missing",
+                                "contradiction_unresolved"
+                            ]
+                        },
+                        "state": {"type": "string", "enum": ["missing", "unknown"]},
+                        "reason_code": {
+                            "type": "string",
+                            "enum": [
+                                "entry_reachability_proof_absent",
+                                "sink_reachability_proof_absent",
+                                "reachability_proof_absent",
+                                "prerequisite_fact_unavailable",
+                                "prerequisite_proof_absent",
+                                "positive_control_absent",
+                                "negative_control_absent",
+                                "environment_control_absent",
+                                "impact_fact_unavailable",
+                                "impact_proof_absent",
+                                "fewer_than_two_positive_experiments",
+                                "target_snapshot_binding_absent",
+                                "artifact_or_receipt_reference_absent",
+                                "contradiction_resolution_unmodeled"
+                            ]
+                        }
+                    },
+                    "required": ["kind", "state", "reason_code"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": ["research_id", "gaps"],
+        "additionalProperties": false
+    })
 }
 
 fn evidence_ref_schema() -> Value {
@@ -545,6 +623,13 @@ fn evidence_ref_schema() -> Value {
             {"type": "object", "properties": {"kind": {"const": "execution_receipt"}, "id": string_schema()}, "required": ["kind", "id"], "additionalProperties": false}
         ]
     })
+}
+
+fn evidence_gap_research_ref_schema() -> Value {
+    json!({"oneOf": [
+        {"type": "object", "properties": {"kind": {"const": "hypothesis"}, "id": string_schema()}, "required": ["kind", "id"], "additionalProperties": false},
+        {"type": "object", "properties": {"kind": {"const": "finding"}, "id": string_schema()}, "required": ["kind", "id"], "additionalProperties": false}
+    ]})
 }
 
 fn research_ref_schema() -> Value {
