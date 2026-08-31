@@ -8,11 +8,11 @@
 - Current milestone: `M4-S4` controlled long-flow vulnerability-research acceptance
 - Current slice: `M4-S4`
 - Slice state: M4-S4 is `COMPLETE_REMOTE_SEALED`; development is `STOPPED_PENDING_NEW_AUTHORIZATION`
-- Lean governance: `PASS`; M4-S4 passed its focused and affected tests, independent repair audit, complete local Gate, compatible explicit-config Live lanes, final Lean Review and remote implementation seal without production-code growth
-- Local Git initialized: `yes`; status-seal branch `agent/m4-s4-status-seal` starts from M4-S4 Squash Merge `a7143ba`
+- Lean governance: `PASS`; M4-S4 passed its focused and affected tests, independent repair audit, complete local Gate, compatible explicit-config Live lanes, final Lean Review and remote implementation seal without production-code growth; the later dual-Provider Vision compatibility probe also added no repository code
+- Local Git initialized: `yes`; `main` tracks the private remote and contains M4-S4 Squash Merge `a7143ba` plus stopped-state seal `16e161f`
 - Remote repository: `F0und-icu/cyber-agent` private; M4-S4 is merged through PR `#59` as `a7143ba`, while no tag, release or Actions run was created
 - Documentation baseline commit: `55ff3be`
-- Current code base: M4-S4 Squash Merge `a7143ba` on `main`; only its final status record remains on the status-seal branch
+- Current code base: M4-S4 Squash Merge `a7143ba` and stopped-state seal `16e161f` on `main`; the post-seal dual-Provider Vision result is a compatibility addendum, not a reopened implementation Slice
 - Upstream Codex reference baseline: `868c9edb0da913a5fc699a71664e65f44f6058b0`; read-only and not a Cyber Agent dependency
 
 ## Latest Local Design Update
@@ -301,7 +301,17 @@
 - Semantic owners and reuse: no production semantic owner changed. The permanent vertical test reuses the existing CLI Chat, Provider Composition, one AgentLoop, Tool Registry, Research/Event/Artifact/Receipt, RequestAudit, ContextDeliveryMap, Compaction/Resume and metrics paths. Keeping the vertical assertions in the existing CLI loopback suite avoids a second integration harness or copied Provider server.
 - API, dependencies and configuration: no `src/`, Cargo dependency/feature, public API, Port, Event, Config field, Provider/Tool binding, Prompt, renderer, registry, cache, store, workflow or Codex port was added. The new fixture and test have no production consumer and create no production surface; no test-only public projection was introduced.
 - Removed/deferred: the temporary metric print used only to capture the accepted local estimate was removed before the final diff. No experimental in-place test, target artifact or Live credential enters the repository. A general benchmark/Eval framework, outcome telemetry, autonomous experiment generation, Web UI, additional Provider bindings and unproven retrieval/guidance promotion remain absent or Deferred.
-- Remaining risk: the available Live configuration cannot validate either image route, and Provider usage/token detail is not exposed by the durable local metrics path. Those facts are recorded as `UNAVAILABLE`, not as failure-free zero or PASS. There is no blocking code or governance debt for the bounded M4-S4 acceptance.
+- Remaining risk at the original seal: the then-available Live configuration could not validate either image route, and Provider usage/token detail was not exposed by the durable local metrics path. The post-seal addendum below narrows only the dual-Provider protocol/service uncertainty; formal CLI Vision integration, the single-multimodal lane and Provider usage detail remain explicitly unavailable. There is no blocking code or governance debt for the bounded M4-S4 acceptance.
+
+### Post-Seal Dual-Provider Vision Live Addendum
+
+- Authorization and scope: on `2026-08-31` the operator separately authorized one explicit-config DeepSeek dual-Provider compatibility run after the M4-S4 remote seal. This addendum does not reopen M4-S4, authorize M5, change production behavior or replace the sealed offline/controlled acceptance record.
+- Explicit composition: the user-owned local Config v1 selects `deepseek-v4-flash` as the Full-only text Primary and `deepseek-v4-flash-vision-exp` as the Secondary Vision Provider with `vision_mode = "secondary_tool"`. Its explicit Vision Capability Mapping declares image input, structured output and Tool calls with a `1048576` context window; no capability is inferred from either model name.
+- Vision protocol/service result: one temporary ignored probe compiled and passed 1/1. A real `view_image` produced a Project Artifact for a synthetic 512-by-256 PNG; the existing Responses encoder sent that Artifact as `input_image`; the real Secondary returned a strict structured `VisionObservation` that correctly identified the left red region, right blue region and centered green square; the text Primary then consumed that Observation and returned the fixed success marker.
+- Compatible Primary regressions: under the same dual-Provider Config v1, the generic Primary Responses smoke passed 1/1 and the fixed Shadow Live AgentLoop passed 1/1 after invoking only its permitted replay Tool. These independently preserve the existing Primary text and controlled Tool-loop paths.
+- Truthful boundary: this proves the generic Responses Vision wire contract, strict `VisionObservation` service and Observation-to-text-Primary compatibility. The temporary probe had to bind the Project image resolver directly because the production CLI has no image argument and does not route Chat through `VisionSessionService`; therefore formal CLI image ingress and an integrated Observation-to-same-AgentLoop Tool/Receipt long flow remain `UNAVAILABLE_NOT_WIRED`, not PASS. A single multimodal-Primary Live lane remains `UNAVAILABLE_NOT_RUN`.
+- Hygiene and isolation: the temporary probe was deleted after the authorized runs. No `src/`, permanent `tests/`, Cargo, architecture, ADR, Provider binding or public API changed; no secret entered Git or durable Project facts; no GitHub Actions run occurred; Codex credential/login/session data was not read or modified.
+- Seal effect: M4-S4 remains `COMPLETE_REMOTE_SEALED`. This status-only addendum replaces only the stale claim that no compatible dual-Provider configuration exists; it does not convert the unwired CLI lane or unrun single-multimodal lane into a PASS.
 
 ## Next Target
 
@@ -310,15 +320,15 @@
 
 ## Current Authorization
 
-The F1e and M4-S3c authorities are consumed. PR `#51`/`32bc0f2` and PR `#52`/`7d5b6d0` consumed the M4-S3d and M4-S3e1 submission authorities. The user authorized completing, testing and independently sealing M4-S3e2, then proceeding in order through M4-S3f, M4-S3g and M4-S4; PR `#59`/`a7143ba` completes that sequence. The earlier Actions pause remains in force.
+The F1e and M4-S3c authorities are consumed. PR `#51`/`32bc0f2` and PR `#52`/`7d5b6d0` consumed the M4-S3d and M4-S3e1 submission authorities. The user authorized completing, testing and independently sealing M4-S3e2, then proceeding in order through M4-S3f, M4-S3g and M4-S4; PR `#59`/`a7143ba` completes that sequence. The later dual-Provider Live and its one documentation-only remote addendum are separately authorized and consumed by the record above. The earlier Actions pause remains in force.
 
 - Run mode: `STOPPED_PENDING_NEW_AUTHORIZATION`; do not start M5 or another implementation Slice
-- Git mode: `STATUS_SEAL_ONLY`; M4-S4 is sealed through PR `#59`/`a7143ba`, and this status-only branch records the final stopped state with `[skip ci]`
+- Git mode: `CONSUMED_POST_SEAL_ADDENDUM`; the one `[skip ci]` documentation-only PR carrying the post-seal dual-Provider Vision record consumes its authorization, and further Git work remains stopped
 - GitHub Actions mode: `PAUSED_BY_OPERATOR`; do not trigger or rerun a Workflow until the user explicitly resumes it after quota recovery
 - Delegation mode: `AUTHORIZED_BOUNDED`; Terra xhigh owns cross-boundary implementation/audit and Luna xhigh only bounded modules/tests/docs as defined by repository governance; one-Agent runtime is unchanged
-- Live test mode: `AUTHORIZED_EXPLICIT_CONFIG`; Mock/Fixture/Replay remain default and each selected Live path uses only an explicit Cyber Agent Config v1 Provider
+- Live test mode: `CONSUMED_POST_SEAL_ADDENDUM`; the separately authorized explicit-config dual-Provider, Primary and controlled Tool-loop requests are complete, and no further Live request is authorized
 - Configuration rule: Provider binding, model, Base URL and Capability Mapping remain Config v1 data. A Provider selects exactly one inline `api_key` or dedicated `credential_ref`; neither may infer Provider/model identity or use Codex login state.
-- Stop condition: `SATISFIED`; M4-S4 is remotely sealed and the unavailable Vision Live paths are recorded without fabricating PASS
+- Stop condition: `SATISFIED`; M4-S4 remains remotely sealed, the dual-Provider protocol/service result is recorded separately, and unwired or unrun Vision lanes remain unavailable without fabricating PASS
 
 ## M4-S3e1 Slice Start
 
