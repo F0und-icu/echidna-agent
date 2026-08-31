@@ -12,20 +12,25 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use cyber_agent::adapters::project_event_store::{Project, ProjectEventStream};
+use cyber_agent::domain::artifacts::ArtifactId;
 use cyber_agent::domain::events::{EventEnvelope, EventId, EventType, OccurredAt, StreamId};
+use cyber_agent::domain::request_audit::REQUEST_AUDIT_MANIFEST_SCHEMA_VERSION;
 use cyber_agent::domain::research::{
-    ResearchEvent, ResearchReducer, TargetKind, TargetSnapshotDraft, TargetSnapshotId,
-    TargetSnapshotRecord,
+    ExecutionReceiptId, ExperimentId, HypothesisId, ResearchEvent, ResearchReducer, TargetKind,
+    TargetSnapshotDraft, TargetSnapshotId, TargetSnapshotRecord,
 };
 use cyber_agent::domain::session::{
     CompactionValidationContext, EvidenceSpine, NarrativeSummary, ResearchStreamIdentity,
-    SessionEvent, SessionReducer, SessionSummaryDraft,
+    SessionEvent, SessionReducer, SessionState, SessionSummaryDraft,
 };
 use cyber_agent::ports::{EventSink, EventSource};
-use serde_json::Value;
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use support::TemporaryDirectory;
 
 const INLINE_API_KEY_FIXTURE: &str = "loopback-inline-api-key";
+const M4_LONG_FLOW_MANIFEST_SHA256: &str =
+    "0196cd31b0d366dd4f1755708ed1874db5d6faf0e006482bf502722242bc7730";
 
 struct LoopbackServer {
     base_url: String,
@@ -397,6 +402,544 @@ fn append_v2_compaction(project: &Project, session: &str, target: TargetSnapshot
         )
         .unwrap();
     EventSink::append_event(&mut store, &envelope).unwrap();
+}
+
+fn m4_long_flow_tool_response(
+    call_id: &str,
+    tool_name: &str,
+    arguments: Value,
+    response_id: &str,
+) -> String {
+    let item = json!({
+        "type": "function_call",
+        "call_id": call_id,
+        "name": tool_name,
+        "arguments": serde_json::to_string(&arguments).unwrap(),
+    });
+    format!(
+        "data: {{\"type\":\"response.output_item.done\",\"item\":{}}}\n\n\
+         data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"{response_id}\"}}}}\n\n",
+        serde_json::to_string(&item).unwrap(),
+    )
+}
+
+fn reduced_session(project: &Project, session: &str) -> SessionState {
+    let session_id = StreamId::new(session);
+    let stream_id = ProjectEventStream::Session(session_id.clone()).stream_id();
+    let mut writer = project.open_writer().unwrap();
+    let store = writer.open_session(session_id, None).unwrap();
+    SessionReducer
+        .reduce(EventSource::read_events(&store, &stream_id).unwrap())
+        .unwrap()
+}
+
+fn assert_audits_reconstruct(project_root: &std::path::Path, state: &SessionState) {
+    for manifest in state.request_audits() {
+        assert_eq!(
+            manifest.schema_version(),
+            REQUEST_AUDIT_MANIFEST_SCHEMA_VERSION
+        );
+        let renderer = manifest.prompt_renderer().unwrap();
+        assert_eq!(renderer.id(), "generic");
+        assert_eq!(renderer.version(), 1);
+        assert!(manifest.resolved_tool_plan_fingerprint().is_some());
+        assert!(manifest.context_delivery_map().is_some());
+        manifest
+            .reconstruct(|blob| {
+                fs::read(
+                    project_root
+                        .join(".cyber-agent/artifacts/blobs/sha256")
+                        .join(blob.as_str()),
+                )
+            })
+            .unwrap();
+    }
+}
+
+#[test]
+fn synthetic_long_flow_preserves_authoritative_evidence_across_compaction_and_resume() {
+    let fixture_root =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/m4_long_flow");
+    let manifest_bytes = fs::read(fixture_root.join("manifest.json")).unwrap();
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&manifest_bytes)),
+        M4_LONG_FLOW_MANIFEST_SHA256,
+        "the test anchors the complete fixture manifest to prevent a coordinated source/hash edit"
+    );
+    let manifest: Value = serde_json::from_slice(&manifest_bytes).unwrap();
+    let source = fixture_root.join("target/fixture_router.rs");
+    let source_bytes = fs::read(&source).unwrap();
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&source_bytes)),
+        manifest["source_sha256"].as_str().unwrap(),
+        "the manifest binds the harmless source toy by SHA-256"
+    );
+
+    let root = TemporaryDirectory::new("cli-chat-m4-s4-long-flow");
+    let target_directory = root.path().join("target");
+    fs::create_dir_all(&target_directory).unwrap();
+    fs::copy(&source, target_directory.join("fixture_router.rs")).unwrap();
+    initialize_project(root.path());
+
+    let target_snapshot = json!({
+        "event_id": "research-m4-s4-snapshot",
+        "occurred_at": "2026-08-31T10:00:00Z",
+        "operation": {
+            "kind": "record_target_snapshot",
+            "record": {
+                "id": "snapshot-m4-s4",
+                "target_id": "fixture.m4-s4.router",
+                "kind": "source",
+                "locator": "target/fixture_router.rs",
+                "version": "1.0.0",
+                "build_id": "m4-s4-fixture",
+                "target_artifact_ids": ["artifact-m4-s4"],
+                "environment_fingerprint": "offline-fixture-environment",
+                "device_fingerprint": "offline-fixture-device",
+                "captured_at": "2026-08-31T10:00:00Z",
+                "notes": "harmless local source toy"
+            }
+        }
+    });
+    let artifact = json!({
+        "event_id": "research-m4-s4-artifact",
+        "occurred_at": "2026-08-31T10:01:00Z",
+        "artifact_id": "artifact-m4-s4",
+        "source_path": "target/fixture_router.rs",
+        "media_type": "text/x-rust",
+        "target_snapshot_id": "snapshot-m4-s4",
+        "toolchain_fingerprint": "m4-s4-offline-fixture-v1"
+    });
+    let hypothesis = json!({
+        "event_id": "research-m4-s4-hypothesis",
+        "occurred_at": "2026-08-31T10:02:00Z",
+        "operation": {
+            "kind": "record_hypothesis",
+            "record": {
+                "id": "hypothesis-m4-s4",
+                "title": "Redirect token may reach the internal dispatcher",
+                "target_id": "fixture.m4-s4.router",
+                "attack_surface": "caller-supplied redirect token",
+                "vulnerability_class": "unvalidated internal redirect",
+                "entry_point": "route_redirect",
+                "sensitive_sink": "internal_dispatch",
+                "rationale": "the source toy forwards an unvalidated token to an internal route selector",
+                "status": "active",
+                "priority": 10,
+                "evidence_links": [{
+                    "relation": "supports",
+                    "evidence": {"kind": "artifact", "id": "artifact-m4-s4"}
+                }]
+            }
+        }
+    });
+    let experiment = json!({
+        "event_id": "research-m4-s4-experiment",
+        "occurred_at": "2026-08-31T10:03:00Z",
+        "operation": {
+            "kind": "record_experiment",
+            "experiment": {
+                "id": "experiment-m4-s4",
+                "hypothesis_id": "hypothesis-m4-s4",
+                "target_snapshot_id": "snapshot-m4-s4",
+                "capsule_id": "capsule-m4-s4",
+                "goal": "read the exact candidate source after recording the hypothesis",
+                "result": "inconclusive",
+                "artifact_refs": ["artifact-m4-s4"]
+            },
+            "capsule": {
+                "id": "capsule-m4-s4",
+                "experiment_id": "experiment-m4-s4",
+                "target_snapshot_id": "snapshot-m4-s4",
+                "action": "Read harmless fixture redirect dispatch",
+                "arguments": {"source_path": "target/fixture_router.rs"},
+                "tool_version": "1",
+                "execution_ids": ["execution:call-m4-s4-read"],
+                "input_artifact_ids": ["artifact-m4-s4"],
+                "environment_delta": "offline fixture only",
+                "account_prerequisites": [],
+                "toolchain_fingerprint": "m4-s4-offline-fixture-v1",
+                "execution_receipt_ids": [],
+                "output_artifact_ids": []
+            }
+        }
+    });
+    let server = spawn_responses_server(vec![
+        (
+            200,
+            m4_long_flow_tool_response(
+                "call-m4-s4-snapshot",
+                "research_update",
+                target_snapshot,
+                "response-m4-s4-snapshot",
+            ),
+        ),
+        (
+            200,
+            m4_long_flow_tool_response(
+                "call-m4-s4-artifact",
+                "artifact_store",
+                artifact,
+                "response-m4-s4-artifact",
+            ),
+        ),
+        (
+            200,
+            m4_long_flow_tool_response(
+                "call-m4-s4-hypothesis",
+                "research_update",
+                hypothesis,
+                "response-m4-s4-hypothesis",
+            ),
+        ),
+        (
+            200,
+            m4_long_flow_tool_response(
+                "call-m4-s4-read",
+                "read_file",
+                json!({"path": "target/fixture_router.rs"}),
+                "response-m4-s4-read",
+            ),
+        ),
+        (
+            200,
+            m4_long_flow_tool_response(
+                "call-m4-s4-experiment",
+                "research_update",
+                experiment,
+                "response-m4-s4-experiment",
+            ),
+        ),
+        (
+            200,
+            text_response(
+                "Candidate only: the offline source toy remains unverified.",
+                "response-m4-s4-candidate",
+            ),
+        ),
+    ]);
+    let config = write_config(root.path(), &server.base_url);
+    let run = run_chat(
+        root.path(),
+        &config,
+        "inspect the harmless redirect toy and retain only a candidate\n/exit\n",
+        &["--domain", "source", "--phase", "experiment"],
+    );
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let run_output = String::from_utf8(run.stdout).unwrap();
+    assert!(run_output.contains("Candidate only"));
+    assert!(!run_output.to_ascii_lowercase().contains("confirmed"));
+    assert!(!run_output.to_ascii_lowercase().contains("reproduced"));
+    let requests = (0..6)
+        .map(|_| server.requests.recv().unwrap())
+        .map(|request| {
+            serde_json::from_str::<Value>(request.split("\r\n\r\n").nth(1).unwrap()).unwrap()
+        })
+        .collect::<Vec<_>>();
+    server.join();
+    assert!(
+        requests[0]["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("Source domain profile v1")
+    );
+    assert!(
+        requests[0]["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("execute the smallest decisive experiment")
+    );
+
+    let session = session_id(root.path());
+    let project = Project::discover(root.path()).unwrap();
+    let research_events = {
+        let mut writer = project.open_writer().unwrap();
+        let store = writer.open_research(None).unwrap();
+        EventSource::read_events(&store, &ProjectEventStream::Research.stream_id()).unwrap()
+    };
+    let research_state = ResearchReducer.reduce(research_events.clone()).unwrap();
+    let research = serde_json::to_value(&research_state).unwrap();
+    assert_eq!(
+        research["target_snapshots"]["snapshot-m4-s4"]["target_artifact_ids"],
+        json!(["artifact-m4-s4"])
+    );
+    assert_eq!(
+        research["hypotheses"]["hypothesis-m4-s4"]["evidence_links"][0]["evidence"],
+        json!({"kind": "artifact", "id": "artifact-m4-s4"})
+    );
+    assert_eq!(
+        research["hypotheses"]["hypothesis-m4-s4"]["evidence_links"][0]["relation"],
+        "supports"
+    );
+    assert_eq!(
+        research["artifacts"]["records"]["artifact-m4-s4"]["target_snapshot_id"],
+        "snapshot-m4-s4"
+    );
+    assert_eq!(
+        research["experiments"]["experiment-m4-s4"]["hypothesis_id"],
+        "hypothesis-m4-s4"
+    );
+    assert_eq!(
+        research["experiments"]["experiment-m4-s4"]["target_snapshot_id"],
+        "snapshot-m4-s4"
+    );
+    assert_eq!(
+        research["experiments"]["experiment-m4-s4"]["artifact_refs"],
+        json!(["artifact-m4-s4"])
+    );
+    assert_eq!(
+        research["capsules"]["capsule-m4-s4"]["execution_ids"],
+        json!(["execution:call-m4-s4-read"])
+    );
+    assert_eq!(
+        research["capsules"]["capsule-m4-s4"]["input_artifact_ids"],
+        json!(["artifact-m4-s4"])
+    );
+    assert_eq!(
+        research["capsules"]["capsule-m4-s4"]["execution_receipt_ids"],
+        json!([])
+    );
+    assert_eq!(research["findings"], json!({}));
+
+    let before_compaction = reduced_session(&project, &session);
+    assert_eq!(
+        before_compaction.history().ensure_all_tool_calls_paired(),
+        Ok(())
+    );
+    assert_eq!(before_compaction.execution_receipt_count(), 5);
+    assert_eq!(before_compaction.request_audits().len(), 6);
+    assert!(before_compaction.vision_observations().is_empty());
+    let raw_session_events = session_events(root.path(), &session);
+    let receipt_event_ids = raw_session_events
+        .iter()
+        .filter(|event| event["event_type"] == "tool.execution_receipt_recorded")
+        .map(|event| event["event_id"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(receipt_event_ids.len(), 5);
+    let artifact_receipt_event_id = raw_session_events
+        .iter()
+        .find(|event| {
+            event["event_type"] == "tool.execution_receipt_recorded"
+                && event["payload"]["receipt"]["execution_id"] == "execution:call-m4-s4-artifact"
+        })
+        .and_then(|event| event["event_id"].as_str())
+        .unwrap()
+        .to_owned();
+    let read_receipt_event_id = raw_session_events
+        .iter()
+        .find(|event| {
+            event["event_type"] == "tool.execution_receipt_recorded"
+                && event["payload"]["receipt"]["execution_id"] == "execution:call-m4-s4-read"
+        })
+        .and_then(|event| event["event_id"].as_str())
+        .unwrap()
+        .to_owned();
+    let artifact_receipt = raw_session_events
+        .iter()
+        .find(|event| event["event_id"] == artifact_receipt_event_id)
+        .unwrap();
+    assert_eq!(
+        artifact_receipt["payload"]["receipt"]["output_artifact_ids"],
+        json!(["artifact-m4-s4"])
+    );
+    assert_audits_reconstruct(root.path(), &before_compaction);
+
+    let research_stream =
+        ResearchStreamIdentity::from_events(project.project_id().clone(), &research_events)
+            .unwrap();
+    let receipt_refs = receipt_event_ids
+        .iter()
+        .cloned()
+        .map(ExecutionReceiptId::new)
+        .collect::<BTreeSet<_>>();
+    let validation = CompactionValidationContext::new(
+        project.project_id(),
+        &research_stream,
+        &research_state,
+        &receipt_refs,
+    );
+    let spine = EvidenceSpine::new(
+        research_stream.clone(),
+        vec![TargetSnapshotId::new("snapshot-m4-s4")],
+        vec![HypothesisId::new("hypothesis-m4-s4")],
+        vec![ExperimentId::new("experiment-m4-s4")],
+        Vec::new(),
+        Vec::new(),
+        vec![ArtifactId::new("artifact-m4-s4")],
+        vec![
+            ExecutionReceiptId::new(artifact_receipt_event_id.clone()),
+            ExecutionReceiptId::new(read_receipt_event_id.clone()),
+        ],
+    )
+    .unwrap();
+    let draft = SessionSummaryDraft::new(
+        spine,
+        NarrativeSummary::new(
+            "retain the offline candidate boundary",
+            "the toy source path is a candidate and is not a Finding",
+            vec!["external reachability and impact remain unproven".to_owned()],
+            vec!["preserve the exact artifact and receipt references".to_owned()],
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let compaction = before_compaction
+        .next_compaction(draft, 1, &validation)
+        .unwrap();
+    let session_id = StreamId::new(&session);
+    let stream_id = ProjectEventStream::Session(session_id.clone()).stream_id();
+    let mut writer = project.open_writer().unwrap();
+    let mut store = writer.open_session(session_id, None).unwrap();
+    let event = SessionEvent::CompactionCreated { compaction }
+        .into_envelope(
+            EventId::new("compaction-m4-s4"),
+            stream_id,
+            store.next_sequence().unwrap(),
+            OccurredAt::new("2026-08-31T10:04:00Z"),
+        )
+        .unwrap();
+    EventSink::append_event(&mut store, &event).unwrap();
+    drop(store);
+    drop(writer);
+
+    let resumed_server = spawn_responses_server(vec![(
+        200,
+        text_response(
+            "Evidence curation keeps the source observation as a candidate.",
+            "response-m4-s4-resume",
+        ),
+    )]);
+    let resumed_config = write_config(root.path(), &resumed_server.base_url);
+    let resumed = run_chat(
+        root.path(),
+        &resumed_config,
+        "curate the existing evidence without upgrading the candidate\n/exit\n",
+        &[
+            "--session",
+            &session,
+            "--domain",
+            "source",
+            "--phase",
+            "evidence-curation",
+        ],
+    );
+    assert!(
+        resumed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    let resumed_request = resumed_server.requests.recv().unwrap();
+    resumed_server.join();
+    let resumed_request: Value =
+        serde_json::from_str(resumed_request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    assert!(resumed_request["previous_response_id"].is_null());
+    assert!(
+        resumed_request["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("curate an auditable evidence record without changing claim truth")
+    );
+    let resume_wire = serde_json::to_string(&resumed_request).unwrap();
+    for reference in [
+        "snapshot-m4-s4",
+        "hypothesis-m4-s4",
+        "experiment-m4-s4",
+        "artifact-m4-s4",
+        artifact_receipt_event_id.as_str(),
+        read_receipt_event_id.as_str(),
+    ] {
+        assert!(
+            resume_wire.contains(reference),
+            "resume request lacks {reference}"
+        );
+    }
+    assert!(!resume_wire.contains("response-m4-s4-candidate"));
+
+    let final_state = reduced_session(&project, &session);
+    assert_eq!(final_state.history().ensure_all_tool_calls_paired(), Ok(()));
+    assert_eq!(final_state.execution_receipt_count(), 5);
+    assert_eq!(final_state.request_audits().len(), 7);
+    assert!(final_state.vision_observations().is_empty());
+    assert_audits_reconstruct(root.path(), &final_state);
+    let full_requests = final_state
+        .request_audits()
+        .iter()
+        .filter(|manifest| {
+            manifest.delivery().mode()
+                == cyber_agent::domain::request_audit::RequestAuditDeliveryMode::Full
+        })
+        .count();
+    assert_eq!(full_requests, 2);
+    assert_eq!(final_state.request_audits().len() - full_requests, 5);
+    assert_eq!(
+        final_state
+            .request_audits()
+            .last()
+            .unwrap()
+            .delivery()
+            .mode(),
+        cyber_agent::domain::request_audit::RequestAuditDeliveryMode::Full
+    );
+    let latest_compaction = final_state.latest_compaction().unwrap();
+    let summary = serde_json::to_value(latest_compaction.summary()).unwrap();
+    assert_eq!(summary["schema_version"], 2);
+    assert_eq!(
+        summary["evidence_spine"]["target_snapshot_refs"],
+        json!(["snapshot-m4-s4"])
+    );
+    assert_eq!(
+        summary["evidence_spine"]["active_hypothesis_refs"],
+        json!(["hypothesis-m4-s4"])
+    );
+    assert_eq!(
+        summary["evidence_spine"]["experiment_refs"],
+        json!(["experiment-m4-s4"])
+    );
+    assert_eq!(
+        summary["evidence_spine"]["artifact_refs"],
+        json!(["artifact-m4-s4"])
+    );
+    assert_eq!(
+        summary["evidence_spine"]["execution_receipt_refs"],
+        json!([artifact_receipt_event_id, read_receipt_event_id])
+    );
+
+    let final_events = session_events(root.path(), &session);
+    let started_primary = final_events
+        .iter()
+        .find(|event| event["event_type"] == "session.started")
+        .and_then(|event| event["payload"]["primary_provider_session"]["id"].as_str())
+        .unwrap();
+    let resumed_primary = final_events
+        .iter()
+        .find(|event| event["event_type"] == "session.resumed")
+        .and_then(|event| event["payload"]["primary_provider_session"]["id"].as_str())
+        .unwrap();
+    assert_ne!(started_primary, resumed_primary);
+
+    let metrics = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+        .current_dir(root.path())
+        .args(["metrics", "--session", &session])
+        .output()
+        .unwrap();
+    assert!(
+        metrics.status.success(),
+        "{}",
+        String::from_utf8_lossy(&metrics.stderr)
+    );
+    let metrics: Value = serde_json::from_slice(&metrics.stdout).unwrap();
+    assert_eq!(metrics["status"], "ok");
+    assert_eq!(metrics["requests"], 7);
+    assert_eq!(metrics["full_requests"], 2);
+    assert_eq!(metrics["incremental_requests"], 5);
+    assert_eq!(metrics["fallbacks"], 0);
+    assert_eq!(metrics["provider_usage"], "unavailable");
+    assert_eq!(metrics["compactions"], 1);
+    assert!(metrics["estimated_tokens"].as_u64().unwrap() > 0);
 }
 
 #[test]
