@@ -10,7 +10,9 @@ use crate::app::session::SessionProjection;
 use crate::domain::artifacts::ArtifactId;
 use crate::domain::events::{EventId, OccurredAt};
 use crate::domain::profile::VisionRoute;
-use crate::domain::request_audit::{RequestAuditBinding, RequestAuditRunContext};
+use crate::domain::request_audit::{
+    RequestAuditAttempt, RequestAuditBinding, RequestAuditManifest, RequestAuditRunContext,
+};
 use crate::domain::session::SessionEvent;
 use crate::domain::vision::{VisionAnalysisFailure, VisionObservation, VisionRouteRecord};
 use crate::ports::EventSink;
@@ -47,6 +49,30 @@ pub struct VisionSecondaryRequest {
     pub analysis: VisionAnalysisInput,
     pub audit: VisionEventStamp,
     pub terminal: VisionEventStamp,
+}
+
+/// Route-validated Secondary work after the durable route commit. Keeping
+/// this token crate-private lets UI composition release its project Writer
+/// before a remote request without duplicating route/audit/terminal rules.
+pub(crate) struct PreparedVisionSecondaryRequest {
+    analysis: VisionAnalysisInput,
+    audit: VisionEventStamp,
+    terminal: VisionEventStamp,
+    primary_profile: crate::domain::context::ModelProfile,
+    primary_capability_hash: String,
+}
+
+pub(crate) enum PreparedVisionSecondaryTerminal {
+    Observation {
+        observation: VisionObservation,
+        terminal: VisionEventStamp,
+        primary_profile: crate::domain::context::ModelProfile,
+        primary_capability_hash: String,
+    },
+    Failure {
+        failure: VisionAnalysisFailure,
+        terminal: VisionEventStamp,
+    },
 }
 
 pub struct VisionSessionService<'blobs, Blobs: ?Sized> {
@@ -127,6 +153,36 @@ where
         S: EventSink<serde_json::Value>,
         S::Error: std::fmt::Debug,
     {
+        let prepared = self.prepare_secondary(request, projection, sink)?;
+        let audit_service = RequestAuditService::new(self.blobs, self.binding.clone());
+        let terminal = self
+            .analyze_prepared(
+                provider,
+                prepared,
+                audit_context,
+                cancellation,
+                |attempt, stamp| {
+                    audit_service
+                        .record(attempt, stamp.event_id, stamp.occurred_at, projection, sink)
+                        .map_err(request_audit_message)
+                },
+            )
+            .await?;
+        self.commit_secondary_terminal(terminal, projection, sink)
+    }
+
+    /// Validates and commits only the Secondary route. The returned typed
+    /// token is the sole input to the no-lock remote-analysis stage.
+    pub(crate) fn prepare_secondary<S>(
+        &self,
+        request: VisionSecondaryRequest,
+        projection: &mut SessionProjection,
+        sink: &mut S,
+    ) -> Result<PreparedVisionSecondaryRequest, VisionSessionError>
+    where
+        S: EventSink<serde_json::Value>,
+        S::Error: std::fmt::Debug,
+    {
         self.require_session(projection)?;
         validate_secondary_request(&request)?;
         self.require_scoped_vision_session(projection, &request.analysis.provider_session)?;
@@ -134,34 +190,87 @@ where
         let primary_capability_hash = request.route.primary_capability_hash.clone();
         self.record_route(request.route, request.route_occurred_at, projection, sink)?;
 
-        let audit_service = RequestAuditService::new(self.blobs, self.binding.clone());
-        let mut audit_id = Some(request.audit.event_id);
+        Ok(PreparedVisionSecondaryRequest {
+            analysis: request.analysis,
+            audit: request.audit,
+            terminal: request.terminal,
+            primary_profile,
+            primary_capability_hash,
+        })
+    }
+
+    /// Performs the one audited remote request without owning a Session
+    /// writer. The caller's callback may acquire a short writer only for the
+    /// mandatory RequestAudit commit.
+    pub(crate) async fn analyze_prepared<VisionProvider, Record, RecordError>(
+        &self,
+        provider: &VisionProvider,
+        prepared: PreparedVisionSecondaryRequest,
+        audit_context: &RequestAuditRunContext,
+        cancellation: AgentCancellation,
+        mut record_audit: Record,
+    ) -> Result<PreparedVisionSecondaryTerminal, VisionSessionError>
+    where
+        VisionProvider: ModelProvider + ?Sized,
+        Record: FnMut(
+            RequestAuditAttempt,
+            VisionEventStamp,
+        ) -> Result<RequestAuditManifest, RecordError>,
+        RecordError: std::fmt::Display,
+    {
+        let mut audit_stamp = Some(prepared.audit);
         let analysis = VisionAnalysisService::new(provider, self.blobs)
-            .analyze_image(request.analysis, audit_context, cancellation, |attempt| {
-                let event_id = audit_id.take().ok_or_else(|| {
+            .analyze_image(prepared.analysis, audit_context, cancellation, |attempt| {
+                let stamp = audit_stamp.take().ok_or_else(|| {
                     "Vision analysis attempted more than one RequestAudit commit".to_owned()
                 })?;
-                audit_service
-                    .record(
-                        attempt,
-                        event_id,
-                        request.audit.occurred_at.clone(),
-                        projection,
-                        sink,
-                    )
-                    .map_err(request_audit_message)
+                record_audit(attempt, stamp).map_err(|error| error.to_string())
             })
             .await;
 
         match analysis {
-            Ok(output) => {
-                let observation = output.observation;
-                let observation_event_id = request.terminal.event_id.clone();
+            Ok(output) => Ok(PreparedVisionSecondaryTerminal::Observation {
+                observation: output.observation,
+                terminal: prepared.terminal,
+                primary_profile: prepared.primary_profile,
+                primary_capability_hash: prepared.primary_capability_hash,
+            }),
+            Err(VisionAnalysisError::AttemptFailed { failure }) => {
+                Ok(PreparedVisionSecondaryTerminal::Failure {
+                    failure: *failure,
+                    terminal: prepared.terminal,
+                })
+            }
+            Err(error) => Err(VisionSessionError::Analysis(error)),
+        }
+    }
+
+    /// Commits exactly one Observation/Failure after the remote stage has
+    /// released every project Writer.
+    pub(crate) fn commit_secondary_terminal<S>(
+        &self,
+        terminal: PreparedVisionSecondaryTerminal,
+        projection: &mut SessionProjection,
+        sink: &mut S,
+    ) -> Result<VisionSessionOutcome, VisionSessionError>
+    where
+        S: EventSink<serde_json::Value>,
+        S::Error: std::fmt::Debug,
+    {
+        self.require_session(projection)?;
+        match terminal {
+            PreparedVisionSecondaryTerminal::Observation {
+                observation,
+                terminal,
+                primary_profile,
+                primary_capability_hash,
+            } => {
+                let observation_event_id = terminal.event_id.clone();
                 self.append_terminal(
                     SessionEvent::VisionObservationRecorded {
                         observation: observation.clone(),
                     },
-                    request.terminal,
+                    terminal,
                     projection,
                     sink,
                 )?;
@@ -176,13 +285,12 @@ where
                     primary_context,
                 })
             }
-            Err(VisionAnalysisError::AttemptFailed { failure }) => {
-                let failure = *failure;
+            PreparedVisionSecondaryTerminal::Failure { failure, terminal } => {
                 self.append_terminal(
                     SessionEvent::VisionAnalysisFailed {
                         failure: failure.clone(),
                     },
-                    request.terminal,
+                    terminal,
                     projection,
                     sink,
                 )?;
@@ -190,7 +298,6 @@ where
                     failure: Box::new(failure),
                 })
             }
-            Err(error) => Err(VisionSessionError::Analysis(error)),
         }
     }
 

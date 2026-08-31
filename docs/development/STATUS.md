@@ -5,15 +5,40 @@
 - Architecture version: `1.6.0`; v1/v1.1 remain remotely sealed, v1.2 through v1.6 are locally frozen with remote seal unauthorized
 - Phase: `IMPLEMENTATION`
 - Implementation: `STARTED`
-- Current milestone: `M4-S4` controlled long-flow vulnerability-research acceptance
-- Current slice: `M4-S4`
-- Slice state: M4-S4 is `COMPLETE_REMOTE_SEALED`; development is `STOPPED_PENDING_NEW_AUTHORIZATION`
-- Lean governance: `PASS`; M4-S4 passed its focused and affected tests, independent repair audit, complete local Gate, compatible explicit-config Live lanes, final Lean Review and remote implementation seal without production-code growth; the later dual-Provider Vision compatibility probe also added no repository code
-- Local Git initialized: `yes`; `main` tracks the private remote and contains M4-S4 Squash Merge `a7143ba` plus stopped-state seal `16e161f`
-- Remote repository: `F0und-icu/cyber-agent` private; M4-S4 is merged through PR `#59` as `a7143ba`, while no tag, release or Actions run was created
+- Current milestone: `M5` optional interface and personal distribution evaluation
+- Current slice: `M5-S1`
+- Slice state: `READY_NOT_AUTHORIZED`; F2a is `COMPLETE_REMOTE_SEALED` through private PR `#62`, and no M5 implementation has started
+- Lean governance: `PASS`; F2a retains one AgentLoop, Provider Composition Root, Responses wire owner, Project/Session/Artifact/Receipt authority and strict non-Evidence VisionObservation boundary
+- Local Git initialized: `yes`; implementation branch `feat/f2a-cli-vision-ingress` starts from post-seal Vision status addendum `385a318`
+- Remote repository: `F0und-icu/cyber-agent` private; F2a is sealed through `[skip ci]` PR `#62`, while no tag, release or Actions run was created
 - Documentation baseline commit: `55ff3be`
-- Current code base: M4-S4 Squash Merge `a7143ba` and stopped-state seal `16e161f` on `main`; the post-seal dual-Provider Vision result is a compatibility addendum, not a reopened implementation Slice
+- Current code base: F2a implementation, independent audit, complete local Gate, both explicit Live lanes and authorized `[skip ci]` remote seal are complete; M5 remains unstarted
 - Upstream Codex reference baseline: `868c9edb0da913a5fc699a71664e65f44f6058b0`; read-only and not a Cyber Agent dependency
+
+## F2a Slice Start
+
+- Objective: close the frozen MVP contract for formal CLI image input without changing Architecture v1 through v1.6. `chat` gains one pending `/image <path>` input that enters the existing auditable Direct or Secondary Vision path before the next Primary Turn.
+- Existing foundation: `view_image` already owns PNG/JPEG validation, deterministic image budget, Artifact/Blob/Lineage and exact result selection; `AgentModelProfile` owns pure capability routing; `VisionSessionService` owns route/audit/Observation facts; `InitialImagePrimaryContext` and the fixed `view_image` follow-up stage already prevent silent omission or duplicate delivery; the one Responses Adapter already owns real `input_image` encoding.
+- Missing production composition: the CLI currently calls only the text `run_turn_audited_with_stages` path, does not bind Project image resolution into `ProviderComposition`, and provides neither initial-image nor model-`view_image` follow-up stages. F2a connects those existing owners rather than introducing a new model, Adapter, workflow or image store.
+- Scope Lock: only CLI Chat composition, Project-aware Provider composition, the fixed AgentLoop Vision/stage entry, the existing Research projection's latest-TargetSnapshot read semantics and one minimal crate-private typed `view_image` input may change. No dependency, schema, Provider/Wire binding, Config field, vendor branch, general attachment manager, Hook/Stage registry, Web/TUI, second History or second AgentLoop is allowed.
+- Pending-input rule: `/image <path>` binds to the most recently recorded authoritative TargetSnapshot, executes and records the existing `view_image` Receipt, and queues exactly one validated selection for the next non-command Turn. Missing TargetSnapshot, a second pending image, invalid image or unavailable Vision route fails explicitly. Pending process state is never reconstructed or silently replayed on Resume.
+- Acceptance: offline Direct/Secondary/disabled/error/follow-up/Resume/Project isolation and durable audit tests; independent Terra xhigh cross-boundary audit after focused and affected tests; repair; complete locked Cargo/Lean Gate; dual-Provider and single-multimodal explicit-config DeepSeek Live acceptance; Lean Review and `[skip ci]` private PR remote seal. GitHub Actions remain paused.
+- Baseline: `cli_chat_loopback`, `provider_composition`, `responses_http_adapter` and `vision_flow` pass 46/46 default-enabled tests; the one explicit Primary Live Smoke remains ignored. No credential or public request was used for this baseline.
+
+## F2a Completion
+
+- State: `COMPLETE_REMOTE_SEALED` through private `[skip ci]` PR `#62`; this status record is part of the exact merge head. M5-S1 is only `READY_NOT_AUTHORIZED`.
+- Production result: formal `chat` accepts one `/image <path>` pending input bound to the latest authoritative TargetSnapshot, executes the existing `view_image` Tool with a real Receipt, and consumes it on the next non-command Turn. Initial operator images and model-originated `view_image` results share the same fixed Direct-or-Secondary composition and one AgentLoop.
+- Composition and concurrency: Config v1 is strictly decoded and validated once before Project discovery, then the one Provider Composition Root binds the Project-isolated image resolver to Primary and optional Vision Responses Adapters. Secondary execution commits Route, releases ProjectWriter, commits RequestAudit under a separate short Writer, performs the remote request without a Writer, then commits exactly one Observation or Failure under a final short Writer.
+- Cancellation and Resume: SIGINT during initial Secondary Vision cancels and drains the scoped request, persists exactly one cancelled Failure, starts zero Primary requests and does not reconstruct or replay a pending image on Resume. Model `view_image` follow-up cancellation returns a normal cancelled Turn after preserving the completed Tool Receipt.
+- Live-discovered repair: the first dual-Provider attempt reached `deepseek-v4-flash-vision-exp` but correctly rejected a region containing the unsupported `description` field. The provider-neutral fixed Vision instruction now states the exact five-field region contract without weakening `VisionRegion`, adding a vendor branch or changing persisted schema; focused tests and an independent Terra re-audit cover the actual ModelRequest instruction.
+- Independent audit: Terra xhigh first identified the ProjectWriter-across-await and initial-Vision SIGINT P1 issues; both gained permanent regressions and were repaired. The final full review and the later prompt-contract increment review each returned `APPROVE` with no P0/P1/P2.
+- Complete local Gate: PASS on Rust `1.93.1`; `cargo fmt --all -- --check`, denied-warning locked Clippy, all-target/all-feature locked tests and locked build exited `0`. The suite discovers 385 tests, passes 383 by default and keeps two explicit Provider Live Smokes ignored.
+- Lean Review: PASS; no dependency, feature, public `pub` API, Event/Research/Artifact/Config schema, Provider/Wire binding, vendor/model/URL branch, second History, second AgentLoop, attachment manager, Hook registry, Web/TUI, Codex dependency or test-only production surface was added. New cross-module APIs are `pub(crate)` with current production consumers; `src/` has no inline tests and `codex/` is clean.
+- Dual-Provider Live: PASS through the user-owned explicit Config v1. Formal Primary Chat first called `research_update` and persisted the harmless TargetSnapshot; `/image` recorded its Artifact/Receipt; one `deepseek_vision` RequestAudit produced one strict VisionObservation; the text Primary then called `read_file` successfully and returned `F2A_DUAL_VISION_TOOL_LOOP_PASS`. Five audited Full requests, three successful Receipts, one Route and one Observation were present; there was no fallback.
+- Single-multimodal Primary Live: PASS through a temporary explicit Config v1 derived without changing the user config. `deepseek-v4-flash-vision-exp` was the sole `primary_direct` Primary and no Vision Provider was configured. Formal Chat persisted the TargetSnapshot, delivered the image directly, called `read_file` successfully and returned `F2A_PRIMARY_DIRECT_TOOL_LOOP_PASS`. Four audited Full requests all used the Primary profile; one Direct Route and zero Secondary RequestAudit/Observation/Failure facts prove route exclusivity.
+- Hygiene: all three isolated harmless Live projects, including the temporary single-Primary Config copy, were deleted after verification. No secret entered Git, Project facts, RequestAudit, output or shell profiles; no GitHub Actions run occurred and no Codex credential/login/session data was read or modified.
+- Git: implementation commit `bf814f3` and private PR `#62` form the F2a delivery. Both branch commits use `[skip ci]`; the branch and PR status-check lists are empty, so the operator Actions pause was preserved.
 
 ## Latest Local Design Update
 
@@ -315,20 +340,20 @@
 
 ## Next Target
 
-- State: `STOPPED_PENDING_NEW_AUTHORIZATION` at remotely sealed M4-S4. Do not begin M5 automatically.
-- Candidate only: M5-S1 CLI sufficiency evaluation remains `READY_NOT_AUTHORIZED` and starts only if the operator wants evidence that CLI image, Markdown or long-output handling is inadequate. It is an evaluation Slice, not advance authorization for Web work.
+- Current target: `STOPPED_PENDING_NEW_AUTHORIZATION`; F2a is complete and no further action is authorized.
+- M5-S1 CLI sufficiency evaluation is `READY_NOT_AUTHORIZED`; F2a does not authorize Web work, CI restoration, release packaging or any M5 implementation.
 
 ## Current Authorization
 
-The F1e and M4-S3c authorities are consumed. PR `#51`/`32bc0f2` and PR `#52`/`7d5b6d0` consumed the M4-S3d and M4-S3e1 submission authorities. The user authorized completing, testing and independently sealing M4-S3e2, then proceeding in order through M4-S3f, M4-S3g and M4-S4; PR `#59`/`a7143ba` completes that sequence. The later dual-Provider Live and its one documentation-only remote addendum are separately authorized and consumed by the record above. The earlier Actions pause remains in force.
+The F1e and M4-S3c authorities are consumed. PR `#51`/`32bc0f2` and PR `#52`/`7d5b6d0` consumed the M4-S3d and M4-S3e1 submission authorities. The user authorized completing, testing and independently sealing M4-S3e2, then proceeding in order through M4-S3f, M4-S3g and M4-S4; PR `#59`/`a7143ba` completes that sequence. The later dual-Provider compatibility Live and status addendum are sealed through PR `#61`/`385a318`. Private PR `#62` consumes the F2a design, implementation, audit, Gate, dual/single-multimodal Live and remote-seal authorities. The earlier Actions pause remains in force.
 
-- Run mode: `STOPPED_PENDING_NEW_AUTHORIZATION`; do not start M5 or another implementation Slice
-- Git mode: `CONSUMED_POST_SEAL_ADDENDUM`; the one `[skip ci]` documentation-only PR carrying the post-seal dual-Provider Vision record consumes its authorization, and further Git work remains stopped
+- Run mode: `STOPPED_PENDING_NEW_AUTHORIZATION`; M5-S1 is not authorized
+- Git mode: `NONE`; the one-time `F2A_PRIVATE_PR_SKIP_CI` authority is consumed by PR `#62`
 - GitHub Actions mode: `PAUSED_BY_OPERATOR`; do not trigger or rerun a Workflow until the user explicitly resumes it after quota recovery
 - Delegation mode: `AUTHORIZED_BOUNDED`; Terra xhigh owns cross-boundary implementation/audit and Luna xhigh only bounded modules/tests/docs as defined by repository governance; one-Agent runtime is unchanged
-- Live test mode: `CONSUMED_POST_SEAL_ADDENDUM`; the separately authorized explicit-config dual-Provider, Primary and controlled Tool-loop requests are complete, and no further Live request is authorized
+- Live test mode: `OFF`; the fixed F2a dual-Provider and single-multimodal authorities are consumed
 - Configuration rule: Provider binding, model, Base URL and Capability Mapping remain Config v1 data. A Provider selects exactly one inline `api_key` or dedicated `credential_ref`; neither may infer Provider/model identity or use Codex login state.
-- Stop condition: `SATISFIED`; M4-S4 remains remotely sealed, the dual-Provider protocol/service result is recorded separately, and unwired or unrun Vision lanes remain unavailable without fabricating PASS
+- Stop condition: satisfied; remain stopped before M5
 
 ## M4-S3e1 Slice Start
 

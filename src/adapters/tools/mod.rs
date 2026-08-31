@@ -18,6 +18,8 @@ mod snapshot;
 mod tool_search;
 mod view_image;
 
+pub(crate) use view_image::ViewImageToolInput;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;

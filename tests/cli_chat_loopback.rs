@@ -4,12 +4,12 @@ mod support;
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Cursor, Read, Write};
 use std::net::TcpListener;
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cyber_agent::adapters::project_event_store::{Project, ProjectEventStream};
 use cyber_agent::domain::artifacts::ArtifactId;
@@ -24,6 +24,7 @@ use cyber_agent::domain::session::{
     SessionEvent, SessionReducer, SessionState, SessionSummaryDraft,
 };
 use cyber_agent::ports::{EventSink, EventSource};
+use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use support::TemporaryDirectory;
@@ -31,6 +32,7 @@ use support::TemporaryDirectory;
 const INLINE_API_KEY_FIXTURE: &str = "loopback-inline-api-key";
 const M4_LONG_FLOW_MANIFEST_SHA256: &str =
     "0196cd31b0d366dd4f1755708ed1874db5d6faf0e006482bf502722242bc7730";
+const F2A_WAIT: Duration = Duration::from_secs(15);
 
 struct LoopbackServer {
     base_url: String,
@@ -43,6 +45,32 @@ struct PendingLoopbackServer {
     requests: Receiver<String>,
     release: mpsc::Sender<()>,
     thread: JoinHandle<()>,
+}
+
+struct F2aPendingVisionServer {
+    base_url: String,
+    requests: Receiver<String>,
+    release: mpsc::Sender<()>,
+    thread: JoinHandle<()>,
+}
+
+impl F2aPendingVisionServer {
+    fn shutdown(self) -> Vec<String> {
+        let _ = self.release.send(());
+        let deadline = Instant::now() + F2A_WAIT;
+        while !self.thread.is_finished() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            self.thread.is_finished(),
+            "F2a pending Vision server did not stop within {} seconds",
+            F2A_WAIT.as_secs()
+        );
+        self.thread
+            .join()
+            .expect("F2a pending Vision server should not panic");
+        self.requests.try_iter().collect()
+    }
 }
 
 impl PendingLoopbackServer {
@@ -108,6 +136,46 @@ fn spawn_pending_responses_server() -> PendingLoopbackServer {
     }
 }
 
+/// Holds one or more loopback requests open until the test explicitly
+/// releases them. The listener and release wait are both bounded so a failed
+/// child cannot leave a Gate thread blocked forever.
+fn spawn_f2a_pending_vision_server() -> F2aPendingVisionServer {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let (request_sender, requests) = mpsc::channel();
+    let (release, release_receiver) = mpsc::channel();
+    let thread = thread::spawn(move || {
+        let deadline = Instant::now() + F2A_WAIT;
+        let mut sockets = Vec::new();
+        loop {
+            if release_receiver.try_recv().is_ok() || Instant::now() >= deadline {
+                return;
+            }
+            match listener.accept() {
+                Ok((mut socket, _)) => {
+                    socket.set_nonblocking(false).unwrap();
+                    socket
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    request_sender.send(read_http_request(&mut socket)).unwrap();
+                    sockets.push(socket);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("F2a pending Vision server accept failed: {error}"),
+            }
+        }
+    });
+    F2aPendingVisionServer {
+        base_url: format!("http://{address}/v1"),
+        requests,
+        release,
+        thread,
+    }
+}
+
 fn read_http_request(socket: &mut std::net::TcpStream) -> String {
     let mut bytes = Vec::new();
     let mut buffer = [0_u8; 4096];
@@ -143,6 +211,64 @@ fn write_config(directory: &std::path::Path, base_url: &str) -> std::path::PathB
     fs::write(
         &config,
         provider_config::fixture().replace("http://127.0.0.1:1/v1", base_url),
+    )
+    .unwrap();
+    config
+}
+
+fn write_dual_config(
+    directory: &std::path::Path,
+    primary_base_url: &str,
+    vision_base_url: &str,
+) -> std::path::PathBuf {
+    let config = directory.join("provider-dual-config.toml");
+    let fixture = provider_config::fixture()
+        .replacen("http://127.0.0.1:1/v1", primary_base_url, 1)
+        .replacen("http://127.0.0.1:1/v1", vision_base_url, 1);
+    fs::write(&config, fixture).unwrap();
+    config
+}
+
+fn write_direct_config(directory: &std::path::Path, primary_base_url: &str) -> std::path::PathBuf {
+    let config = directory.join("provider-direct-config.toml");
+    let fixture = provider_config::fixture()
+        .replacen("http://127.0.0.1:1/v1", primary_base_url, 1)
+        .replacen(
+            "vision_mode = \"secondary_tool\"",
+            "vision_mode = \"primary_direct\"",
+            1,
+        )
+        .replacen("image_input = false", "image_input = true", 1);
+    fs::write(&config, fixture).unwrap();
+    config
+}
+
+fn write_disabled_config(directory: &std::path::Path) -> std::path::PathBuf {
+    let config = directory.join("provider-disabled-config.toml");
+    fs::write(
+        &config,
+        provider_config::fixture().replacen(
+            "vision_mode = \"secondary_tool\"",
+            "vision_mode = \"disabled\"",
+            1,
+        ),
+    )
+    .unwrap();
+    config
+}
+
+fn write_no_image_capability_config(directory: &std::path::Path) -> std::path::PathBuf {
+    let config = directory.join("provider-no-image-config.toml");
+    fs::write(
+        &config,
+        provider_config::fixture()
+            .replacen(
+                "vision_mode = \"secondary_tool\"",
+                "vision_mode = \"auto\"",
+                1,
+            )
+            .replacen("\nvision = \"vision\"", "", 1)
+            .replacen("image_input = true", "image_input = false", 1),
     )
     .unwrap();
     config
@@ -198,6 +324,7 @@ fn run_chat_with_pid(
         .args(["chat", "--config", config.to_str().unwrap()])
         .args(extra_args)
         .env("CYBER_AGENT_PRIMARY_API_KEY", "loopback-primary-secret")
+        .env("CYBER_AGENT_VISION_API_KEY", "loopback-vision-secret")
         .env("OPENAI_API_KEY", "must-not-be-read")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -211,6 +338,33 @@ fn run_chat_with_pid(
         .write_all(input.as_bytes())
         .unwrap();
     (process_id, child.wait_with_output().unwrap())
+}
+
+fn spawn_f2a_chat(
+    project: &std::path::Path,
+    config: &std::path::Path,
+    input: &str,
+    extra_args: &[&str],
+) -> Child {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+        .current_dir(project)
+        .args(["chat", "--config", config.to_str().unwrap()])
+        .args(extra_args)
+        .env("CYBER_AGENT_PRIMARY_API_KEY", "loopback-primary-secret")
+        .env("CYBER_AGENT_VISION_API_KEY", "loopback-vision-secret")
+        .env("OPENAI_API_KEY", "must-not-be-read")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    child
 }
 
 struct WaitingChat {
@@ -236,6 +390,7 @@ fn spawn_waiting_chat(project: &std::path::Path, config: &std::path::Path) -> Wa
         .current_dir(project)
         .args(["chat", "--config", config.to_str().unwrap()])
         .env("CYBER_AGENT_PRIMARY_API_KEY", "loopback-primary-secret")
+        .env("CYBER_AGENT_VISION_API_KEY", "loopback-vision-secret")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -286,10 +441,115 @@ fn session_events(project: &std::path::Path, session: &str) -> Vec<Value> {
 }
 
 fn text_response(text: &str, response_id: &str) -> String {
+    let text = serde_json::to_string(text).unwrap();
     format!(
-        "data: {{\"type\":\"response.output_text.delta\",\"delta\":\"{text}\"}}\n\n\
+        "data: {{\"type\":\"response.output_text.delta\",\"delta\":{text}}}\n\n\
          data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"{response_id}\"}}}}\n\n"
     )
+}
+
+fn vision_response(summary: &str, response_id: &str) -> String {
+    text_response(
+        &serde_json::to_string(&json!({
+            "schema_version": 1,
+            "summary": summary,
+            "extracted_text": "fixture screenshot",
+            "regions": [],
+            "security_relevant_clues": ["fixture boundary marker"],
+            "uncertainty": ["synthetic input only"]
+        }))
+        .unwrap(),
+        response_id,
+    )
+}
+
+fn png_bytes(width: u32, height: u32) -> Vec<u8> {
+    let image = RgbaImage::from_pixel(width, height, Rgba([11, 29, 47, 255]));
+    let mut bytes = Vec::new();
+    DynamicImage::ImageRgba8(image)
+        .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
+        .unwrap();
+    bytes
+}
+
+fn request_body(request: &str) -> Value {
+    serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap()
+}
+
+fn f2a_request_body(receiver: &Receiver<String>, label: &str) -> Value {
+    let request = receiver.recv_timeout(F2A_WAIT).unwrap_or_else(|error| {
+        panic!("timed out waiting {F2A_WAIT:?} for F2a {label} request: {error}")
+    });
+    request_body(&request)
+}
+
+fn f2a_join_server(server: LoopbackServer, label: &str) {
+    let LoopbackServer { thread, .. } = server;
+    let deadline = Instant::now() + F2A_WAIT;
+    while !thread.is_finished() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        thread.is_finished(),
+        "F2a {label} loopback server did not stop within {} seconds",
+        F2A_WAIT.as_secs()
+    );
+    thread
+        .join()
+        .unwrap_or_else(|_| panic!("F2a {label} loopback server panicked"));
+}
+
+fn f2a_wait_child(mut child: Child, label: &str) -> std::process::Output {
+    let deadline = Instant::now() + F2A_WAIT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                return child.wait_with_output().unwrap_or_else(|error| {
+                    panic!("failed to collect F2a {label} output: {error}")
+                });
+            }
+            Ok(None) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(20));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!(
+                    "F2a {label} child did not exit within {} seconds",
+                    F2A_WAIT.as_secs()
+                );
+            }
+            Err(error) => panic!("failed to poll F2a {label} child: {error}"),
+        }
+    }
+}
+
+fn json_contains_type(value: &Value, expected: &str) -> bool {
+    match value {
+        Value::Array(values) => values
+            .iter()
+            .any(|value| json_contains_type(value, expected)),
+        Value::Object(values) => {
+            values.get("type").and_then(Value::as_str) == Some(expected)
+                || values
+                    .values()
+                    .any(|value| json_contains_type(value, expected))
+        }
+        _ => false,
+    }
+}
+
+fn json_contains_text(value: &Value, expected: &str) -> bool {
+    match value {
+        Value::String(value) => value.contains(expected),
+        Value::Array(values) => values
+            .iter()
+            .any(|value| json_contains_text(value, expected)),
+        Value::Object(values) => values
+            .values()
+            .any(|value| json_contains_text(value, expected)),
+        _ => false,
+    }
 }
 
 fn assert_tree_does_not_contain(root: &std::path::Path, needle: &[u8]) {
@@ -454,6 +714,622 @@ fn assert_audits_reconstruct(project_root: &std::path::Path, state: &SessionStat
             })
             .unwrap();
     }
+}
+
+#[test]
+fn f2a_secondary_cli_image_is_observed_before_primary_tool_loop_and_remains_auditable() {
+    let root = TemporaryDirectory::new("f2a-cli-secondary-image");
+    initialize_project(root.path());
+    let project = Project::discover(root.path()).unwrap();
+    append_research_snapshot(&project, "older");
+    let current_target = append_research_snapshot(&project, "current");
+    fs::write(root.path().join("screen.png"), png_bytes(16, 12)).unwrap();
+    fs::write(
+        root.path().join("target.txt"),
+        "synthetic target boundary\n",
+    )
+    .unwrap();
+
+    let vision = spawn_responses_server(vec![(
+        200,
+        vision_response("secondary fixture observation", "vision-secondary"),
+    )]);
+    let primary = spawn_responses_server(vec![
+        (
+            200,
+            m4_long_flow_tool_response(
+                "f2a-read-secondary",
+                "read_file",
+                json!({"path": "target.txt"}),
+                "primary-secondary-tool",
+            ),
+        ),
+        (
+            200,
+            text_response("F2A_SECONDARY_COMPLETE", "primary-secondary-final"),
+        ),
+    ]);
+    let config = write_dual_config(root.path(), &primary.base_url, &vision.base_url);
+
+    let output = run_chat(
+        root.path(),
+        &config,
+        "/image screen.png\nInspect the synthetic image, then call read_file for target.txt before answering.\n/exit\n",
+        &[],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("Queued image"));
+    assert!(stdout.contains(current_target.as_str()));
+    assert!(stdout.contains("F2A_SECONDARY_COMPLETE"));
+
+    let vision_request = f2a_request_body(&vision.requests, "secondary Vision");
+    f2a_join_server(vision, "secondary Vision");
+    assert_eq!(vision_request["model"], "fixture-vision-model");
+    assert!(json_contains_type(&vision_request["input"], "input_image"));
+    assert!(json_contains_text(
+        &vision_request["input"],
+        "Inspect the synthetic image"
+    ));
+
+    let first_primary = f2a_request_body(&primary.requests, "secondary Primary first");
+    let second_primary = f2a_request_body(&primary.requests, "secondary Primary second");
+    f2a_join_server(primary, "secondary Primary");
+    assert_eq!(first_primary["model"], "fixture-text-model");
+    assert!(!json_contains_type(&first_primary["input"], "input_image"));
+    assert!(json_contains_text(
+        &first_primary["input"],
+        "secondary fixture observation"
+    ));
+    assert_eq!(
+        second_primary["previous_response_id"],
+        "primary-secondary-tool"
+    );
+    assert!(json_contains_type(
+        &second_primary["input"],
+        "function_call_output"
+    ));
+
+    let session = session_id(root.path());
+    let state = reduced_session(&project, &session);
+    assert_eq!(state.vision_routes().len(), 1);
+    assert_eq!(state.vision_observations().len(), 1);
+    assert_ne!(
+        state.primary_provider_session().unwrap().id,
+        state.vision_observations()[0].provider_session.id
+    );
+    assert_eq!(state.request_audits().len(), 3);
+    assert_audits_reconstruct(root.path(), &state);
+    let events = session_events(root.path(), &session);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["event_type"] == "tool.execution_receipt_recorded")
+            .count(),
+        2,
+        "operator view_image and model read_file must each keep a real Receipt"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["event_type"] == "session.history_item_recorded")
+            .count(),
+        5
+    );
+    let research = fs::read_to_string(root.path().join(".cyber-agent/research.jsonl")).unwrap();
+    assert!(research.contains(current_target.as_str()));
+    assert!(!research.contains("finding.recorded"));
+}
+
+#[test]
+fn f2a_primary_direct_cli_image_reaches_only_primary_and_keeps_real_tool_receipt() {
+    let root = TemporaryDirectory::new("f2a-cli-primary-direct");
+    initialize_project(root.path());
+    let project = Project::discover(root.path()).unwrap();
+    append_research_snapshot(&project, "direct");
+    fs::write(root.path().join("screen.png"), png_bytes(9, 7)).unwrap();
+    fs::write(root.path().join("target.txt"), "direct fixture target\n").unwrap();
+
+    let primary = spawn_responses_server(vec![
+        (
+            200,
+            m4_long_flow_tool_response(
+                "f2a-read-direct",
+                "read_file",
+                json!({"path": "target.txt"}),
+                "primary-direct-tool",
+            ),
+        ),
+        (
+            200,
+            text_response("F2A_DIRECT_COMPLETE", "primary-direct-final"),
+        ),
+    ]);
+    let config = write_direct_config(root.path(), &primary.base_url);
+    let output = run_chat(
+        root.path(),
+        &config,
+        "/image screen.png\nInspect the direct image, then call read_file for target.txt before answering.\n/exit\n",
+        &[],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .contains("F2A_DIRECT_COMPLETE")
+    );
+
+    let first_primary = f2a_request_body(&primary.requests, "direct Primary first");
+    let second_primary = f2a_request_body(&primary.requests, "direct Primary second");
+    f2a_join_server(primary, "direct Primary");
+    assert!(json_contains_type(&first_primary["input"], "input_image"));
+    assert_eq!(
+        second_primary["previous_response_id"],
+        "primary-direct-tool"
+    );
+    assert!(!json_contains_type(&second_primary["input"], "input_image"));
+
+    let session = session_id(root.path());
+    let state = reduced_session(&project, &session);
+    assert_eq!(state.vision_routes().len(), 1);
+    assert_eq!(
+        state.vision_routes()[0].route,
+        cyber_agent::domain::profile::VisionRoute::PrimaryDirect
+    );
+    assert_eq!(state.vision_observations().len(), 0);
+    assert_eq!(state.request_audits().len(), 2);
+    assert_audits_reconstruct(root.path(), &state);
+    let events = session_events(root.path(), &session);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["event_type"] == "tool.execution_receipt_recorded")
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn f2a_model_view_image_follow_up_runs_secondary_before_the_next_primary_sample() {
+    let root = TemporaryDirectory::new("f2a-cli-model-view-image-follow-up");
+    initialize_project(root.path());
+    let project = Project::discover(root.path()).unwrap();
+    append_research_snapshot(&project, "follow-up");
+    fs::write(root.path().join("screen.png"), png_bytes(10, 8)).unwrap();
+
+    let vision = spawn_responses_server(vec![(
+        200,
+        vision_response("model follow-up observation", "vision-follow-up"),
+    )]);
+    let primary = spawn_responses_server(vec![
+        (
+            200,
+            m4_long_flow_tool_response(
+                "f2a-view-follow-up",
+                "view_image",
+                json!({
+                    "event_id": "f2a-follow-up-artifact-event",
+                    "occurred_at": "2026-08-31T01:00:00Z",
+                    "artifact_id": "artifact-f2a-follow-up",
+                    "source_path": "screen.png",
+                    "target_snapshot_id": "snapshot-follow-up",
+                    "toolchain_fingerprint": "f2a-loopback"
+                }),
+                "primary-follow-up-tool",
+            ),
+        ),
+        (
+            200,
+            text_response("F2A_FOLLOW_UP_COMPLETE", "primary-follow-up-final"),
+        ),
+    ]);
+    let config = write_dual_config(root.path(), &primary.base_url, &vision.base_url);
+    let output = run_chat(
+        root.path(),
+        &config,
+        "Call view_image for screen.png, then use the observation and answer.\n/exit\n",
+        &["--domain", "mobile"],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .contains("F2A_FOLLOW_UP_COMPLETE")
+    );
+
+    let first_primary = f2a_request_body(&primary.requests, "follow-up Primary first");
+    let second_primary = f2a_request_body(&primary.requests, "follow-up Primary second");
+    f2a_join_server(primary, "follow-up Primary");
+    let vision_request = f2a_request_body(&vision.requests, "follow-up Vision");
+    f2a_join_server(vision, "follow-up Vision");
+    assert!(!json_contains_type(&first_primary["input"], "input_image"));
+    assert!(json_contains_type(&vision_request["input"], "input_image"));
+    assert!(json_contains_text(
+        &second_primary["input"],
+        "model follow-up observation"
+    ));
+    assert!(json_contains_type(
+        &second_primary["input"],
+        "function_call_output"
+    ));
+
+    let session = session_id(root.path());
+    let state = reduced_session(&project, &session);
+    assert_eq!(state.vision_routes().len(), 1);
+    assert_eq!(state.vision_observations().len(), 1);
+    assert_eq!(state.request_audits().len(), 3);
+    assert_audits_reconstruct(root.path(), &state);
+    assert_eq!(
+        session_events(root.path(), &session)
+            .iter()
+            .filter(|event| event["event_type"] == "tool.execution_receipt_recorded")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn f2a_image_commands_reject_invalid_inputs_before_any_provider_request_or_route() {
+    let missing = TemporaryDirectory::new("f2a-cli-image-missing-target");
+    initialize_project(missing.path());
+    fs::write(missing.path().join("screen.png"), png_bytes(4, 4)).unwrap();
+    let missing_config = write_config(missing.path(), "http://127.0.0.1:1/v1");
+    let output = run_chat(
+        missing.path(),
+        &missing_config,
+        "/image screen.png\n/exit\n",
+        &[],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .contains("requires at least one recorded TargetSnapshot")
+    );
+    let missing_events = session_events(missing.path(), &session_id(missing.path()));
+    assert!(missing_events.iter().all(|event| {
+        !matches!(
+            event["event_type"].as_str(),
+            Some("tool.execution_receipt_recorded")
+                | Some("session.vision_route_decided")
+                | Some("session.request_audit_recorded")
+        )
+    }));
+
+    let disabled = TemporaryDirectory::new("f2a-cli-image-disabled");
+    initialize_project(disabled.path());
+    let disabled_project = Project::discover(disabled.path()).unwrap();
+    append_research_snapshot(&disabled_project, "disabled");
+    fs::write(disabled.path().join("screen.png"), png_bytes(4, 4)).unwrap();
+    let disabled_config = write_disabled_config(disabled.path());
+    let output = run_chat(
+        disabled.path(),
+        &disabled_config,
+        "/image screen.png\n/exit\n",
+        &[],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .contains("VISION_DISABLED")
+    );
+    assert_eq!(
+        session_events(disabled.path(), &session_id(disabled.path()))
+            .iter()
+            .filter(|event| event["event_type"] == "tool.execution_receipt_recorded")
+            .count(),
+        0
+    );
+
+    let unavailable = TemporaryDirectory::new("f2a-cli-image-unavailable");
+    initialize_project(unavailable.path());
+    let unavailable_project = Project::discover(unavailable.path()).unwrap();
+    append_research_snapshot(&unavailable_project, "unavailable");
+    fs::write(unavailable.path().join("screen.png"), png_bytes(4, 4)).unwrap();
+    let unavailable_config = write_no_image_capability_config(unavailable.path());
+    let output = run_chat(
+        unavailable.path(),
+        &unavailable_config,
+        "/image screen.png\n/exit\n",
+        &[],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .contains("NO_IMAGE_CAPABLE_PROVIDER")
+    );
+
+    let corrupt = TemporaryDirectory::new("f2a-cli-image-corrupt");
+    initialize_project(corrupt.path());
+    let corrupt_project = Project::discover(corrupt.path()).unwrap();
+    append_research_snapshot(&corrupt_project, "corrupt");
+    fs::write(corrupt.path().join("corrupt.png"), b"not a PNG").unwrap();
+    let corrupt_config = write_config(corrupt.path(), "http://127.0.0.1:1/v1");
+    let output = run_chat(
+        corrupt.path(),
+        &corrupt_config,
+        "/image corrupt.png\n/exit\n",
+        &[],
+    );
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .contains("view_image_invalid")
+    );
+    assert_eq!(
+        session_events(corrupt.path(), &session_id(corrupt.path()))
+            .iter()
+            .filter(|event| event["event_type"] == "tool.execution_receipt_recorded")
+            .count(),
+        1,
+        "a started failed view_image execution keeps its real Receipt"
+    );
+
+    let oversized = TemporaryDirectory::new("f2a-cli-image-oversized");
+    initialize_project(oversized.path());
+    let oversized_project = Project::discover(oversized.path()).unwrap();
+    append_research_snapshot(&oversized_project, "oversized");
+    fs::File::create(oversized.path().join("oversized.png"))
+        .unwrap()
+        .set_len(32 * 1024 * 1024 + 1)
+        .unwrap();
+    let oversized_config = write_config(oversized.path(), "http://127.0.0.1:1/v1");
+    let output = run_chat(
+        oversized.path(),
+        &oversized_config,
+        "/image oversized.png\n/exit\n",
+        &[],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("33554432"),
+        "unexpected oversized-image diagnostic: {stdout}"
+    );
+    assert_eq!(
+        session_events(oversized.path(), &session_id(oversized.path()))
+            .iter()
+            .filter(|event| event["event_type"] == "tool.execution_receipt_recorded")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn f2a_second_pending_image_is_rejected_and_resume_does_not_replay_process_state() {
+    let root = TemporaryDirectory::new("f2a-cli-image-pending-resume");
+    initialize_project(root.path());
+    let project = Project::discover(root.path()).unwrap();
+    append_research_snapshot(&project, "pending");
+    fs::write(root.path().join("first.png"), png_bytes(5, 5)).unwrap();
+    fs::write(root.path().join("second.png"), png_bytes(6, 6)).unwrap();
+    let inert_config = write_config(root.path(), "http://127.0.0.1:1/v1");
+    let first = run_chat(
+        root.path(),
+        &inert_config,
+        "/image first.png\n/image second.png\n/exit\n",
+        &[],
+    );
+    assert!(first.status.success());
+    let first_stdout = String::from_utf8(first.stdout).unwrap();
+    assert!(first_stdout.contains("Queued image"));
+    assert!(first_stdout.contains("already queued for the next Turn"));
+    let session = session_id(root.path());
+    assert_eq!(
+        session_events(root.path(), &session)
+            .iter()
+            .filter(|event| event["event_type"] == "tool.execution_receipt_recorded")
+            .count(),
+        1
+    );
+
+    let primary = spawn_responses_server(vec![(
+        200,
+        text_response("F2A_RESUME_WITHOUT_IMAGE", "resume-without-image"),
+    )]);
+    let resumed_config = write_dual_config(root.path(), &primary.base_url, "http://127.0.0.1:1/v1");
+    let resumed = run_chat(
+        root.path(),
+        &resumed_config,
+        "Continue without a reconstructed image.\n/exit\n",
+        &["--session", &session],
+    );
+    assert!(
+        resumed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    let request = f2a_request_body(&primary.requests, "resume Primary");
+    f2a_join_server(primary, "resume Primary");
+    assert!(!json_contains_type(&request["input"], "input_image"));
+    let state = reduced_session(&project, &session);
+    assert!(state.vision_routes().is_empty());
+    assert!(state.vision_observations().is_empty());
+}
+
+#[test]
+fn f2a_secondary_pending_vision_sigint_releases_writer_and_resume_does_not_replay_image() {
+    let root = TemporaryDirectory::new("f2a-cli-secondary-vision-cancel");
+    initialize_project(root.path());
+    let project = Project::discover(root.path()).unwrap();
+    append_research_snapshot(&project, "cancel");
+    fs::write(root.path().join("screen.png"), png_bytes(8, 8)).unwrap();
+
+    let server = spawn_f2a_pending_vision_server();
+    let config = write_dual_config(root.path(), "http://127.0.0.1:2/v1", &server.base_url);
+    let child = spawn_f2a_chat(
+        root.path(),
+        &config,
+        "/image screen.png\nInspect this image while the Vision response is pending.\n",
+        &[],
+    );
+
+    let request = match server.requests.recv_timeout(F2A_WAIT) {
+        Ok(request) => request,
+        Err(error) => {
+            let _ = Command::new("/bin/kill")
+                .args(["-TERM", &child.id().to_string()])
+                .status();
+            let _ = server.shutdown();
+            let output = f2a_wait_child(child, "secondary Vision timeout cleanup");
+            panic!(
+                "timed out waiting {F2A_WAIT:?} for the pending Vision request: {error}\\nstdout:\\n{}\\nstderr:\\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    };
+    let request_body = request_body(&request);
+    assert_eq!(request_body["model"], "fixture-vision-model");
+    assert!(json_contains_type(&request_body["input"], "input_image"));
+
+    // The scoped Vision request is deliberately held open. CLI persistence
+    // must not retain the Project Writer lock across that remote await.
+    let writer_available = project.open_writer().is_ok();
+    let signal_status = Command::new("/bin/kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .unwrap();
+    let extra_requests = server.shutdown();
+    let output = f2a_wait_child(child, "secondary Vision cancellation");
+    assert!(
+        signal_status.success(),
+        "SIGINT failed for pending Vision child: {signal_status}\\nstdout:\\n{}\\nstderr:\\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        writer_available,
+        "Project Writer was unavailable while the pending Vision request was remote-awaiting"
+    );
+    assert!(
+        extra_requests.is_empty(),
+        "Primary must not be sampled while the initial Vision request is pending: {extra_requests:?}"
+    );
+
+    let session = session_id(root.path());
+    let events_before_resume = session_events(root.path(), &session);
+    assert_eq!(
+        events_before_resume
+            .iter()
+            .filter(|event| event["event_type"] == "vision.route_decided")
+            .count(),
+        1
+    );
+    assert_eq!(
+        events_before_resume
+            .iter()
+            .filter(|event| event["event_type"] == "session.request_audit_recorded")
+            .count(),
+        1
+    );
+    assert_eq!(
+        events_before_resume
+            .iter()
+            .filter(|event| event["event_type"] == "vision.observation_recorded")
+            .count(),
+        0
+    );
+    let failure = events_before_resume
+        .iter()
+        .find(|event| event["event_type"] == "vision.analysis_failed")
+        .expect("cancelled Vision must leave one terminal failure fact");
+    assert_eq!(failure["payload"]["error_code"], "cancelled");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("[vision request cancelled; no Primary request was started]")
+    );
+
+    let inert_config = write_config(root.path(), "http://127.0.0.1:1/v1");
+    let resumed = {
+        let child = spawn_f2a_chat(
+            root.path(),
+            &inert_config,
+            "/exit\n",
+            &["--session", &session],
+        );
+        // The resume must address the existing Session explicitly; use the
+        // same bounded process helper as the pending child.
+        f2a_wait_child(child, "secondary Vision resume")
+    };
+    assert!(
+        resumed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    let events_after_resume = session_events(root.path(), &session);
+    assert_eq!(
+        events_after_resume
+            .iter()
+            .filter(|event| event["event_type"] == "vision.route_decided")
+            .count(),
+        1
+    );
+    assert_eq!(
+        events_after_resume
+            .iter()
+            .filter(|event| event["event_type"] == "session.request_audit_recorded")
+            .count(),
+        1
+    );
+    assert_eq!(
+        events_after_resume
+            .iter()
+            .filter(|event| event["event_type"] == "vision.analysis_failed")
+            .count(),
+        1
+    );
+    assert_eq!(
+        events_after_resume
+            .iter()
+            .filter(|event| event["event_type"] == "vision.observation_recorded")
+            .count(),
+        0
+    );
+    assert_eq!(
+        events_after_resume
+            .iter()
+            .filter(|event| event["event_type"] == "session.resumed")
+            .count(),
+        1,
+        "Resume may append its one lifecycle fact but must not replay pending image state"
+    );
 }
 
 #[test]

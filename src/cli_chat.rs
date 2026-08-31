@@ -6,6 +6,8 @@
 //! duplicate sequences. Context, History, RequestAudit, Tool execution and
 //! model streaming retain their existing owners.
 
+mod vision;
+
 use std::io::{self, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -23,7 +25,8 @@ use crate::adapters::research_projection::{
 };
 use crate::adapters::tools::ToolRegistry;
 use crate::app::agent_loop::{
-    AgentLoop, AgentLoopError, AgentTurnOutcome, AssistantTextDeltaStage, ToolExecutionReceiptStage,
+    AgentLoop, AgentLoopError, AgentTurnOutcome, AssistantTextDeltaStage, CliVisionStages,
+    ToolExecutionReceiptStage, ViewImageFollowUpFuture,
 };
 use crate::app::cancellation::AgentCancellation;
 use crate::app::request_audit::RequestAuditService;
@@ -33,7 +36,7 @@ use crate::domain::domain_profile::DomainProfile;
 use crate::domain::events::{EventId, OccurredAt, StreamId};
 use crate::domain::project::ProjectId;
 use crate::domain::request_audit::{
-    RequestAuditAttempt, RequestAuditBinding, RequestAuditRunContext,
+    RequestAuditAttempt, RequestAuditBinding, RequestAuditManifest, RequestAuditRunContext,
 };
 use crate::domain::research_control::{ResearchPhase, ResearchPhaseSelection};
 use crate::domain::session::{SessionEvent, SessionLifecycle, SessionState};
@@ -92,7 +95,7 @@ pub(crate) async fn run(
     );
 
     println!(
-        "{} session `{}` with domain `{}` and phase `{}`. Enter one line at a time; use /domain, /phase, /exit or EOF.",
+        "{} session `{}` with domain `{}` and phase `{}`. Enter one line at a time; use /image, /domain, /phase, /exit or EOF.",
         disposition.message(),
         session_id.as_str(),
         domain.id(),
@@ -101,6 +104,7 @@ pub(crate) async fn run(
             .id(),
     );
     let mut pending_phase = requested_phase.map(ResearchPhaseSelection::operator);
+    let mut pending_image: Option<vision::PendingImage> = None;
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     loop {
         print!("you> ");
@@ -130,6 +134,33 @@ pub(crate) async fn run(
         if line.is_empty() {
             continue;
         }
+        if line == "/image" {
+            println!("Usage: /image <path>");
+            continue;
+        }
+        if let Some(path) = line.strip_prefix("/image ") {
+            if let Some(image) = &pending_image {
+                println!(
+                    "Image `{}` is already queued for the next Turn; submit a prompt before attaching another image.",
+                    image.delivery_artifact_id()
+                );
+                continue;
+            }
+            match vision::ingest_image(&session, &tools, composition, path).await {
+                Ok(image) => {
+                    println!(
+                        "Queued image `{}` for TargetSnapshot `{}` and the next Turn.",
+                        image.delivery_artifact_id(),
+                        image
+                            .target_snapshot_id()
+                            .expect("operator image intake always binds a TargetSnapshot")
+                    );
+                    pending_image = Some(image);
+                }
+                Err(error) => println!("Image rejected: {error}"),
+            }
+            continue;
+        }
         if let Some(value) = line.strip_prefix("/phase ") {
             let phase = parse_phase(value)?;
             pending_phase = Some(ResearchPhaseSelection::operator(phase));
@@ -150,10 +181,38 @@ pub(crate) async fn run(
         agent.queue_research_phase(phase);
 
         refresh_agent_context(&session.project, &tools, &mut agent)?;
+        let cancellation = AgentCancellation::new();
+        let initial_image = match pending_image.take() {
+            Some(image) => {
+                let preparation = vision::prepare_primary_context(
+                    &session,
+                    composition,
+                    image,
+                    &line,
+                    cancellation.clone(),
+                );
+                tokio::pin!(preparation);
+                let prepared = tokio::select! {
+                    result = &mut preparation => result,
+                    signal = tokio::signal::ctrl_c() => {
+                        signal?;
+                        cancellation.cancel();
+                        match preparation.as_mut().await {
+                            Ok(_) | Err(ChatError::VisionCancelled) => {
+                                println!("\n[vision request cancelled; no Primary request was started]");
+                                continue;
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    }
+                }?;
+                Some(prepared)
+            }
+            None => None,
+        };
         print!("assistant> ");
         io::stdout().flush()?;
 
-        let cancellation = AgentCancellation::new();
         let signal_cancellation = cancellation.clone();
         let history_start = agent.history().items().len();
         let mut text_delta = |text: &str| {
@@ -174,14 +233,37 @@ pub(crate) async fn run(
                 .record_execution(outcome)
                 .map_err(ChatError::into_execution_receipt_agent_loop_error)
         };
+        let follow_up_session = &session;
+        let follow_up_composition = composition;
+        let follow_up_task = line.clone();
+        let follow_up_cancellation = cancellation.clone();
+        let mut follow_up = move |selection| -> ViewImageFollowUpFuture<'_> {
+            let task = follow_up_task.clone();
+            let cancellation = follow_up_cancellation.clone();
+            Box::pin(async move {
+                vision::prepare_primary_context(
+                    follow_up_session,
+                    follow_up_composition,
+                    vision::PendingImage::from_selection(selection),
+                    &task,
+                    cancellation,
+                )
+                .await
+                .map_err(vision::follow_up_error)
+            })
+        };
         let outcome = {
-            let turn = agent.run_turn_audited_with_stages(
+            let turn = agent.run_turn_audited_with_vision_stages(
                 line,
+                initial_image,
                 cancellation,
                 &audit_context,
                 &mut record_attempt,
-                &mut text_delta as &mut AssistantTextDeltaStage<'_>,
-                &mut record_execution as &mut ToolExecutionReceiptStage<'_>,
+                CliVisionStages::new(
+                    &mut follow_up,
+                    &mut text_delta as &mut AssistantTextDeltaStage<'_>,
+                    &mut record_execution as &mut ToolExecutionReceiptStage<'_>,
+                ),
             );
             tokio::pin!(turn);
             tokio::select! {
@@ -402,19 +484,32 @@ impl DurableChatSession {
     }
 
     fn record_request_audit(&self, attempt: RequestAuditAttempt) -> Result<(), ChatError> {
+        self.record_request_audit_manifest(attempt, None)
+            .map(|_| ())
+    }
+
+    fn record_stamped_request_audit(
+        &self,
+        attempt: RequestAuditAttempt,
+        event_id: EventId,
+        occurred_at: OccurredAt,
+    ) -> Result<RequestAuditManifest, ChatError> {
+        self.record_request_audit_manifest(attempt, Some((event_id, occurred_at)))
+    }
+
+    fn record_request_audit_manifest(
+        &self,
+        attempt: RequestAuditAttempt,
+        stamp: Option<(EventId, OccurredAt)>,
+    ) -> Result<RequestAuditManifest, ChatError> {
         let mut writer = self.project.open_writer()?;
         let mut store = writer.open_session(self.session_id.clone(), None)?;
         let stream_id = ProjectEventStream::Session(self.session_id.clone()).stream_id();
         let mut projection =
             SessionProjection::replay(EventSource::read_events(&store, &stream_id)?)?;
         let sequence = store.next_sequence()?;
-        let service = RequestAuditService::new(
-            &self.artifacts,
-            RequestAuditBinding::new(self.project.project_id().clone(), stream_id)?,
-        );
-        service
-            .record(
-                attempt,
+        let (event_id, occurred_at) = stamp.unwrap_or_else(|| {
+            (
                 event_id(
                     self.project.project_id(),
                     &self.session_id,
@@ -422,10 +517,14 @@ impl DurableChatSession {
                     "request-audit",
                 ),
                 occurred_at(),
-                &mut projection,
-                &mut store,
             )
-            .map(|_| ())
+        });
+        let service = RequestAuditService::new(
+            &self.artifacts,
+            RequestAuditBinding::new(self.project.project_id().clone(), stream_id)?,
+        );
+        service
+            .record(attempt, event_id, occurred_at, &mut projection, &mut store)
             .map_err(|error| ChatError::Agent(error.into_agent_loop_error()))
     }
 
@@ -586,6 +685,18 @@ pub(crate) enum ChatError {
     UnknownPhase { value: String },
     #[error("unknown vulnerability-research domain `{value}`")]
     UnknownDomain { value: String },
+    #[error("/image requires a non-empty local path")]
+    ImagePathRequired,
+    #[error("/image requires at least one recorded TargetSnapshot in the current Project")]
+    ImageTargetSnapshotRequired,
+    #[error("local image intake failed: {message}")]
+    ImageIntake { message: String },
+    #[error("the selected Agent Model Profile cannot accept images: {reason}")]
+    VisionUnavailable { reason: &'static str },
+    #[error("CLI Vision composition failed: {message}")]
+    VisionComposition { message: String },
+    #[error("Vision analysis was cancelled before the Primary request")]
+    VisionCancelled,
 }
 
 impl ChatError {

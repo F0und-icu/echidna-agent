@@ -434,6 +434,8 @@ impl ResearchEvent {
 pub struct ResearchState {
     #[serde(skip)]
     applied_event_digests: BTreeMap<EventId, String>,
+    #[serde(skip)]
+    latest_target_snapshot_id: Option<TargetSnapshotId>,
     target_snapshots: BTreeMap<TargetSnapshotId, TargetSnapshotRecord>,
     hypotheses: BTreeMap<HypothesisId, HypothesisRecord>,
     experiments: BTreeMap<ExperimentId, ExperimentRecord>,
@@ -465,6 +467,13 @@ impl ResearchState {
         self.target_snapshots
             .values()
             .find(|record| record.snapshot_fingerprint == fingerprint)
+    }
+
+    /// Returns the most recently recorded immutable TargetSnapshot in Event
+    /// order. This is the single derived "current target" rule used by CLI
+    /// image intake; it does not rewrite or rank historical snapshots.
+    pub(crate) fn latest_target_snapshot_id(&self) -> Option<&TargetSnapshotId> {
+        self.latest_target_snapshot_id.as_ref()
     }
 
     pub fn hypotheses_by_dedup_key(&self, dedup_key: &str) -> Vec<&HypothesisRecord> {
@@ -817,6 +826,7 @@ impl ResearchReducer {
         match event {
             ResearchEvent::TargetSnapshotRecorded(record) => {
                 validate_target_snapshot_recorded(state, &record)?;
+                state.latest_target_snapshot_id = Some(record.id.clone());
                 state.target_snapshots.insert(record.id.clone(), record);
             }
             ResearchEvent::HypothesisRecorded {

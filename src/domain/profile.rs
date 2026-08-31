@@ -39,6 +39,21 @@ pub enum VisionRouteReason {
     NoImageCapableProvider,
 }
 
+impl VisionRouteReason {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::PrimaryImageCapable => "PRIMARY_IMAGE_CAPABLE",
+            Self::PrimaryImageUnsupportedSecondarySelected => {
+                "PRIMARY_IMAGE_UNSUPPORTED_SECONDARY_SELECTED"
+            }
+            Self::ForcedPrimaryDirect => "FORCED_PRIMARY_DIRECT",
+            Self::ForcedSecondaryTool => "FORCED_SECONDARY_TOOL",
+            Self::VisionDisabled => "VISION_DISABLED",
+            Self::NoImageCapableProvider => "NO_IMAGE_CAPABLE_PROVIDER",
+        }
+    }
+}
+
 /// The deterministic result of capability-only Vision routing.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct VisionRouteDecision {

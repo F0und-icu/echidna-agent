@@ -939,6 +939,33 @@ Gate：Responses/AgentLoop/History/RequestAudit/Replay 专项与受影响测试�
 
 没有证明收益的优化抽象必须删除或降级为 Deferred。
 
+### F2a：正式 CLI Vision Ingress
+
+目标：关闭已经由 Architecture v1.1/ADR-0002 冻结、但尚未接入正式 `chat` 的图片 MVP 契约。该 Slice 不修改冻结架构，不开启 M5/Web，也不增加第二 AgentLoop、Provider 路径或图片事实源。
+
+交付：
+
+- `chat` 支持 `/image <path>`，通过既有 `view_image` Tool、Artifact/Blob/Receipt owner 校验并保存一个本地 PNG/JPEG，绑定最近一次权威 `TargetSnapshot`，并只排队给下一次非命令 Turn；没有 TargetSnapshot、存在未消费图片、损坏/超限/不支持格式时返回明确错误。
+- 唯一 Provider Composition Root 接受当前 Project 作为运行时装配输入，并为所选 Primary/可选 Vision Responses Adapter 绑定同一个 Project 隔离的图片 Artifact resolver；`doctor`、Mock、Replay 和无图片 Live 路径继续复用同一配置/Adapter owner，且不需要 Project resolver。
+- 一个固定 CLI Vision stage 复用 `AgentModelProfile::resolve_vision_route`、`VisionSessionService`、现有 Session Event/RequestAudit/Artifact 事实与同一 AgentLoop：`primary_direct` 只向 Primary 交付图片；`secondary_tool` 先产生严格 `VisionObservation`，再只把派生 Observation 与 Artifact 引用交给 Primary。
+- 正式 CLI 同时处理 operator `/image` 初始图片和模型真实调用 `view_image` 后的固定 follow-up；两者共享同一 route/Session/audit composition，不从普通 ToolResult 猜测图片，也不在 Primary/Secondary 两条路径重复发送。
+- Primary 文本 streaming、Tool Receipt 持久化、Reasoning continuation、DomainProfile/ResearchPhase、ContextDeliveryMap、Resume 和 Project 隔离行为保持不变。
+
+Scope Lock：
+
+- 允许的生产改动仅限 CLI Chat composition、一个 Project-aware Composition Root 参数、现有 AgentLoop 固定 Vision/stage 入口、现有 Research 投影的最近 TargetSnapshot 只读语义、为真实 CLI 消费者提供的最小 crate-private `view_image` typed input，以及在真实 Live 偏离后收紧现有 Vision analysis 固定输出指令的字段精度。
+- 不增加 Cargo 依赖、Event/Research/Artifact/Config schema、Provider/Wire binding、模型名/URL/vendor 分支、通用 Attachment Manager、Hook/Stage Registry、第二 History、第二 AgentLoop、Web/TUI 或目标专用工具。
+- `/image` v1 每次只允许一个待消费图片。排队状态只属于当前 CLI 进程/下一 Turn；Resume 不猜测或自动重放未消费输入。历史 Artifact/Receipt/Route/Observation 仍由既有事实源重建。
+- VisionObservation 保持 derived model observation；它不会自动写 Finding、EvidenceLink、Memory 或已验证 Research 事实。
+
+验收：
+
+- Offline：CLI `/image` 正常/损坏/超限/无 TargetSnapshot/重复排队；`primary_direct` 零 Secondary 请求；`secondary_tool` 严格 Observation 先于 Primary；`disabled`/无能力在 Provider 前失败；模型 `view_image` follow-up；Project/ProviderSession/Resume/ContextDeliveryMap/Receipt 隔离。
+- Live：显式 Config v1 双 Provider 路径完成 `image -> VisionObservation -> 同一 Primary AgentLoop -> 固定无害 Tool/Receipt -> final`；另一个显式 Config v1 以同一实验多模态模型作为 `primary_direct` Primary，完成同一样例并证明不发 Secondary 请求。
+- 固定 Gate 顺序：专项测试 → 受影响测试 → 独立 Terra xhigh 审计 → 修复 → 完整 locked Cargo/Lean Gate → Lean Review → 分别授权的显式 Live lanes → `[skip ci]` 私有 PR 封存。GitHub Actions 保持暂停。
+
+完成记录：F2a 已完成正式 CLI ingress、独立 Terra xhigh 审计与修复、385-test 完整 Cargo/Lean Gate，以及双 Provider Secondary 和单多模态 Primary Direct 两条显式 DeepSeek Live 验收。首条 Live 暴露的 `regions.description` 偏离通过精确通用 Prompt 契约修复并再次独立审计；严格持久 Schema 未放宽。私有 `[skip ci]` PR `#62` 完成远端封存，当前停在 M5-S1 `READY_NOT_AUTHORIZED`。
+
 ### M5-S1：CLI 充分性评估
 
 仅当 CLI 在图片、Markdown 或长输出上有明确不足时，才实现 loopback-only Web feature。

@@ -1900,6 +1900,17 @@ M1 总完成标准：M1a、M1b、M1c 分别有可运行集成测试，任一后�
 
 完成标准：至少完成一个长流程漏洞研究任务，且恢复、记忆、Research Ledger、TargetSnapshot、ExperimentCapsule 和证据引用正常；固定 Trace 可回放核心不变量，版本差分能解释来源；增量、批量和缓存方案在对照 Eval 中减少模型往返或重复 Token，否则删除对应复杂度。
 
+### F2a：正式 CLI Vision Ingress
+
+- [x] `/image <path>` 通过既有 `view_image`/Artifact/Receipt owner 排队一个经过验证的本地图片给下一 Turn。
+- [x] Primary 与可选 Vision Provider 通过唯一 Project-aware Composition Root 解析同一 Project 的图片 Artifact。
+- [x] `primary_direct` 只向 Primary 交付图片，`secondary_tool` 先持久化严格 VisionObservation 再进入同一 Primary AgentLoop。
+- [x] 正式 CLI 同时处理初始 operator 图片和模型 `view_image` Tool follow-up，不静默遗漏或重复发送。
+- [x] disabled/无能力/无 TargetSnapshot/损坏或超限图片在 Provider 请求前明确失败。
+- [x] 双 Provider 与单多模态 Primary 的固定 DeepSeek Live lanes 分别通过，并保留 Primary/Vision Session、RequestAudit、ContextDeliveryMap、Receipt 和 Evidence 边界。
+
+完成标准：正式 `chat` 完成可审计的 `image -> Direct 或 VisionObservation -> Primary AgentLoop -> Tool/Receipt -> final`，不增加第二 AgentLoop、Provider/Wire binding、图片事实源、通用附件系统、Web/TUI 或新依赖。
+
 ### M5：可选界面和构建
 
 - [ ] 评估 CLI 是否已足够。
@@ -2076,4 +2087,4 @@ M1 总完成标准：M1a、M1b、M1c 分别有可运行集成测试，任一后�
 
 具体状态始终以 `docs/development/STATUS.md` 为准。F1a-F1e 已远端封存；F1e 的远端 Gate 由用户在 GitHub 账单/额度导致零 Step 失败后明确单次豁免，后续 Actions 暂停。Architecture v1.2 至 v1.6 的远端架构封存仍未授权。
 
-M4-S3e1 已通过独立 Terra xhigh 审计、完整 Gate，并经 PR `#52`/Squash Merge `7d5b6d0` 远端封存。M4-S3e2 provenance/Evidence-Spine Compaction 已完成独立 Terra xhigh 审计、完整本地 Gate、合成 DeepSeek Live Tool Loop、Lean Review，并经 PR `#53`/Squash Merge `1f382ee` 远端封存。M4-S3f deterministic retrieval Shadow 已完成独立 Terra xhigh 审计、修复、完整本地 Gate 与 Lean Review，并经 PR `#55`/Squash Merge `02bdbaa` 远端封存。M4-S3g deterministic guidance Shadow 已完成独立 Terra xhigh 审计、修复、完整本地 Gate 与 Lean Review，并经 PR `#57`/Squash Merge `5f63157` 远端封存。M4-S4 真实长流程验收已完成 S3e2 回归审计、受控离线长流程、独立修复审计、完整本地 Gate、显式 DeepSeek text-only Live lanes 与诚实的 Vision/multimodal `UNAVAILABLE` 记录，并经 PR `#59`/Squash Merge `a7143ba` 远端封存。项目现停在 `STOPPED_PENDING_NEW_AUTHORIZATION`；M5-S1 仅是未授权的 CLI 充分性评估候选，不自动开始。
+M4-S3e1 已通过独立 Terra xhigh 审计、完整 Gate，并经 PR `#52`/Squash Merge `7d5b6d0` 远端封存。M4-S3e2 provenance/Evidence-Spine Compaction 已完成独立 Terra xhigh 审计、完整本地 Gate、合成 DeepSeek Live Tool Loop、Lean Review，并经 PR `#53`/Squash Merge `1f382ee` 远端封存。M4-S3f deterministic retrieval Shadow 已完成独立 Terra xhigh 审计、修复、完整本地 Gate 与 Lean Review，并经 PR `#55`/Squash Merge `02bdbaa` 远端封存。M4-S3g deterministic guidance Shadow 已完成独立 Terra xhigh 审计、修复、完整本地 Gate 与 Lean Review，并经 PR `#57`/Squash Merge `5f63157` 远端封存。M4-S4 真实长流程验收已完成 S3e2 回归审计、受控离线长流程、独立修复审计、完整本地 Gate、显式 DeepSeek text-only Live lanes 与诚实的 Vision/multimodal `UNAVAILABLE` 记录，并经 PR `#59`/Squash Merge `a7143ba` 远端封存；后续双 Provider 协议/服务兼容结果经 PR `#61`/`385a318` 补充封存。F2a 正式 CLI Vision ingress 已完成独立审计、完整 Cargo/Lean Gate、双 Provider Secondary 和单多模态 Primary Direct Live 验收，并经私有 `[skip ci]` PR `#62` 远端封存；当前停止，M5-S1 保持 `READY_NOT_AUTHORIZED`。

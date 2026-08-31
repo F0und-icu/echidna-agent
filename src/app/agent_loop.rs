@@ -181,6 +181,29 @@ pub type ToolExecutionReceiptStage<'a> =
 /// outside Conversation History and CLI output.
 pub type AssistantTextDeltaStage<'a> = dyn FnMut(&str) -> Result<(), AgentLoopError> + 'a;
 
+/// The fixed callback bundle used only by production CLI Vision composition.
+/// Grouping these existing stages keeps the entry point bounded without
+/// introducing a registry or another lifecycle owner.
+pub(crate) struct CliVisionStages<'a> {
+    follow_up: &'a mut ViewImageFollowUp<'a>,
+    text_delta: &'a mut AssistantTextDeltaStage<'a>,
+    record_execution: &'a mut ToolExecutionReceiptStage<'a>,
+}
+
+impl<'a> CliVisionStages<'a> {
+    pub(crate) fn new(
+        follow_up: &'a mut ViewImageFollowUp<'a>,
+        text_delta: &'a mut AssistantTextDeltaStage<'a>,
+        record_execution: &'a mut ToolExecutionReceiptStage<'a>,
+    ) -> Self {
+        Self {
+            follow_up,
+            text_delta,
+            record_execution,
+        }
+    }
+}
+
 struct StreamingStages<'a> {
     text_delta: Option<&'a mut AssistantTextDeltaStage<'a>>,
     record_execution: Option<&'a mut ToolExecutionReceiptStage<'a>>,
@@ -625,6 +648,38 @@ where
         .await
     }
 
+    /// Runs the production CLI path with the same streaming/Receipt stages
+    /// plus the one fixed Vision composition. The optional initial image and
+    /// every successful model-originated `view_image` result are mutually
+    /// exclusive Direct-or-Secondary Primary contexts prepared by the
+    /// existing Vision Session owner.
+    pub(crate) async fn run_turn_audited_with_vision_stages(
+        &mut self,
+        user_text: impl Into<String>,
+        initial_image: Option<InitialImagePrimaryContext>,
+        cancellation: AgentCancellation,
+        audit_context: &RequestAuditRunContext,
+        record_attempt: &mut dyn FnMut(RequestAuditAttempt) -> Result<(), AgentLoopError>,
+        stages: CliVisionStages<'_>,
+    ) -> Result<AgentTurnOutcome, AgentLoopError> {
+        let primary_capability_hash = self.provider.capabilities().semantic_hash();
+        let initial_image = initial_image
+            .map(|context| context.into_content_item(&self.profile, &primary_capability_hash))
+            .transpose()?;
+        self.run_turn_inner(
+            user_text,
+            cancellation,
+            Some((audit_context, record_attempt)),
+            initial_image,
+            Some(stages.follow_up),
+            StreamingStages {
+                text_delta: Some(stages.text_delta),
+                record_execution: Some(stages.record_execution),
+            },
+        )
+        .await
+    }
+
     async fn run_turn_inner(
         &mut self,
         user_text: impl Into<String>,
@@ -980,9 +1035,20 @@ where
                 deferred_activations
                     .apply_search_result(&execution.result, sampling_step.resolved_tool_plan())?;
             }
-            self.append_view_image_contexts(&scheduled.executions, &mut view_image_follow_up)
-                .await?;
+            let view_image_follow_up = self
+                .append_view_image_contexts(&scheduled.executions, &mut view_image_follow_up)
+                .await;
             executions.extend(scheduled.executions);
+            match view_image_follow_up {
+                Ok(()) => {}
+                Err(AgentLoopError::ViewImageFollowUpCancelled) if cancellation.is_cancelled() => {
+                    return Ok(AgentTurnOutcome::Cancelled {
+                        model_requests: provider_requests,
+                        executions,
+                    });
+                }
+                Err(error) => return Err(error),
+            }
             if scheduled.cancelled {
                 return Ok(AgentTurnOutcome::Cancelled {
                     model_requests: provider_requests,
@@ -1428,6 +1494,8 @@ pub enum AgentLoopError {
     ViewImageFollowUpRequired {
         call_id: crate::domain::tools::ToolCallId,
     },
+    #[error("the fixed view_image follow-up was cancelled before the next model sample")]
+    ViewImageFollowUpCancelled,
     #[error("the Agent reached the per-Turn model-request limit of {limit}")]
     ModelRequestLimit { limit: usize },
     #[error("the Tool scheduler returned fewer outcomes than staged plans")]

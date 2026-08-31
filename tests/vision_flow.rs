@@ -415,6 +415,18 @@ async fn secondary_path_commits_route_audit_observation_then_primary_without_sen
     assert_eq!(vision_requests.len(), 1);
     assert!(!vision_requests[0].is_incremental());
     assert!(vision_requests[0].input().tool_specs.is_empty());
+    assert!(
+        vision_requests[0]
+            .input()
+            .instructions
+            .contains("Every regions item must contain exactly label")
+    );
+    assert!(
+        vision_requests[0]
+            .input()
+            .instructions
+            .contains("do not add description or any other field")
+    );
     assert!(matches!(
         vision_requests[0].input().content_items.as_slice(),
         [ContentItem::Text { .. }, ContentItem::ImageArtifact { artifact_id, .. }]

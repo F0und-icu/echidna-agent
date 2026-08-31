@@ -27,7 +27,7 @@ const DELIVERY_BUDGET: ImageDeliveryBudget =
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct ViewImageArgs {
+pub(crate) struct ViewImageToolInput {
     event_id: String,
     occurred_at: String,
     artifact_id: String,
@@ -36,11 +36,35 @@ struct ViewImageArgs {
     toolchain_fingerprint: String,
 }
 
+impl ViewImageToolInput {
+    pub(crate) fn new(
+        event_id: impl Into<String>,
+        occurred_at: impl Into<String>,
+        artifact_id: impl Into<String>,
+        source_path: impl Into<String>,
+        target_snapshot_id: impl Into<String>,
+        toolchain_fingerprint: impl Into<String>,
+    ) -> Self {
+        Self {
+            event_id: event_id.into(),
+            occurred_at: occurred_at.into(),
+            artifact_id: artifact_id.into(),
+            source_path: source_path.into(),
+            target_snapshot_id: target_snapshot_id.into(),
+            toolchain_fingerprint: toolchain_fingerprint.into(),
+        }
+    }
+
+    pub(crate) fn into_value(self) -> Value {
+        serde_json::to_value(self).expect("ViewImageToolInput serialization cannot fail")
+    }
+}
+
 pub(super) fn normalize(
     project_root: &Path,
     value: Value,
 ) -> Result<(Value, Vec<ResourceKey>), ToolExecutorError> {
-    let arguments: ViewImageArgs = decode_arguments("view_image", value)?;
+    let arguments: ViewImageToolInput = decode_arguments("view_image", value)?;
     require_nonempty_view_arguments(&arguments)?;
     let resolver = ResourceKeyResolver::new(project_root);
     Ok((
@@ -53,11 +77,11 @@ pub(super) fn normalize(
 }
 
 pub(super) async fn execute(project_root: &Path, plan: ToolExecutionPlan) -> ToolExecutionOutcome {
-    let arguments: ViewImageArgs = match decode_arguments("view_image", plan.call.arguments.clone())
-    {
-        Ok(arguments) => arguments,
-        Err(error) => return invalid_plan(plan, error),
-    };
+    let arguments: ViewImageToolInput =
+        match decode_arguments("view_image", plan.call.arguments.clone()) {
+            Ok(arguments) => arguments,
+            Err(error) => return invalid_plan(plan, error),
+        };
     if let Err(error) = require_nonempty_view_arguments(&arguments) {
         return invalid_plan(plan, error);
     }
@@ -112,7 +136,7 @@ pub(super) async fn execute(project_root: &Path, plan: ToolExecutionPlan) -> Too
 }
 
 fn original_artifact_arguments(
-    arguments: &ViewImageArgs,
+    arguments: &ViewImageToolInput,
     prepared: &PreparedLocalImage,
 ) -> ArtifactStoreArgs {
     ArtifactStoreArgs {
@@ -129,7 +153,7 @@ fn original_artifact_arguments(
 }
 
 fn derived_artifact_arguments(
-    arguments: &ViewImageArgs,
+    arguments: &ViewImageToolInput,
     prepared: &PreparedLocalImage,
 ) -> Option<ArtifactStoreArgs> {
     prepared
@@ -161,7 +185,9 @@ fn publication_json(publication: &PublishedArtifact) -> Value {
     })
 }
 
-fn require_nonempty_view_arguments(arguments: &ViewImageArgs) -> Result<(), ToolExecutorError> {
+fn require_nonempty_view_arguments(
+    arguments: &ViewImageToolInput,
+) -> Result<(), ToolExecutorError> {
     let probe = ArtifactStoreArgs {
         event_id: arguments.event_id.clone(),
         occurred_at: arguments.occurred_at.clone(),

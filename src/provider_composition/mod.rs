@@ -8,6 +8,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::adapters::credentials::{CredentialSource, CredentialSourceError};
+use crate::adapters::project_event_store::Project;
 use crate::adapters::responses::{ResponsesHttpAdapter, ResponsesHttpConfig};
 use crate::domain::model::ModelCapabilities;
 use crate::domain::profile::AgentModelProfile;
@@ -26,6 +27,12 @@ pub struct ProviderComposition {
     primary_request_adapter_version: RequestAdapterVersion,
 }
 
+/// One strictly decoded and validated Config v1 value awaiting runtime-only
+/// inputs such as the current Project image resolver. This crate-private
+/// token preserves config-error precedence without parsing or composing a
+/// Provider twice.
+pub(crate) struct ValidatedProviderConfig(ProviderConfigV1);
+
 impl ProviderComposition {
     /// Loads and validates one explicit config path without resolving a
     /// credential or performing network I/O.
@@ -33,7 +40,28 @@ impl ProviderComposition {
         path: impl AsRef<Path>,
         credential_source: Arc<dyn CredentialSource>,
     ) -> Result<Self, ProviderCompositionError> {
-        Self::compose(ProviderConfigV1::load(path)?, credential_source)
+        Self::compose(Self::load_config(path)?, credential_source, None)
+    }
+
+    /// Strictly decodes and validates Config v1 before any runtime-only input
+    /// is resolved. The returned token has no credential or network action.
+    pub(crate) fn load_config(
+        path: impl AsRef<Path>,
+    ) -> Result<ValidatedProviderConfig, ProviderCompositionError> {
+        let config = ProviderConfigV1::load(path)?;
+        config.validate()?;
+        Ok(ValidatedProviderConfig(config))
+    }
+
+    /// Binds one validated configuration to an already-discovered Project.
+    /// Both Primary and optional Vision Providers retain the one protocol
+    /// Adapter construction owner.
+    pub(crate) fn compose_for_project(
+        config: ValidatedProviderConfig,
+        credential_source: Arc<dyn CredentialSource>,
+        project: Project,
+    ) -> Result<Self, ProviderCompositionError> {
+        Self::compose(config, credential_source, Some(project))
     }
 
     pub fn agent_profile(&self) -> &AgentModelProfile {
@@ -55,11 +83,21 @@ impl ProviderComposition {
         &self.primary_request_adapter_version
     }
 
+    /// Returns the scoped Vision request Adapter identity when a Vision
+    /// Provider is configured. The fixed Responses binding currently shares
+    /// one wire owner, but callers do not infer that from profile names.
+    pub(crate) fn vision_request_adapter_version(&self) -> Option<&RequestAdapterVersion> {
+        self.vision
+            .as_ref()
+            .map(|_| &self.primary_request_adapter_version)
+    }
+
     fn compose(
-        config: ProviderConfigV1,
+        config: ValidatedProviderConfig,
         credential_source: Arc<dyn CredentialSource>,
+        project: Option<Project>,
     ) -> Result<Self, ProviderCompositionError> {
-        config.validate()?;
+        let config = config.0;
 
         let agent = config.active_agent_definition();
         let primary_definition = config.provider(&agent.primary);
@@ -68,6 +106,7 @@ impl ProviderComposition {
             primary_definition,
             config.capabilities(primary_definition),
             Arc::clone(&credential_source),
+            project.as_ref(),
         );
         let vision = agent.vision.as_deref().map(|vision_id| {
             let definition = config.provider(vision_id);
@@ -76,6 +115,7 @@ impl ProviderComposition {
                 definition,
                 config.capabilities(definition),
                 Arc::clone(&credential_source),
+                project.as_ref(),
             )
         });
         let agent_profile = config.active_agent_model_profile()?;
@@ -94,6 +134,7 @@ fn compose_provider(
     definition: &ProviderDefinition,
     capabilities: ModelCapabilities,
     credential_source: Arc<dyn CredentialSource>,
+    project: Option<&Project>,
 ) -> Arc<dyn ModelProvider> {
     let (credential_reference, credential_source) = match definition.credential() {
         ProviderCredential::Reference(reference) => (reference.to_owned(), credential_source),
@@ -107,15 +148,22 @@ fn compose_provider(
         }
     };
     match (definition.binding, definition.wire_api) {
-        (ProviderBinding::HttpSse, WireApi::Responses) => Arc::new(ResponsesHttpAdapter::new(
-            ResponsesHttpConfig::new(
-                &definition.base_url,
-                &definition.model,
-                credential_reference,
-                capabilities,
-            ),
-            credential_source,
-        )),
+        (ProviderBinding::HttpSse, WireApi::Responses) => {
+            let adapter = ResponsesHttpAdapter::new(
+                ResponsesHttpConfig::new(
+                    &definition.base_url,
+                    &definition.model,
+                    credential_reference,
+                    capabilities,
+                ),
+                credential_source,
+            );
+            let adapter = match project {
+                Some(project) => adapter.with_project_image_resolver(project.clone()),
+                None => adapter,
+            };
+            Arc::new(adapter)
+        }
     }
 }
 

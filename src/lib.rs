@@ -318,9 +318,13 @@ fn run_chat(
     phase: Option<CliResearchPhase>,
 ) -> Result<(), CliError> {
     let config = config.ok_or(CliError::ChatConfigurationRequired)?;
-    let composition = load_provider_composition(Some(config))?
-        .expect("an explicit chat configuration always composes one Provider");
+    let config = ProviderComposition::load_config(config)?;
     let project = discover_current_project()?;
+    let composition = ProviderComposition::compose_for_project(
+        config,
+        Arc::new(adapters::credentials::ProcessEnvironmentCredentialSource),
+        project.clone(),
+    )?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()

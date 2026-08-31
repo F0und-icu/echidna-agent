@@ -31,7 +31,7 @@ use crate::domain::vision::{
 use crate::ports::artifact::ArtifactStore;
 use crate::ports::model::{ModelProvider, ModelRequest};
 
-const VISION_INSTRUCTIONS: &str = "Analyze the supplied local image for vulnerability research. Return exactly one JSON object with schema_version=1, summary, optional extracted_text, regions, security_relevant_clues, and uncertainty. Do not call tools and do not claim a verified finding.";
+const VISION_INSTRUCTIONS: &str = "Analyze the supplied local image for vulnerability research. Return only one JSON object, without Markdown or commentary. The object must contain exactly these fields: schema_version (the integer 1), summary (string), extracted_text (string or null), regions (array), security_relevant_clues (array of strings), and uncertainty (array of strings). Every regions item must contain exactly label (string), x (non-negative integer), y (non-negative integer), width (positive integer), and height (positive integer); do not add description or any other field. Use an empty array when no bounded region or clue is available. Do not call tools and do not claim a verified finding.";
 
 /// All caller-owned identities for a single targeted image analysis.
 #[derive(Clone, Debug)]
