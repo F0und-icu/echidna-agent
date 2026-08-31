@@ -7,12 +7,12 @@
 - Implementation: `STARTED`
 - Current milestone: `M4-S4` controlled long-flow vulnerability-research acceptance
 - Current slice: `M4-S4`
-- Slice state: M4-S3g is `COMPLETE_REMOTE_SEALED`; M4-S4 is `COMPLETE_LOCAL_VALIDATED_PENDING_REMOTE_SEAL`
-- Lean governance: `PASS`; M4-S4 passed its focused and affected tests, independent repair audit, complete local Gate, compatible explicit-config Live lanes and final Lean Review without production-code growth
-- Local Git initialized: `yes`; branch `agent/m4-s4-long-flow-acceptance` starts from the M4-S3g status seal `ecc3af2` over Squash Merge `5f63157`
-- Remote repository: `F0und-icu/cyber-agent` private; M4-S3g is merged through PR `#57` as `5f63157`, while no tag, release or Actions run was created
+- Slice state: M4-S4 is `COMPLETE_REMOTE_SEALED`; development is `STOPPED_PENDING_NEW_AUTHORIZATION`
+- Lean governance: `PASS`; M4-S4 passed its focused and affected tests, independent repair audit, complete local Gate, compatible explicit-config Live lanes, final Lean Review and remote implementation seal without production-code growth
+- Local Git initialized: `yes`; status-seal branch `agent/m4-s4-status-seal` starts from M4-S4 Squash Merge `a7143ba`
+- Remote repository: `F0und-icu/cyber-agent` private; M4-S4 is merged through PR `#59` as `a7143ba`, while no tag, release or Actions run was created
 - Documentation baseline commit: `55ff3be`
-- Current code base: M4-S3g status seal `ecc3af2` on `main`; M4-S4 adds only a controlled fixture and permanent CLI loopback acceptance on its Slice branch, pending remote seal
+- Current code base: M4-S4 Squash Merge `a7143ba` on `main`; only its final status record remains on the status-seal branch
 - Upstream Codex reference baseline: `868c9edb0da913a5fc699a71664e65f44f6058b0`; read-only and not a Cyber Agent dependency
 
 ## Latest Local Design Update
@@ -273,7 +273,7 @@
 ## M4-S4 Completion and Lean Review
 
 - Slice: `M4-S4` controlled long-flow vulnerability-research acceptance.
-- State: `COMPLETE_LOCAL_VALIDATED_PENDING_REMOTE_SEAL`; acceptance began from remotely sealed `main` at status seal `ecc3af2` on `agent/m4-s4-long-flow-acceptance`. The sealed S3g behavior base is `5f63157`.
+- State: `COMPLETE_REMOTE_SEALED`; acceptance began from remotely sealed `main` at status seal `ecc3af2`, was implemented on `agent/m4-s4-long-flow-acceptance`, and merged through private PR `#59` as Squash Merge `a7143ba`. The sealed S3g behavior base is `5f63157`.
 - Outcome lock: complete one authorized, bounded, synthetic local vulnerability-research task through the existing CLI, one AgentLoop, one Session and one Research authority. The task must exercise durable Resume, Research Ledger, TargetSnapshot, ExperimentCapsule/Receipt/Artifact evidence, explicit DomainProfile/ResearchPhase boundaries and auditable RequestAudit/ContextDeliveryMap/Evidence Spine reconstruction without using a real third-party target.
 - Offline acceptance first: all Mock/Fixture/Replay paths must prove text-primary plus scoped Vision routing, single multimodal primary without a Secondary request, `disabled`/unavailable image capability errors, Profile/Turn-boundary Session isolation, immutable SamplingStepPlan/ResolvedToolPlan binding, Deferred activation lifetime and reproducible long-flow Resume. Mechanical/Fixture paths execute no uncontrolled external action and cannot promote Observation/Replay/Vision output into evidence.
 - Live matrix: each real request is opt-in and uses only an explicit Config v1 through the one Provider Composition Root. Run every currently available Cyber Agent Provider configuration independently; the existing text-only DeepSeek configuration may satisfy only the compatible text long-flow lane. A text-primary plus Vision lane and a single multimodal-primary lane require an explicit compatible Vision/multimodal Provider configuration. Missing credentials/capabilities are recorded as `UNAVAILABLE`, never inferred from model names and never fabricated as PASS.
@@ -294,6 +294,7 @@
 - Complete local Gate: `cargo fmt --all -- --check`, denied-warning locked Clippy, `cargo test --locked --all-targets --all-features`, `cargo build --locked`, production inline-test, generic Provider/protocol-owner, forbidden Codex dependency, `git diff --check` and clean fixed `codex/` scans pass on Rust `1.93.1`. The complete suite discovers 381 tests: 379 default-enabled tests pass and two explicit Live Smokes remain ignored by default.
 - Compatible Live lane: the user-owned explicit `/Users/f0und/.config/cyber-agent/deepseek-live.toml` selects `deepseek-v4-flash` as a text-only, Full-only Responses Primary through the one Config v1 Composition Root. The primary protocol smoke passes 1/1 and the fixed Shadow AgentLoop passes 1/1 after actually invoking its single permitted `replay_read` Tool. This proves only compatible text Responses and one controlled Tool round; it is not reported as a Vision or full real-target long-flow PASS.
 - Unavailable Live lanes: no explicit compatible text-primary-plus-Vision configuration and no explicit compatible multimodal-primary configuration exist, so both Live lanes are `UNAVAILABLE`. Offline coverage passes, but model names are not used to infer image capabilities and no substitute credential or Codex login state is consulted.
+- Remote seal: implementation commit `32973fd`, private PR `#59` and Squash Merge `a7143ba` form the M4-S4 delivery seal. Both commit subjects contain `[skip ci]`; PR status reported no checks, no GitHub Actions run was created, and no tag, release or architecture-manifest seal occurred.
 
 ### Lean Review
 
@@ -304,20 +305,20 @@
 
 ## Next Target
 
-- State after remote seal: `STOPPED_PENDING_NEW_AUTHORIZATION` at M4-S4. Do not begin M5 automatically.
+- State: `STOPPED_PENDING_NEW_AUTHORIZATION` at remotely sealed M4-S4. Do not begin M5 automatically.
 - Candidate only: M5-S1 CLI sufficiency evaluation remains `READY_NOT_AUTHORIZED` and starts only if the operator wants evidence that CLI image, Markdown or long-output handling is inadequate. It is an evaluation Slice, not advance authorization for Web work.
 
 ## Current Authorization
 
-The F1e and M4-S3c authorities are consumed. PR `#51`/`32bc0f2` and PR `#52`/`7d5b6d0` consumed the M4-S3d and M4-S3e1 submission authorities. The user authorized completing, testing and independently sealing M4-S3e2, then proceeding in order through M4-S3f, M4-S3g and M4-S4; the earlier Actions pause remains in force.
+The F1e and M4-S3c authorities are consumed. PR `#51`/`32bc0f2` and PR `#52`/`7d5b6d0` consumed the M4-S3d and M4-S3e1 submission authorities. The user authorized completing, testing and independently sealing M4-S3e2, then proceeding in order through M4-S3f, M4-S3g and M4-S4; PR `#59`/`a7143ba` completes that sequence. The earlier Actions pause remains in force.
 
-- Run mode: `IMPLEMENT_AND_SEAL_SEQUENTIALLY`; finish the current Slice before beginning the next
-- Git mode: `SLICE_BRANCH_PR_MERGE`; M4-S3g is sealed through PR `#57`/`5f63157`, and M4-S4 uses its own branch, commit, private PR and merge only after its Gate
+- Run mode: `STOPPED_PENDING_NEW_AUTHORIZATION`; do not start M5 or another implementation Slice
+- Git mode: `STATUS_SEAL_ONLY`; M4-S4 is sealed through PR `#59`/`a7143ba`, and this status-only branch records the final stopped state with `[skip ci]`
 - GitHub Actions mode: `PAUSED_BY_OPERATOR`; do not trigger or rerun a Workflow until the user explicitly resumes it after quota recovery
 - Delegation mode: `AUTHORIZED_BOUNDED`; Terra xhigh owns cross-boundary implementation/audit and Luna xhigh only bounded modules/tests/docs as defined by repository governance; one-Agent runtime is unchanged
 - Live test mode: `AUTHORIZED_EXPLICIT_CONFIG`; Mock/Fixture/Replay remain default and each selected Live path uses only an explicit Cyber Agent Config v1 Provider
 - Configuration rule: Provider binding, model, Base URL and Capability Mapping remain Config v1 data. A Provider selects exactly one inline `api_key` or dedicated `credential_ref`; neither may infer Provider/model identity or use Codex login state.
-- Stop condition: complete and remotely seal each Slice independently; stop at M4-S4 acceptance, recording any unavailable Vision Live path honestly rather than fabricating PASS
+- Stop condition: `SATISFIED`; M4-S4 is remotely sealed and the unavailable Vision Live paths are recorded without fabricating PASS
 
 ## M4-S3e1 Slice Start
 
