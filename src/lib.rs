@@ -158,6 +158,15 @@ enum InspectCommand {
         #[arg(long)]
         historical_comparison: bool,
     },
+    /// Rank existing typed NextActions and optional controlled typed candidates without execution.
+    Guidance {
+        /// The exact current TargetSnapshot ID used for applicability filtering.
+        #[arg(long = "target-snapshot")]
+        target_snapshot: String,
+        /// Strict bounded JSON document containing caller-supplied controlled Eval candidates.
+        #[arg(long = "eval-candidates", value_name = "PATH")]
+        eval_candidates: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -198,6 +207,8 @@ pub enum CliError {
     Observation { message: String },
     #[error("deterministic retrieval Shadow inspection failed: {message}")]
     Retrieval { message: String },
+    #[error("deterministic evidence-gap guidance Shadow inspection failed: {message}")]
+    Guidance { message: String },
 }
 
 #[derive(Debug, Serialize)]
@@ -385,6 +396,13 @@ where
             &historical_sessions,
             historical_comparison,
         ),
+        Some(CliCommand::Inspect {
+            inspection:
+                InspectCommand::Guidance {
+                    target_snapshot,
+                    eval_candidates,
+                },
+        }) => cli_inspection::print_guidance_shadow(&target_snapshot, eval_candidates.as_deref()),
         None => {
             let mut command = Cli::command();
             command.print_help()?;

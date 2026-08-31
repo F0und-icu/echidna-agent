@@ -9,6 +9,10 @@ mod records;
 mod reducer;
 mod upcast;
 
+pub(crate) use evidence_gap::{
+    EvidenceGapKind, EvidenceGapReasonCode, EvidenceGapReport, EvidenceGapState,
+};
+pub(crate) use fingerprint::{ActionFingerprintParts, action_fingerprint_from_parts};
 pub use fingerprint::{action_fingerprint, dedup_key, snapshot_fingerprint};
 pub use records::{
     CapsuleId, EvidenceLink, EvidenceRef, EvidenceRelation, ExecutionReceiptId,
@@ -19,7 +23,7 @@ pub use records::{
     NextActionRecord, NextActionStatus, NextActionUpdate, ResearchFactRef, ResearchRecordRef,
     TargetKind, TargetSnapshotDraft, TargetSnapshotId, TargetSnapshotRecord,
 };
-pub(crate) use reducer::ResearchReferenceCatalog;
 pub use reducer::{
     ResearchError, ResearchEvent, ResearchEventType, ResearchReducer, ResearchState,
 };
+pub(crate) use reducer::{ResearchReferenceCatalog, ResearchReferenceTargetApplicability};

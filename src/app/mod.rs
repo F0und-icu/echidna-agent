@@ -4,6 +4,7 @@ pub mod agent_loop;
 pub mod cancellation;
 pub mod context_compilation;
 pub mod doctor;
+pub(crate) mod guidance;
 pub(crate) mod inspection;
 mod inspection_metrics;
 mod inspection_prompt;

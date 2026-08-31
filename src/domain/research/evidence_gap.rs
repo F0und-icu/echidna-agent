@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::records::{
     EvidenceLink, EvidenceRef, EvidenceRelation, FindingRecord, FindingStatus, HypothesisRecord,
@@ -10,9 +10,9 @@ use super::records::{
 };
 use super::reducer::{ResearchReferenceCatalog, ResearchState};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-enum EvidenceGapKind {
+pub(crate) enum EvidenceGapKind {
     EntryUnproven,
     SinkUnproven,
     ReachabilityUnproven,
@@ -27,16 +27,16 @@ enum EvidenceGapKind {
     ContradictionUnresolved,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-enum EvidenceGapState {
+pub(crate) enum EvidenceGapState {
     Missing,
     Unknown,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-enum EvidenceGapReasonCode {
+pub(crate) enum EvidenceGapReasonCode {
     EntryReachabilityProofAbsent,
     SinkReachabilityProofAbsent,
     ReachabilityProofAbsent,
@@ -65,7 +65,7 @@ struct EvidenceGapSubject<'a> {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-struct EvidenceGap {
+pub(crate) struct EvidenceGap {
     kind: EvidenceGapKind,
     state: EvidenceGapState,
     reason_code: EvidenceGapReasonCode,
@@ -76,6 +76,30 @@ struct EvidenceGap {
 pub(crate) struct EvidenceGapReport {
     research_id: ResearchRecordRef,
     gaps: Vec<EvidenceGap>,
+}
+
+impl EvidenceGapReport {
+    pub(crate) fn research_id(&self) -> &ResearchRecordRef {
+        &self.research_id
+    }
+
+    pub(crate) fn gaps(&self) -> &[EvidenceGap] {
+        &self.gaps
+    }
+}
+
+impl EvidenceGap {
+    pub(crate) const fn kind(&self) -> EvidenceGapKind {
+        self.kind
+    }
+
+    pub(crate) const fn state(&self) -> EvidenceGapState {
+        self.state
+    }
+
+    pub(crate) const fn reason_code(&self) -> EvidenceGapReasonCode {
+        self.reason_code
+    }
 }
 
 pub(super) fn project(

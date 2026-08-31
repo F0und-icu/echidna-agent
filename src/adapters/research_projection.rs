@@ -62,11 +62,21 @@ fn load_reference_catalog_and_receipt_ids(
 }
 
 pub(crate) fn load_research_state(project: &Project) -> Result<ResearchState, String> {
+    load_research_projection(project).map(|(state, _)| state)
+}
+
+/// Rebuilds the one authoritative Research projection and the ephemeral
+/// Session Receipt catalog it requires. Callers receive no writer and the
+/// catalog is never serialized as a second fact source.
+pub(crate) fn load_research_projection(
+    project: &Project,
+) -> Result<(ResearchState, ResearchReferenceCatalog), String> {
     let references = load_reference_catalog(project)?;
     let events = read_existing_research_events(project).map_err(|error| error.to_string())?;
-    ResearchReducer
+    let state = ResearchReducer
         .reduce_with_references(events, &references)
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    Ok((state, references))
 }
 
 pub(crate) fn load_compaction_validation_facts(

@@ -1894,8 +1894,8 @@ M1 总完成标准：M1a、M1b、M1c 分别有可运行集成测试，任一后�
 - [x] AndroidManifest 外部 Extractor，通过 `run_commands` 复用现有工具链，不在 Rust 内重写解析器。
 - [x] typed EvidenceLink、legacy Upcaster 和 pure evidence-gap projection。
 - [ ] ContextSlot/Origin/Authority/Retention/Freshness、ContextDeliveryMap 和 Evidence-Spine Summary v2。
-- [ ] exact identifier + fielded BM25 + CJK/ASCII n-gram + RRF + authority/freshness retrieval Shadow。
-- [ ] deterministic evidence-gap/NextAction guidance Shadow，无 autonomous execution。
+- [x] exact identifier + fielded BM25 + CJK/ASCII n-gram + RRF + authority/freshness retrieval Shadow。
+- [x] deterministic evidence-gap/NextAction guidance Shadow，无 autonomous execution。
 - [ ] 根据 Eval 删除无用抽象和 Prompt。
 
 完成标准：至少完成一个长流程漏洞研究任务，且恢复、记忆、Research Ledger、TargetSnapshot、ExperimentCapsule 和证据引用正常；固定 Trace 可回放核心不变量，版本差分能解释来源；增量、批量和缓存方案在对照 Eval 中减少模型往返或重复 Token，否则删除对应复杂度。

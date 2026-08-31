@@ -4,14 +4,19 @@
 //! `app::inspection`; this module only discovers the local project and feeds
 //! already-existing facts into that projection.
 
+use std::fs::File;
+use std::io::Read;
+use std::path::Path;
+
 use crate::adapters::artifact_store::LocalArtifactStore;
 use crate::adapters::project_event_store::{
     Project, ProjectEventStoreError, ProjectEventStream, read_existing_session_events,
 };
 use crate::adapters::project_memory::LocalProjectMemory;
 use crate::adapters::project_snapshot::{CacheDisposition, LocalProjectSnapshot};
-use crate::adapters::research_projection::load_research_state;
+use crate::adapters::research_projection::{load_research_projection, load_research_state};
 use crate::adapters::tools::ToolRegistry;
+use crate::app::guidance::project_shadow_report as project_guidance_shadow_report;
 use crate::app::inspection::{self, AuditReferenceStatus, SnapshotDisposition, SnapshotFacts};
 use crate::app::observation::ObservationService;
 use crate::app::request_audit::RequestAuditService;
@@ -21,16 +26,25 @@ use crate::app::retrieval::{
 use crate::app::session::SessionProjection;
 use crate::domain::artifacts::ArtifactId;
 use crate::domain::events::StreamId;
+use crate::domain::guidance::{
+    CandidateValidity, GuidanceActionIdentityWitness, GuidanceEvalCandidate,
+    GuidanceEvalCandidates, PrerequisiteState,
+};
 use crate::domain::observation::ValidatedObservationSet;
 use crate::domain::request_audit::RequestAuditBinding;
-use crate::domain::research::{ResearchState, TargetSnapshotId};
+use crate::domain::research::{
+    EvidenceGapKind, ExperimentId, FindingId, HypothesisId, ResearchRecordRef, ResearchState,
+    TargetSnapshotId,
+};
 use crate::domain::session::SessionState;
 use crate::ports::artifact::ArtifactStore;
 use crate::ports::tool::ToolExecutor;
-use serde_json::json;
+use serde::Deserialize;
+use serde_json::{Value, json};
 
 const MAX_RETRIEVAL_OBSERVATION_SESSIONS: usize = 48;
 const MAX_RETRIEVAL_OBSERVATIONS: usize = 48;
+const MAX_GUIDANCE_CANDIDATE_FILE_BYTES: usize = 64 * 1024;
 
 use super::{CliError, print_json};
 
@@ -196,6 +210,42 @@ pub(crate) fn print_retrieval_shadow(
     }))
 }
 
+pub(crate) fn print_guidance_shadow(
+    current_target_snapshot: &str,
+    eval_candidates_path: Option<&Path>,
+) -> Result<(), CliError> {
+    let project = require_guidance_project()?;
+    let (research, references) = load_research_projection(&project).map_err(guidance_error)?;
+    let candidates = read_guidance_candidates(eval_candidates_path)?;
+    let report = project_guidance_shadow_report(
+        &research,
+        &references,
+        &TargetSnapshotId::new(current_target_snapshot),
+        candidates,
+    )
+    .map_err(guidance_error)?;
+    print_json(&json!({
+        "command": "inspect guidance",
+        "status": "ok",
+        "shadow": true,
+        "model_context_changed": false,
+        "effects": {
+            "provider_requests": 0,
+            "tool_actions": 0,
+            "experiment_creations": 0,
+            "research_writes": 0,
+            "memory_writes": 0,
+            "phase_changes": 0,
+            "finding_promotions": 0,
+            "observation_promotions": 0,
+            "retrieval_state_changes": 0,
+            "event_writes": 0,
+            "cache_writes": 0
+        },
+        "report": report,
+    }))
+}
+
 fn uninitialized_snapshot() -> SnapshotFacts {
     SnapshotFacts {
         disposition: SnapshotDisposition::Unavailable,
@@ -225,6 +275,214 @@ fn require_retrieval_project() -> Result<Project, CliError> {
     discover_project()?.ok_or_else(|| CliError::Retrieval {
         message: "the current directory is not an initialized Cyber Agent project".to_owned(),
     })
+}
+
+fn require_guidance_project() -> Result<Project, CliError> {
+    discover_project()?.ok_or_else(|| CliError::Guidance {
+        message: "the current directory is not an initialized Cyber Agent project".to_owned(),
+    })
+}
+
+fn read_guidance_candidates(path: Option<&Path>) -> Result<GuidanceEvalCandidates, CliError> {
+    let Some(path) = path else {
+        return Ok(GuidanceEvalCandidates::empty());
+    };
+    let file = File::open(path).map_err(|error| CliError::Guidance {
+        message: format!(
+            "cannot open controlled candidate file `{}`: {error}",
+            path.display()
+        ),
+    })?;
+    let mut bytes = Vec::new();
+    file.take((MAX_GUIDANCE_CANDIDATE_FILE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| CliError::Guidance {
+            message: format!(
+                "cannot read controlled candidate file `{}`: {error}",
+                path.display()
+            ),
+        })?;
+    if bytes.len() > MAX_GUIDANCE_CANDIDATE_FILE_BYTES {
+        return Err(CliError::Guidance {
+            message: format!(
+                "controlled candidate file `{}` exceeds the {}-byte limit",
+                path.display(),
+                MAX_GUIDANCE_CANDIDATE_FILE_BYTES
+            ),
+        });
+    }
+    let wire = serde_json::from_slice::<GuidanceEvalCandidatesWire>(&bytes).map_err(|error| {
+        CliError::Guidance {
+            message: format!(
+                "controlled candidate file `{}` is invalid: {error}",
+                path.display()
+            ),
+        }
+    })?;
+    Ok(wire.into())
+}
+
+/// Strict CLI-only wire input for controlled guidance cases. It deliberately
+/// does not deserialize through the durable Research schema: this caller has
+/// its own bounded input contract and explicitly converts to typed Domain
+/// candidates before the projection runs.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GuidanceEvalCandidatesWire {
+    candidates: Vec<GuidanceEvalCandidateWire>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GuidanceEvalCandidateWire {
+    id: String,
+    research_id: GuidanceResearchRecordRefWire,
+    target_snapshot_id: String,
+    action_identity: GuidanceActionIdentityWitnessWire,
+    validity: CandidateValidityWire,
+    prerequisite: PrerequisiteStateWire,
+    boundary_importance: u8,
+    competing_hypothesis_discrimination: u8,
+    expected_gap_closures: Vec<EvidenceGapKind>,
+    reproducibility: u8,
+    execution_cost: u8,
+    mutation_risk: u8,
+    version_drift_risk: u8,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GuidanceActionIdentityWitnessWire {
+    hypothesis_id: String,
+    normalized_action: String,
+    #[serde(default)]
+    normalized_arguments: Value,
+    #[serde(default)]
+    tool_version: String,
+    #[serde(default)]
+    input_artifact_ids: Vec<String>,
+    #[serde(default)]
+    environment_delta: String,
+    #[serde(default)]
+    account_prerequisites: Vec<String>,
+    #[serde(default)]
+    toolchain_fingerprint: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GuidanceResearchRecordRefWire {
+    kind: GuidanceResearchRecordKindWire,
+    id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum GuidanceResearchRecordKindWire {
+    Hypothesis,
+    Experiment,
+    Finding,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CandidateValidityWire {
+    Valid,
+    Invalid,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PrerequisiteStateWire {
+    Satisfied,
+    Missing,
+    Unknown,
+}
+
+impl From<GuidanceEvalCandidatesWire> for GuidanceEvalCandidates {
+    fn from(wire: GuidanceEvalCandidatesWire) -> Self {
+        Self {
+            candidates: wire
+                .candidates
+                .into_iter()
+                .map(GuidanceEvalCandidate::from)
+                .collect(),
+        }
+    }
+}
+
+impl From<GuidanceEvalCandidateWire> for GuidanceEvalCandidate {
+    fn from(wire: GuidanceEvalCandidateWire) -> Self {
+        Self {
+            id: wire.id,
+            research_id: wire.research_id.into(),
+            target_snapshot_id: TargetSnapshotId::new(wire.target_snapshot_id),
+            action_identity: wire.action_identity.into(),
+            validity: wire.validity.into(),
+            prerequisite: wire.prerequisite.into(),
+            boundary_importance: wire.boundary_importance,
+            competing_hypothesis_discrimination: wire.competing_hypothesis_discrimination,
+            expected_gap_closures: wire.expected_gap_closures,
+            reproducibility: wire.reproducibility,
+            execution_cost: wire.execution_cost,
+            mutation_risk: wire.mutation_risk,
+            version_drift_risk: wire.version_drift_risk,
+        }
+    }
+}
+
+impl From<GuidanceActionIdentityWitnessWire> for GuidanceActionIdentityWitness {
+    fn from(wire: GuidanceActionIdentityWitnessWire) -> Self {
+        Self {
+            hypothesis_id: HypothesisId::new(wire.hypothesis_id),
+            normalized_action: wire.normalized_action,
+            normalized_arguments: wire.normalized_arguments,
+            tool_version: wire.tool_version,
+            input_artifact_ids: wire
+                .input_artifact_ids
+                .into_iter()
+                .map(ArtifactId::new)
+                .collect(),
+            environment_delta: wire.environment_delta,
+            account_prerequisites: wire.account_prerequisites,
+            toolchain_fingerprint: wire.toolchain_fingerprint,
+        }
+    }
+}
+
+impl From<GuidanceResearchRecordRefWire> for ResearchRecordRef {
+    fn from(wire: GuidanceResearchRecordRefWire) -> Self {
+        match wire.kind {
+            GuidanceResearchRecordKindWire::Hypothesis => {
+                ResearchRecordRef::Hypothesis(HypothesisId::new(wire.id))
+            }
+            GuidanceResearchRecordKindWire::Experiment => {
+                ResearchRecordRef::Experiment(ExperimentId::new(wire.id))
+            }
+            GuidanceResearchRecordKindWire::Finding => {
+                ResearchRecordRef::Finding(FindingId::new(wire.id))
+            }
+        }
+    }
+}
+
+impl From<CandidateValidityWire> for CandidateValidity {
+    fn from(value: CandidateValidityWire) -> Self {
+        match value {
+            CandidateValidityWire::Valid => Self::Valid,
+            CandidateValidityWire::Invalid => Self::Invalid,
+        }
+    }
+}
+
+impl From<PrerequisiteStateWire> for PrerequisiteState {
+    fn from(value: PrerequisiteStateWire) -> Self {
+        match value {
+            PrerequisiteStateWire::Satisfied => Self::Satisfied,
+            PrerequisiteStateWire::Missing => Self::Missing,
+            PrerequisiteStateWire::Unknown => Self::Unknown,
+        }
+    }
 }
 
 fn read_current_observations(
@@ -308,6 +566,12 @@ fn read_historical_summaries(
 
 fn retrieval_error(error: impl std::fmt::Display) -> CliError {
     CliError::Retrieval {
+        message: error.to_string(),
+    }
+}
+
+fn guidance_error(error: impl std::fmt::Display) -> CliError {
+    CliError::Guidance {
         message: error.to_string(),
     }
 }

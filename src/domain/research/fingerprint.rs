@@ -79,34 +79,69 @@ pub fn action_fingerprint(
     experiment: &ExperimentRecord,
     capsule: &ExperimentCapsuleRecord,
 ) -> Result<String, ResearchError> {
-    let mut input_artifact_ids = capsule
-        .input_artifact_ids
-        .iter()
-        .map(|id| id.as_str())
-        .collect::<Vec<_>>();
+    action_fingerprint_from_parts(ActionFingerprintParts {
+        hypothesis_id: experiment.hypothesis_id.as_str(),
+        target_snapshot_id: experiment.target_snapshot_id.as_str(),
+        normalized_action: &capsule.normalized_action,
+        normalized_arguments: &capsule.normalized_arguments,
+        tool_version: &capsule.tool_version,
+        input_artifact_ids: capsule
+            .input_artifact_ids
+            .iter()
+            .map(|id| id.as_str())
+            .collect(),
+        environment_delta: &capsule.environment_delta,
+        account_prerequisites: capsule
+            .account_prerequisites
+            .iter()
+            .map(String::as_str)
+            .collect(),
+        toolchain_fingerprint: &capsule.toolchain_fingerprint,
+    })
+}
+
+/// The one action-identity normalization and fingerprint owner. Callers must
+/// provide typed identity parts; this function owns sorting, deduplication,
+/// text normalization, canonical JSON, and the `action-` namespace.
+pub(crate) fn action_fingerprint_from_parts(
+    parts: ActionFingerprintParts<'_>,
+) -> Result<String, ResearchError> {
+    let mut input_artifact_ids = parts.input_artifact_ids;
     input_artifact_ids.sort_unstable();
     input_artifact_ids.dedup();
-    let mut account_prerequisites = capsule
+    let mut account_prerequisites = parts
         .account_prerequisites
-        .iter()
-        .map(|prerequisite| normalize_action(prerequisite))
+        .into_iter()
+        .map(normalize_action)
         .collect::<Vec<_>>();
     account_prerequisites.sort_unstable();
     account_prerequisites.dedup();
     fingerprint(
         "action",
         &ActionInput {
-            hypothesis_id: experiment.hypothesis_id.as_str(),
-            target_snapshot_id: experiment.target_snapshot_id.as_str(),
-            normalized_action: normalize_action(&capsule.normalized_action),
-            normalized_arguments: canonical_json(&capsule.normalized_arguments),
-            tool_version: normalize_action(&capsule.tool_version),
+            hypothesis_id: parts.hypothesis_id,
+            target_snapshot_id: parts.target_snapshot_id,
+            normalized_action: normalize_action(parts.normalized_action),
+            normalized_arguments: canonical_json(parts.normalized_arguments),
+            tool_version: normalize_action(parts.tool_version),
             input_artifact_ids,
-            environment_delta: normalize_action(&capsule.environment_delta),
+            environment_delta: normalize_action(parts.environment_delta),
             account_prerequisites,
-            toolchain_fingerprint: normalize_action(&capsule.toolchain_fingerprint),
+            toolchain_fingerprint: normalize_action(parts.toolchain_fingerprint),
         },
     )
+}
+
+pub(crate) struct ActionFingerprintParts<'a> {
+    pub(crate) hypothesis_id: &'a str,
+    pub(crate) target_snapshot_id: &'a str,
+    pub(crate) normalized_action: &'a str,
+    pub(crate) normalized_arguments: &'a Value,
+    pub(crate) tool_version: &'a str,
+    pub(crate) input_artifact_ids: Vec<&'a str>,
+    pub(crate) environment_delta: &'a str,
+    pub(crate) account_prerequisites: Vec<&'a str>,
+    pub(crate) toolchain_fingerprint: &'a str,
 }
 
 pub(crate) fn validate_dedup(record: &HypothesisRecord) -> Result<(), ResearchError> {

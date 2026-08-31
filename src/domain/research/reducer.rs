@@ -74,6 +74,17 @@ pub(crate) struct ResearchReferenceCatalog {
     execution_receipts: BTreeMap<ExecutionReceiptId, ExecutionReceipt>,
 }
 
+/// Conservative applicability of an existing Research record to one exact
+/// current TargetSnapshot. `Unknown` preserves the distinction between a
+/// target identity that is compatible so far and an actual Snapshot binding.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ResearchReferenceTargetApplicability {
+    Applicable,
+    Incompatible,
+    Unknown,
+    MissingReference,
+}
+
 impl ResearchReferenceCatalog {
     pub(crate) fn insert_execution_receipt(
         &mut self,
@@ -550,6 +561,53 @@ impl ResearchState {
 
     pub(crate) fn retrieval_next_action_records(&self) -> impl Iterator<Item = &NextActionRecord> {
         self.next_actions.values()
+    }
+
+    /// The sole TargetSnapshot applicability projection for an existing
+    /// NextAction's typed Research reference. It deliberately never infers a
+    /// Snapshot, version, prerequisite, or experiment identity from action
+    /// prose.
+    pub(crate) fn research_reference_target_applicability(
+        &self,
+        reference: &ResearchRecordRef,
+        current_target: &TargetSnapshotId,
+    ) -> ResearchReferenceTargetApplicability {
+        let Some(current) = self.target_snapshot(current_target) else {
+            return ResearchReferenceTargetApplicability::MissingReference;
+        };
+        match reference {
+            ResearchRecordRef::Hypothesis(id) => match self.hypotheses.get(id) {
+                Some(record) if record.target_id == current.target_id => {
+                    ResearchReferenceTargetApplicability::Unknown
+                }
+                Some(_) => ResearchReferenceTargetApplicability::Incompatible,
+                None => ResearchReferenceTargetApplicability::MissingReference,
+            },
+            ResearchRecordRef::Experiment(id) => match self.experiments.get(id) {
+                Some(record) if &record.target_snapshot_id == current_target => {
+                    ResearchReferenceTargetApplicability::Applicable
+                }
+                Some(_) => ResearchReferenceTargetApplicability::Incompatible,
+                None => ResearchReferenceTargetApplicability::MissingReference,
+            },
+            ResearchRecordRef::Finding(id) => match self.findings.get(id) {
+                Some(record) if !record.target_snapshot_ids.is_empty() => {
+                    if record.target_snapshot_ids.contains(current_target) {
+                        ResearchReferenceTargetApplicability::Applicable
+                    } else {
+                        ResearchReferenceTargetApplicability::Incompatible
+                    }
+                }
+                Some(record)
+                    if record.target_id == current.target_id
+                        && record.target_version == current.version =>
+                {
+                    ResearchReferenceTargetApplicability::Unknown
+                }
+                Some(_) => ResearchReferenceTargetApplicability::Incompatible,
+                None => ResearchReferenceTargetApplicability::MissingReference,
+            },
+        }
     }
 
     pub(crate) fn retrieval_artifact_records(&self) -> impl Iterator<Item = &ArtifactRecord> {

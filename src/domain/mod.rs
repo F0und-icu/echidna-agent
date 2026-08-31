@@ -9,6 +9,7 @@ pub(crate) mod canonical_json;
 pub mod context;
 pub mod domain_profile;
 pub mod events;
+pub(crate) mod guidance;
 pub mod history;
 pub mod image;
 pub mod memory;
