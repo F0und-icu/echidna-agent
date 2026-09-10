@@ -1,5 +1,6 @@
 /codex/
 /target/
+/dist/
 **/.cyber-agent/
 .env
 .env.*

@@ -5,15 +5,20 @@ name: CI
   push:
     branches:
       - main
+  workflow_call:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   gate:
-    name: Rust gate
+    name: Offline Rust gate and macOS arm64 package
     runs-on: macos-15
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -63,3 +68,19 @@ jobs:
 
       - name: Build
         run: cargo build --locked
+
+      - name: Package macOS arm64 release
+        run: ./scripts/package-macos-arm64.sh
+
+      - name: Check distribution failure cases
+        run: ./tests/distribution_package.sh dist
+
+      - name: Upload verified macOS arm64 package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cyber-agent-macos-arm64
+          path: |
+            dist/cyber-agent-*-aarch64-apple-darwin.tar.gz
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7

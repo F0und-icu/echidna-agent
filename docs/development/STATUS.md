@@ -7,12 +7,40 @@
 - Implementation: `STARTED`
 - Current milestone: `M5` optional interface and personal distribution evaluation
 - Current slice: `M5-S2`
-- Slice state: `AUTHORIZED_NOT_STARTED`; the operator authorized M5-S2 implementation, appropriate testing and remote Git delivery after the M5-S1 remote seal
-- Lean governance: `PASS`; M5-S1 retains one AgentLoop, Session/Research/Receipt authorities and fixed CLI stages without automatic Compaction, a Hook registry, second state source or public test surface
-- Local Git initialized: `yes`; clean local `main` tracks `origin/main`
+- Slice state: `COMPLETE_LOCAL_AWAITING_REMOTE`; M5-S2 passed its independent audit, repair, complete locked Cargo/distribution Gate and Lean Review
+- Lean governance: `PASS`; M5-S2 adds only bounded workflow/package ownership with no Rust production API, dependency, Provider path, fact source or product capability change
+- Local Git initialized: `yes`; M5-S2 is staged for delivery from `feat/m5-s2-release-distribution`
 - Remote repository: `F0und-icu/cyber-agent` private; M5-S1 is sealed through PR `#63` and Squash Merge `6bd85b6`
 - Documentation baseline commit: `55ff3be`
-- Current code base: M5-S1a and M5-S1b are independently audited, locally gated and remotely sealed; M5-S2 has not started
+- Current code base: M5-S1a and M5-S1b are remotely sealed; M5-S2 is complete locally and awaits its authorized PR-head Gate and merge
+
+## M5-S2 Slice Start
+
+- Objective: make the existing single-package CLI reproducibly distributable as one macOS arm64 archive with a verified SHA-256 checksum, while keeping ordinary CI entirely offline and credential-free.
+- Scope Lock: add one packaging/verification script as the sole owner of version, archive name, allowlisted contents and checksum; refine the existing one-job CI; add a tag-only Release workflow and a `workflow_dispatch`-only Live Smoke workflow. No Rust production code, Cargo dependency, Config schema, Provider/Wire path, Event/Research/Artifact schema, AgentLoop, Web/TUI, installer, updater or signing service is allowed.
+- Credential boundary: ordinary CI and Release never reference Provider secrets. The Live workflow obtains endpoint/model/capabilities from a generated strict Config v1 and injects the `live-test` Environment credential only into the exact ignored-test step. It cannot run from PR, fork, push or `pull_request_target` and cannot read Codex credentials.
+- Release boundary: M5-S2 may verify the workflow and publish its implementation, but it does not create a version tag or GitHub Release. Tag creation remains a separate release decision after the exact main commit passes its Gate.
+- Verification order: focused workflow/package checks, affected offline tests, independent read-only audit, repair, complete locked Cargo/Lean Gate and Lean Review.
+
+## M5-S2 Pre-Audit Checkpoint
+
+- Implemented locally: one binary-only macOS arm64 package/checksum owner; one-job offline CI with a reusable `workflow_call`; a tag-only Release workflow that requires an annotated version-matching main-history Tag; and a manual `live-test` Environment workflow for the two existing fixed Primary synthetic Live lanes.
+- Credential isolation: CI and Release contain no Provider Secret reference. The manual workflow writes a strict credential-reference Config v1 without a Key and injects only `CYBER_AGENT_PRIMARY_API_KEY` into the selected ignored-test step. It has no PR, fork, push or `pull_request_target` trigger and no Codex credential path.
+- Focused checks: `PASS`. Shell syntax, YAML parsing, actionlint `1.7.7`, package version resolution, a real locked arm64 release build, Mach-O arm64 inspection, binary-only archive allowlist and SHA-256 verification passed. Negative checks rejected both a modified checksum and a checksum-valid archive containing an added local log.
+- Affected tests: `PASS`. `cargo test --locked --all-targets --all-features` passed all 395 default-enabled tests and kept the two explicit Live Smokes ignored; no credential or remote Provider request was used.
+- Gate state: `AWAITING_INDEPENDENT_AUDIT`. Complete fmt/Clippy/build/Lean Gate, remote Git delivery, Actions execution and optional Live Smoke have not yet run.
+
+## M5-S2 Completion and Lean Review
+
+- Outcome: `COMPLETE_LOCAL_AWAITING_REMOTE`. The exact delivery adds reproducible macOS arm64 packaging, offline CI artifact production, tag-only Release automation and a separately manual Primary Live Smoke workflow; no Tag or GitHub Release is created by this Slice.
+- Independent audit: the bounded Terra xhigh audit found two P1 issues and one P2 issue. Release attempted a private fetch after disabling persisted checkout credentials; archive verification allowed a checksum-valid symlink in the binary slot; and `primary_stream` could enter the secret-bearing step with usage disabled. Repairs use checkout's complete local `origin/main`, verify exact archive names and entry types plus extracted non-link types, and reject the inconsistent Live input before any secret-bearing step. The closure review returned `APPROVE` with no P0/P1/P2.
+- Distribution owner: `scripts/package-macos-arm64.sh` is the only version, target triple, archive-name, binary-only allowlist, Mach-O arm64 and SHA-256 owner. CI and Release call the same script; Release verifies an annotated `v<Cargo version>` Tag on remote main before publication.
+- Permanent regressions: `tests/distribution_package.sh` accepts the real package and rejects a modified checksum, an added local log and a symlink substituted for the binary. The generated `/dist/` directory is ignored and never becomes release source material.
+- Complete Gate: `PASS` on Rust `1.93.1`. Locked fmt, denied-warning Clippy, all-target/all-feature tests and host build passed; the suite discovers 397 tests, passes all 395 default-enabled tests and keeps two explicit Live Smokes ignored. Shell syntax, actionlint `1.7.7`, a fresh locked arm64 release build, distribution positive/negative tests, inline-test scan, single-package/forbidden-Codex-dependency checks, credential-like delivery scan, unchanged Cargo dependency files, unchanged `codex/` checkout and `git diff --check` also passed.
+- Workflow/credential boundary: ordinary CI and Release have no Provider Secret and cannot enable Live tests. `live-smoke.yml` has only `workflow_dispatch`, binds the `live-test` Environment, generates a strict credential-reference Config v1, and injects `CYBER_AGENT_PRIMARY_API_KEY` only into the selected fixed ignored-test step. It has no PR, fork, push or `pull_request_target` path and no Codex credential source.
+- Local Live acceptance: `PASS` for the fixed `synthetic_primary_live_smoke_uses_provider_composition` against `deepseek-v4-flash` through a temporary credential-reference Config v1 and the one Provider Composition Root. An initial setup attempt correctly failed before network activity because the ignored root `deepseek` file is Codex-format rather than Cyber Agent Config v1; the translated temporary Config contained no Key and was removed after the passing request. No secret entered output, Git, Project facts or shell profiles, and no Codex login/configuration was accessed.
+- API/dependency/schema review: no Rust source, `pub` item, crate, feature, Cargo file, Event/Research/Artifact/Config schema, Prompt, Provider/Wire binding, Adapter, AgentLoop, History, Hook/registry, Web/TUI or Codex dependency changed. No upstream code was copied; PORT ledger changes are unnecessary.
+- Removed/deferred: no duplicate build or checksum owner was retained. Automated image-protocol Live Smoke remains Deferred until a fixed low-cost ignored image case exists; the already completed F2a Direct/Secondary Live evidence is not relabeled. Release Tag creation, changelog finalization, signing, installer and updater remain separate operator decisions.
 
 ## M5-S1a Slice Start
 

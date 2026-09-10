@@ -1,0 +1,135 @@
+name: Live Provider Smoke
+
+"on":
+  workflow_dispatch:
+    inputs:
+      lane:
+        description: Fixed synthetic Live Smoke to run
+        required: true
+        type: choice
+        default: primary_stream
+        options:
+          - primary_stream
+          - shadow_tool_loop
+      base_url:
+        description: HTTPS base URL for the configured Responses service
+        required: true
+        type: string
+      model:
+        description: Exact configured model identifier
+        required: true
+        type: string
+      context_window:
+        description: Declared context-window capability
+        required: true
+        type: string
+        default: "131072"
+      incremental_input:
+        description: Service accepts previous_response_id plus strict delta
+        required: true
+        type: boolean
+        default: false
+      usage_reporting:
+        description: Service emits usage events required by primary_stream
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-smoke
+  cancel-in-progress: false
+
+jobs:
+  live-smoke:
+    name: Explicit synthetic Live Smoke
+    runs-on: macos-15
+    timeout-minutes: 10
+    environment: live-test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install --no-self-update
+
+      - name: Create strict credential-reference Config v1
+        env:
+          LIVE_LANE: ${{ inputs.lane }}
+          LIVE_BASE_URL: ${{ inputs.base_url }}
+          LIVE_MODEL: ${{ inputs.model }}
+          LIVE_CONTEXT_WINDOW: ${{ inputs.context_window }}
+          LIVE_INCREMENTAL_INPUT: ${{ inputs.incremental_input }}
+          LIVE_USAGE_REPORTING: ${{ inputs.usage_reporting }}
+        run: |
+          printf '%s' "$LIVE_BASE_URL" | grep -Eq '^https://[A-Za-z0-9][A-Za-z0-9./:_?&=%~-]*$'
+          printf '%s' "$LIVE_MODEL" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$'
+          printf '%s' "$LIVE_CONTEXT_WINDOW" | grep -Eq '^[1-9][0-9]*$'
+          case "$LIVE_INCREMENTAL_INPUT" in true|false) ;; *) exit 2 ;; esac
+          case "$LIVE_USAGE_REPORTING" in true|false) ;; *) exit 2 ;; esac
+          case "$LIVE_LANE:$LIVE_USAGE_REPORTING" in
+            primary_stream:true|shadow_tool_loop:true|shadow_tool_loop:false) ;;
+            *)
+              echo 'primary_stream requires usage_reporting=true' >&2
+              exit 2
+              ;;
+          esac
+
+          config_path="$RUNNER_TEMP/cyber-agent-live.toml"
+          umask 077
+          printf '%s\n' \
+            'schema_version = 1' \
+            'active_agent_profile = "default"' \
+            '' \
+            '[providers.primary]' \
+            'binding = "http_sse"' \
+            'wire_api = "responses"' \
+            "base_url = \"$LIVE_BASE_URL\"" \
+            "model = \"$LIVE_MODEL\"" \
+            'credential_ref = "CYBER_AGENT_PRIMARY_API_KEY"' \
+            'capability_mapping = "primary-live-v1"' \
+            'generation = 1' \
+            '' \
+            '[capability_mappings.primary-live-v1]' \
+            'version = 1' \
+            'text_input = true' \
+            'image_input = false' \
+            'streaming = true' \
+            'tool_call = true' \
+            'structured_output = true' \
+            "incremental_input = $LIVE_INCREMENTAL_INPUT" \
+            "usage_reporting = $LIVE_USAGE_REPORTING" \
+            "context_window = $LIVE_CONTEXT_WINDOW" \
+            '' \
+            '[agent_profiles.default]' \
+            'primary = "primary"' \
+            'vision_mode = "disabled"' \
+            'generation = 1' > "$config_path"
+
+      - name: Run the selected ignored Live Smoke
+        env:
+          CYBER_AGENT_LIVE_TESTS: "1"
+          CYBER_AGENT_LIVE_CONFIG: ${{ runner.temp }}/cyber-agent-live.toml
+          CYBER_AGENT_PRIMARY_API_KEY: ${{ secrets.CYBER_AGENT_PRIMARY_API_KEY }}
+          SMOKE_LANE: ${{ inputs.lane }}
+        run: |
+          test -n "$CYBER_AGENT_PRIMARY_API_KEY"
+          case "$SMOKE_LANE" in
+            primary_stream)
+              cargo test --locked --test responses_http_adapter \
+                synthetic_primary_live_smoke_uses_provider_composition -- --ignored --exact
+              ;;
+            shadow_tool_loop)
+              cargo test --locked --test trace_replay \
+                synthetic_shadow_live_smoke_uses_composition_and_only_fixed_replay_tools -- --ignored --exact
+              ;;
+            *) exit 2 ;;
+          esac
+
+      - name: Remove temporary Live Config
+        if: always()
+        run: rm -f "$RUNNER_TEMP/cyber-agent-live.toml"

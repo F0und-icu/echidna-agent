@@ -242,46 +242,40 @@ Release Gate：
 - Migration Notes 完整。
 - Artifact 中不存在 API Key、`.cyber-agent/`、目标文件或本地日志。
 
-## 8. GitHub Actions 设计
+## 8. GitHub Actions 实现
 
 ### 8.1 Pull Request CI
 
-触发：`pull_request` 和 main push。
+`.github/workflows/ci.yml` 由 `pull_request`、main push 或同仓库
+`workflow_call` 触发。为了减少个人仓库的 Actions 启动和重复编译成本，
+它只有一个 macOS Job，按顺序执行：
 
-Jobs：
+1. checkout 并安装 `rust-toolchain.toml` 固定工具链；
+2. format、生产源码测试布局、Provider composition 和单 Responses owner 静态检查；
+3. locked Clippy、全部默认启用的离线 Mock/Fixture/Replay 测试和 locked host build；
+4. 调用 `scripts/package-macos-arm64.sh` 完成 locked arm64 release build、二进制白名单归档、架构检查和 SHA-256 自校验；
+5. 上传七天保留的验证产物，供人工下载或同一次 Release workflow 使用。
 
-1. quality
-   - checkout
-   - 安装 `rust-toolchain.toml` 固定工具链
-   - `cargo fmt --all -- --check`
-   - `cargo clippy --locked --all-targets --all-features -- -D warnings`
-   - `cargo test --locked --all-targets --all-features`
-
-2. macos-build
-   - macOS runner
-   - 添加 `aarch64-apple-darwin` target
-   - `cargo build --locked --release --target aarch64-apple-darwin`
-   - 生成 SHA-256 供检查，不在普通 PR 发布
-
-3. architecture-guard
-   - 检查只有一个 Cargo package。
-   - 检查禁止的 Codex crate 不在 `cargo metadata`。
-   - 检查 `codex/` 不被 Git 跟踪。
-   - 检查封存架构文件没有被修改。
+普通 CI 不引用 GitHub Secret，不设置 `CYBER_AGENT_LIVE_TESTS`，所以两个
+ignored Live Smoke 不会发送远程请求。分发脚本只允许归档一个顶层目录和
+其中的 `cyber-agent` 二进制；配置、`.cyber-agent/`、日志和目标数据没有
+进入包的路径。
 
 Actions 必须固定到明确版本；条件允许时固定 commit SHA。升级 Action 作为独立 chore PR。
 
 ### 8.2 Release Workflow
 
-触发：匹配 `v*` 的 Tag，且 Tag 所指提交在 main 历史中。
+`.github/workflows/release.yml` 只由匹配 `v*` 的 Tag 触发。它先通过
+`workflow_call` 复用上面的完整离线 Gate 和同一份构建产物，然后验证：
 
-步骤：
+- Tag 是 annotated tag；
+- Tag 等于 `v<Cargo package version>`；
+- Tag commit 位于远程 main 历史；
+- 下载产物再次通过同一分发脚本的内容白名单、Mach-O arm64 和 SHA-256 校验。
 
-- 重跑 Quality。
-- 构建 macOS aarch64 release。
-- 生成 `cyber-agent-<version>-aarch64-apple-darwin.tar.gz`。
-- 生成 `SHA256SUMS`。
-- 上传 GitHub Release Artifact。
+全部通过后才用 GitHub 当次短期 Token 创建 Release，并上传
+`cyber-agent-<version>-aarch64-apple-darwin.tar.gz` 与 `SHA256SUMS`。
+M5-S2 只建立此路径，不自动创建第一个 Tag 或 Release。
 
 Workflow 不读取运行时 API Key，不运行真实漏洞研究，不上传本地项目数据。
 
@@ -289,14 +283,17 @@ Workflow 不读取运行时 API Key，不运行真实漏洞研究，不上传本
 
 真实 Provider 兼容性测试与 Pull Request CI、Release Workflow 完全分离：
 
-- 文件建议命名为 `live-smoke.yml`，只接受 `workflow_dispatch` 手动触发。
-- 使用 GitHub Environment `live-test`，Secret 按 Provider Profile 使用 `CYBER_AGENT_*_API_KEY` 命名空间。
-- Primary、Vision 与本地开发 Key 分开创建和撤销；同一 Workflow 不要求两种模式共享 Provider。
+- 文件固定为 `.github/workflows/live-smoke.yml`，只接受 `workflow_dispatch` 手动触发。
+- 使用 GitHub Environment `live-test`，当前固定 Primary lanes 只读取 CI 专用 `CYBER_AGENT_PRIMARY_API_KEY`。
 - Secret 只进入运行 ignored live test 的单个 step，不设置为 Workflow 或所有 Job 的全局环境变量。
 - 不响应 `pull_request`、Fork 或 `pull_request_target`，也不复用普通 PR 的任意输入作为模型 Prompt。
-- 只运行固定的合成 smoke cases，并限制并发、超时和输出长度。
-- Primary 和 Vision Smoke 可独立选择运行；组合 Smoke 仅在两条单 Provider 路径通过后执行。
+- 手动输入只选择现有 `primary_stream` 或 `shadow_tool_loop` 固定合成用例，以及 Config v1 的 URL、Model、Context Window、incremental 和 usage capability；它们不改变测试 Prompt。
+- Workflow 先生成不含 Secret 的严格引用式 Config v1，再仅在所选测试 step 解析凭据；限时、串行且不上传正文或测试产物。
 - 不上传请求/响应正文、Authorization Header、测试日志、`.cyber-agent/` 或目标 Artifact。
+
+当前 workflow 不伪造一个只发文本的“Vision smoke”。正式 Direct/Secondary
+图片闭环已有 F2a 双模式 Live 验收；将其自动化需要先出现一个固定、低成本、
+可独立 ignored 的图片协议用例，并继续分别使用 Primary/Vision 专用 Key。
 
 Live Smoke 失败只表示 Provider 兼容路径需要诊断，不得通过导入 Codex CLI 登录或修改 `~/.codex` 来修复。
 
