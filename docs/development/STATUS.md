@@ -7,12 +7,12 @@
 - Implementation: `STARTED`
 - Current milestone: `M5` optional interface and personal distribution evaluation
 - Current slice: `M5-S2`
-- Slice state: `COMPLETE_LOCAL_AWAITING_REMOTE`; M5-S2 passed its independent audit, repair, complete locked Cargo/distribution Gate and Lean Review
+- Slice state: `COMPLETE_REMOTE_SEALED`; M5-S2 passed its independent audit, repair, complete locked Cargo/distribution Gate, Lean Review, PR-head CI and post-merge DeepSeek Live acceptance
 - Lean governance: `PASS`; M5-S2 adds only bounded workflow/package ownership with no Rust production API, dependency, Provider path, fact source or product capability change
-- Local Git initialized: `yes`; M5-S2 is staged for delivery from `feat/m5-s2-release-distribution`
-- Remote repository: `F0und-icu/cyber-agent` private; M5-S1 is sealed through PR `#63` and Squash Merge `6bd85b6`
+- Local Git initialized: `yes`; `main` tracks the private remote at the M5-S2 implementation seal before this status-only record
+- Remote repository: `F0und-icu/cyber-agent` private; M5-S2 implementation is sealed through PR `#65` and Squash Merge `f755f62`
 - Documentation baseline commit: `55ff3be`
-- Current code base: M5-S1a and M5-S1b are remotely sealed; M5-S2 is complete locally and awaits its authorized PR-head Gate and merge
+- Current code base: M5-S1a, M5-S1b and M5-S2 are remotely sealed; no next Slice, release Tag or GitHub Release is authorized or started
 
 ## M5-S2 Slice Start
 
@@ -41,6 +41,13 @@
 - Local Live acceptance: `PASS` for the fixed `synthetic_primary_live_smoke_uses_provider_composition` against `deepseek-v4-flash` through a temporary credential-reference Config v1 and the one Provider Composition Root. An initial setup attempt correctly failed before network activity because the ignored root `deepseek` file is Codex-format rather than Cyber Agent Config v1; the translated temporary Config contained no Key and was removed after the passing request. No secret entered output, Git, Project facts or shell profiles, and no Codex login/configuration was accessed.
 - API/dependency/schema review: no Rust source, `pub` item, crate, feature, Cargo file, Event/Research/Artifact/Config schema, Prompt, Provider/Wire binding, Adapter, AgentLoop, History, Hook/registry, Web/TUI or Codex dependency changed. No upstream code was copied; PORT ledger changes are unnecessary.
 - Removed/deferred: no duplicate build or checksum owner was retained. Automated image-protocol Live Smoke remains Deferred until a fixed low-cost ignored image case exists; the already completed F2a Direct/Secondary Live evidence is not relabeled. Release Tag creation, changelog finalization, signing, installer and updater remain separate operator decisions.
+
+## M5-S2 Remote Seal and Post-Merge Live Acceptance
+
+- Remote implementation seal: exact branch head `e95d051f8610a9d49ddc78895deba84e6d7917d2` passed the sole PR-head offline CI and macOS arm64 distribution Gate in run `34497582948`; private PR `#65` Squash Merged as `f755f6206bd6b6caed3122904078603112d43d6f` with `[skip ci]`, so no duplicate `main` CI was started.
+- Live acceptance: after the implementation merge, both explicit ignored tests passed against configured `deepseek-v4-flash` through the one strict Config v1 Provider Composition Root: `synthetic_primary_live_smoke_uses_provider_composition` passed 1/1 and `synthetic_shadow_live_smoke_uses_composition_and_only_fixed_replay_tools` passed 1/1.
+- Credential isolation: the Live runs extracted the already user-provided credential from the ignored local `deepseek` file only into the test subprocess environment. A temporary credential-reference Config contained no Key and was deleted after the runs; no secret entered output, Git, Project facts, shell profiles or GitHub, and no Codex login/configuration was accessed.
+- Publication boundary: M5-S2 is `COMPLETE_REMOTE_SEALED`. No GitHub Environment Secret was created, no remote Live workflow was dispatched, and no version Tag, GitHub Release, installer, updater or signing/notarization action occurred.
 
 ## M5-S1a Slice Start
 
