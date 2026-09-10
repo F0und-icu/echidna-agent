@@ -124,6 +124,51 @@ fn session_reducer_rejects_unknown_schema_and_illegal_transitions_without_mutati
         reducer.apply(
             &mut state,
             event(
+                "invalid-domain-selection",
+                2,
+                "session.domain_profile_selected",
+                json!({
+                    "schema_version": 1,
+                    "selection": {
+                        "profile": "mobile",
+                        "profile_generation": 1,
+                        "source": "default",
+                        "reason_code": "NEW_SESSION_DEFAULT_SOURCE"
+                    }
+                })
+            )
+        ),
+        Err(SessionError::MalformedPayload { .. })
+    ));
+    assert_eq!(state, started_state);
+
+    assert!(matches!(
+        reducer.apply(
+            &mut state,
+            event(
+                "unknown-domain-field",
+                2,
+                "session.domain_profile_selected",
+                json!({
+                    "schema_version": 1,
+                    "selection": {
+                        "profile": "source",
+                        "profile_generation": 1,
+                        "source": "default",
+                        "reason_code": "NEW_SESSION_DEFAULT_SOURCE",
+                        "unexpected": true
+                    }
+                })
+            )
+        ),
+        Err(SessionError::MalformedPayload { .. })
+    ));
+    assert_eq!(state, started_state);
+
+    assert!(matches!(
+        reducer.apply(
+            &mut state,
+            event(
                 "unsupported-schema",
                 2,
                 "session.ended",

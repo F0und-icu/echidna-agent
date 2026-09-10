@@ -21,6 +21,128 @@ fn help_lists_m0_commands() {
     assert!(stdout.contains("chat"));
     assert!(stdout.contains("doctor"));
     assert!(stdout.contains("inspect"));
+    assert!(stdout.contains("session"));
+}
+
+#[test]
+fn m5_session_list_show_export_and_end_use_the_existing_durable_stream() {
+    let directory = TemporaryDirectory::new("m5-session-cli");
+    let config = write_provider_config(directory.path());
+    let initialized = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+        .current_dir(directory.path())
+        .arg("init")
+        .output()
+        .unwrap();
+    assert!(initialized.status.success());
+    let chat = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+        .current_dir(directory.path())
+        .args(["chat", "--config", config.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(chat.status.success());
+    let session = fs::read_dir(directory.path().join(".cyber-agent/sessions"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .file_name()
+        .into_string()
+        .unwrap();
+
+    let list = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+        .current_dir(directory.path())
+        .args(["session", "list"])
+        .output()
+        .unwrap();
+    assert!(list.status.success());
+    let list: serde_json::Value = serde_json::from_slice(&list.stdout).unwrap();
+    assert_eq!(list["sessions"][0]["session_id"], session);
+    assert_eq!(list["sessions"][0]["lifecycle"], "active");
+
+    let show = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+        .current_dir(directory.path())
+        .args(["session", "show", &session])
+        .output()
+        .unwrap();
+    assert!(show.status.success());
+    let show: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
+    assert_eq!(show["domain"], "source");
+    assert_eq!(show["domain_selection_recorded"], false);
+
+    let export = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+        .current_dir(directory.path())
+        .args(["session", "export", &session, "--format", "json"])
+        .output()
+        .unwrap();
+    assert!(export.status.success());
+    let export: serde_json::Value = serde_json::from_slice(&export.stdout).unwrap();
+    assert_eq!(export["schema_version"], 1);
+    assert_eq!(
+        export["authority_boundary"]["vision"],
+        "derived model observations; not Finding evidence"
+    );
+
+    let export_path = directory.path().join("session-export.md");
+    let markdown = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+        .current_dir(directory.path())
+        .args([
+            "session",
+            "export",
+            &session,
+            "--format",
+            "markdown",
+            "--output",
+            export_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(markdown.status.success());
+    let retained = fs::read_to_string(&export_path).unwrap();
+    assert!(retained.contains("Research references remain authoritative only"));
+    assert!(retained.contains("Vision (derived non-evidence)"));
+    assert!(retained.contains("Latest Compaction (derived continuation)"));
+
+    let rejected_overwrite = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+        .current_dir(directory.path())
+        .args([
+            "session",
+            "export",
+            &session,
+            "--format",
+            "markdown",
+            "--output",
+            export_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!rejected_overwrite.status.success());
+    assert!(String::from_utf8_lossy(&rejected_overwrite.stderr).contains("cannot create export"));
+    assert_eq!(fs::read_to_string(&export_path).unwrap(), retained);
+
+    let ended = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+        .current_dir(directory.path())
+        .args(["session", "end", &session])
+        .output()
+        .unwrap();
+    assert!(ended.status.success());
+    let ended: serde_json::Value = serde_json::from_slice(&ended.stdout).unwrap();
+    assert_eq!(ended["lifecycle"], "ended");
+
+    let resume = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+        .current_dir(directory.path())
+        .args([
+            "chat",
+            "--config",
+            config.to_str().unwrap(),
+            "--resume",
+            "latest",
+        ])
+        .output()
+        .unwrap();
+    assert!(!resume.status.success());
+    assert!(
+        String::from_utf8_lossy(&resume.stderr).contains("no strictly replayable Active Session")
+    );
 }
 
 #[test]

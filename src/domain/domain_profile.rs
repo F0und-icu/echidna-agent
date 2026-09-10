@@ -17,6 +17,119 @@ pub enum DomainProfile {
     Binary,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DomainProfileSelectionSource {
+    Default,
+    Operator,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum DomainProfileReasonCode {
+    NewSessionDefaultSource,
+    LegacyDefaultSource,
+    OperatorSelected,
+}
+
+/// The durable Domain selection restored by Session Resume. Source and reason
+/// are validated together so a default cannot be persisted as an operator
+/// choice, or vice versa.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DomainProfileSelection {
+    profile: DomainProfile,
+    profile_generation: u64,
+    source: DomainProfileSelectionSource,
+    reason_code: DomainProfileReasonCode,
+}
+
+impl DomainProfileSelection {
+    pub const fn new_session_default() -> Self {
+        Self::default_source(DomainProfileReasonCode::NewSessionDefaultSource)
+    }
+
+    pub const fn legacy_default() -> Self {
+        Self::default_source(DomainProfileReasonCode::LegacyDefaultSource)
+    }
+
+    const fn default_source(reason_code: DomainProfileReasonCode) -> Self {
+        Self {
+            profile: DomainProfile::Source,
+            profile_generation: DomainProfile::Source.generation(),
+            source: DomainProfileSelectionSource::Default,
+            reason_code,
+        }
+    }
+
+    pub const fn operator(profile: DomainProfile) -> Self {
+        Self {
+            profile,
+            profile_generation: profile.generation(),
+            source: DomainProfileSelectionSource::Operator,
+            reason_code: DomainProfileReasonCode::OperatorSelected,
+        }
+    }
+
+    pub const fn profile(self) -> DomainProfile {
+        self.profile
+    }
+
+    pub const fn profile_generation(self) -> u64 {
+        self.profile_generation
+    }
+
+    pub const fn source(self) -> DomainProfileSelectionSource {
+        self.source
+    }
+
+    pub const fn reason_code(self) -> DomainProfileReasonCode {
+        self.reason_code
+    }
+
+    pub fn validate(self) -> Result<(), DomainProfileSelectionError> {
+        if self.profile_generation != self.profile.generation() {
+            return Err(DomainProfileSelectionError::GenerationMismatch {
+                profile: self.profile,
+                expected: self.profile.generation(),
+                received: self.profile_generation,
+            });
+        }
+        let valid = matches!(
+            (self.source, self.reason_code, self.profile),
+            (
+                DomainProfileSelectionSource::Default,
+                DomainProfileReasonCode::NewSessionDefaultSource
+                    | DomainProfileReasonCode::LegacyDefaultSource,
+                DomainProfile::Source
+            ) | (
+                DomainProfileSelectionSource::Operator,
+                DomainProfileReasonCode::OperatorSelected,
+                _
+            )
+        );
+        if valid {
+            Ok(())
+        } else {
+            Err(DomainProfileSelectionError::InvalidSelection)
+        }
+    }
+}
+
+#[derive(Clone, Debug, thiserror::Error, Eq, PartialEq)]
+pub enum DomainProfileSelectionError {
+    #[error(
+        "DomainProfile `{profile:?}` generation mismatch: expected {expected}, received {received}"
+    )]
+    GenerationMismatch {
+        profile: DomainProfile,
+        expected: u64,
+        received: u64,
+    },
+    #[error("DomainProfile selection source and reason are inconsistent")]
+    InvalidSelection,
+}
+
 impl DomainProfile {
     pub const ALL: [Self; 4] = [Self::Source, Self::Web, Self::Mobile, Self::Binary];
 

@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::io::{BufRead, BufReader, Cursor, Read, Write};
 use std::net::TcpListener;
+use std::os::unix::fs::PermissionsExt;
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread::{self, JoinHandle};
@@ -16,8 +17,12 @@ use cyber_agent::domain::artifacts::ArtifactId;
 use cyber_agent::domain::events::{EventEnvelope, EventId, EventType, OccurredAt, StreamId};
 use cyber_agent::domain::request_audit::REQUEST_AUDIT_MANIFEST_SCHEMA_VERSION;
 use cyber_agent::domain::research::{
-    ExecutionReceiptId, ExperimentId, HypothesisId, ResearchEvent, ResearchReducer, TargetKind,
-    TargetSnapshotDraft, TargetSnapshotId, TargetSnapshotRecord,
+    EvidenceLink, EvidenceRef, EvidenceRelation, ExecutionReceiptId, ExperimentCapsuleDraft,
+    ExperimentDraft, ExperimentId, ExperimentRecord, ExperimentResult, FindingDraft, FindingId,
+    FindingRecord, FindingStatus, HypothesisDraft, HypothesisId, HypothesisRecord,
+    HypothesisStatus, NextActionDraft, NextActionId, NextActionRecord, NextActionStatus,
+    ResearchEvent, ResearchRecordRef, ResearchReducer, TargetKind, TargetSnapshotDraft,
+    TargetSnapshotId, TargetSnapshotRecord,
 };
 use cyber_agent::domain::session::{
     CompactionValidationContext, EvidenceSpine, NarrativeSummary, ResearchStreamIdentity,
@@ -216,6 +221,26 @@ fn write_config(directory: &std::path::Path, base_url: &str) -> std::path::PathB
     config
 }
 
+fn write_context_window_config(
+    directory: &std::path::Path,
+    base_url: &str,
+    context_window: u32,
+) -> std::path::PathBuf {
+    let config = directory.join(format!("provider-context-{context_window}.toml"));
+    fs::write(
+        &config,
+        provider_config::fixture()
+            .replace("http://127.0.0.1:1/v1", base_url)
+            .replacen(
+                "context_window = 32768",
+                &format!("context_window = {context_window}"),
+                1,
+            ),
+    )
+    .unwrap();
+    config
+}
+
 fn write_dual_config(
     directory: &std::path::Path,
     primary_base_url: &str,
@@ -407,14 +432,19 @@ fn spawn_waiting_chat(project: &std::path::Path, config: &std::path::Path) -> Wa
 }
 
 fn session_id(project: &std::path::Path) -> String {
+    let mut entries = session_ids(project);
+    assert_eq!(entries.len(), 1);
+    entries.pop().unwrap()
+}
+
+fn session_ids(project: &std::path::Path) -> Vec<String> {
     let sessions = project.join(".cyber-agent/sessions");
     let mut entries = fs::read_dir(sessions)
         .unwrap()
         .map(|entry| entry.unwrap().file_name().into_string().unwrap())
         .collect::<Vec<_>>();
     entries.sort();
-    assert_eq!(entries.len(), 1);
-    entries.pop().unwrap()
+    entries
 }
 
 fn assert_session_id_binds_process(session: &str, process_id: u32) {
@@ -569,6 +599,14 @@ fn assert_tree_does_not_contain(root: &std::path::Path, needle: &[u8]) {
 }
 
 fn append_research_snapshot(project: &Project, label: &str) -> TargetSnapshotId {
+    append_research_snapshot_with_artifacts(project, label, Vec::new())
+}
+
+fn append_research_snapshot_with_artifacts(
+    project: &Project,
+    label: &str,
+    target_artifact_ids: Vec<ArtifactId>,
+) -> TargetSnapshotId {
     let snapshot_id = TargetSnapshotId::new(format!("snapshot-{label}"));
     let record = TargetSnapshotRecord::from_draft(TargetSnapshotDraft {
         id: snapshot_id.clone(),
@@ -577,7 +615,7 @@ fn append_research_snapshot(project: &Project, label: &str) -> TargetSnapshotId 
         locator: format!("src/{label}"),
         version: "1.0.0".to_owned(),
         build_id: format!("build-{label}"),
-        target_artifact_ids: Vec::new(),
+        target_artifact_ids,
         environment_fingerprint: "fixture-environment".to_owned(),
         device_fingerprint: "fixture-device".to_owned(),
         captured_at: "2026-08-31T00:00:00Z".to_owned(),
@@ -597,6 +635,20 @@ fn append_research_snapshot(project: &Project, label: &str) -> TargetSnapshotId 
     );
     EventSink::append_event(&mut store, &envelope).unwrap();
     snapshot_id
+}
+
+fn append_research_event(project: &Project, label: &str, event: ResearchEvent) {
+    let mut writer = project.open_writer().unwrap();
+    let mut store = writer.open_research(None).unwrap();
+    let envelope = EventEnvelope::current(
+        EventId::new(format!("research-{label}")),
+        ProjectEventStream::Research.stream_id(),
+        store.next_sequence().unwrap(),
+        OccurredAt::new(format!("2026-08-31T00:01:{label}Z")),
+        EventType::new(event.event_type().as_str()),
+        event.encode_payload().unwrap(),
+    );
+    EventSink::append_event(&mut store, &envelope).unwrap();
 }
 
 fn append_v2_compaction(project: &Project, session: &str, target: TargetSnapshotId) {
@@ -681,6 +733,26 @@ fn m4_long_flow_tool_response(
          data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"{response_id}\"}}}}\n\n",
         serde_json::to_string(&item).unwrap(),
     )
+}
+
+fn tool_calls_response(calls: &[(&str, &str, Value)], response_id: &str) -> String {
+    let mut response = String::new();
+    for (call_id, tool_name, arguments) in calls {
+        let item = json!({
+            "type": "function_call",
+            "call_id": call_id,
+            "name": tool_name,
+            "arguments": serde_json::to_string(arguments).unwrap(),
+        });
+        response.push_str(&format!(
+            "data: {{\"type\":\"response.output_item.done\",\"item\":{}}}\n\n",
+            serde_json::to_string(&item).unwrap(),
+        ));
+    }
+    response.push_str(&format!(
+        "data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"{response_id}\"}}}}\n\n"
+    ));
+    response
 }
 
 fn reduced_session(project: &Project, session: &str) -> SessionState {
@@ -2018,6 +2090,1243 @@ fn chat_loopback_streams_text_and_persists_started_history_audit_and_explicit_re
             .path()
             .join(".cyber-agent/artifacts/blobs/sha256")
             .is_dir()
+    );
+}
+
+#[test]
+fn m5_paste_preserves_multiline_input_and_domain_resume_never_drifts_to_source() {
+    let project = TemporaryDirectory::new("m5-cli-paste-domain-resume");
+    initialize_project(project.path());
+    let first_server = spawn_responses_server(vec![(
+        200,
+        text_response("mobile multiline answer", "m5-paste-first"),
+    )]);
+    let config = write_config(project.path(), &first_server.base_url);
+    let pasted = "map exported component\n/phase verification\nretain exact newline";
+    let first = run_chat(
+        project.path(),
+        &config,
+        &format!("/paste\n{pasted}\n/end\n/exit\n"),
+        &["--domain", "mobile"],
+    );
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(String::from_utf8_lossy(&first.stdout).contains("Paste mode"));
+    let first_request = request_body(&first_server.requests.recv().unwrap());
+    first_server.join();
+    assert!(json_contains_text(&first_request["input"], pasted));
+    assert!(
+        first_request["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("Mobile domain profile v1")
+    );
+
+    let session = session_id(project.path());
+    let domain_events = session_events(project.path(), &session)
+        .into_iter()
+        .filter(|event| event["event_type"] == "session.domain_profile_selected")
+        .collect::<Vec<_>>();
+    assert_eq!(domain_events.len(), 1);
+    assert_eq!(
+        domain_events[0]["payload"],
+        json!({
+            "schema_version": 1,
+            "selection": {
+                "profile": "mobile",
+                "profile_generation": 1,
+                "source": "operator",
+                "reason_code": "OPERATOR_SELECTED"
+            }
+        })
+    );
+    let phase_events = session_events(project.path(), &session)
+        .into_iter()
+        .filter(|event| event["event_type"] == "session.research_phase_selected")
+        .collect::<Vec<_>>();
+    assert_eq!(phase_events.len(), 1);
+    assert_eq!(phase_events[0]["payload"]["selection"]["phase"], "mapping");
+
+    let second_server = spawn_responses_server(vec![(
+        200,
+        text_response("restored mobile answer", "m5-paste-resumed"),
+    )]);
+    let resumed_config = write_config(project.path(), &second_server.base_url);
+    let resumed = run_chat(
+        project.path(),
+        &resumed_config,
+        "continue\n/exit\n",
+        &["--resume", "latest"],
+    );
+    assert!(
+        resumed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    let resumed_request = request_body(&second_server.requests.recv().unwrap());
+    second_server.join();
+    assert!(
+        resumed_request["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("Mobile domain profile v1")
+    );
+    assert_eq!(
+        session_events(project.path(), &session)
+            .iter()
+            .filter(|event| event["event_type"] == "session.domain_profile_selected")
+            .count(),
+        1,
+        "Resume without an override restores the durable Domain without duplicating it"
+    );
+}
+
+#[test]
+fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_exactly() {
+    let root = TemporaryDirectory::new("m5-production-compaction");
+    fs::write(root.path().join("candidate.txt"), "bounded candidate\n").unwrap();
+    initialize_project(root.path());
+    let project = Project::discover(root.path()).unwrap();
+    let old_target_snapshot = append_research_snapshot(&project, "m5-compact-old");
+    let target_snapshot = append_research_snapshot_with_artifacts(
+        &project,
+        "m5-compact",
+        vec![
+            ArtifactId::new("artifact-m5-compact-old"),
+            ArtifactId::new("artifact-m5-compact"),
+        ],
+    );
+
+    let first_server = spawn_responses_server(vec![
+        (
+            200,
+            m4_long_flow_tool_response(
+                "m5-compact-old-artifact",
+                "artifact_store",
+                json!({
+                    "event_id": "artifact-event-m5-compact-old",
+                    "occurred_at": "2026-08-31T00:00:00Z",
+                    "artifact_id": "artifact-m5-compact-old",
+                    "source_path": "candidate.txt",
+                    "media_type": "text/plain",
+                    "target_snapshot_id": old_target_snapshot.as_str(),
+                    "toolchain_fingerprint": "m5-compact-fixture-v1"
+                }),
+                "m5-compact-old-artifact-response",
+            ),
+        ),
+        (
+            200,
+            m4_long_flow_tool_response(
+                "m5-compact-artifact",
+                "artifact_store",
+                json!({
+                    "event_id": "artifact-event-m5-compact",
+                    "occurred_at": "2026-08-31T00:00:01Z",
+                    "artifact_id": "artifact-m5-compact",
+                    "source_path": "candidate.txt",
+                    "media_type": "text/plain",
+                    "target_snapshot_id": target_snapshot.as_str(),
+                    "toolchain_fingerprint": "m5-compact-fixture-v1"
+                }),
+                "m5-compact-artifact-response",
+            ),
+        ),
+        (
+            200,
+            m4_long_flow_tool_response(
+                "m5-compact-read",
+                "read_file",
+                json!({"path": "candidate.txt"}),
+                "m5-compact-read-response",
+            ),
+        ),
+        (
+            200,
+            text_response(
+                "The bounded candidate is mapped but remains unverified.",
+                "m5-compact-first-final",
+            ),
+        ),
+    ]);
+    let first_config = write_config(root.path(), &first_server.base_url);
+    let first = run_chat(
+        root.path(),
+        &first_config,
+        "map the bounded candidate without promoting a finding\n/exit\n",
+        &["--domain", "mobile", "--phase", "experiment"],
+    );
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    for _ in 0..4 {
+        first_server.requests.recv().unwrap();
+    }
+    first_server.join();
+
+    let session = session_id(root.path());
+    let first_events = session_events(root.path(), &session);
+    let old_artifact_receipt = first_events
+        .iter()
+        .find(|event| {
+            event["event_type"] == "tool.execution_receipt_recorded"
+                && event["payload"]["receipt"]["execution_id"]
+                    == "execution:m5-compact-old-artifact"
+        })
+        .and_then(|event| event["event_id"].as_str())
+        .map(ExecutionReceiptId::new)
+        .unwrap();
+    let artifact_receipt = first_events
+        .iter()
+        .find(|event| {
+            event["event_type"] == "tool.execution_receipt_recorded"
+                && event["payload"]["receipt"]["execution_id"] == "execution:m5-compact-artifact"
+        })
+        .and_then(|event| event["event_id"].as_str())
+        .map(ExecutionReceiptId::new)
+        .unwrap();
+    let read_receipt = first_events
+        .iter()
+        .find(|event| {
+            event["event_type"] == "tool.execution_receipt_recorded"
+                && event["payload"]["receipt"]["execution_id"] == "execution:m5-compact-read"
+        })
+        .and_then(|event| event["event_id"].as_str())
+        .map(ExecutionReceiptId::new)
+        .unwrap();
+
+    let hypothesis = HypothesisRecord::from_draft(HypothesisDraft {
+        id: HypothesisId::new("hypothesis-m5-compact"),
+        title: "Candidate parser boundary".to_owned(),
+        target_id: "fixture.target".to_owned(),
+        attack_surface: "bounded fixture".to_owned(),
+        vulnerability_class: "input validation".to_owned(),
+        entry_point: "candidate input".to_owned(),
+        sensitive_sink: "fixture parser".to_owned(),
+        rationale: "requires a controlled verification step".to_owned(),
+        status: HypothesisStatus::Testing,
+        priority: 10,
+        evidence_links: vec![EvidenceLink {
+            relation: EvidenceRelation::Supports,
+            evidence: EvidenceRef::Artifact(ArtifactId::new("artifact-m5-compact")),
+        }],
+        last_action: None,
+        next_action: Some(NextActionId::new("next-action-m5-compact")),
+    })
+    .unwrap();
+    append_research_event(
+        &project,
+        "m5-compact-hypothesis",
+        ResearchEvent::HypothesisRecorded {
+            record: hypothesis,
+            keep_independent: false,
+        },
+    );
+
+    let (old_experiment, old_capsule) = ExperimentRecord::from_drafts(
+        ExperimentDraft {
+            id: ExperimentId::new("experiment-m5-compact-old"),
+            hypothesis_id: HypothesisId::new("hypothesis-m5-compact"),
+            target_snapshot_id: old_target_snapshot.clone(),
+            capsule_id: cyber_agent::domain::research::CapsuleId::new("capsule-m5-compact-old"),
+            goal: "read the older bounded candidate".to_owned(),
+            result: ExperimentResult::Inconclusive,
+            artifact_refs: vec![ArtifactId::new("artifact-m5-compact-old")],
+            notes: "older Snapshot only".to_owned(),
+        },
+        ExperimentCapsuleDraft {
+            id: cyber_agent::domain::research::CapsuleId::new("capsule-m5-compact-old"),
+            experiment_id: ExperimentId::new("experiment-m5-compact-old"),
+            target_snapshot_id: old_target_snapshot.clone(),
+            action: "read older candidate fixture".to_owned(),
+            arguments: json!({"path": "candidate.txt", "snapshot": "old"}),
+            tool_version: "1".to_owned(),
+            execution_ids: vec![cyber_agent::domain::tools::ExecutionId::new(
+                "execution:m5-compact-old-artifact",
+            )],
+            input_artifact_ids: vec![ArtifactId::new("artifact-m5-compact-old")],
+            environment_delta: "offline fixture only".to_owned(),
+            account_prerequisites: Vec::new(),
+            toolchain_fingerprint: "m5-compact-fixture-v1".to_owned(),
+            execution_receipt_ids: vec![old_artifact_receipt.clone()],
+            output_artifact_ids: Vec::new(),
+        },
+    )
+    .unwrap();
+    append_research_event(
+        &project,
+        "m5-compact-old-experiment",
+        ResearchEvent::ExperimentRecorded {
+            experiment: old_experiment,
+            capsule: Box::new(old_capsule),
+            rerun_reason: None,
+        },
+    );
+
+    let (experiment, capsule) = ExperimentRecord::from_drafts(
+        ExperimentDraft {
+            id: ExperimentId::new("experiment-m5-compact"),
+            hypothesis_id: HypothesisId::new("hypothesis-m5-compact"),
+            target_snapshot_id: target_snapshot.clone(),
+            capsule_id: cyber_agent::domain::research::CapsuleId::new("capsule-m5-compact"),
+            goal: "read the bounded candidate".to_owned(),
+            result: ExperimentResult::Inconclusive,
+            artifact_refs: vec![ArtifactId::new("artifact-m5-compact")],
+            notes: "no impact claim".to_owned(),
+        },
+        ExperimentCapsuleDraft {
+            id: cyber_agent::domain::research::CapsuleId::new("capsule-m5-compact"),
+            experiment_id: ExperimentId::new("experiment-m5-compact"),
+            target_snapshot_id: target_snapshot.clone(),
+            action: "read candidate fixture".to_owned(),
+            arguments: json!({"path": "candidate.txt"}),
+            tool_version: "1".to_owned(),
+            execution_ids: vec![cyber_agent::domain::tools::ExecutionId::new(
+                "execution:m5-compact-read",
+            )],
+            input_artifact_ids: vec![ArtifactId::new("artifact-m5-compact")],
+            environment_delta: "offline fixture only".to_owned(),
+            account_prerequisites: Vec::new(),
+            toolchain_fingerprint: "m5-compact-fixture-v1".to_owned(),
+            execution_receipt_ids: vec![read_receipt.clone()],
+            output_artifact_ids: Vec::new(),
+        },
+    )
+    .unwrap();
+    append_research_event(
+        &project,
+        "m5-compact-experiment",
+        ResearchEvent::ExperimentRecorded {
+            experiment,
+            capsule: Box::new(capsule),
+            rerun_reason: None,
+        },
+    );
+
+    let finding = FindingRecord::from_draft(FindingDraft {
+        id: FindingId::new("finding-m5-compact"),
+        title: "Unverified bounded candidate".to_owned(),
+        status: FindingStatus::Candidate,
+        target_id: "fixture.target".to_owned(),
+        target_version: "1.0.0".to_owned(),
+        vulnerability_class: "input validation".to_owned(),
+        entry_point: "candidate input".to_owned(),
+        sensitive_sink: "fixture parser".to_owned(),
+        target_snapshot_ids: vec![target_snapshot.clone()],
+        prerequisites: vec!["offline fixture".to_owned()],
+        impact: "unverified".to_owned(),
+        evidence_links: vec![EvidenceLink {
+            relation: EvidenceRelation::Supports,
+            evidence: EvidenceRef::Experiment(ExperimentId::new("experiment-m5-compact")),
+        }],
+    })
+    .unwrap();
+    append_research_event(
+        &project,
+        "m5-compact-finding",
+        ResearchEvent::FindingRecorded {
+            record: finding,
+            keep_independent: false,
+        },
+    );
+    let old_finding = FindingRecord::from_draft(FindingDraft {
+        id: FindingId::new("finding-m5-compact-old"),
+        title: "Older Snapshot candidate".to_owned(),
+        status: FindingStatus::Candidate,
+        target_id: "fixture.target".to_owned(),
+        target_version: "1.0.0".to_owned(),
+        vulnerability_class: "input validation".to_owned(),
+        entry_point: "older candidate input".to_owned(),
+        sensitive_sink: "older fixture parser".to_owned(),
+        target_snapshot_ids: vec![old_target_snapshot],
+        prerequisites: vec!["offline fixture".to_owned()],
+        impact: "unverified older Snapshot".to_owned(),
+        evidence_links: vec![EvidenceLink {
+            relation: EvidenceRelation::Supports,
+            evidence: EvidenceRef::Experiment(ExperimentId::new("experiment-m5-compact-old")),
+        }],
+    })
+    .unwrap();
+    append_research_event(
+        &project,
+        "m5-compact-old-finding",
+        ResearchEvent::FindingRecorded {
+            record: old_finding,
+            keep_independent: false,
+        },
+    );
+    append_research_event(
+        &project,
+        "m5-compact-old-next-action",
+        ResearchEvent::NextActionRecorded(
+            NextActionRecord::from_draft(NextActionDraft {
+                id: NextActionId::new("next-action-m5-compact-old"),
+                research_id: ResearchRecordRef::Finding(FindingId::new("finding-m5-compact-old")),
+                priority: 8,
+                action: "do not retain this older Snapshot action".to_owned(),
+                status: NextActionStatus::Pending,
+            })
+            .unwrap(),
+        ),
+    );
+    append_research_event(
+        &project,
+        "m5-compact-next-action",
+        ResearchEvent::NextActionRecorded(
+            NextActionRecord::from_draft(NextActionDraft {
+                id: NextActionId::new("next-action-m5-compact"),
+                research_id: ResearchRecordRef::Finding(FindingId::new("finding-m5-compact")),
+                priority: 9,
+                action: "verify reachability without changing claim truth".to_owned(),
+                status: NextActionStatus::Pending,
+            })
+            .unwrap(),
+        ),
+    );
+
+    let compacted_server = spawn_responses_server(vec![(
+        200,
+        text_response(
+            "Continue from the exact compacted evidence boundary.",
+            "m5-compact-second-final",
+        ),
+    )]);
+    let compacted_config = write_config(root.path(), &compacted_server.base_url);
+    let compacted = run_chat(
+        root.path(),
+        &compacted_config,
+        "/context\n/compact\ncontinue after explicit compaction\n/exit\n",
+        &["--resume", "latest"],
+    );
+    assert!(
+        compacted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compacted.stderr)
+    );
+    let compacted_output = String::from_utf8(compacted.stdout).unwrap();
+    assert!(
+        compacted_output.contains("Context pressure is unavailable before the first model request")
+    );
+    assert!(compacted_output.contains("Compaction revision 1 applied"));
+    assert!(compacted_output.contains("next Primary request will be CompactionReset Full"));
+    let compacted_request = request_body(&compacted_server.requests.recv().unwrap());
+    compacted_server.join();
+    assert!(compacted_request["previous_response_id"].is_null());
+    let compacted_wire = serde_json::to_string(&compacted_request).unwrap();
+    for expected in [
+        "derived_session_summary_v2",
+        "snapshot-m5-compact",
+        "hypothesis-m5-compact",
+        "experiment-m5-compact",
+        "finding-m5-compact",
+        "next-action-m5-compact",
+        "artifact-m5-compact",
+        read_receipt.as_str(),
+        "m5-compact-artifact",
+        "m5-compact-read",
+        "continue after explicit compaction",
+    ] {
+        assert!(
+            compacted_wire.contains(expected),
+            "request lacks {expected}"
+        );
+    }
+
+    let compacted_state = reduced_session(&project, &session);
+    let summary =
+        serde_json::to_value(compacted_state.latest_compaction().unwrap().summary()).unwrap();
+    assert_eq!(summary["schema_version"], 2);
+    assert_eq!(summary["revision"], 1);
+    assert_eq!(
+        summary["evidence_spine"]["target_snapshot_refs"],
+        json!(["snapshot-m5-compact"])
+    );
+    assert_eq!(
+        summary["evidence_spine"]["active_hypothesis_refs"],
+        json!(["hypothesis-m5-compact"])
+    );
+    assert_eq!(
+        summary["evidence_spine"]["experiment_refs"],
+        json!(["experiment-m5-compact"])
+    );
+    assert_eq!(
+        summary["evidence_spine"]["finding_refs"],
+        json!(["finding-m5-compact"])
+    );
+    assert_eq!(
+        summary["evidence_spine"]["next_action_refs"],
+        json!(["next-action-m5-compact"])
+    );
+    assert_eq!(
+        summary["evidence_spine"]["artifact_refs"],
+        json!(["artifact-m5-compact"])
+    );
+    let receipt_refs = summary["evidence_spine"]["execution_receipt_refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(receipt_refs, BTreeSet::from([read_receipt.as_str()]));
+    assert!(!receipt_refs.contains(artifact_receipt.as_str()));
+    assert!(!receipt_refs.contains(old_artifact_receipt.as_str()));
+    let summary_wire = serde_json::to_string(&summary).unwrap();
+    for old_reference in [
+        "snapshot-m5-compact-old",
+        "experiment-m5-compact-old",
+        "finding-m5-compact-old",
+        "next-action-m5-compact-old",
+        "artifact-m5-compact-old",
+    ] {
+        assert!(
+            !summary_wire.contains(old_reference),
+            "Summary retained older Snapshot reference {old_reference}"
+        );
+    }
+    assert_eq!(
+        compacted_state
+            .request_audits()
+            .last()
+            .unwrap()
+            .delivery()
+            .reason(),
+        cyber_agent::domain::request_audit::RequestAuditDeliveryReason::Full(
+            cyber_agent::domain::context::BaselineInvalidationReason::CompactionReset
+        )
+    );
+    assert_eq!(
+        session_events(root.path(), &session)
+            .iter()
+            .filter(|event| event["event_type"] == "session.compaction_created")
+            .count(),
+        1
+    );
+
+    let resumed_server = spawn_responses_server(vec![(
+        200,
+        text_response(
+            "Resume retained the compacted boundary.",
+            "m5-compact-resume",
+        ),
+    )]);
+    let resumed_config = write_config(root.path(), &resumed_server.base_url);
+    let resumed = run_chat(
+        root.path(),
+        &resumed_config,
+        "resume the compacted boundary\n/exit\n",
+        &["--resume", "latest"],
+    );
+    assert!(
+        resumed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    let resumed_request = request_body(&resumed_server.requests.recv().unwrap());
+    resumed_server.join();
+    assert!(resumed_request["previous_response_id"].is_null());
+    assert!(
+        resumed_request["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("Mobile domain profile v1")
+    );
+    assert!(
+        resumed_request["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("execute the smallest decisive experiment")
+    );
+    let resumed_wire = serde_json::to_string(&resumed_request).unwrap();
+    assert!(resumed_wire.contains("derived_session_summary_v2"));
+    assert!(resumed_wire.contains("continue after explicit compaction"));
+    assert!(resumed_wire.contains("resume the compacted boundary"));
+}
+
+#[test]
+fn m5_compaction_preconditions_never_append_a_partial_fact() {
+    let missing_research = TemporaryDirectory::new("m5-compact-missing-research");
+    initialize_project(missing_research.path());
+    let server = spawn_responses_server(vec![(
+        200,
+        text_response("history exists", "m5-compact-missing-research"),
+    )]);
+    let config = write_config(missing_research.path(), &server.base_url);
+    let first = run_chat(
+        missing_research.path(),
+        &config,
+        "create resumable history\n/exit\n",
+        &[],
+    );
+    assert!(first.status.success());
+    server.requests.recv().unwrap();
+    server.join();
+    let session = session_id(missing_research.path());
+    let project = Project::discover(missing_research.path()).unwrap();
+    append_research_event(
+        &project,
+        "m5-no-target-hypothesis",
+        ResearchEvent::HypothesisRecorded {
+            record: HypothesisRecord::from_draft(HypothesisDraft {
+                id: HypothesisId::new("hypothesis-without-target-snapshot"),
+                title: "Unbound hypothesis fixture".to_owned(),
+                target_id: "fixture.unbound".to_owned(),
+                attack_surface: "fixture".to_owned(),
+                vulnerability_class: "fixture".to_owned(),
+                entry_point: "fixture-entry".to_owned(),
+                sensitive_sink: "fixture-sink".to_owned(),
+                rationale: "exercise the missing current target boundary".to_owned(),
+                status: HypothesisStatus::Active,
+                priority: 1,
+                evidence_links: Vec::new(),
+                last_action: None,
+                next_action: None,
+            })
+            .unwrap(),
+            keep_independent: false,
+        },
+    );
+    let offline_config = write_config(missing_research.path(), "http://127.0.0.1:1/v1");
+    let rejected = run_chat(
+        missing_research.path(),
+        &offline_config,
+        "/compact\n",
+        &["--resume", "latest"],
+    );
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr).contains("requires a current TargetSnapshot")
+    );
+    assert!(
+        session_events(missing_research.path(), &session)
+            .iter()
+            .all(|event| event["event_type"] != "session.compaction_created")
+    );
+
+    let empty_history = TemporaryDirectory::new("m5-compact-empty-history");
+    initialize_project(empty_history.path());
+    let offline_config = write_config(empty_history.path(), "http://127.0.0.1:1/v1");
+    let started = run_chat(empty_history.path(), &offline_config, "/exit\n", &[]);
+    assert!(started.status.success());
+    let session = session_id(empty_history.path());
+    let project = Project::discover(empty_history.path()).unwrap();
+    append_research_snapshot(&project, "m5-empty-history");
+    let rejected = run_chat(
+        empty_history.path(),
+        &offline_config,
+        "/compact\n",
+        &["--resume", "latest"],
+    );
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr)
+            .contains("requires non-empty resumable History with a user goal")
+    );
+    assert!(
+        session_events(empty_history.path(), &session)
+            .iter()
+            .all(|event| event["event_type"] != "session.compaction_created")
+    );
+
+    let incomplete_pair = TemporaryDirectory::new("m5-compact-incomplete-tool-pair");
+    initialize_project(incomplete_pair.path());
+    let project = Project::discover(incomplete_pair.path()).unwrap();
+    append_research_snapshot(&project, "m5-incomplete-pair");
+    let session_id = StreamId::new("m5-incomplete-pair");
+    let stream_id = ProjectEventStream::Session(session_id.clone()).stream_id();
+    let mut writer = project.open_writer().unwrap();
+    let mut store = writer.open_session(session_id.clone(), None).unwrap();
+    for (label, event) in [
+        (
+            "started",
+            SessionEvent::Started {
+                primary_provider_session: cyber_agent::domain::context::ProviderSessionRef {
+                    id: cyber_agent::domain::context::ProviderSessionId::new(
+                        "primary-before-incomplete-resume",
+                    ),
+                    role: cyber_agent::domain::context::ProviderSessionRole::Primary,
+                    generation: 1,
+                },
+            },
+        ),
+        (
+            "user",
+            SessionEvent::HistoryItemRecorded {
+                item: cyber_agent::domain::model::ContentItem::user_text(
+                    "retain the interrupted call boundary",
+                ),
+            },
+        ),
+        (
+            "call",
+            SessionEvent::HistoryItemRecorded {
+                item: cyber_agent::domain::model::ContentItem::ToolCall {
+                    call: cyber_agent::domain::tools::ToolCall {
+                        call_id: cyber_agent::domain::tools::ToolCallId::new("m5-incomplete-call"),
+                        name: cyber_agent::domain::tools::ToolName::new("read_file"),
+                        arguments: json!({"path": "candidate.txt"}),
+                    },
+                },
+            },
+        ),
+    ] {
+        let event = event
+            .into_envelope(
+                EventId::new(format!("m5-incomplete-{label}")),
+                stream_id.clone(),
+                store.next_sequence().unwrap(),
+                OccurredAt::new("2026-08-31T00:02:00Z"),
+            )
+            .unwrap();
+        EventSink::append_event(&mut store, &event).unwrap();
+    }
+    drop(store);
+    drop(writer);
+    let offline_config = write_config(incomplete_pair.path(), "http://127.0.0.1:1/v1");
+    let rejected = run_chat(
+        incomplete_pair.path(),
+        &offline_config,
+        "/compact\n",
+        &["--session", session_id.as_str()],
+    );
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("has no Tool Result"));
+    assert!(
+        session_events(incomplete_pair.path(), session_id.as_str())
+            .iter()
+            .all(|event| event["event_type"] != "session.compaction_created")
+    );
+}
+
+#[test]
+fn m5_context_pressure_uses_only_planner_manifest_and_never_auto_compacts() {
+    let normal = TemporaryDirectory::new("m5-context-pressure-normal");
+    initialize_project(normal.path());
+    let normal_server = spawn_responses_server(vec![(
+        200,
+        text_response("normal pressure", "m5-pressure-normal"),
+    )]);
+    let normal_config = write_config(normal.path(), &normal_server.base_url);
+    let normal_output = run_chat(
+        normal.path(),
+        &normal_config,
+        "inspect normal pressure\n/context\n/exit\n",
+        &[],
+    );
+    assert!(normal_output.status.success());
+    normal_server.requests.recv().unwrap();
+    normal_server.join();
+    let normal_stdout = String::from_utf8(normal_output.stdout).unwrap();
+    assert!(
+        normal_stdout.contains("[context pressure: normal]"),
+        "{normal_stdout}"
+    );
+    assert!(normal_stdout.contains("No Compaction is suggested."));
+
+    let warning = TemporaryDirectory::new("m5-context-pressure-warning");
+    initialize_project(warning.path());
+    let warning_server = spawn_responses_server(vec![(
+        200,
+        text_response("warning pressure", "m5-pressure-warning"),
+    )]);
+    let warning_config =
+        write_context_window_config(warning.path(), &warning_server.base_url, 20_000);
+    let warning_output = run_chat(
+        warning.path(),
+        &warning_config,
+        "inspect warning pressure\n/context\n/exit\n",
+        &[],
+    );
+    assert!(
+        warning_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&warning_output.stderr)
+    );
+    warning_server.requests.recv().unwrap();
+    warning_server.join();
+    let warning_stdout = String::from_utf8(warning_output.stdout).unwrap();
+    assert!(
+        warning_stdout.contains("[context pressure: warning]"),
+        "{warning_stdout}"
+    );
+
+    let critical = TemporaryDirectory::new("m5-context-pressure-critical");
+    initialize_project(critical.path());
+    let discovered = Project::discover(critical.path()).unwrap();
+    append_research_snapshot(&discovered, "m5-pressure-critical");
+    append_research_event(
+        &discovered,
+        "m5-pressure-critical-hypothesis",
+        ResearchEvent::HypothesisRecorded {
+            record: HypothesisRecord::from_draft(HypothesisDraft {
+                id: HypothesisId::new("hypothesis-m5-pressure-critical"),
+                title: "critical pressure fixture".to_owned(),
+                target_id: "fixture.target".to_owned(),
+                attack_surface: "fixture".to_owned(),
+                vulnerability_class: "fixture".to_owned(),
+                entry_point: "fixture-entry".to_owned(),
+                sensitive_sink: "fixture-sink".to_owned(),
+                rationale: "x".repeat(80_000),
+                status: HypothesisStatus::Active,
+                priority: 1,
+                evidence_links: Vec::new(),
+                last_action: None,
+                next_action: None,
+            })
+            .unwrap(),
+            keep_independent: false,
+        },
+    );
+    let critical_server = spawn_responses_server(vec![(
+        200,
+        text_response("critical pressure", "m5-pressure-critical"),
+    )]);
+    let critical_config =
+        write_context_window_config(critical.path(), &critical_server.base_url, 18_500);
+    let critical_output = run_chat(
+        critical.path(),
+        &critical_config,
+        "inspect critical pressure\n/context\n/exit\n",
+        &[],
+    );
+    assert!(
+        critical_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&critical_output.stderr)
+    );
+    critical_server.requests.recv().unwrap();
+    critical_server.join();
+    let critical_stdout = String::from_utf8(critical_output.stdout).unwrap();
+    assert!(
+        critical_stdout.contains("[context pressure: critical]"),
+        "{critical_stdout}"
+    );
+
+    for (root, stdout) in [
+        (&warning, warning_stdout.as_str()),
+        (&critical, critical_stdout.as_str()),
+    ] {
+        assert!(stdout.contains("Consider /compact before a long next Turn."));
+        assert!(stdout.contains("Provider usage is not inferred."));
+        let session = session_id(root.path());
+        assert!(
+            session_events(root.path(), &session)
+                .iter()
+                .all(|event| event["event_type"] != "session.compaction_created")
+        );
+    }
+}
+
+#[test]
+fn m5_cli_reports_real_tool_start_and_persisted_terminal_receipt() {
+    let project = TemporaryDirectory::new("m5-cli-tool-visibility");
+    initialize_project(project.path());
+    fs::write(project.path().join("target.txt"), "bounded fixture\n").unwrap();
+    let server = spawn_responses_server(vec![
+        (
+            200,
+            m4_long_flow_tool_response(
+                "m5-read",
+                "read_file",
+                json!({"path": "target.txt"}),
+                "m5-tool",
+            ),
+        ),
+        (200, text_response("tool complete", "m5-tool-final")),
+    ]);
+    let config = write_config(project.path(), &server.base_url);
+    let output = run_chat(
+        project.path(),
+        &config,
+        "read the bounded fixture\n/exit\n",
+        &[],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    server.requests.recv().unwrap();
+    server.requests.recv().unwrap();
+    server.join();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains(
+            "[tool started] name=read_file execution_id=execution:m5-read call_id=m5-read"
+        )
+    );
+    assert!(
+        stderr.contains(
+            "[tool completed] name=read_file execution_id=execution:m5-read receipt_event="
+        )
+    );
+    assert!(!stderr.to_ascii_lowercase().contains("reasoning"));
+    assert_eq!(
+        session_events(project.path(), &session_id(project.path()))
+            .iter()
+            .filter(|event| event["event_type"] == "tool.execution_receipt_recorded")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn m5_cli_labels_deduplicated_tool_calls_without_a_second_start_or_receipt() {
+    let project = TemporaryDirectory::new("m5-cli-tool-dedup-visibility");
+    initialize_project(project.path());
+    let arguments = json!({"argv": ["/usr/bin/true"]});
+    let server = spawn_responses_server(vec![
+        (
+            200,
+            tool_calls_response(
+                &[
+                    ("m5-job-leader", "start_job", arguments.clone()),
+                    ("m5-job-follower", "start_job", arguments),
+                ],
+                "m5-dedup-tool",
+            ),
+        ),
+        (
+            200,
+            text_response("deduplicated tool complete", "m5-dedup-final"),
+        ),
+    ]);
+    let config = write_config(project.path(), &server.base_url);
+    let output = run_chat(
+        project.path(),
+        &config,
+        "/phase experiment\nlaunch the bounded duplicate fixture\n/exit\n",
+        &[],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    server.requests.recv().unwrap();
+    server.requests.recv().unwrap();
+    server.join();
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(stderr.matches("[tool started]").count(), 1, "{stderr}");
+    assert_eq!(stderr.matches("[tool completed]").count(), 1, "{stderr}");
+    assert_eq!(stderr.matches("[tool deduplicated]").count(), 1, "{stderr}");
+    assert!(stderr.contains("source_execution_id=execution:m5-job-leader"));
+    assert!(stderr.contains("call_id=m5-job-follower"));
+
+    let events = session_events(project.path(), &session_id(project.path()));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["event_type"] == "tool.execution_receipt_recorded")
+            .count(),
+        1,
+        "the follower reuses the leader Receipt fact"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| {
+                event["event_type"] == "session.history_item_recorded"
+                    && event["payload"]["item"]["kind"] == "tool_call"
+            })
+            .count(),
+        2
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| {
+                event["event_type"] == "session.history_item_recorded"
+                    && event["payload"]["item"]["kind"] == "tool_result"
+            })
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn m5_cli_labels_failed_and_cancelled_tools_only_after_durable_receipts() {
+    let project = TemporaryDirectory::new("m5-cli-tool-terminal-visibility");
+    initialize_project(project.path());
+    let marker = project.path().join("blocking-tool-started");
+    let blocking_tool = project.path().join("blocking-tool.sh");
+    fs::write(
+        &blocking_tool,
+        "#!/bin/sh\n: > \"$1\"\nexec /bin/sleep 30\n",
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&blocking_tool).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&blocking_tool, permissions).unwrap();
+
+    let server = spawn_responses_server(vec![
+        (
+            200,
+            m4_long_flow_tool_response(
+                "m5-failed",
+                "run_command",
+                json!({"argv": ["/usr/bin/false"]}),
+                "m5-failed-tool",
+            ),
+        ),
+        (200, text_response("failure observed", "m5-failed-final")),
+        (
+            200,
+            m4_long_flow_tool_response(
+                "m5-cancelled",
+                "run_command",
+                json!({
+                    "argv": [
+                        blocking_tool.to_str().unwrap(),
+                        marker.to_str().unwrap()
+                    ]
+                }),
+                "m5-cancelled-tool",
+            ),
+        ),
+    ]);
+    let config = write_config(project.path(), &server.base_url);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+        .current_dir(project.path())
+        .args(["chat", "--config", config.to_str().unwrap()])
+        .env("CYBER_AGENT_PRIMARY_API_KEY", "loopback-primary-secret")
+        .env("CYBER_AGENT_VISION_API_KEY", "loopback-vision-secret")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"exercise failure\nexercise cancellation\n/exit\n")
+        .unwrap();
+
+    let deadline = Instant::now() + F2A_WAIT;
+    while !marker.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        marker.exists(),
+        "the cancellable Tool never crossed its start boundary"
+    );
+    let signal_status = Command::new("/bin/kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(signal_status.success());
+
+    let output = f2a_wait_child(child, "M5 Tool terminal visibility");
+    f2a_join_server(server, "M5 Tool terminal visibility");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(stderr.matches("[tool started]").count(), 2, "{stderr}");
+    assert!(stderr.contains(
+        "[tool failed] name=run_command execution_id=execution:m5-failed receipt_event="
+    ));
+    assert!(stderr.contains(
+        "[tool cancelled] name=run_command execution_id=execution:m5-cancelled receipt_event="
+    ));
+
+    let events = session_events(project.path(), &session_id(project.path()));
+    let receipt_statuses = events
+        .iter()
+        .filter(|event| event["event_type"] == "tool.execution_receipt_recorded")
+        .map(|event| event["payload"]["receipt"]["status"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(receipt_statuses, vec!["failed", "cancelled"]);
+}
+
+#[test]
+fn m5_legacy_domain_backfill_and_explicit_resume_override_are_durable() {
+    let project = TemporaryDirectory::new("m5-cli-legacy-domain-override");
+    initialize_project(project.path());
+    let inert = write_config(project.path(), "http://127.0.0.1:1/v1");
+    assert!(
+        run_chat(project.path(), &inert, "/exit\n", &[])
+            .status
+            .success()
+    );
+    let session = session_id(project.path());
+    assert!(
+        session_events(project.path(), &session)
+            .iter()
+            .all(|event| event["event_type"] != "session.domain_profile_selected")
+    );
+
+    let source_server = spawn_responses_server(vec![(
+        200,
+        text_response("legacy source answer", "m5-legacy-domain"),
+    )]);
+    let source_config = write_config(project.path(), &source_server.base_url);
+    let legacy = run_chat(
+        project.path(),
+        &source_config,
+        "resume legacy domain\n/exit\n",
+        &["--session", &session],
+    );
+    assert!(
+        legacy.status.success(),
+        "{}",
+        String::from_utf8_lossy(&legacy.stderr)
+    );
+    let source_request = request_body(&source_server.requests.recv().unwrap());
+    source_server.join();
+    assert!(
+        source_request["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("Source domain profile v1")
+    );
+
+    let web_server = spawn_responses_server(vec![(
+        200,
+        text_response("explicit web answer", "m5-domain-override"),
+    )]);
+    let web_config = write_config(project.path(), &web_server.base_url);
+    let overridden = run_chat(
+        project.path(),
+        &web_config,
+        "apply explicit domain\n/exit\n",
+        &["--resume", &session, "--domain", "web"],
+    );
+    assert!(
+        overridden.status.success(),
+        "{}",
+        String::from_utf8_lossy(&overridden.stderr)
+    );
+    let web_request = request_body(&web_server.requests.recv().unwrap());
+    web_server.join();
+    assert!(
+        web_request["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("Web domain profile v1")
+    );
+
+    let domains = session_events(project.path(), &session)
+        .into_iter()
+        .filter(|event| event["event_type"] == "session.domain_profile_selected")
+        .collect::<Vec<_>>();
+    assert_eq!(domains.len(), 2);
+    assert_eq!(
+        domains[0]["payload"]["selection"],
+        json!({
+            "profile": "source",
+            "profile_generation": 1,
+            "source": "default",
+            "reason_code": "LEGACY_DEFAULT_SOURCE"
+        })
+    );
+    assert_eq!(
+        domains[1]["payload"]["selection"],
+        json!({
+            "profile": "web",
+            "profile_generation": 1,
+            "source": "operator",
+            "reason_code": "OPERATOR_SELECTED"
+        })
+    );
+}
+
+#[test]
+fn m5_session_end_respects_the_active_chat_runtime_lease() {
+    let project = TemporaryDirectory::new("m5-session-end-runtime-lease");
+    initialize_project(project.path());
+    let config = write_config(project.path(), "http://127.0.0.1:1/v1");
+    let waiting = spawn_waiting_chat(project.path(), &config);
+    let session = session_id(project.path());
+
+    let rejected = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+        .current_dir(project.path())
+        .args(["session", "end", &session])
+        .output()
+        .unwrap();
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("Chat runtime is already active"));
+    assert!(
+        session_events(project.path(), &session)
+            .iter()
+            .all(|event| event["event_type"] != "session.ended")
+    );
+
+    waiting.exit();
+    let ended = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+        .current_dir(project.path())
+        .args(["session", "end", &session])
+        .output()
+        .unwrap();
+    assert!(ended.status.success());
+    assert_eq!(
+        session_events(project.path(), &session)
+            .iter()
+            .filter(|event| event["event_type"] == "session.ended")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn m5_resume_latest_uses_most_recent_durable_activity_not_directory_order() {
+    let project = TemporaryDirectory::new("m5-resume-latest-activity");
+    initialize_project(project.path());
+    let inert = write_config(project.path(), "http://127.0.0.1:1/v1");
+    assert!(
+        run_chat(project.path(), &inert, "/exit\n", &[])
+            .status
+            .success()
+    );
+    let first = session_ids(project.path())[0].clone();
+    assert!(
+        run_chat(project.path(), &inert, "/exit\n", &[])
+            .status
+            .success()
+    );
+    let sessions = session_ids(project.path());
+    let second = sessions.iter().find(|id| *id != &first).unwrap().clone();
+
+    assert!(
+        run_chat(project.path(), &inert, "/exit\n", &["--resume", &first])
+            .status
+            .success()
+    );
+    let server = spawn_responses_server(vec![(
+        200,
+        text_response("latest activity restored", "m5-latest-activity"),
+    )]);
+    let config = write_config(project.path(), &server.base_url);
+    let resumed = run_chat(
+        project.path(),
+        &config,
+        "continue latest\n/exit\n",
+        &["--resume", "latest"],
+    );
+    assert!(
+        resumed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    server.requests.recv().unwrap();
+    server.join();
+    assert!(
+        session_events(project.path(), &first)
+            .iter()
+            .any(|event| event["event_type"] == "session.history_item_recorded")
+    );
+    assert!(
+        session_events(project.path(), &second)
+            .iter()
+            .all(|event| event["event_type"] != "session.history_item_recorded")
     );
 }
 

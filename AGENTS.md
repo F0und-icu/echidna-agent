@@ -24,10 +24,10 @@ If the user explicitly authorizes development sub-agents, every delegated agent 
 ## Current Phase
 
 - Architecture v1.6 is the latest locally frozen additive extension over immutable v1 through v1.5. Its remote seal remains unauthorized; local implementation status is governed by `STATUS.md`.
-- M0 through M4-S2 are complete and remotely sealed; M4-S3a1, M4-S3a2 and M4-S3b are locally implemented and gated but not remotely sealed. M4-S3c is `READY_NOT_AUTHORIZED`.
+- M0 through M4-S4 and F2a are complete and remotely sealed. M5-S1a and M5-S1b are locally authorized in sequence; their exact scope and state are governed by `STATUS.md` and `IMPLEMENTATION_PLAN.md`.
 - F1a Config/Composition Root, F1b protocol-first Responses HTTP/SSE Adapter, F1c first-version CLI Chat and F1d local inline Provider credentials are complete and remotely sealed by PR `#46` at Squash Merge `6eb4959`; one synthetic F1c DeepSeek Live Chat passed.
-- F1d preserves one configuration and Adapter path: Config v1 may select exactly one inline `api_key` or existing `credential_ref` per Provider. The former M4-S3a was split before implementation into M4-S3a1 and M4-S3a2; both and the subsequent M4-S3b are locally complete. Do not start M4-S3c without new authorization.
-- F1e Responses Reasoning Continuation is complete and remotely sealed by PR `#48` at Squash Merge `2f6a9e5`, including one configuration-driven DeepSeek Full-only Live Tool Loop. The complete local Gate passed; remote run `33295806720` executed zero Steps because GitHub blocked it for billing/spending-limit reasons, and the user explicitly authorized that one merge without rerunning Actions. Further Actions are paused, while M4-S3c and any further Live request remain unauthorized. Completed reasoning stays in provider delivery, never Conversation History; a redundant encrypted sidecar is ignored only beside valid plaintext reasoning, while encrypted-only remains unsupported.
+- F1d preserves one configuration and Adapter path: Config v1 may select exactly one inline `api_key` or existing `credential_ref` per Provider. M5 work must preserve that same composition path.
+- F1e Responses Reasoning Continuation is complete and remotely sealed by PR `#48` at Squash Merge `2f6a9e5`, including one configuration-driven DeepSeek Full-only Live Tool Loop. Completed reasoning stays in provider delivery, never Conversation History; a redundant encrypted sidecar is ignored only beside valid plaintext reasoning, while encrypted-only remains unsupported. Further Actions and Live requests remain unauthorized unless the operator explicitly enables them.
 - Local Git is initialized and `main` tracks the private remote.
 - `codex/` is a clean, read-only upstream reference repository.
 

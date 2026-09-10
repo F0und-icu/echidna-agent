@@ -13,6 +13,7 @@ use serde_json::Value;
 use thiserror::Error;
 
 use super::context::{ProviderSessionId, ProviderSessionRef, ProviderSessionRole};
+use super::domain_profile::{DomainProfile, DomainProfileSelection};
 use super::events::{
     ApplyOutcome, CurrentEventUpcaster, EventEnvelope, EventError, EventId, EventReducer,
     EventSequence, EventType, EventUpcaster, OccurredAt, State, StreamId,
@@ -41,6 +42,7 @@ const VISION_ROUTE_DECIDED_EVENT_TYPE: &str = "vision.route_decided";
 const VISION_OBSERVATION_RECORDED_EVENT_TYPE: &str = "vision.observation_recorded";
 const VISION_ANALYSIS_FAILED_EVENT_TYPE: &str = "vision.analysis_failed";
 const RESEARCH_PHASE_SELECTED_EVENT_TYPE: &str = "session.research_phase_selected";
+const DOMAIN_PROFILE_SELECTED_EVENT_TYPE: &str = "session.domain_profile_selected";
 pub(super) const CURRENT_SESSION_PAYLOAD_SCHEMA_VERSION: u16 = 1;
 
 mod compaction;
@@ -110,6 +112,9 @@ pub enum SessionEvent {
     ResearchPhaseSelected {
         selection: ResearchPhaseSelection,
     },
+    DomainProfileSelected {
+        selection: DomainProfileSelection,
+    },
 }
 
 impl SessionEvent {
@@ -153,6 +158,9 @@ impl SessionEvent {
             Self::ResearchPhaseSelected { .. } => {
                 EventType::new(RESEARCH_PHASE_SELECTED_EVENT_TYPE)
             }
+            Self::DomainProfileSelected { .. } => {
+                EventType::new(DOMAIN_PROFILE_SELECTED_EVENT_TYPE)
+            }
         }
     }
 
@@ -189,6 +197,9 @@ impl SessionEvent {
             Self::VisionAnalysisFailed { failure } => serde_json::to_value(failure),
             Self::ResearchPhaseSelected { selection } => {
                 serde_json::to_value(ResearchPhaseSelectedPayload::current(*selection))
+            }
+            Self::DomainProfileSelected { selection } => {
+                serde_json::to_value(DomainProfileSelectedPayload::current(*selection))
             }
         };
         payload.map_err(|error| SessionError::PayloadEncode {
@@ -288,6 +299,19 @@ impl SessionEvent {
                     })?;
                 Ok(Self::ResearchPhaseSelected { selection })
             }
+            DOMAIN_PROFILE_SELECTED_EVENT_TYPE => {
+                let payload: DomainProfileSelectedPayload =
+                    decode_strict_payload(event_type, payload)?;
+                require_current_payload_schema(event_type, payload.schema_version)?;
+                let selection = payload.selection;
+                selection
+                    .validate()
+                    .map_err(|error| SessionError::MalformedPayload {
+                        event_type: event_type.clone(),
+                        message: error.to_string(),
+                    })?;
+                Ok(Self::DomainProfileSelected { selection })
+            }
             _ => Err(SessionError::UnknownEventType {
                 event_type: event_type.clone(),
             }),
@@ -316,6 +340,7 @@ pub struct SessionState {
     vision_observations: Vec<VisionObservation>,
     vision_failures: Vec<VisionAnalysisFailure>,
     research_phase_selection: Option<ResearchPhaseSelection>,
+    domain_profile_selection: Option<DomainProfileSelection>,
 }
 
 impl Default for SessionState {
@@ -339,6 +364,7 @@ impl Default for SessionState {
             vision_observations: Vec::new(),
             vision_failures: Vec::new(),
             research_phase_selection: None,
+            domain_profile_selection: None,
         }
     }
 }
@@ -479,6 +505,17 @@ impl SessionState {
     pub fn effective_research_phase(&self) -> ResearchPhase {
         self.research_phase_selection
             .map_or(ResearchPhase::Mapping, ResearchPhaseSelection::phase)
+    }
+
+    /// The latest explicit durable Domain selection. Legacy Sessions remain
+    /// read-only until their next real Turn appends the stable source default.
+    pub const fn domain_profile_selection(&self) -> Option<DomainProfileSelection> {
+        self.domain_profile_selection
+    }
+
+    pub fn effective_domain_profile(&self) -> DomainProfile {
+        self.domain_profile_selection
+            .map_or(DomainProfile::Source, DomainProfileSelection::profile)
     }
 
     /// Returns the precise next Session Event sequence without allocating or
@@ -835,6 +872,20 @@ fn apply_session_event(
                 })?;
             state.research_phase_selection = Some(selection);
         }
+        SessionEvent::DomainProfileSelected { selection } => {
+            require_transition(
+                state.lifecycle,
+                "session.domain_profile_selected",
+                SessionLifecycle::Active,
+            )?;
+            selection
+                .validate()
+                .map_err(|error| SessionError::MalformedPayload {
+                    event_type: EventType::new(DOMAIN_PROFILE_SELECTED_EVENT_TYPE),
+                    message: error.to_string(),
+                })?;
+            state.domain_profile_selection = Some(selection);
+        }
     }
     Ok(())
 }
@@ -1111,6 +1162,22 @@ struct ResearchPhaseSelectedPayload {
     selection: ResearchPhaseSelection,
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct DomainProfileSelectedPayload {
+    schema_version: u16,
+    selection: DomainProfileSelection,
+}
+
+impl DomainProfileSelectedPayload {
+    const fn current(selection: DomainProfileSelection) -> Self {
+        Self {
+            schema_version: CURRENT_SESSION_PAYLOAD_SCHEMA_VERSION,
+            selection,
+        }
+    }
+}
+
 impl ResearchPhaseSelectedPayload {
     const fn current(selection: ResearchPhaseSelection) -> Self {
         Self {
@@ -1198,6 +1265,10 @@ pub enum SessionError {
     CompactionSummaryEntryDuplicate { field: &'static str, value: String },
     #[error("Session Compaction Summary is {actual} bytes, above the {maximum}-byte local bound")]
     CompactionSummaryTooLarge { actual: usize, maximum: usize },
+    #[error("Session Compaction requires a current TargetSnapshot in the Project Research stream")]
+    CompactionCurrentTargetRequired,
+    #[error("Session Compaction requires non-empty resumable History with a user goal")]
+    CompactionResumableHistoryRequired,
     #[error("Session Compaction requires a non-empty authoritative Research stream")]
     CompactionResearchStreamEmpty,
     #[error("Session Compaction Research stream changed from `{expected}` to `{received}`")]

@@ -34,7 +34,8 @@ use crate::domain::session::{
 };
 use crate::domain::tools::{
     DeferredActivationSet, ExecutionId, IdempotencyKey, ResolvedToolPlan, ToolCall,
-    ToolExecutionOutcome, ToolExposurePlan, ToolFailure, ToolFailureRetryability, ToolResult,
+    ToolExecutionOutcome, ToolExecutionPlan, ToolExposurePlan, ToolFailure,
+    ToolFailureRetryability, ToolResult,
 };
 use crate::domain::world_state::{ProjectSnapshotContext, ResearchWorldState, WorldStateError};
 use crate::domain::{
@@ -51,7 +52,7 @@ use super::cancellation::AgentCancellation;
 use super::context_compilation::{ContextCacheSummary, ContextCompilationError};
 use super::model_sample::ModelSample;
 use super::model_streaming::{ModelStreamOutcome, ModelStreamingError, ModelStreamingService};
-use super::tool_scheduler::execute_batch;
+use super::tool_scheduler::{ScheduledToolResult, execute_batch};
 use compaction::AppliedCompaction;
 use request_audit::RequestAuditStage;
 
@@ -176,6 +177,11 @@ pub type ViewImageFollowUpFuture<'a> =
 pub type ToolExecutionReceiptStage<'a> =
     dyn FnMut(&ToolExecutionOutcome) -> Result<(), AgentLoopError> + 'a;
 
+/// The fixed CLI-only notification emitted at the exact scheduler boundary
+/// before a Tool future is started. It is presentation only and cannot alter
+/// the immutable execution plan or dispatch path.
+pub(crate) type ToolExecutionStartStage<'a> = dyn FnMut(&ToolExecutionPlan) + 'a;
+
 /// The one fixed stage for user-visible assistant text while a response is
 /// streaming. Reasoning is intentionally not part of this stage and remains
 /// outside Conversation History and CLI output.
@@ -184,21 +190,24 @@ pub type AssistantTextDeltaStage<'a> = dyn FnMut(&str) -> Result<(), AgentLoopEr
 /// The fixed callback bundle used only by production CLI Vision composition.
 /// Grouping these existing stages keeps the entry point bounded without
 /// introducing a registry or another lifecycle owner.
-pub(crate) struct CliVisionStages<'a> {
+pub(crate) struct CliRuntimeStages<'a> {
     follow_up: &'a mut ViewImageFollowUp<'a>,
     text_delta: &'a mut AssistantTextDeltaStage<'a>,
+    tool_start: &'a mut ToolExecutionStartStage<'a>,
     record_execution: &'a mut ToolExecutionReceiptStage<'a>,
 }
 
-impl<'a> CliVisionStages<'a> {
+impl<'a> CliRuntimeStages<'a> {
     pub(crate) fn new(
         follow_up: &'a mut ViewImageFollowUp<'a>,
         text_delta: &'a mut AssistantTextDeltaStage<'a>,
+        tool_start: &'a mut ToolExecutionStartStage<'a>,
         record_execution: &'a mut ToolExecutionReceiptStage<'a>,
     ) -> Self {
         Self {
             follow_up,
             text_delta,
+            tool_start,
             record_execution,
         }
     }
@@ -206,6 +215,7 @@ impl<'a> CliVisionStages<'a> {
 
 struct StreamingStages<'a> {
     text_delta: Option<&'a mut AssistantTextDeltaStage<'a>>,
+    tool_start: Option<&'a mut ToolExecutionStartStage<'a>>,
     record_execution: Option<&'a mut ToolExecutionReceiptStage<'a>>,
 }
 
@@ -213,6 +223,7 @@ impl StreamingStages<'_> {
     fn none() -> Self {
         Self {
             text_delta: None,
+            tool_start: None,
             record_execution: None,
         }
     }
@@ -642,6 +653,7 @@ where
             None,
             StreamingStages {
                 text_delta: Some(text_delta),
+                tool_start: None,
                 record_execution: Some(record_execution),
             },
         )
@@ -660,7 +672,7 @@ where
         cancellation: AgentCancellation,
         audit_context: &RequestAuditRunContext,
         record_attempt: &mut dyn FnMut(RequestAuditAttempt) -> Result<(), AgentLoopError>,
-        stages: CliVisionStages<'_>,
+        stages: CliRuntimeStages<'_>,
     ) -> Result<AgentTurnOutcome, AgentLoopError> {
         let primary_capability_hash = self.provider.capabilities().semantic_hash();
         let initial_image = initial_image
@@ -674,6 +686,7 @@ where
             Some(stages.follow_up),
             StreamingStages {
                 text_delta: Some(stages.text_delta),
+                tool_start: Some(stages.tool_start),
                 record_execution: Some(stages.record_execution),
             },
         )
@@ -691,6 +704,7 @@ where
     ) -> Result<AgentTurnOutcome, AgentLoopError> {
         let StreamingStages {
             mut text_delta,
+            mut tool_start,
             mut record_execution,
         } = stages;
         self.apply_pending_configuration()?;
@@ -1028,6 +1042,7 @@ where
                     tool_calls,
                     sampling_step.resolved_tool_plan(),
                     &cancellation,
+                    &mut tool_start,
                     &mut record_execution,
                 )
                 .await?;
@@ -1214,6 +1229,7 @@ where
         calls: Vec<ToolCall>,
         resolved_tool_plan: &ResolvedToolPlan,
         cancellation: &AgentCancellation,
+        start_stage: &mut Option<&mut ToolExecutionStartStage<'_>>,
         receipt_stage: &mut Option<&mut ToolExecutionReceiptStage<'_>>,
     ) -> Result<ScheduledCalls, AgentLoopError> {
         let mut prepared = Vec::with_capacity(calls.len());
@@ -1250,6 +1266,7 @@ where
             plans,
             cancellation,
             &mut self.completed_idempotency,
+            start_stage,
         )
         .await;
         if scheduled.outcomes.len() != planned_outcome_count {
@@ -1263,8 +1280,16 @@ where
                     let outcome = outcomes
                         .next()
                         .ok_or(AgentLoopError::SchedulerResultMissing)?;
-                    self.history.append_tool_result(outcome.result.clone())?;
-                    executions.push(outcome);
+                    match outcome {
+                        ScheduledToolResult::Executed(outcome) => {
+                            let outcome = *outcome;
+                            self.history.append_tool_result(outcome.result.clone())?;
+                            executions.push(outcome);
+                        }
+                        ScheduledToolResult::NotStarted(result) => {
+                            self.history.append_tool_result(result)?;
+                        }
+                    }
                 }
                 PreparedToolCall::PlanningFailure(result) => {
                     self.history.append_tool_result(result)?;

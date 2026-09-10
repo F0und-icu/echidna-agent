@@ -966,11 +966,59 @@ Scope Lock：
 
 完成记录：F2a 已完成正式 CLI ingress、独立 Terra xhigh 审计与修复、385-test 完整 Cargo/Lean Gate，以及双 Provider Secondary 和单多模态 Primary Direct 两条显式 DeepSeek Live 验收。首条 Live 暴露的 `regions.description` 偏离通过精确通用 Prompt 契约修复并再次独立审计；严格持久 Schema 未放宽。私有 `[skip ci]` PR `#62` 完成远端封存，当前停在 M5-S1 `READY_NOT_AUTHORIZED`。
 
-### M5-S1：CLI 充分性评估
+### M5-S1a：CLI Operability
 
-仅当 CLI 在图片、Markdown 或长输出上有明确不足时，才实现 loopback-only Web feature。
+目标：让单用户本地 CLI 足以承担日常漏洞研究，不引入 TUI/Web、第二 AgentLoop 或第二状态源。
 
-不实现登录、多用户、远程部署或云会话。
+交付：
+
+- `chat` 增加 `/paste ... /end` 多行输入；普通单行输入、`/image` 和流式 Assistant 文本保持兼容。
+- `session list/show/end` 提供确定性的本地 Session 生命周期视图；`chat --resume latest` 恢复最近一个 Active Session，历史 `--session <id>` 保持兼容别名。
+- DomainProfile 选择与 Phase 一样在 Turn 边界先持久化再生效；Resume 恢复最后一次有效 Domain，显式 `--domain` 或 `/domain` 才能在下一 Turn 改变它，杜绝默认 `source` 静默漂移。
+- CLI 显示每次模型发起的 Tool 执行开始、完成、失败或取消，以及真实 `execution_id`/Receipt Event ID；Reasoning 不进入终端输出。
+- `session export <id> --format markdown|json [--output <path>]` 从现有 Session/Research/Artifact/Receipt/Vision facts 生成只读派生导出。导出不写 Event、Research、Memory、Artifact 或第二份 History。
+
+Scope Lock：
+
+- 允许一个追加的 Session Domain 选择事件/Reducer 投影、固定 CLI Tool 执行可见阶段、CLI 输入/Session/导出模块和永久顶层测试。
+- 不增加 Cargo 依赖、通用 Hook/Observer Registry、TUI/Web/Server、登录/多用户、云会话、第二 AgentLoop、第二 History、第二事实库或 Provider/Wire 分支。
+- Session `latest` 只在当前 Project 的严格可重放 Active Sessions 中选择；损坏或 Ended Session 不得被静默恢复。
+- 导出内容必须标记 authoritative fact reference、derived observation 和 narrative 的不同边界，不把 VisionObservation 或 Summary narrative 升级成 Finding evidence。
+
+验收：
+
+- `/paste` 保留换行且命令只在非 paste 状态解释；EOF/空 paste 有明确行为。
+- 新 Session 默认 Domain、显式 Domain、`/domain`、Resume、legacy Session 和 `latest` 均有持久连续性回归；任何 Domain 改变发生在 Provider 请求前。
+- Tool start/terminal 状态与真实 ExecutionReceipt 一一对应，pre-execution 失败不伪造 Receipt，Reasoning 不显示。
+- Session list/show/end/export 覆盖 Project 隔离、损坏流、Active/Ended 生命周期和 Markdown/JSON 输出。
+
+Gate：专项测试 → 受影响测试 → 独立审计 → 修复 → 完整 locked Cargo/Lean Gate → Lean Review。Git、Actions、Live Test、Web/TUI 均需另行授权。
+
+### M5-S1b：Production Compaction
+
+目标：把已有严格 Evidence-Spine Compaction 从“可恢复外部事实”接入正式 Chat，使长会话可以显式压缩并继续，同时保持事实、Provider 和审计连续性。
+
+交付：
+
+- `/compact` 从当前严格 Session 投影、最新 Research stream identity、当前 TargetSnapshot 相关 typed Research/Artifact/Receipt 引用和有界最近 History，生成唯一的 SessionSummary v2/Compaction Event；随后通过现有 `AgentLoop::apply_compaction` 原子应用。
+- NarrativeSummary 由固定本地确定性投影产生，只保留有界的最近目标/进度续写文本并明确其非权威性；不进行隐藏模型请求，不复制 Research claims 为第二权威。
+- CLI 从 ContextPlanner 的既有预算/decision manifest 派生 `normal`、`warning`、`critical` 压力说明；只在阈值或截断/排除出现时提醒 `/compact`，不自动改变事实或发起压缩。
+- Compaction 后下一次真实请求必须是 `CompactionReset` Full；成功后才恢复既有增量规则。Resume 再次严格校验 Project、Session、Primary ProviderSession、Research watermark/hash、typed reference 和 History Tool pairing。
+
+Scope Lock：
+
+- 复用现有 `SessionSummaryDraft`、EvidenceSpine、CompactionValidationContext、Session Event Store、ContextPlanner、RequestAudit 和 AgentLoop Compaction owner；只增加一个生产用确定性 Draft 组合路径和 CLI 命令。
+- 不增加自动 Compaction workflow、第二摘要模型、远程 judge、向量/图数据库、第二 Context renderer、Provider-specific metadata、配置字段或新依赖。
+- 无 TargetSnapshot、无可续写 History、跨 Project、stale watermark、missing/type-mismatched reference、ProviderSession 不一致或不完整 Tool Pair 必须在 Event append 或 AgentLoop 应用前明确失败。
+
+验收：
+
+- 正式 CLI 创建 schema v2 reference-only Summary、追加 Compaction、立刻应用并在同进程继续；Event/History 原始事实不被删除或覆盖。
+- Compaction 后 Full 请求包含 Summary v2、保留完整 Tool Pair 和随后 User Turn；RequestAudit/ContextDeliveryMap 可完整重建。
+- 进程退出后 `--resume latest` 恢复同一 Domain/Phase、Summary/EvidenceSpine 与 retained/post-boundary History，且 Primary/Vision/response/reasoning identity 不跨 Session。
+- 阈值投影由相同 ContextDecisionManifest 唯一数据源得出；缺少实际 Provider usage 时不伪造 Token 用量。
+
+Gate：专项测试 → 受影响测试 → 独立审计 → 修复 → 完整 locked Cargo/Lean Gate → Lean Review。完成后停在 M5-S2 `READY_NOT_AUTHORIZED`；Git、Actions、Live Test、发布和 Web/TUI 仍需另行授权。
 
 ### M5-S2：CI、Release 与个人分发
 

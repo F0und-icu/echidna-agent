@@ -711,6 +711,7 @@ fn reset_assessment_is_repeatable_until_success_and_session_identity_cannot_cros
     let mut session = primary_session();
     establish(&mut session, &baseline_snapshot, output.clone());
     session.reset(BaselineInvalidationReason::CompactionReset);
+    session.reset(BaselineInvalidationReason::ToolsChanged);
     for _ in 0..2 {
         assert_eq!(
             session.assess_delivery(&candidate, true),

@@ -8,19 +8,25 @@ use futures_util::future::{Either, select};
 use futures_util::stream::{FuturesUnordered, StreamExt};
 
 use crate::domain::tools::{
-    IdempotencyKey, ToolExecutionOutcome, ToolExecutionPlan, ToolResultStatus, ToolRetryPolicy,
-    scheduling_conflicts,
+    IdempotencyKey, ToolExecutionOutcome, ToolExecutionPlan, ToolFailure, ToolFailureRetryability,
+    ToolResult, ToolResultStatus, ToolRetryPolicy, scheduling_conflicts,
 };
 use crate::ports::tool::ToolExecutor;
 
+use super::agent_loop::ToolExecutionStartStage;
 use super::cancellation::AgentCancellation;
 
 type ActiveFuture<'tools> =
     Pin<Box<dyn Future<Output = (usize, ToolExecutionOutcome)> + Send + 'tools>>;
 
 pub(super) struct ScheduledToolBatch {
-    pub(super) outcomes: Vec<ToolExecutionOutcome>,
+    pub(super) outcomes: Vec<ScheduledToolResult>,
     pub(super) cancelled: bool,
+}
+
+pub(super) enum ScheduledToolResult {
+    Executed(Box<ToolExecutionOutcome>),
+    NotStarted(ToolResult),
 }
 
 /// Executes one completed model sample's valid plans. Resource conflict rules
@@ -33,15 +39,16 @@ pub(super) async fn execute_batch<Tools: ToolExecutor + ?Sized>(
     plans: Vec<ToolExecutionPlan>,
     cancellation: &AgentCancellation,
     completed_receipts: &mut BTreeMap<IdempotencyKey, ToolExecutionOutcome>,
+    start_stage: &mut Option<&mut ToolExecutionStartStage<'_>>,
 ) -> ScheduledToolBatch {
-    let mut outcomes = vec![None; plans.len()];
+    let mut outcomes = (0..plans.len()).map(|_| None).collect::<Vec<_>>();
     let mut followers = vec![Vec::new(); plans.len()];
     let mut leaders = BTreeMap::<IdempotencyKey, usize>::new();
     let mut pending = VecDeque::new();
 
     for (index, plan) in plans.iter().enumerate() {
         if let Some(outcome) = completed_outcome(plan, completed_receipts) {
-            outcomes[index] = Some(outcome);
+            outcomes[index] = Some(ScheduledToolResult::Executed(Box::new(outcome)));
             continue;
         }
         if let Some(leader) = dedupe_leader(plan, index, &mut leaders) {
@@ -64,6 +71,9 @@ pub(super) async fn execute_batch<Tools: ToolExecutor + ?Sized>(
                 break;
             };
             let plan = &plans[index];
+            if let Some(stage) = start_stage.as_deref_mut() {
+                stage(plan);
+            }
             active.insert(index, plan.clone());
             let execution = tools.execute(plan.clone());
             running.push(Box::pin(async move { (index, execution.await) }));
@@ -87,9 +97,10 @@ pub(super) async fn execute_batch<Tools: ToolExecutor + ?Sized>(
                 for follower in &followers[index] {
                     let follower_outcome =
                         ToolExecutionOutcome::deduplicated_for(&plans[*follower], &outcome);
-                    outcomes[*follower] = Some(follower_outcome);
+                    outcomes[*follower] =
+                        Some(ScheduledToolResult::Executed(Box::new(follower_outcome)));
                 }
-                outcomes[index] = Some(outcome);
+                outcomes[index] = Some(ScheduledToolResult::Executed(Box::new(outcome)));
             }
             Either::Left((None, _)) => break,
             Either::Right(((), _)) => cancelled = true,
@@ -98,13 +109,38 @@ pub(super) async fn execute_batch<Tools: ToolExecutor + ?Sized>(
 
     if cancelled {
         // Dropping `running` cancels adapter futures (including child
-        // processes configured with kill-on-drop). Every staged Tool Call is
-        // still paired before the AgentLoop returns its cancellation outcome.
-        for (index, outcome) in outcomes.iter_mut().enumerate() {
-            if outcome.is_none() {
-                let cancelled =
-                    ToolExecutionOutcome::cancelled(plans[index].clone(), "agent_cancelled");
-                *outcome = Some(cancelled);
+        // processes configured with kill-on-drop). Only plans which crossed
+        // the start boundary receive execution Receipts. Pending plans remain
+        // paired pre-execution failures without a fabricated Receipt.
+        for index in active.keys().copied().collect::<Vec<_>>() {
+            outcomes[index] = Some(ScheduledToolResult::Executed(Box::new(
+                ToolExecutionOutcome::cancelled(plans[index].clone(), "agent_cancelled"),
+            )));
+        }
+        for index in pending {
+            outcomes[index] = Some(ScheduledToolResult::NotStarted(not_started_result(
+                &plans[index],
+            )));
+        }
+        for (leader, follower_indexes) in followers.iter().enumerate() {
+            for follower in follower_indexes {
+                if outcomes[*follower].is_some() {
+                    continue;
+                }
+                outcomes[*follower] = Some(
+                    match outcomes[leader].as_ref().expect(
+                        "every dedupe leader is completed, active, or pending at cancellation",
+                    ) {
+                        ScheduledToolResult::Executed(source) => {
+                            ScheduledToolResult::Executed(Box::new(
+                                ToolExecutionOutcome::deduplicated_for(&plans[*follower], source),
+                            ))
+                        }
+                        ScheduledToolResult::NotStarted(_) => {
+                            ScheduledToolResult::NotStarted(not_started_result(&plans[*follower]))
+                        }
+                    },
+                );
             }
         }
     }
@@ -117,6 +153,18 @@ pub(super) async fn execute_batch<Tools: ToolExecutor + ?Sized>(
         outcomes,
         cancelled,
     }
+}
+
+fn not_started_result(plan: &ToolExecutionPlan) -> ToolResult {
+    ToolResult::from_pre_execution_failure(
+        &plan.call,
+        ToolFailure::pre_execution(
+            "tool_not_started",
+            ToolFailureRetryability::Terminal,
+            "Tool execution was cancelled before the scheduler start boundary",
+        ),
+        serde_json::json!({"error": "agent_cancelled_before_start"}),
+    )
 }
 
 fn completed_outcome(

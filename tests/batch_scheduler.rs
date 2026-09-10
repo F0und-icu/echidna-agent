@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use cyber_agent::app::agent_loop::{AgentLoop, AgentTurnOutcome};
 use cyber_agent::app::cancellation::AgentCancellation;
+use cyber_agent::domain::model::ContentItem;
 use cyber_agent::domain::model::{CapabilityMappingVersion, ModelCapabilities, ModelEvent};
 use cyber_agent::domain::tools::{
     ExecutionId, ResourceKey, ToolCachePolicy, ToolCall, ToolCallId, ToolDeterminism, ToolEffect,
@@ -479,5 +480,53 @@ async fn cancelled_receipts_do_not_block_a_later_same_resource_execution() {
             if executions[0].result.status == ToolResultStatus::Cancelled
     ));
     assert_eq!(trace.executions.load(Ordering::SeqCst), 2);
+    assert_eq!(agent.history().ensure_all_tool_calls_paired(), Ok(()));
+}
+
+#[tokio::test]
+async fn cancellation_receipts_only_cover_resource_wave_plans_that_actually_started() {
+    let provider = ScriptedProvider::new([batch_response(vec![
+        call("call-started", "device:shared"),
+        call("call-pending", "device:shared"),
+    ])]);
+    let tools = ProbeExecutor::new(ToolRetryPolicy::NeverAutoRetry);
+    let trace = tools.trace.clone();
+    let mut agent = AgentLoop::new(&provider, &tools);
+    let cancellation = AgentCancellation::new();
+    let signal = cancellation.clone();
+
+    let turn = agent.run_turn("cancel the resource wave", cancellation);
+    let cancel = async move {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        signal.cancel();
+    };
+    let (outcome, ()) = tokio::join!(turn, cancel);
+    let AgentTurnOutcome::Cancelled { executions, .. } = outcome.unwrap() else {
+        panic!("the resource wave should be cancelled");
+    };
+    assert_eq!(trace.executions.load(Ordering::SeqCst), 1);
+    assert_eq!(executions.len(), 1, "only the started plan has a Receipt");
+    assert_eq!(
+        executions[0].receipt.execution_id.as_str(),
+        "execution:call-started"
+    );
+    assert_eq!(executions[0].result.status, ToolResultStatus::Cancelled);
+
+    let results = agent
+        .history()
+        .items()
+        .iter()
+        .filter_map(|item| match item {
+            ContentItem::ToolResult { result } => Some(result),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].call_id.as_str(), "call-started");
+    assert_eq!(results[0].status, ToolResultStatus::Cancelled);
+    assert_eq!(results[1].call_id.as_str(), "call-pending");
+    assert_eq!(results[1].status, ToolResultStatus::Failed);
+    assert_eq!(results[1].output["failure"]["stage"], "pre_execution");
+    assert!(results[1].output["failure"].get("execution_id").is_none());
     assert_eq!(agent.history().ensure_all_tool_calls_paired(), Ok(()));
 }

@@ -6,6 +6,7 @@
 //! duplicate sequences. Context, History, RequestAudit, Tool execution and
 //! model streaming retain their existing owners.
 
+mod compaction;
 mod vision;
 
 use std::io::{self, Write};
@@ -25,14 +26,14 @@ use crate::adapters::research_projection::{
 };
 use crate::adapters::tools::ToolRegistry;
 use crate::app::agent_loop::{
-    AgentLoop, AgentLoopError, AgentTurnOutcome, AssistantTextDeltaStage, CliVisionStages,
-    ToolExecutionReceiptStage, ViewImageFollowUpFuture,
+    AgentLoop, AgentLoopError, AgentTurnOutcome, AssistantTextDeltaStage, CliRuntimeStages,
+    ToolExecutionReceiptStage, ToolExecutionStartStage, ViewImageFollowUpFuture,
 };
 use crate::app::cancellation::AgentCancellation;
 use crate::app::request_audit::RequestAuditService;
 use crate::app::session::{AppendAfterDurableError, SessionProjection};
 use crate::domain::context::{ProviderSession, ProviderSessionId, ProviderSessionRole};
-use crate::domain::domain_profile::DomainProfile;
+use crate::domain::domain_profile::{DomainProfile, DomainProfileSelection};
 use crate::domain::events::{EventId, OccurredAt, StreamId};
 use crate::domain::project::ProjectId;
 use crate::domain::request_audit::{
@@ -56,7 +57,7 @@ pub(crate) async fn run(
     project: Project,
     composition: &ProviderComposition,
     requested_session: Option<String>,
-    domain: DomainProfile,
+    requested_domain: Option<DomainProfile>,
     requested_phase: Option<ResearchPhase>,
 ) -> Result<(), ChatError> {
     let _runtime_lease = project.acquire_chat_runtime_lease()?;
@@ -68,6 +69,7 @@ pub(crate) async fn run(
     let session = DurableChatSession::new(project, session_id.clone())?;
     let (session_state, provider_session, disposition, compaction_validation) =
         session.start_or_resume(explicit_resume)?;
+    let domain = requested_domain.unwrap_or_else(|| session_state.effective_domain_profile());
 
     let tools = ToolRegistry::for_project(session.project.root());
     let mut agent = AgentLoop::with_primary_context(
@@ -95,7 +97,7 @@ pub(crate) async fn run(
     );
 
     println!(
-        "{} session `{}` with domain `{}` and phase `{}`. Enter one line at a time; use /image, /domain, /phase, /exit or EOF.",
+        "{} session `{}` with domain `{}` and phase `{}`. Enter a line, or use /paste, /image, /domain, /phase, /context, /compact, /exit or EOF.",
         disposition.message(),
         session_id.as_str(),
         domain.id(),
@@ -103,6 +105,7 @@ pub(crate) async fn run(
             .unwrap_or_else(|| session_state.effective_research_phase())
             .id(),
     );
+    let mut pending_domain = requested_domain.map(DomainProfileSelection::operator);
     let mut pending_phase = requested_phase.map(ResearchPhaseSelection::operator);
     let mut pending_image: Option<vision::PendingImage> = None;
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
@@ -124,6 +127,43 @@ pub(crate) async fn run(
             );
             return Ok(());
         };
+        let line = if line == "/paste" {
+            println!("Paste mode; finish with /end on its own line.");
+            let mut pasted = Vec::new();
+            loop {
+                print!("...> ");
+                io::stdout().flush()?;
+                let next = tokio::select! {
+                    line = lines.next_line() => line?,
+                    signal = tokio::signal::ctrl_c() => {
+                        signal?;
+                        println!("\n[paste cancelled]");
+                        pasted.clear();
+                        break None;
+                    }
+                };
+                match next {
+                    Some(value) if value == "/end" => break Some(pasted.join("\n")),
+                    Some(value) => pasted.push(value),
+                    None => {
+                        println!(
+                            "EOF received during paste; Session `{}` remains active and the incomplete paste was discarded.",
+                            session_id.as_str()
+                        );
+                        return Ok(());
+                    }
+                }
+            }
+        } else {
+            Some(line)
+        };
+        let Some(line) = line else {
+            continue;
+        };
+        if line.is_empty() {
+            println!("Empty input ignored.");
+            continue;
+        }
         if line == "/exit" {
             println!(
                 "Session `{}` remains active for explicit resume.",
@@ -131,7 +171,26 @@ pub(crate) async fn run(
             );
             return Ok(());
         }
-        if line.is_empty() {
+        if line == "/context" {
+            match agent.last_context_plan() {
+                Some(plan) => {
+                    println!("{}", compaction::ContextPressure::from_plan(plan).message())
+                }
+                None => println!(
+                    "Context pressure is unavailable before the first model request; Provider usage is not inferred."
+                ),
+            }
+            continue;
+        }
+        if line == "/compact" {
+            if let Some(image) = &pending_image {
+                println!(
+                    "Compaction is unavailable while image `{}` is queued; submit its Turn first.",
+                    image.delivery_artifact_id()
+                );
+                continue;
+            }
+            println!("{}", session.compact(&mut agent)?.message());
             continue;
         }
         if line == "/image" {
@@ -169,7 +228,7 @@ pub(crate) async fn run(
         }
         if let Some(value) = line.strip_prefix("/domain ") {
             let selected_domain = parse_domain(value)?;
-            agent.queue_domain_profile(selected_domain);
+            pending_domain = Some(DomainProfileSelection::operator(selected_domain));
             println!(
                 "Queued domain `{}` for the next Turn.",
                 selected_domain.id()
@@ -177,6 +236,8 @@ pub(crate) async fn run(
             continue;
         }
 
+        let domain = session.prepare_domain_for_turn(disposition, pending_domain.take())?;
+        agent.queue_domain_profile(domain);
         let phase = session.prepare_phase_for_turn(disposition, pending_phase.take())?;
         agent.queue_research_phase(phase);
 
@@ -228,10 +289,43 @@ pub(crate) async fn run(
                 .record_request_audit(attempt)
                 .map_err(ChatError::into_request_audit_agent_loop_error)
         };
+        let mut tool_start = |plan: &crate::domain::tools::ToolExecutionPlan| {
+            let _ = writeln!(
+                io::stderr(),
+                "[tool started] name={} execution_id={} call_id={}",
+                plan.call.name,
+                plan.execution_id,
+                plan.call.call_id
+            );
+        };
         let mut record_execution = |outcome: &ToolExecutionOutcome| {
-            session
+            let disposition = session
                 .record_execution(outcome)
-                .map_err(ChatError::into_execution_receipt_agent_loop_error)
+                .map_err(ChatError::into_execution_receipt_agent_loop_error)?;
+            match disposition {
+                ReceiptRecordDisposition::Recorded { event_id } => {
+                    let _ = writeln!(
+                        io::stderr(),
+                        "[tool {}] name={} execution_id={} receipt_event={} call_id={}",
+                        tool_terminal_label(outcome.receipt.status),
+                        outcome.result.tool_name,
+                        outcome.receipt.execution_id,
+                        event_id,
+                        outcome.result.call_id
+                    );
+                }
+                ReceiptRecordDisposition::Existing { event_id } => {
+                    let _ = writeln!(
+                        io::stderr(),
+                        "[tool deduplicated] name={} source_execution_id={} source_receipt_event={} call_id={}",
+                        outcome.result.tool_name,
+                        outcome.receipt.execution_id,
+                        event_id,
+                        outcome.result.call_id
+                    );
+                }
+            }
+            Ok(())
         };
         let follow_up_session = &session;
         let follow_up_composition = composition;
@@ -259,9 +353,10 @@ pub(crate) async fn run(
                 cancellation,
                 &audit_context,
                 &mut record_attempt,
-                CliVisionStages::new(
+                CliRuntimeStages::new(
                     &mut follow_up,
                     &mut text_delta as &mut AssistantTextDeltaStage<'_>,
+                    &mut tool_start as &mut ToolExecutionStartStage<'_>,
                     &mut record_execution as &mut ToolExecutionReceiptStage<'_>,
                 ),
             );
@@ -289,6 +384,12 @@ pub(crate) async fn run(
                 session.record_history(&agent.history().items()[history_start..])?;
                 println!();
                 return Err(ChatError::Agent(error));
+            }
+        }
+        if let Some(plan) = agent.last_context_plan() {
+            let pressure = compaction::ContextPressure::from_plan(plan);
+            if pressure.should_remind() {
+                println!("{}", pressure.message());
             }
         }
     }
@@ -483,6 +584,46 @@ impl DurableChatSession {
         Ok(selection.phase())
     }
 
+    /// Makes the selected Domain durable before AgentLoop can apply it or
+    /// send a Provider request. Legacy replay remains read-only until here.
+    fn prepare_domain_for_turn(
+        &self,
+        disposition: SessionDisposition,
+        requested: Option<DomainProfileSelection>,
+    ) -> Result<DomainProfile, ChatError> {
+        let mut writer = self.project.open_writer()?;
+        let mut store = writer.open_session(self.session_id.clone(), None)?;
+        let stream_id = ProjectEventStream::Session(self.session_id.clone()).stream_id();
+        let mut projection =
+            SessionProjection::replay(EventSource::read_events(&store, &stream_id)?)?;
+        let selection = match requested {
+            Some(selection) => selection,
+            None => match projection.state().domain_profile_selection() {
+                Some(selection) => return Ok(selection.profile()),
+                None if disposition == SessionDisposition::Started => {
+                    DomainProfileSelection::new_session_default()
+                }
+                None => DomainProfileSelection::legacy_default(),
+            },
+        };
+        let sequence = store.next_sequence()?;
+        let event = SessionEvent::DomainProfileSelected { selection }.into_envelope(
+            event_id(
+                self.project.project_id(),
+                &self.session_id,
+                sequence.get(),
+                "domain-profile",
+            ),
+            stream_id,
+            sequence,
+            occurred_at(),
+        )?;
+        projection
+            .append(&mut store, event)
+            .map_err(ChatError::from_session_append)?;
+        Ok(selection.profile())
+    }
+
     fn record_request_audit(&self, attempt: RequestAuditAttempt) -> Result<(), ChatError> {
         self.record_request_audit_manifest(attempt, None)
             .map(|_| ())
@@ -528,21 +669,32 @@ impl DurableChatSession {
             .map_err(|error| ChatError::Agent(error.into_agent_loop_error()))
     }
 
-    fn record_execution(&self, outcome: &ToolExecutionOutcome) -> Result<(), ChatError> {
+    fn record_execution(
+        &self,
+        outcome: &ToolExecutionOutcome,
+    ) -> Result<ReceiptRecordDisposition, ChatError> {
         let mut writer = self.project.open_writer()?;
         let mut store = writer.open_session(self.session_id.clone(), None)?;
         let stream_id = ProjectEventStream::Session(self.session_id.clone()).stream_id();
         let mut projection =
             SessionProjection::replay(EventSource::read_events(&store, &stream_id)?)?;
-        if projection
+        if let Some(record) = projection
             .state()
             .execution_receipts()
             .iter()
-            .any(|record| record.receipt == outcome.receipt)
+            .find(|record| record.receipt == outcome.receipt)
         {
-            return Ok(());
+            return Ok(ReceiptRecordDisposition::Existing {
+                event_id: record.event_id.clone(),
+            });
         }
         let sequence = store.next_sequence()?;
+        let receipt_event_id = event_id(
+            self.project.project_id(),
+            &self.session_id,
+            sequence.get(),
+            "execution-receipt",
+        );
         let event = if outcome.receipt.cache_source.is_some() {
             SessionEvent::ToolResultCacheHit {
                 receipt: outcome.receipt.clone(),
@@ -552,21 +704,13 @@ impl DurableChatSession {
                 receipt: outcome.receipt.clone(),
             }
         }
-        .into_envelope(
-            event_id(
-                self.project.project_id(),
-                &self.session_id,
-                sequence.get(),
-                "execution-receipt",
-            ),
-            stream_id,
-            sequence,
-            occurred_at(),
-        )?;
+        .into_envelope(receipt_event_id.clone(), stream_id, sequence, occurred_at())?;
         projection
             .append(&mut store, event)
             .map_err(ChatError::from_session_append)?;
-        Ok(())
+        Ok(ReceiptRecordDisposition::Recorded {
+            event_id: receipt_event_id,
+        })
     }
 
     fn record_history(&self, items: &[crate::domain::model::ContentItem]) -> Result<(), ChatError> {
@@ -596,6 +740,11 @@ impl DurableChatSession {
     }
 }
 
+enum ReceiptRecordDisposition {
+    Recorded { event_id: EventId },
+    Existing { event_id: EventId },
+}
+
 fn parse_phase(value: &str) -> Result<ResearchPhase, ChatError> {
     match value.trim() {
         "mapping" => Ok(ResearchPhase::Mapping),
@@ -606,6 +755,14 @@ fn parse_phase(value: &str) -> Result<ResearchPhase, ChatError> {
         value => Err(ChatError::UnknownPhase {
             value: value.to_owned(),
         }),
+    }
+}
+
+fn tool_terminal_label(status: crate::domain::tools::ToolResultStatus) -> &'static str {
+    match status {
+        crate::domain::tools::ToolResultStatus::Succeeded => "completed",
+        crate::domain::tools::ToolResultStatus::Failed => "failed",
+        crate::domain::tools::ToolResultStatus::Cancelled => "cancelled",
     }
 }
 
@@ -697,6 +854,10 @@ pub(crate) enum ChatError {
     VisionComposition { message: String },
     #[error("Vision analysis was cancelled before the Primary request")]
     VisionCancelled,
+    #[error(
+        "strict Session History changed independently from the active AgentLoop; Compaction was not appended"
+    )]
+    CompactionRuntimeHistoryMismatch,
 }
 
 impl ChatError {

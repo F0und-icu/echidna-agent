@@ -22,6 +22,7 @@ pub mod trace_eval_runtime;
 
 mod cli_chat;
 mod cli_inspection;
+mod cli_session;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -43,12 +44,16 @@ enum CliCommand {
     Init,
     /// Start an interactive research session.
     Chat {
-        /// Explicitly resume this durable Session instead of starting a new one.
-        #[arg(long, value_name = "SESSION_ID")]
+        /// Resume one durable Session ID, or `latest`; `--session` is kept as an alias.
+        #[arg(
+            long = "resume",
+            visible_alias = "session",
+            value_name = "SESSION_ID|latest"
+        )]
         session: Option<String>,
-        /// Fixed vulnerability-research target domain for this Chat process.
-        #[arg(long, value_enum, default_value_t = CliDomainProfile::Source)]
-        domain: CliDomainProfile,
+        /// Explicit target domain. Omit on Resume to restore the durable selection.
+        #[arg(long, value_enum)]
+        domain: Option<CliDomainProfile>,
         /// Explicit initial research objective. Omit to use or restore Mapping.
         #[arg(long, value_enum)]
         phase: Option<CliResearchPhase>,
@@ -73,6 +78,43 @@ enum CliCommand {
         #[command(subcommand)]
         inspection: InspectCommand,
     },
+    /// Inspect or end durable local Sessions without starting a model runtime.
+    Session {
+        #[command(subcommand)]
+        command: SessionCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SessionCommand {
+    /// List every strictly replayable Session in the current Project.
+    List,
+    /// Show one strictly replayed Session summary.
+    Show {
+        #[arg(value_name = "SESSION_ID")]
+        session: String,
+    },
+    /// Durably end one Active Session.
+    End {
+        #[arg(value_name = "SESSION_ID")]
+        session: String,
+    },
+    /// Export one Session transcript and its durable references.
+    Export {
+        #[arg(value_name = "SESSION_ID")]
+        session: String,
+        #[arg(long, value_enum, default_value_t = CliSessionExportFormat::Markdown)]
+        format: CliSessionExportFormat,
+        /// Write a new file instead of stdout; an existing path is never overwritten.
+        #[arg(long, value_name = "PATH")]
+        output: Option<PathBuf>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum CliSessionExportFormat {
+    Markdown,
+    Json,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -199,6 +241,8 @@ pub enum CliError {
     Chat { message: String },
     #[error("Session `{session_id}` does not exist in the current project")]
     SessionNotFound { session_id: String },
+    #[error("Session operation failed: {message}")]
+    SessionOperation { message: String },
     #[error(
         "the current project has {session_count} Sessions; select one explicitly with `--session <session-id>`"
     )]
@@ -314,12 +358,13 @@ fn discover_current_project() -> Result<Project, CliError> {
 fn run_chat(
     config: Option<&Path>,
     session: Option<String>,
-    domain: CliDomainProfile,
+    domain: Option<CliDomainProfile>,
     phase: Option<CliResearchPhase>,
 ) -> Result<(), CliError> {
     let config = config.ok_or(CliError::ChatConfigurationRequired)?;
     let config = ProviderComposition::load_config(config)?;
     let project = discover_current_project()?;
+    let session = cli_session::resolve_resume_target(&project, session.as_deref())?;
     let composition = ProviderComposition::compose_for_project(
         config,
         Arc::new(adapters::credentials::ProcessEnvironmentCredentialSource),
@@ -335,7 +380,7 @@ fn run_chat(
             project,
             &composition,
             session,
-            domain.into(),
+            domain.map(DomainProfile::from),
             phase.map(ResearchPhase::from),
         ))
         .map_err(|error| CliError::Chat {
@@ -407,6 +452,23 @@ where
                     eval_candidates,
                 },
         }) => cli_inspection::print_guidance_shadow(&target_snapshot, eval_candidates.as_deref()),
+        Some(CliCommand::Session { command }) => match command {
+            SessionCommand::List => cli_session::print_list(),
+            SessionCommand::Show { session } => cli_session::print_show(&session),
+            SessionCommand::End { session } => cli_session::end(&session),
+            SessionCommand::Export {
+                session,
+                format,
+                output,
+            } => cli_session::export(
+                &session,
+                match format {
+                    CliSessionExportFormat::Markdown => cli_session::ExportFormat::Markdown,
+                    CliSessionExportFormat::Json => cli_session::ExportFormat::Json,
+                },
+                output.as_deref(),
+            ),
+        },
         None => {
             let mut command = Cli::command();
             command.print_help()?;

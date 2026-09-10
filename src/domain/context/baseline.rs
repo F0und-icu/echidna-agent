@@ -159,6 +159,12 @@ impl ProviderSession {
     /// Marks a reset reason without discarding a Baseline before the forced
     /// full request completes successfully.
     pub fn reset(&mut self, reason: BaselineInvalidationReason) {
+        // Compaction replaces History and Summary semantics. Once queued, no
+        // later Turn-boundary Prompt/Tool change may obscure that causal reset
+        // before the first successful complete request commits it.
+        if self.pending_reset == Some(BaselineInvalidationReason::CompactionReset) {
+            return;
+        }
         self.pending_reset = Some(reason);
     }
 

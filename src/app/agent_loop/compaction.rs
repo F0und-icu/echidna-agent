@@ -36,6 +36,16 @@ where
     Provider: ModelProvider + ?Sized,
     Tools: ToolExecutor + ?Sized,
 {
+    /// Verifies the active Session/Primary binding before a caller appends a
+    /// new Compaction fact. The durable Compaction itself is still validated
+    /// and applied only by [`Self::apply_compaction`].
+    pub(crate) fn validate_compaction_session(
+        &self,
+        session: &SessionState,
+    ) -> Result<(), AgentLoopConfigurationError> {
+        self.compaction_session_stream(session).map(|_| ())
+    }
+
     /// Applies a durable Compaction projection. Repeating the same persisted
     /// fact is a no-op; a new fact replaces the active derived Summary and
     /// forces exactly one subsequent Full request.
@@ -44,32 +54,7 @@ where
         session: &SessionState,
         validation: Option<&CompactionValidationContext<'_>>,
     ) -> Result<(), AgentLoopConfigurationError> {
-        if session.lifecycle() != SessionLifecycle::Active {
-            return Err(AgentLoopConfigurationError::ActiveSessionCompactionRequired);
-        }
-        let stream_id = session
-            .stream_id()
-            .cloned()
-            .ok_or(AgentLoopConfigurationError::CompactionSessionStreamMissing)?;
-        if let Some(expected) = &self.bound_session_stream
-            && expected != &stream_id
-        {
-            return Err(
-                AgentLoopConfigurationError::CompactionSessionStreamMismatch {
-                    expected: expected.clone(),
-                    received: stream_id,
-                },
-            );
-        }
-        let expected_provider = session
-            .primary_provider_session()
-            .ok_or(AgentLoopConfigurationError::ActiveSessionCompactionRequired)?;
-        if expected_provider != self.provider_session.reference() {
-            return Err(AgentLoopConfigurationError::CompactionProviderMismatch {
-                expected: expected_provider.clone(),
-                received: self.provider_session.reference().clone(),
-            });
-        }
+        let stream_id = self.compaction_session_stream(session)?;
         let compaction = session
             .latest_compaction()
             .ok_or(AgentLoopConfigurationError::CompactionRequired)?;
@@ -118,5 +103,38 @@ where
             .reset(BaselineInvalidationReason::CompactionReset);
         self.clear_committed_primary_delivery_state();
         Ok(())
+    }
+
+    fn compaction_session_stream(
+        &self,
+        session: &SessionState,
+    ) -> Result<StreamId, AgentLoopConfigurationError> {
+        if session.lifecycle() != SessionLifecycle::Active {
+            return Err(AgentLoopConfigurationError::ActiveSessionCompactionRequired);
+        }
+        let stream_id = session
+            .stream_id()
+            .cloned()
+            .ok_or(AgentLoopConfigurationError::CompactionSessionStreamMissing)?;
+        if let Some(expected) = &self.bound_session_stream
+            && expected != &stream_id
+        {
+            return Err(
+                AgentLoopConfigurationError::CompactionSessionStreamMismatch {
+                    expected: expected.clone(),
+                    received: stream_id,
+                },
+            );
+        }
+        let expected_provider = session
+            .primary_provider_session()
+            .ok_or(AgentLoopConfigurationError::ActiveSessionCompactionRequired)?;
+        if expected_provider != self.provider_session.reference() {
+            return Err(AgentLoopConfigurationError::CompactionProviderMismatch {
+                expected: expected_provider.clone(),
+                received: self.provider_session.reference().clone(),
+            });
+        }
+        Ok(stream_id)
     }
 }

@@ -573,9 +573,9 @@ impl ResearchState {
     }
 
     /// The sole TargetSnapshot applicability projection for an existing
-    /// NextAction's typed Research reference. It deliberately never infers a
-    /// Snapshot, version, prerequisite, or experiment identity from action
-    /// prose.
+    /// typed Research reference. NextAction guidance and Compaction both
+    /// consume this rule; it never infers a Snapshot, version, prerequisite,
+    /// or experiment identity from prose.
     pub(crate) fn research_reference_target_applicability(
         &self,
         reference: &ResearchRecordRef,
@@ -619,6 +619,54 @@ impl ResearchState {
         }
     }
 
+    /// Resolves whether one Evidence reference is bound to the exact current
+    /// TargetSnapshot. This is intentionally stricter than the target/version
+    /// compatibility used by evidence-gap projection: Compaction must not
+    /// carry an Artifact, Experiment, or Receipt from an older Snapshot even
+    /// when both Snapshots describe the same target version.
+    pub(crate) fn evidence_reference_target_applicability(
+        &self,
+        references: &ResearchReferenceCatalog,
+        reference: &EvidenceRef,
+        current_target: &TargetSnapshotId,
+    ) -> ResearchReferenceTargetApplicability {
+        if self.target_snapshot(current_target).is_none() {
+            return ResearchReferenceTargetApplicability::MissingReference;
+        }
+        match reference {
+            EvidenceRef::Artifact(id) => match self.artifacts.get(id) {
+                Some(record) if &record.target_snapshot_id == current_target => {
+                    ResearchReferenceTargetApplicability::Applicable
+                }
+                Some(_) => ResearchReferenceTargetApplicability::Incompatible,
+                None => ResearchReferenceTargetApplicability::MissingReference,
+            },
+            EvidenceRef::Experiment(id) => self.research_reference_target_applicability(
+                &ResearchRecordRef::Experiment(id.clone()),
+                current_target,
+            ),
+            EvidenceRef::ExecutionReceipt(id) => {
+                if references.execution_receipt(id).is_none() {
+                    return ResearchReferenceTargetApplicability::MissingReference;
+                }
+                if self.capsules.values().any(|capsule| {
+                    capsule.execution_receipt_ids.contains(id)
+                        && &capsule.target_snapshot_id == current_target
+                        && self
+                            .experiments
+                            .get(&capsule.experiment_id)
+                            .is_some_and(|experiment| {
+                                &experiment.target_snapshot_id == current_target
+                            })
+                }) {
+                    ResearchReferenceTargetApplicability::Applicable
+                } else {
+                    ResearchReferenceTargetApplicability::Incompatible
+                }
+            }
+        }
+    }
+
     pub(crate) fn retrieval_artifact_records(&self) -> impl Iterator<Item = &ArtifactRecord> {
         self.artifacts.records()
     }
@@ -627,7 +675,7 @@ impl ResearchState {
         self.experiments.get(id)
     }
 
-    pub(super) fn capsule_for_experiment(
+    pub(crate) fn capsule_for_experiment(
         &self,
         experiment: &ExperimentRecord,
     ) -> Option<&ExperimentCapsuleRecord> {
