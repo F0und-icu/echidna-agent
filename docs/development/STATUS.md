@@ -7,12 +7,12 @@
 - Implementation: `STARTED`
 - Current milestone: `M5` optional interface and personal distribution evaluation
 - Current slice: `M5-S2`
-- Slice state: `READY_NOT_AUTHORIZED`; M5-S1a and M5-S1b are complete locally, while no M5-S2 implementation is authorized
+- Slice state: `AUTHORIZED_NOT_STARTED`; the operator authorized M5-S2 implementation, appropriate testing and remote Git delivery after the M5-S1 remote seal
 - Lean governance: `PASS`; M5-S1 retains one AgentLoop, Session/Research/Receipt authorities and fixed CLI stages without automatic Compaction, a Hook registry, second state source or public test surface
-- Local Git initialized: `yes`; dirty local `main` tracks `origin/main`, and no M5 commit or remote operation is authorized
-- Remote repository: `F0und-icu/cyber-agent` private; F2a is sealed through `[skip ci]` PR `#62`, while no tag, release or Actions run was created
+- Local Git initialized: `yes`; clean local `main` tracks `origin/main`
+- Remote repository: `F0und-icu/cyber-agent` private; M5-S1 is sealed through PR `#63` and Squash Merge `6bd85b6`
 - Documentation baseline commit: `55ff3be`
-- Current code base: M5-S1a and M5-S1b are independently audited and locally gated on one dirty local `main`, but neither is committed or remotely sealed
+- Current code base: M5-S1a and M5-S1b are independently audited, locally gated and remotely sealed; M5-S2 has not started
 
 ## M5-S1a Slice Start
 
@@ -77,6 +77,7 @@
 - API/dependency/module review: no crate, Cargo feature, Port, Event, Config, Prompt, wire/schema version, Provider branch, Hook/registry, model call or externally public test surface was added. New composition and pressure types are private or `pub(crate)`/`pub(super)` with current production consumers; `capsule_for_experiment` is widened only to `pub(crate)` for the production Adapter. The 391-line `research_projection` module triggered split review and remains one cohesive read-only Project Research plus Session Receipt projection boundary; splitting its shared strict replay/reference catalog now would add forwarding surface without a second semantic owner.
 - Removed/deferred: the repair removed the Adapter-local target/version fallback and every unfiltered Evidence-closure path. Automatic Compaction, model-generated summaries, line editing, TUI/Web, M5-S2 CI/release work, Git/Actions/Live and remote sealing remain outside this completed Slice.
 - External effects: no real credential resolution, Provider Live request, Codex login/config access, Git commit/push/PR, Actions run, Live Test, tag, release or Web/TUI work occurred. The read-only upstream reference remains clean at `868c9edb0da913a5fc699a71664e65f44f6058b0`.
+- Git and remote seal: implementation commit `0711f23` passed the sole PR-head Rust Gate in run `34487474572`; private PR `#63` Squash Merged as `6bd85b6d9bf955a4074157f0d5b184441ba4e277`. No main-branch duplicate run, tag or Release was created.
 
 ## F2a Slice Start
 
