@@ -31,7 +31,7 @@
 
 当前状态：
 
-- 阶段：Implementation；M0 至 M5-S2 和 F1a-F1e/F2a 已远端封存；F3 已完成本地修复、独立审计、完整离线 Gate 及带明确限制的合成 Live 验收，已授权远端交付，具体验证与 Git 状态见 STATUS。
+- 阶段：Implementation；M0 至 M5-S2 和 F1a-F1e/F2a 已远端封存；F3 已完成独立审计、完整离线 Gate、带明确限制的合成 Live 验收，并经 PR #67 / Squash Merge `5873c08` 远端封存，具体验证与 Git 状态见 STATUS。
 - 当前代码基线已具备一个 AgentLoop、项目/会话/研究/审计事实、固定领域 Prompt Profiles、多模态组合、Replay/Eval、唯一 Provider Composition Root 和第一版 CLI Chat。
 - Architecture v1.5/v1.6 已在本地冻结：Provider-visible completed reasoning 与 Conversation History 分离，并仅在有完整 `reasoning_text` 时忽略冗余 Adapter-local encrypted sidecar；architecture-manifest 远端封存仍未授权。
 - Architecture v1.7 / ADR-0017 约束 F3 的逐阶段持久化、Research 前缀恢复、当前上下文接入、预算压缩与网络超时。本轮不实现非交互执行或 benchmark 适配，不自动授权 Git、Actions 或 Live。
@@ -2088,7 +2088,7 @@ M1 总完成标准：M1a、M1b、M1c 分别有可运行集成测试，任一后�
 
 ## 25. 下一步
 
-F3 当前更新：M5-S1a/S1b/S2 已完成并远端封存；F3 已通过独立 Terra xhigh 审计、完整离线 Gate（406 passed / 2 Live ignored）、Lean Review、正式 CLI 合成 Live 和本地分发验证，正在执行已授权远端交付。Full-only 活跃推理遇核心上下文替换或无法保留的预算时仍显式停止，Resume／显式压缩后恢复；不能宣称无缝热替换。非交互执行与 benchmark 适配暂不实现，下一 Slice 未授权。以下为此前 milestone 封存时的历史交接，不是当前 Slice 授权；当前状态仅以 STATUS 为准。
+F3 当前更新：M5-S1a/S1b/S2 已完成并远端封存；F3 已通过独立 Terra xhigh 审计、完整离线 Gate（406 passed / 2 Live ignored）、Lean Review、正式 CLI 合成 Live 和本地分发验证，并经 PR #67 / Squash Merge `5873c08` 远端封存。Full-only 活跃推理遇核心上下文替换或无法保留的预算时仍显式停止，Resume／显式压缩后恢复；不能宣称无缝热替换。非交互执行与 benchmark 适配暂不实现，下一 Slice 未授权。以下为此前 milestone 封存时的历史交接，不是当前 Slice 授权；当前状态仅以 STATUS 为准。
 
 具体状态始终以 `docs/development/STATUS.md` 为准。F1a-F1e 已远端封存；F1e 的远端 Gate 由用户在 GitHub 账单/额度导致零 Step 失败后明确单次豁免，后续 Actions 暂停。Architecture v1.2 至 v1.6 的远端架构封存仍未授权。
 
