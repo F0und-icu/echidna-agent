@@ -419,7 +419,11 @@ fn session_history_facts_replay_through_the_single_pairing_owner_and_normalize_i
         Some(ContentItem::ToolResult { result })
             if result.call_id.as_str() == "open"
                 && result.status == ToolResultStatus::Cancelled
-                && result.output == json!({"error": "aborted"})
+                && result.output == json!({
+                    "error": "aborted",
+                    "execution_status": "unknown",
+                    "guidance": "do_not_assume_no_effect_or_auto_rerun"
+                })
     ));
 
     let duplicate = SessionReducer.reduce([

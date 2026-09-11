@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use thiserror::Error;
 
 use crate::domain::canonical_json::{canonical_blake3_hash, canonical_json};
@@ -16,7 +16,10 @@ use crate::domain::context::{
     ContextFragmentSource, FragmentCachePolicy,
 };
 use crate::domain::model::{ContentItem, MessageRole};
-use crate::domain::research::ResearchState;
+use crate::domain::research::{
+    ExperimentResult, FindingStatus, HypothesisStatus, NextActionStatus, ResearchRecordRef,
+    ResearchReferenceTargetApplicability, ResearchState, TargetSnapshotRecord,
+};
 use crate::domain::snapshot::ProjectSnapshot;
 
 /// The fixed research-only section vocabulary frozen in Architecture v1.
@@ -148,57 +151,203 @@ impl ResearchWorldState {
         })
     }
 
-    /// Derives only facts whose current status is expressible without adding
-    /// a second Research query API. In particular, this never labels every
-    /// stored hypothesis as active or every experiment as recent.
+    /// Projects the current typed Research facts without treating an absent
+    /// record class as an observed empty fact. The latest TargetSnapshot is
+    /// the sole current-target identity; every target-scoped record is
+    /// filtered through its typed relationship to that snapshot.
     pub fn from_research_state(state: &ResearchState) -> Result<Self, WorldStateError> {
-        let serialized = serde_json::to_value(state).map_err(WorldStateError::encoding)?;
-        let object = serialized.as_object().cloned().unwrap_or_default();
+        let Some(current_target) = state.current_target_snapshot() else {
+            return Self::from_sections(unknown_current_target_sections());
+        };
+        let current_target_id = &current_target.id;
+        let active_hypotheses = state
+            .hypothesis_records()
+            .filter_map(|record| {
+                if !matches!(
+                    record.status,
+                    HypothesisStatus::Active | HypothesisStatus::Testing
+                ) || record.merged_into.is_some()
+                {
+                    return None;
+                }
+                let target_applicability = match state.research_reference_target_applicability(
+                    &ResearchRecordRef::Hypothesis(record.id.clone()),
+                    current_target_id,
+                ) {
+                    ResearchReferenceTargetApplicability::Applicable => "exact_snapshot",
+                    // Hypotheses bind only to a target identity. They are useful
+                    // current context, but never assert exact-Snapshot proof.
+                    ResearchReferenceTargetApplicability::Unknown => "target_id_only",
+                    ResearchReferenceTargetApplicability::Incompatible
+                    | ResearchReferenceTargetApplicability::MissingReference => return None,
+                };
+                Some(json!({
+                    "record": record,
+                    "target_applicability": target_applicability,
+                }))
+            })
+            .collect::<Vec<_>>();
+        let experiments = state
+            .retrieval_experiment_records()
+            .filter(|record| {
+                matches!(
+                    state.research_reference_target_applicability(
+                        &ResearchRecordRef::Experiment(record.id.clone()),
+                        current_target_id,
+                    ),
+                    ResearchReferenceTargetApplicability::Applicable
+                )
+            })
+            .map(|record| serde_json::to_value(record).map_err(WorldStateError::encoding))
+            .collect::<Result<Vec<_>, _>>()?;
+        let findings = state
+            .finding_records()
+            .filter(|record| {
+                record.status != FindingStatus::Discarded
+                    && record.merged_into.is_none()
+                    && matches!(
+                        state.research_reference_target_applicability(
+                            &ResearchRecordRef::Finding(record.id.clone()),
+                            current_target_id,
+                        ),
+                        ResearchReferenceTargetApplicability::Applicable
+                    )
+            })
+            .map(|record| serde_json::to_value(record).map_err(WorldStateError::encoding))
+            .collect::<Result<Vec<_>, _>>()?;
+        let rejected_hypotheses = state
+            .hypothesis_records()
+            .filter_map(|record| {
+                if record.status != HypothesisStatus::Rejected || record.merged_into.is_some() {
+                    return None;
+                }
+                let target_applicability = match state.research_reference_target_applicability(
+                    &ResearchRecordRef::Hypothesis(record.id.clone()),
+                    current_target_id,
+                ) {
+                    ResearchReferenceTargetApplicability::Applicable => "exact_snapshot",
+                    ResearchReferenceTargetApplicability::Unknown => "target_id_only",
+                    ResearchReferenceTargetApplicability::Incompatible
+                    | ResearchReferenceTargetApplicability::MissingReference => return None,
+                };
+                Some(json!({
+                    "record": record,
+                    "target_applicability": target_applicability,
+                }))
+            })
+            .collect::<Vec<_>>();
+        let negative_experiments = state
+            .retrieval_experiment_records()
+            .filter(|record| {
+                record.result == ExperimentResult::Negative
+                    && matches!(
+                        state.research_reference_target_applicability(
+                            &ResearchRecordRef::Experiment(record.id.clone()),
+                            current_target_id,
+                        ),
+                        ResearchReferenceTargetApplicability::Applicable
+                    )
+            })
+            .map(|record| serde_json::to_value(record).map_err(WorldStateError::encoding))
+            .collect::<Result<Vec<_>, _>>()?;
+        let next_actions = state
+            .retrieval_next_action_records()
+            .filter(|record| {
+                matches!(
+                    record.status,
+                    NextActionStatus::Pending | NextActionStatus::Running
+                ) && matches!(
+                    state.research_reference_target_applicability(
+                        &record.research_id,
+                        current_target_id,
+                    ),
+                    ResearchReferenceTargetApplicability::Applicable
+                        | ResearchReferenceTargetApplicability::Unknown
+                )
+            })
+            .map(|record| {
+                let applicability = match state
+                    .research_reference_target_applicability(&record.research_id, current_target_id)
+                {
+                    ResearchReferenceTargetApplicability::Applicable => "exact_snapshot",
+                    ResearchReferenceTargetApplicability::Unknown => "target_or_version_only",
+                    ResearchReferenceTargetApplicability::Incompatible
+                    | ResearchReferenceTargetApplicability::MissingReference => {
+                        unreachable!("the filter retains only current-target next actions")
+                    }
+                };
+                json!({"record": record, "target_applicability": applicability})
+            })
+            .collect::<Vec<_>>();
+        let attack_surface = active_hypotheses
+            .iter()
+            .filter_map(|entry| {
+                entry
+                    .get("record")?
+                    .get("attack_surface")?
+                    .as_str()
+                    .map(str::to_owned)
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+
         Self::from_sections([
-            (ResearchWorldStateSection::Target, Value::Array(Vec::new())),
+            (
+                ResearchWorldStateSection::Target,
+                target_projection(current_target),
+            ),
             (
                 ResearchWorldStateSection::TargetSnapshot,
-                Value::Array(Vec::new()),
+                snapshot_projection(current_target)?,
             ),
             (
                 ResearchWorldStateSection::TargetDelta,
-                Value::Array(Vec::new()),
+                unknown("target_delta_projection_not_available"),
             ),
             (
                 ResearchWorldStateSection::Environment,
-                Value::Array(Vec::new()),
+                environment_projection(current_target),
             ),
             (
                 ResearchWorldStateSection::ProjectSnapshot,
-                Value::Array(Vec::new()),
+                unknown("project_snapshot_is_composed_separately"),
             ),
             (
                 ResearchWorldStateSection::AttackSurface,
-                Value::Array(Vec::new()),
+                json!({"state": "observed", "values": attack_surface}),
             ),
             (
                 ResearchWorldStateSection::ActiveHypotheses,
-                records_with_status(&object, "hypotheses", &["active", "testing"]),
+                json!({"state": "observed", "target_snapshot_id": current_target_id, "records": active_hypotheses}),
             ),
             (
                 ResearchWorldStateSection::RecentExperiments,
-                Value::Array(Vec::new()),
+                json!({
+                    "state": "observed",
+                    "target_snapshot_id": current_target_id,
+                    "recency": "not_modeled; records are exact-current-target experiments",
+                    "records": experiments,
+                }),
             ),
             (
                 ResearchWorldStateSection::Findings,
-                records_without_status(&object, "findings", "discarded"),
+                json!({"state": "observed", "target_snapshot_id": current_target_id, "records": findings}),
             ),
             (
                 ResearchWorldStateSection::FailedPaths,
-                Value::Array(Vec::new()),
+                json!({
+                    "state": "observed",
+                    "target_snapshot_id": current_target_id,
+                    "rejected_hypotheses": rejected_hypotheses,
+                    "negative_experiments": negative_experiments,
+                }),
             ),
             (
                 ResearchWorldStateSection::ActiveJobs,
-                Value::Array(Vec::new()),
+                unknown("research_ledger_has_no_typed_active_job_projection"),
             ),
             (
                 ResearchWorldStateSection::NextActions,
-                records_with_status(&object, "next_actions", &["pending", "running"]),
+                json!({"state": "observed", "target_snapshot_id": current_target_id, "records": next_actions}),
             ),
         ])
     }
@@ -336,35 +485,42 @@ impl<'a> From<&'a ProjectSnapshot> for ProjectSnapshotSemanticHash<'a> {
     }
 }
 
-fn record_values<'a>(object: &'a Map<String, Value>, key: &str) -> impl Iterator<Item = &'a Value> {
-    object
-        .get(key)
-        .and_then(Value::as_object)
+fn unknown(reason: &'static str) -> Value {
+    json!({"state": "unknown", "reason": reason})
+}
+
+fn unknown_current_target_sections() -> impl IntoIterator<Item = (ResearchWorldStateSection, Value)>
+{
+    ResearchWorldStateSection::ALL
         .into_iter()
-        .flat_map(|records| records.values())
+        .map(|section| (section, unknown("no_current_target_snapshot_recorded")))
 }
 
-fn records_with_status(object: &Map<String, Value>, key: &str, statuses: &[&str]) -> Value {
-    Value::Array(
-        record_values(object, key)
-            .filter(|record| {
-                record
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .is_some_and(|status| statuses.contains(&status))
-            })
-            .cloned()
-            .collect(),
-    )
+fn target_projection(snapshot: &TargetSnapshotRecord) -> Value {
+    json!({
+        "state": "observed",
+        "target_id": snapshot.target_id,
+        "kind": snapshot.kind,
+        "locator": snapshot.locator,
+        "version": snapshot.version,
+        "build_id": snapshot.build_id,
+    })
 }
 
-fn records_without_status(object: &Map<String, Value>, key: &str, excluded: &str) -> Value {
-    Value::Array(
-        record_values(object, key)
-            .filter(|record| record.get("status").and_then(Value::as_str) != Some(excluded))
-            .cloned()
-            .collect(),
-    )
+fn snapshot_projection(snapshot: &TargetSnapshotRecord) -> Result<Value, WorldStateError> {
+    Ok(json!({
+        "state": "observed",
+        "record": serde_json::to_value(snapshot).map_err(WorldStateError::encoding)?,
+    }))
+}
+
+fn environment_projection(snapshot: &TargetSnapshotRecord) -> Value {
+    json!({
+        "state": "observed",
+        "target_snapshot_id": snapshot.id,
+        "environment_fingerprint": snapshot.environment_fingerprint,
+        "device_fingerprint": snapshot.device_fingerprint,
+    })
 }
 
 fn render_full(state: &ResearchWorldState) -> String {

@@ -1891,7 +1891,7 @@ fn synthetic_long_flow_preserves_authoritative_evidence_across_compaction_and_re
 }
 
 #[test]
-fn stale_v2_compaction_is_rejected_before_a_durable_resume_event() {
+fn append_only_research_evolution_rebuilds_compaction_before_resume() {
     let root = TemporaryDirectory::new("cli-chat-stale-compaction");
     initialize_project(root.path());
     let config = write_config(root.path(), "http://127.0.0.1:1/v1");
@@ -1902,13 +1902,78 @@ fn stale_v2_compaction_is_rejected_before_a_durable_resume_event() {
 
     let bound_target = append_research_snapshot(&project, "bound");
     append_v2_compaction(&project, &session, bound_target);
-    append_research_snapshot(&project, "newer");
+    let current = append_research_snapshot(&project, "newer");
     let before = session_events(root.path(), &session);
 
     let resumed = run_chat(root.path(), &config, "/exit\n", &["--session", &session]);
+    assert!(
+        resumed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    let after = session_events(root.path(), &session);
+    assert_eq!(&after[..before.len()], before.as_slice());
+    assert_eq!(
+        after[before.len()]["event_type"],
+        "session.compaction_created"
+    );
+    assert_eq!(after[before.len() + 1]["event_type"], "session.resumed");
+    assert_eq!(
+        after[before.len()]["payload"]["summary"]["evidence_spine"]["target_snapshot_refs"],
+        json!([current.as_str()])
+    );
+    // No stale source is reused and repeating Resume creates no new Summary.
+    let again = run_chat(root.path(), &config, "/exit\n", &["--session", &session]);
+    assert!(
+        again.status.success(),
+        "{}",
+        String::from_utf8_lossy(&again.stderr)
+    );
+    let final_events = session_events(root.path(), &session);
+    assert_eq!(
+        final_events
+            .iter()
+            .filter(|event| event["event_type"] == "session.compaction_created")
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn changed_historical_research_prefix_is_rejected_before_resume() {
+    let root = TemporaryDirectory::new("cli-chat-tampered-compaction");
+    initialize_project(root.path());
+    let config = write_config(root.path(), "http://127.0.0.1:1/v1");
+    assert!(
+        run_chat(root.path(), &config, "/exit\n", &[])
+            .status
+            .success()
+    );
+    let session = session_id(root.path());
+    let project = Project::discover(root.path()).unwrap();
+    let bound = append_research_snapshot(&project, "bound");
+    append_v2_compaction(&project, &session, bound);
+    append_research_snapshot(&project, "newer");
+    let research_path = root.path().join(".cyber-agent/research.jsonl");
+    let contents = fs::read_to_string(&research_path).unwrap();
+    let mut lines = contents
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    lines[0]["occurred_at"] = json!("tampered-history-timestamp");
+    fs::write(
+        &research_path,
+        lines
+            .iter()
+            .map(|line| format!("{}\n", serde_json::to_string(line).unwrap()))
+            .collect::<String>(),
+    )
+    .unwrap();
+    let before = session_events(root.path(), &session);
+    let resumed = run_chat(root.path(), &config, "/exit\n", &["--session", &session]);
     assert!(!resumed.status.success());
     assert!(
-        String::from_utf8_lossy(&resumed.stderr).contains("Research revision is stale"),
+        String::from_utf8_lossy(&resumed.stderr).contains("historical Research prefix"),
         "{}",
         String::from_utf8_lossy(&resumed.stderr)
     );
@@ -2527,8 +2592,6 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
         "next-action-m5-compact",
         "artifact-m5-compact",
         read_receipt.as_str(),
-        "m5-compact-artifact",
-        "m5-compact-read",
         "continue after explicit compaction",
     ] {
         assert!(
@@ -2538,6 +2601,20 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
     }
 
     let compacted_state = reduced_session(&project, &session);
+    // F3 selects the retained suffix by actual budget/reduction rather than
+    // always keeping twelve items. Original call/result facts remain durable
+    // even if they are omitted from this request; no retained pair is split.
+    let original_history = serde_json::to_string(compacted_state.history().items()).unwrap();
+    assert!(original_history.contains("m5-compact-artifact"));
+    assert!(original_history.contains("m5-compact-read"));
+    let retained = compacted_state
+        .latest_compaction()
+        .unwrap()
+        .retained_history();
+    assert_eq!(
+        cyber_agent::domain::history::normalize_content_items(retained).unwrap(),
+        retained
+    );
     let summary =
         serde_json::to_value(compacted_state.latest_compaction().unwrap().summary()).unwrap();
     assert_eq!(summary["schema_version"], 2);
@@ -2803,6 +2880,122 @@ fn m5_compaction_preconditions_never_append_a_partial_fact() {
 }
 
 #[test]
+fn f3_compaction_rejects_negative_reduction_without_appending() {
+    let root = TemporaryDirectory::new("f3-compaction-no-reduction");
+    initialize_project(root.path());
+    let project = Project::discover(root.path()).unwrap();
+    append_research_snapshot(&project, "small");
+    let server = spawn_responses_server(vec![(200, text_response("ok", "short"))]);
+    let config = write_config(root.path(), &server.base_url);
+    assert!(
+        run_chat(root.path(), &config, "hi\n/exit\n", &[])
+            .status
+            .success()
+    );
+    server.join();
+    let session = session_id(root.path());
+    let output = run_chat(root.path(), &config, "/compact\n", &["--session", &session]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("smaller usable next-Turn Context"));
+    assert!(
+        session_events(root.path(), &session)
+            .iter()
+            .all(|event| event["event_type"] != "session.compaction_created")
+    );
+}
+
+#[test]
+fn f3_large_compaction_bounds_reference_subset_and_drops_oversized_recent_history() {
+    let root = TemporaryDirectory::new("f3-compaction-bounded");
+    initialize_project(root.path());
+    let project = Project::discover(root.path()).unwrap();
+    append_research_snapshot(&project, "large");
+    let server = spawn_responses_server(vec![(
+        200,
+        text_response(&"analysis ".repeat(3500), "large"),
+    )]);
+    let config = write_config(root.path(), &server.base_url);
+    let initial = run_chat(
+        root.path(),
+        &config,
+        "Investigate parser boundaries\n/exit\n",
+        &[],
+    );
+    assert!(
+        initial.status.success(),
+        "{}",
+        String::from_utf8_lossy(&initial.stderr)
+    );
+    server.join();
+    let session = session_id(root.path());
+    for index in 0..100 {
+        let record = HypothesisRecord::from_draft(HypothesisDraft {
+            id: HypothesisId::new(format!("hypothesis-f3-{index:03}-{}", "x".repeat(120))),
+            title: format!("parser candidate {index}"),
+            target_id: "fixture.target".to_owned(),
+            attack_surface: format!("input {index}"),
+            vulnerability_class: "validation".to_owned(),
+            entry_point: format!("entry {index}"),
+            sensitive_sink: "parser".to_owned(),
+            rationale: "requires controlled verification".to_owned(),
+            status: HypothesisStatus::Testing,
+            priority: 1,
+            evidence_links: vec![],
+            last_action: None,
+            next_action: None,
+        })
+        .unwrap();
+        append_research_event(
+            &project,
+            &format!("f3-hyp-{index}"),
+            ResearchEvent::HypothesisRecorded {
+                record,
+                keep_independent: true,
+            },
+        );
+    }
+    let output = run_chat(
+        root.path(),
+        &config,
+        "/compact\n/exit\n",
+        &["--session", &session],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let events = session_events(root.path(), &session);
+    let compaction = &events
+        .iter()
+        .find(|event| event["event_type"] == "session.compaction_created")
+        .unwrap()["payload"];
+    assert!(serde_json::to_vec(&compaction["summary"]).unwrap().len() <= 8192);
+    let references = compaction["summary"]["evidence_spine"]["active_hypothesis_refs"]
+        .as_array()
+        .unwrap();
+    assert!(!references.is_empty() && references.len() <= 32);
+    assert!(
+        compaction["retained_history"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        compaction["summary"]["narrative"]["current_goal"]
+            .as_str()
+            .unwrap()
+            .contains("parser boundaries")
+    );
+    assert!(
+        !compaction["summary"]["narrative"]["unresolved_questions"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
 fn m5_context_pressure_uses_only_planner_manifest_and_never_auto_compacts() {
     let normal = TemporaryDirectory::new("m5-context-pressure-normal");
     initialize_project(normal.path());
@@ -3050,7 +3243,7 @@ fn m5_cli_labels_deduplicated_tool_calls_without_a_second_start_or_receipt() {
 }
 
 #[test]
-fn m5_cli_labels_failed_and_cancelled_tools_only_after_durable_receipts() {
+fn f3_graceful_interrupt_never_fabricates_a_receipt_for_unobserved_external_effects() {
     let project = TemporaryDirectory::new("m5-cli-tool-terminal-visibility");
     initialize_project(project.path());
     let marker = project.path().join("blocking-tool-started");
@@ -3125,7 +3318,7 @@ fn m5_cli_labels_failed_and_cancelled_tools_only_after_durable_receipts() {
     let output = f2a_wait_child(child, "M5 Tool terminal visibility");
     f2a_join_server(server, "M5 Tool terminal visibility");
     assert!(
-        output.status.success(),
+        !output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -3134,9 +3327,8 @@ fn m5_cli_labels_failed_and_cancelled_tools_only_after_durable_receipts() {
     assert!(stderr.contains(
         "[tool failed] name=run_command execution_id=execution:m5-failed receipt_event="
     ));
-    assert!(stderr.contains(
-        "[tool cancelled] name=run_command execution_id=execution:m5-cancelled receipt_event="
-    ));
+    assert!(!stderr.contains("[tool cancelled]"));
+    assert!(stderr.contains("external effects are unknown"));
 
     let events = session_events(project.path(), &session_id(project.path()));
     let receipt_statuses = events
@@ -3144,7 +3336,30 @@ fn m5_cli_labels_failed_and_cancelled_tools_only_after_durable_receipts() {
         .filter(|event| event["event_type"] == "tool.execution_receipt_recorded")
         .map(|event| event["payload"]["receipt"]["status"].as_str().unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(receipt_statuses, vec!["failed", "cancelled"]);
+    assert_eq!(receipt_statuses, vec!["failed"]);
+    assert!(
+        marker.exists(),
+        "the effect before interruption must not be denied"
+    );
+    let state = reduced_session(
+        &Project::discover(project.path()).unwrap(),
+        &session_id(project.path()),
+    );
+    assert!(state.history().ensure_all_tool_calls_paired().is_err());
+    let normalized =
+        cyber_agent::domain::history::normalize_content_items(state.history().items()).unwrap();
+    let unresolved = normalized
+        .iter()
+        .find_map(|item| match item {
+            cyber_agent::domain::model::ContentItem::ToolResult { result }
+                if result.call_id.as_str() == "m5-cancelled" =>
+            {
+                Some(result)
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(unresolved.output["execution_status"], "unknown");
 }
 
 #[test]
@@ -3679,4 +3894,295 @@ fn ctrl_c_cancels_an_active_request_and_keeps_the_session_resumable() {
             .count(),
         1
     );
+}
+
+mod f3_context {
+    use super::*;
+
+    fn append_finding(
+        project: &Project,
+        event_label: &str,
+        id: &str,
+        title: &str,
+        target_snapshot_ids: Vec<TargetSnapshotId>,
+    ) {
+        let record = FindingRecord::from_draft(FindingDraft {
+            id: FindingId::new(id),
+            title: title.to_owned(),
+            status: FindingStatus::Candidate,
+            target_id: "fixture.target".to_owned(),
+            target_version: "1.0.0".to_owned(),
+            vulnerability_class: format!("fixture-class-{id}"),
+            entry_point: format!("fixture-entry-{id}"),
+            sensitive_sink: format!("fixture-sink-{id}"),
+            target_snapshot_ids,
+            prerequisites: Vec::new(),
+            impact: "candidate only".to_owned(),
+            evidence_links: Vec::new(),
+        })
+        .unwrap();
+        append_research_event(
+            project,
+            event_label,
+            ResearchEvent::FindingRecorded {
+                record,
+                keep_independent: false,
+            },
+        );
+    }
+
+    fn append_active_hypothesis(project: &Project, id: &str) {
+        let record = HypothesisRecord::from_draft(HypothesisDraft {
+            id: HypothesisId::new(id),
+            title: "F3 current hypothesis".to_owned(),
+            target_id: "fixture.target".to_owned(),
+            attack_surface: "F3 fixture surface".to_owned(),
+            vulnerability_class: "F3 fixture class".to_owned(),
+            entry_point: "F3 fixture entry".to_owned(),
+            sensitive_sink: "F3 fixture sink".to_owned(),
+            rationale: "F3 refresh regression fixture".to_owned(),
+            status: HypothesisStatus::Active,
+            priority: 1,
+            evidence_links: Vec::new(),
+            last_action: None,
+            next_action: None,
+        })
+        .unwrap();
+        append_research_event(
+            project,
+            "f3-current-hypothesis",
+            ResearchEvent::HypothesisRecorded {
+                record,
+                keep_independent: false,
+            },
+        );
+    }
+
+    fn write_f3_context_config(root: &std::path::Path, base_url: &str) -> std::path::PathBuf {
+        let prompts = root.join("prompts");
+        fs::create_dir_all(&prompts).unwrap();
+        fs::write(prompts.join("personal.md"), "F3 personal prompt v1\n").unwrap();
+        fs::write(prompts.join("project.md"), "F3 project prompt fixed\n").unwrap();
+        fs::create_dir_all(root.join(".cyber-agent/memory")).unwrap();
+        fs::write(
+            root.join(".cyber-agent/memory/core.md"),
+            "F3 core memory v1\n",
+        )
+        .unwrap();
+
+        let config = write_config(root, base_url);
+        let mut content = fs::read_to_string(&config).unwrap();
+        content.push_str(
+            "\n[prompts]\npersonal_file = \"prompts/personal.md\"\nproject_file = \"prompts/project.md\"\n",
+        );
+        fs::write(&config, content).unwrap();
+        config
+    }
+
+    fn write_sse_response(socket: &mut std::net::TcpStream, body: &str) {
+        let headers = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        socket.write_all(headers.as_bytes()).unwrap();
+        socket.write_all(body.as_bytes()).unwrap();
+        socket.flush().unwrap();
+    }
+
+    fn accept_before_deadline(listener: &TcpListener, label: &str) -> std::net::TcpStream {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            match listener.accept() {
+                Ok((socket, _)) => return socket,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "{label} loopback server did not receive the expected request"
+                    );
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("{label} loopback server failed to accept: {error}"),
+            }
+        }
+    }
+
+    #[test]
+    fn current_context_refreshes_later_steps_and_filters_to_the_exact_target_snapshot() {
+        let root = TemporaryDirectory::new("f3-context-refresh");
+        initialize_project(root.path());
+        let project = Project::discover(root.path()).unwrap();
+        let old_snapshot = append_research_snapshot(&project, "f3-old");
+        let current_snapshot = append_research_snapshot(&project, "f3-current");
+        append_finding(
+            &project,
+            "f3-old-finding",
+            "f3-old-finding",
+            "F3 stale finding must not reach current context",
+            vec![old_snapshot],
+        );
+        append_finding(
+            &project,
+            "f3-current-finding",
+            "f3-current-finding",
+            "F3 exact current finding reaches context",
+            vec![current_snapshot],
+        );
+        append_finding(
+            &project,
+            "f3-unknown-finding",
+            "f3-unknown-finding",
+            "F3 same-version finding without an exact snapshot is not proof",
+            Vec::new(),
+        );
+        append_active_hypothesis(&project, "f3-current-hypothesis");
+        fs::write(root.path().join("target.txt"), "F3 tool read fixture\n").unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let (request_sender, requests) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let mut first = accept_before_deadline(&listener, "first F3 context");
+            first
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            request_sender.send(read_http_request(&mut first)).unwrap();
+            let _ = released.recv();
+            write_sse_response(
+                &mut first,
+                &m4_long_flow_tool_response(
+                    "f3-context-read",
+                    "read_file",
+                    json!({"path": "target.txt"}),
+                    "f3-context-first",
+                ),
+            );
+
+            let mut second = accept_before_deadline(&listener, "later F3 context");
+            second
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            request_sender.send(read_http_request(&mut second)).unwrap();
+            write_sse_response(
+                &mut second,
+                &text_response("F3 context refresh complete", "f3-context-final"),
+            );
+        });
+        let config = write_f3_context_config(root.path(), &format!("http://{address}/v1"));
+        let child = spawn_f2a_chat(
+            root.path(),
+            &config,
+            "refresh current context after a tool result\n/exit\n",
+            &[],
+        );
+
+        let first = request_body(
+            &requests
+                .recv_timeout(Duration::from_secs(15))
+                .expect("first request should arrive"),
+        );
+        let first_wire = serde_json::to_string(&first).unwrap();
+        let first_instructions = first["instructions"].as_str().unwrap();
+        assert!(first_instructions.contains("F3 personal prompt v1"));
+        assert!(first_instructions.contains("F3 project prompt fixed"));
+        assert!(first_wire.contains("F3 core memory v1"));
+        assert!(first_wire.contains("snapshot-f3-current"));
+        assert!(first_wire.contains("fixture-environment"));
+        // The bounded WorldState renderer may cut record prose, but a selected
+        // record keeps its typed ID. Neither stale nor merely same-version
+        // Finding is eligible to become current-context proof.
+        assert!(first_wire.contains("f3-current-finding"));
+        assert!(!first_wire.contains("f3-old-finding"));
+        assert!(!first_wire.contains("f3-unknown-finding"));
+        assert!(!first_wire.contains("F3 later next action"));
+
+        append_research_event(
+            &project,
+            "f3-later-next-action",
+            ResearchEvent::NextActionRecorded(
+                NextActionRecord::from_draft(NextActionDraft {
+                    id: NextActionId::new("f3-later-next-action"),
+                    research_id: ResearchRecordRef::Hypothesis(HypothesisId::new(
+                        "f3-current-hypothesis",
+                    )),
+                    priority: 5,
+                    action: "F3 later next action".to_owned(),
+                    status: NextActionStatus::Pending,
+                })
+                .unwrap(),
+            ),
+        );
+        fs::write(
+            root.path().join("prompts/personal.md"),
+            "F3 personal prompt v2\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join(".cyber-agent/memory/core.md"),
+            "F3 core memory v2\n",
+        )
+        .unwrap();
+        release.send(()).unwrap();
+
+        let second = request_body(
+            &requests
+                .recv_timeout(Duration::from_secs(15))
+                .expect("later request should arrive"),
+        );
+        server.join().unwrap();
+        let output = f2a_wait_child(child, "F3 context refresh");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let second_wire = serde_json::to_string(&second).unwrap();
+        let second_instructions = second["instructions"].as_str().unwrap();
+        assert!(second_instructions.contains("F3 personal prompt v2"));
+        assert!(!second_instructions.contains("F3 personal prompt v1"));
+        assert!(second_instructions.contains("F3 project prompt fixed"));
+        assert!(second_wire.contains("F3 core memory v2"));
+        assert!(!second_wire.contains("F3 core memory v1"));
+        assert!(second_wire.contains("F3 later next action"));
+    }
+
+    #[test]
+    fn configured_missing_prompt_fails_before_a_provider_request() {
+        let root = TemporaryDirectory::new("f3-context-missing-prompt");
+        initialize_project(root.path());
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let config = write_config(root.path(), &format!("http://{address}/v1"));
+        let mut configured = fs::read_to_string(&config).unwrap();
+        configured.push_str("\n[prompts]\npersonal_file = \"missing-personal.md\"\n");
+        fs::write(&config, configured).unwrap();
+
+        let output = run_chat(
+            root.path(),
+            &config,
+            "this must not reach the provider\n/exit\n",
+            &[],
+        );
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("read personal Prompt"),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let deadline = Instant::now() + Duration::from_millis(200);
+        loop {
+            match listener.accept() {
+                Ok(_) => panic!("configured missing Prompt must fail before a Provider request"),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("failed to inspect Provider listener: {error}"),
+            }
+        }
+    }
 }

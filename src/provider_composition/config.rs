@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -21,6 +21,8 @@ pub(super) struct ProviderConfigV1 {
     pub(super) providers: BTreeMap<String, ProviderDefinition>,
     pub(super) capability_mappings: BTreeMap<String, CapabilityMappingDefinition>,
     pub(super) agent_profiles: BTreeMap<String, AgentProfileDefinition>,
+    #[serde(default)]
+    pub(super) prompts: PromptSources,
 }
 
 impl ProviderConfigV1 {
@@ -32,10 +34,17 @@ impl ProviderConfigV1 {
                 source,
             }
         })?;
-        toml::from_str(&encoded).map_err(|source| ProviderCompositionError::DecodeConfiguration {
-            path: path.to_path_buf(),
-            message: redact_inline_api_key(source.to_string()),
-        })
+        let mut config: Self = toml::from_str(&encoded).map_err(|source| {
+            ProviderCompositionError::DecodeConfiguration {
+                path: path.to_path_buf(),
+                message: redact_inline_api_key(source.to_string()),
+            }
+        })?;
+        config.prompts.validate()?;
+        config
+            .prompts
+            .resolve_relative_to(path.parent().unwrap_or_else(|| Path::new(".")));
+        Ok(config)
     }
 
     pub(super) fn active_agent_definition(&self) -> &AgentProfileDefinition {
@@ -98,6 +107,40 @@ impl ProviderConfigV1 {
     }
 }
 
+/// Explicit prompt paths, deliberately without prompt bytes. Interactive
+/// Context loading owns their I/O so `doctor` remains content-free.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PromptSources {
+    pub(crate) personal_file: Option<PathBuf>,
+    pub(crate) project_file: Option<PathBuf>,
+}
+
+impl PromptSources {
+    fn resolve_relative_to(&mut self, parent: &Path) {
+        for path in [&mut self.personal_file, &mut self.project_file]
+            .into_iter()
+            .flatten()
+        {
+            if path.is_relative() {
+                *path = parent.join(&*path);
+            }
+        }
+    }
+
+    pub(super) fn validate(&self) -> Result<(), ProviderCompositionError> {
+        for (field, path) in [
+            ("prompts.personal_file", self.personal_file.as_ref()),
+            ("prompts.project_file", self.project_file.as_ref()),
+        ] {
+            if path.is_some_and(|path| path.as_os_str().is_empty()) {
+                return Err(ProviderCompositionError::InvalidPromptPath { field });
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize)]
 pub(super) enum ProviderBinding {
     #[serde(rename = "http_sse")]
@@ -121,6 +164,18 @@ pub(super) struct ProviderDefinition {
     pub(super) api_key: Option<InlineApiKey>,
     pub(super) capability_mapping: String,
     pub(super) generation: u64,
+    #[serde(default = "default_connect_timeout_ms")]
+    pub(super) connect_timeout_ms: u64,
+    #[serde(default = "default_read_timeout_ms")]
+    pub(super) read_timeout_ms: u64,
+}
+
+const fn default_connect_timeout_ms() -> u64 {
+    crate::adapters::responses::DEFAULT_CONNECT_TIMEOUT_MS
+}
+
+const fn default_read_timeout_ms() -> u64 {
+    crate::adapters::responses::DEFAULT_READ_TIMEOUT_MS
 }
 
 impl ProviderDefinition {

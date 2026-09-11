@@ -16,7 +16,7 @@
 4. `task.md` 中当前产品范围、架构约束和里程碑。
 5. `docs/development/IMPLEMENTATION_PLAN.md`。
 6. `docs/development/LEAN_CODE_GOVERNANCE.md`。
-7. 最新的冻结架构链：`docs/architecture/CYBER_AGENT_ARCHITECTURE_V1.md` 至 `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_6.md`。
+7. 最新的冻结架构链：`docs/architecture/CYBER_AGENT_ARCHITECTURE_V1.md` 至 `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_7.md`。
 8. 已接受的 `docs/adr/ADR-*.md`。
 9. `docs/development/GIT_VERSION_RELEASE.md` 和 `docs/development/DEVELOPMENT_ENVIRONMENT.md`。
 10. `Codex架构与漏洞挖掘Agent复用评估.md`。
@@ -37,6 +37,7 @@
 | `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_4.md` | 架构 v1.4 ToolFailure 执行边界与持久 Trace 准确率可观测性增量 | 本地冻结；远端封存未授权前不修改 |
 | `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_5.md` | 架构 v1.5 Provider reasoning continuation 与双 History 权威边界 | 本地冻结；远端封存未授权前不修改 |
 | `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_6.md` | 架构 v1.6 冗余 encrypted reasoning sidecar 的 Adapter-local 边界 | 本地冻结；远端封存未授权前不修改 |
+| `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_7.md` | 架构 v1.7 交互连续性、当前上下文与预算恢复；ADR-0017 | 本地冻结；远端封存待授权 |
 | `docs/architecture/SEALED_MANIFEST.md` | 封存来源、提交基线和 Hash 清单 | 只追加新封存记录 |
 | `docs/development/IMPLEMENTATION_PLAN.md` | 按 Slice 可执行的开发步骤和验收门 | 可以，不能追溯改写已完成 Slice |
 | `docs/development/STATUS.md` | 当前唯一工作状态和下一动作 | 每个 Slice 开始/结束更新 |
@@ -69,7 +70,7 @@ Codex Luna xhigh 或其他高推理 Codex 执行开发任务时，必须按顺�
 3. 当前 Slice 在 `docs/development/IMPLEMENTATION_PLAN.md` 中的完整章节
 4. `docs/development/LEAN_CODE_GOVERNANCE.md`
 5. `task.md` 的相关架构章节和测试红线
-6. 冻结架构 v1 至 v1.6 的完整 additive chain 及相关 ADR 中与该 Slice 相关的接口契约
+6. 冻结架构 v1 至 v1.7 的完整 additive chain 及相关 ADR 中与该 Slice 相关的接口契约
 7. 已有源码、测试和工作树状态
 
 用户明确授权开发子 Agent 时，每个子 Agent 也必须自行读取上述文件；父 Agent 的摘要不能替代本地治理文件。
@@ -92,10 +93,10 @@ Codex Luna xhigh 或其他高推理 Codex 执行开发任务时，必须按顺�
 
 ## 6. 当前状态
 
-M0 至 M4-S2 以及 F1a 至 F1e 均已远端封存。F1e 通过完整本地 Gate 和一次 DeepSeek Full-only Live Tool Loop；GitHub 因账单/额度原因让远端 Run `33295806720` 在零 Step 时失败，用户明确授权该次不重跑 Actions 的合并。后续 Actions 暂停，M4-S3c 与进一步 Live 请求仍未授权。
+M0 至 M5-S2 以及 F1a-F1e/F2a 已远端封存。当前 F3 修复交互式运行连续性，具体审计和 Gate 进展以 STATUS 为准；本轮不增加非交互执行或 benchmark 适配，不触发 Git/Actions/Live。
 
 Architecture v1.5/v1.6 已在本地冻结：completed reasoning 仅属于 Provider delivery，明文存在时冗余 opaque encrypted sidecar 不进入 Core；encrypted-only 与未知 content 继续显式失败。
 
-原 M4-S3a 又在实现前拆成 M4-S3a1 与 M4-S3a2；M4-S3a1/a2/b 已完成并远端 checkpoint，当前 M4-S3c 为 `READY_NOT_AUTHORIZED`。`codex/` 仍是固定提交的只读参考。
+Architecture v1.7 / ADR-0017 是 F3 的本地增量约束；历史封存和 Live 结果不会被当作 F3 的验证。`codex/` 仍是固定提交的只读参考。
 
 实现入口以 `docs/development/STATUS.md` 为准。

@@ -15,6 +15,7 @@ use crate::domain::profile::AgentModelProfile;
 use crate::domain::request_audit::RequestAdapterVersion;
 use crate::ports::model::ModelProvider;
 
+pub(crate) use config::PromptSources;
 use config::{ProviderBinding, ProviderConfigV1, ProviderCredential, ProviderDefinition, WireApi};
 pub use validation::ProviderCompositionError;
 
@@ -25,6 +26,7 @@ pub struct ProviderComposition {
     primary: Arc<dyn ModelProvider>,
     vision: Option<Arc<dyn ModelProvider>>,
     primary_request_adapter_version: RequestAdapterVersion,
+    prompt_sources: PromptSources,
 }
 
 /// One strictly decoded and validated Config v1 value awaiting runtime-only
@@ -92,12 +94,19 @@ impl ProviderComposition {
             .map(|_| &self.primary_request_adapter_version)
     }
 
+    /// Paths only: the CLI refresh stage reads optional prompt content at a
+    /// Turn boundary and reports filesystem errors before Provider activity.
+    pub(crate) fn prompt_sources(&self) -> &PromptSources {
+        &self.prompt_sources
+    }
+
     fn compose(
         config: ValidatedProviderConfig,
         credential_source: Arc<dyn CredentialSource>,
         project: Option<Project>,
     ) -> Result<Self, ProviderCompositionError> {
         let config = config.0;
+        let prompt_sources = config.prompts.clone();
 
         let agent = config.active_agent_definition();
         let primary_definition = config.provider(&agent.primary);
@@ -125,6 +134,7 @@ impl ProviderComposition {
             primary,
             vision,
             primary_request_adapter_version: ResponsesHttpAdapter::request_adapter_version(),
+            prompt_sources,
         })
     }
 }
@@ -155,7 +165,8 @@ fn compose_provider(
                     &definition.model,
                     credential_reference,
                     capabilities,
-                ),
+                )
+                .with_timeouts(definition.connect_timeout_ms, definition.read_timeout_ms),
                 credential_source,
             );
             let adapter = match project {

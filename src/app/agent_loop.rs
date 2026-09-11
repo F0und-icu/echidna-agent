@@ -4,6 +4,8 @@ mod compaction;
 mod context_state;
 mod request_audit;
 
+pub(crate) use context_state::CurrentContextState;
+
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -170,12 +172,33 @@ pub type ViewImageFollowUp<'a> = dyn FnMut(ViewImageSelection) -> ViewImageFollo
 pub type ViewImageFollowUpFuture<'a> =
     Pin<Box<dyn Future<Output = Result<InitialImagePrimaryContext, AgentLoopError>> + 'a>>;
 
-/// The one fixed stage that makes a completed Tool outcome durable before the
-/// next Provider sample. It is deliberately scoped to Receipt persistence;
-/// it does not own Tool execution, Cache policy, History pairing or a general
-/// Hook mechanism.
+/// The one fixed pre-sampling Context refresh. Its result is typed current
+/// data, not a hook payload; the AgentLoop immediately captures a fresh
+/// immutable SamplingStepPlan after installing it.
+pub(crate) type ContextRefreshStage<'a> =
+    dyn FnMut() -> Result<CurrentContextState, AgentLoopError> + 'a;
+
+/// The existing fixed stage that makes a completed Tool outcome durable before
+/// the next Provider sample. It remains available to the generic audited
+/// runtime path; CLI Chat uses [`ChatDurabilityStage`] so its paired History
+/// fact and real Receipt are checkpointed by one Session owner.
 pub type ToolExecutionReceiptStage<'a> =
     dyn FnMut(&ToolExecutionOutcome) -> Result<(), AgentLoopError> + 'a;
+
+/// A bounded CLI-only durability checkpoint. This is one typed stage rather
+/// than a general transaction or Hook abstraction: user/model History is
+/// checkpointed before its dependent action; a real completed Receipt is
+/// checkpointed at scheduler completion; and ordered paired Tool Results are
+/// checkpointed before a later model sample.
+pub(crate) enum ChatDurabilityCheckpoint<'a> {
+    History(&'a [ContentItem]),
+    ExecutionReceipt(&'a ToolExecutionOutcome),
+}
+
+/// The fixed Chat persistence handoff. The CLI Session owner supplies this
+/// stage; AgentLoop retains History pairing, Tool execution and scheduling.
+pub(crate) type ChatDurabilityStage<'a> = dyn for<'checkpoint> FnMut(ChatDurabilityCheckpoint<'checkpoint>) -> Result<(), AgentLoopError>
+    + 'a;
 
 /// The fixed CLI-only notification emitted at the exact scheduler boundary
 /// before a Tool future is started. It is presentation only and cannot alter
@@ -194,7 +217,8 @@ pub(crate) struct CliRuntimeStages<'a> {
     follow_up: &'a mut ViewImageFollowUp<'a>,
     text_delta: &'a mut AssistantTextDeltaStage<'a>,
     tool_start: &'a mut ToolExecutionStartStage<'a>,
-    record_execution: &'a mut ToolExecutionReceiptStage<'a>,
+    durability: &'a mut ChatDurabilityStage<'a>,
+    context_refresh: &'a mut ContextRefreshStage<'a>,
 }
 
 impl<'a> CliRuntimeStages<'a> {
@@ -202,13 +226,15 @@ impl<'a> CliRuntimeStages<'a> {
         follow_up: &'a mut ViewImageFollowUp<'a>,
         text_delta: &'a mut AssistantTextDeltaStage<'a>,
         tool_start: &'a mut ToolExecutionStartStage<'a>,
-        record_execution: &'a mut ToolExecutionReceiptStage<'a>,
+        durability: &'a mut ChatDurabilityStage<'a>,
+        context_refresh: &'a mut ContextRefreshStage<'a>,
     ) -> Self {
         Self {
             follow_up,
             text_delta,
             tool_start,
-            record_execution,
+            durability,
+            context_refresh,
         }
     }
 }
@@ -217,6 +243,8 @@ struct StreamingStages<'a> {
     text_delta: Option<&'a mut AssistantTextDeltaStage<'a>>,
     tool_start: Option<&'a mut ToolExecutionStartStage<'a>>,
     record_execution: Option<&'a mut ToolExecutionReceiptStage<'a>>,
+    durability: Option<&'a mut ChatDurabilityStage<'a>>,
+    context_refresh: Option<&'a mut ContextRefreshStage<'a>>,
 }
 
 impl StreamingStages<'_> {
@@ -225,6 +253,8 @@ impl StreamingStages<'_> {
             text_delta: None,
             tool_start: None,
             record_execution: None,
+            durability: None,
+            context_refresh: None,
         }
     }
 }
@@ -236,6 +266,7 @@ pub struct AgentLoop<'provider, 'tools, Provider: ?Sized, Tools: ?Sized> {
     pending_prompt_composition: Option<PromptComposition>,
     world_state: Option<ResearchWorldState>,
     project_snapshot: Option<ProjectSnapshotContext>,
+    project_memory_core: Option<crate::domain::context::ContextFragment>,
     session_summary: Option<SessionSummary>,
     pending_session_summary: Option<SessionSummaryDraft>,
     history: ConversationHistory,
@@ -260,6 +291,7 @@ pub struct AgentLoop<'provider, 'tools, Provider: ?Sized, Tools: ?Sized> {
     committed_history_len: usize,
     committed_world_state: Option<ResearchWorldState>,
     committed_project_snapshot: Option<ProjectSnapshotContext>,
+    committed_project_memory_core: Option<crate::domain::context::ContextFragment>,
     history_provenance: BTreeMap<usize, ContextProvenance>,
     bound_session_stream: Option<StreamId>,
     applied_compaction: Option<AppliedCompaction>,
@@ -330,6 +362,7 @@ where
             pending_prompt_composition: None,
             world_state: None,
             project_snapshot: None,
+            project_memory_core: None,
             session_summary: None,
             pending_session_summary: None,
             history: ConversationHistory::default(),
@@ -354,6 +387,7 @@ where
             committed_history_len: 0,
             committed_world_state: None,
             committed_project_snapshot: None,
+            committed_project_memory_core: None,
             history_provenance: BTreeMap::new(),
             bound_session_stream: None,
             applied_compaction: None,
@@ -499,6 +533,21 @@ where
     /// cache and snapshot fact owners remain outside this loop.
     pub fn set_project_snapshot(&mut self, project_snapshot: ProjectSnapshotContext) {
         self.project_snapshot = Some(project_snapshot);
+    }
+
+    /// Installs one typed current Context snapshot before a sampling Step or
+    /// Compaction preflight. Pending operator configuration is applied first;
+    /// this stage never changes Domain/Profile/Phase from refreshed facts.
+    pub(crate) fn refresh_current_context(
+        &mut self,
+        current: CurrentContextState,
+    ) -> Result<(), AgentLoopError> {
+        self.apply_pending_configuration()?;
+        self.prompt_composition = current.apply_prompt_sources(self.prompt_composition.clone())?;
+        self.world_state = Some(current.world_state().clone());
+        self.project_snapshot = Some(current.project_snapshot().clone());
+        self.project_memory_core = current.project_memory_core().cloned();
+        Ok(())
     }
 
     /// Replaces the local candidate for the next Compaction. It does not
@@ -655,17 +704,18 @@ where
                 text_delta: Some(text_delta),
                 tool_start: None,
                 record_execution: Some(record_execution),
+                durability: None,
+                context_refresh: None,
             },
         )
         .await
     }
 
-    /// Runs the production CLI path with the same streaming/Receipt stages
-    /// plus the one fixed Vision composition. The optional initial image and
-    /// every successful model-originated `view_image` result are mutually
-    /// exclusive Direct-or-Secondary Primary contexts prepared by the
-    /// existing Vision Session owner.
-    pub(crate) async fn run_turn_audited_with_vision_stages(
+    /// Production Chat's existing Vision/durability path plus the one fixed
+    /// current-facts refresh before every sampling Step. The refresh runs
+    /// after the Turn-boundary configuration has been applied and before a
+    /// new immutable SamplingStepPlan exists.
+    pub(crate) async fn run_turn_audited_with_context_refresh_and_vision_stages(
         &mut self,
         user_text: impl Into<String>,
         initial_image: Option<InitialImagePrimaryContext>,
@@ -687,7 +737,9 @@ where
             StreamingStages {
                 text_delta: Some(stages.text_delta),
                 tool_start: Some(stages.tool_start),
-                record_execution: Some(stages.record_execution),
+                record_execution: None,
+                durability: Some(stages.durability),
+                context_refresh: Some(stages.context_refresh),
             },
         )
         .await
@@ -706,6 +758,8 @@ where
             mut text_delta,
             mut tool_start,
             mut record_execution,
+            mut durability,
+            mut context_refresh,
         } = stages;
         self.apply_pending_configuration()?;
         if cancellation.is_cancelled() {
@@ -725,6 +779,11 @@ where
             self.history.append_content_item(initial_image)?;
             self.history_provenance.insert(history_index, provenance);
         }
+        if let Some(stage) = durability.as_deref_mut() {
+            stage(ChatDurabilityCheckpoint::History(
+                &self.history.items()[turn_history_start..],
+            ))?;
+        }
         let capabilities = self.provider.capabilities();
         let context_budget = self.context_planner.default_budget(&capabilities)?;
         self.next_turn_sequence += 1;
@@ -734,6 +793,9 @@ where
         let mut provider_requests = 0;
 
         for request_index in 0..MAX_MODEL_REQUESTS_PER_TURN {
+            if let Some(refresh) = context_refresh.as_deref_mut() {
+                self.refresh_current_context(refresh()?)?;
+            }
             self.history.ensure_all_tool_calls_paired()?;
             let resolved_tool_plan = self
                 .tools
@@ -752,6 +814,7 @@ where
                     prompt_composition: &self.prompt_composition,
                     world_state: self.world_state.as_ref(),
                     project_snapshot: self.project_snapshot.as_ref(),
+                    project_memory_core: self.project_memory_core.as_ref(),
                     session_summary: self.session_summary.as_ref(),
                     history: self.history.items(),
                     history_provenance: &self.history_provenance,
@@ -820,6 +883,10 @@ where
                             world_state: self.world_state.as_ref(),
                             committed_project_snapshot: self.committed_project_snapshot.as_ref(),
                             project_snapshot: self.project_snapshot.as_ref(),
+                            committed_project_memory_core: self
+                                .committed_project_memory_core
+                                .as_ref(),
+                            project_memory_core: self.project_memory_core.as_ref(),
                             history: self.history.items(),
                             history_provenance: &self.history_provenance,
                             turn_history_start,
@@ -1004,7 +1071,13 @@ where
             }
             self.require_continuation_identity(&completion, capabilities.incremental_input)?;
             let server_output_items = sample.content_items();
+            let sample_history_start = self.history.items().len();
             sample.commit(&mut self.history)?;
+            if let Some(stage) = durability.as_deref_mut() {
+                stage(ChatDurabilityCheckpoint::History(
+                    &self.history.items()[sample_history_start..],
+                ))?;
+            }
             self.provider_session
                 .record_completed_sample(&snapshot, server_output_items.clone())?;
             self.commit_continuation(&completion);
@@ -1019,6 +1092,7 @@ where
             self.committed_history_len = self.history.items().len();
             self.committed_world_state = self.world_state.clone();
             self.committed_project_snapshot = self.project_snapshot.clone();
+            self.committed_project_memory_core = self.project_memory_core.clone();
             self.committed_context_manifest = Some(plan.full_logical_manifest().clone());
             self.last_successful_context = Some(ContextInspection {
                 plan: plan.clone(),
@@ -1044,6 +1118,7 @@ where
                     &cancellation,
                     &mut tool_start,
                     &mut record_execution,
+                    &mut durability,
                 )
                 .await?;
             for execution in &scheduled.executions {
@@ -1172,6 +1247,7 @@ where
         self.committed_history_len = self.history.items().len();
         self.committed_world_state = None;
         self.committed_project_snapshot = None;
+        self.committed_project_memory_core = None;
         self.last_baseline_assessment = None;
     }
 
@@ -1231,11 +1307,12 @@ where
         cancellation: &AgentCancellation,
         start_stage: &mut Option<&mut ToolExecutionStartStage<'_>>,
         receipt_stage: &mut Option<&mut ToolExecutionReceiptStage<'_>>,
+        durability_stage: &mut Option<&mut ChatDurabilityStage<'_>>,
     ) -> Result<ScheduledCalls, AgentLoopError> {
         let mut prepared = Vec::with_capacity(calls.len());
         let mut plans = Vec::new();
         for call in calls {
-            let execution_id = ExecutionId::new(format!("execution:{}", call.call_id));
+            let execution_id = ExecutionId::for_model_call(&call.call_id);
             match self
                 .tools
                 .plan_model_call(resolved_tool_plan, execution_id, call.clone())
@@ -1261,19 +1338,32 @@ where
         }
 
         let planned_outcome_count = plans.len();
-        let scheduled = execute_batch(
-            self.tools,
-            plans,
-            cancellation,
-            &mut self.completed_idempotency,
-            start_stage,
-        )
-        .await;
+        let scheduled = {
+            let mut checkpoint_receipt = |outcome: &ToolExecutionOutcome| {
+                if let Some(stage) = durability_stage.as_deref_mut() {
+                    stage(ChatDurabilityCheckpoint::ExecutionReceipt(outcome))?;
+                }
+                Ok(())
+            };
+            let mut scheduler_receipt_stage: Option<&mut ToolExecutionReceiptStage<'_>> =
+                Some(&mut checkpoint_receipt);
+            execute_batch(
+                self.tools,
+                plans,
+                cancellation,
+                &mut self.completed_idempotency,
+                start_stage,
+                &mut scheduler_receipt_stage,
+            )
+            .await?
+        };
         if scheduled.outcomes.len() != planned_outcome_count {
             return Err(AgentLoopError::SchedulerResultCountMismatch);
         }
         let mut outcomes = scheduled.outcomes.into_iter();
         let mut executions = Vec::new();
+        let result_history_start = self.history.items().len();
+        let mut interrupted = false;
         for entry in prepared {
             match entry {
                 PreparedToolCall::Planned => {
@@ -1289,6 +1379,7 @@ where
                         ScheduledToolResult::NotStarted(result) => {
                             self.history.append_tool_result(result)?;
                         }
+                        ScheduledToolResult::Interrupted => interrupted = true,
                     }
                 }
                 PreparedToolCall::PlanningFailure(result) => {
@@ -1299,12 +1390,22 @@ where
         if outcomes.next().is_some() {
             return Err(AgentLoopError::SchedulerResultCountMismatch);
         }
-        self.history.ensure_all_tool_calls_paired()?;
-        if let Some(stage) = receipt_stage.as_deref_mut() {
+        if let Some(stage) = durability_stage.as_deref_mut() {
+            stage(ChatDurabilityCheckpoint::History(
+                &self.history.items()[result_history_start..],
+            ))?;
+        }
+        if durability_stage.is_none()
+            && let Some(stage) = receipt_stage.as_deref_mut()
+        {
             for outcome in &executions {
                 stage(outcome)?;
             }
         }
+        if interrupted {
+            return Err(AgentLoopError::ToolExecutionInterrupted);
+        }
+        self.history.ensure_all_tool_calls_paired()?;
         Ok(ScheduledCalls {
             executions,
             cancelled: scheduled.cancelled,
@@ -1503,6 +1604,10 @@ pub enum AgentLoopError {
     RequestAuditDeliveryMismatch,
     #[error("RequestAudit commit failed: {message}")]
     RequestAuditCommit { message: String },
+    #[error("History checkpoint commit failed: {message}")]
+    HistoryCheckpointCommit { message: String },
+    #[error("current Context refresh failed: {message}")]
+    ContextRefresh { message: String },
     #[error("Execution Receipt commit failed: {message}")]
     ExecutionReceiptCommit { message: String },
     #[error("assistant text presentation failed: {message}")]
@@ -1523,6 +1628,10 @@ pub enum AgentLoopError {
     ViewImageFollowUpCancelled,
     #[error("the Agent reached the per-Turn model-request limit of {limit}")]
     ModelRequestLimit { limit: usize },
+    #[error(
+        "Tool execution was interrupted before an outcome was observed; external effects are unknown, no Receipt or result was invented and no Tool was retried"
+    )]
+    ToolExecutionInterrupted,
     #[error("the Tool scheduler returned fewer outcomes than staged plans")]
     SchedulerResultMissing,
     #[error("the Tool scheduler returned more outcomes than staged plans")]

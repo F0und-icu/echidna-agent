@@ -44,6 +44,10 @@
 | Project/Research 事实 | Event/Artifact/Markdown 权威源 | Cache/Summary/Snapshot 只能删除重建 |
 | Evidence relation | Research Ledger 的 typed EvidenceLink owner | Summary/Prompt/Replay/Eval/Vision 只能引用或投影，不能创建关系 |
 | Retrieval 与 guidance | 固定版本化纯算法各一个 owner | Candidate pool 保留独立 eligibility；报告只进 Shadow/derived path |
+| 交互 History/Receipt 检查点 | AgentLoop 固定阶段 + Session Writer/Reducer | Receipt 不确定性不被改写成虚假 Result；无自动执行重试 |
+| 交互当前上下文装配 | CLI `context` 读取显式来源，AgentLoop 安装，ContextPlanner 编译 | 不增加目录发现、Prompt Registry 或另一套预算公式 |
+| Compaction 候选与恢复 | CLI `compaction` 选择，原 Session/History owner 配对，原 ContextPlanner 预检 | 先严格验证历史前缀再重建当前引用；不得绕过 exact-TargetSnapshot owner |
+| Session Receipt 投影缓存 | `research_projection` 的进程内派生 cache | 按精确来源复用；无独立持久事实源，不能靠 mtime 假定未变 |
 
 重复调用统一所有者是允许的；复制其规则、错误判定、排序、截断或配对逻辑是不允许的。
 

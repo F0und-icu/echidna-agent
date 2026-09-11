@@ -1034,6 +1034,21 @@ Gate：专项测试 → 受影响测试 → 独立审计 → 修复 → 完整 l
 - 独立 `live-smoke.yml` 只允许 `workflow_dispatch`，从 `live-test` Environment 向单个测试 step 注入 CI 专用 Key。
 - Fork、普通 PR 和 `pull_request_target` 不得获得或触发 Live Test Secret。
 
+### F3：Interactive Runtime Repair
+
+Fix the reviewed production defects on the remotely sealed M5-S2 baseline. The current operator authorization covers this repair round, not benchmark/non-interactive work.
+
+Deliverables:
+
+- Persist user input and complete model output History before downstream actions; persist Tool results with existing real Receipts before resampling. Preserve completed effects across interruption, and never replay a Tool automatically. Batch History appends through one lock/projection owner.
+- Validate a stale Summary against its exact historical Research prefix, then rebuild a new current-target Compaction from authoritative facts before Resume. Changed or missing historical sources still fail; never relax exact-target evidence eligibility.
+- Project current TargetSnapshot/environment and applicable Research records; refresh research facts at later sampling Steps without changing operator Domain/Phase inside a Turn.
+- Load explicit Personal/Project Prompt and Project Core Memory through the existing composition, ordering, fingerprint and provenance owners. Retrieval/guidance remain Shadow.
+- Keep Compaction deterministic and bounded, preserve a useful goal and continuation, reject non-beneficial candidates before append, and select complete recent History within a budget.
+- Add explicit Provider connection/read deadlines through Config and the existing Responses transport, with compatible defaults and loopback stalled-service tests.
+
+No new crate, second AgentLoop, fact store, generic Hook, benchmark adapter, non-interactive entry, vendor protocol, automatic retry or real Provider request. Permanent regressions stay in `tests/`. Each implementation workstream has finite ownership; final independent review covers their integration. Gate order remains focused → affected → independent audit → repairs → full Gate → Lean Review.
+
 ## 7. 失败与阻塞处理
 
 - 同一错误先定位最小失败层：Domain、Port、Adapter、Integration、Environment。

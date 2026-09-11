@@ -1858,7 +1858,7 @@ impl ToolExecutor for PendingToolExecutor {
 }
 
 #[tokio::test]
-async fn cancellation_during_tool_execution_records_a_cancelled_pair() {
+async fn cancellation_during_unobserved_tool_execution_preserves_unknown_state() {
     let registry = ToolRegistry::for_project(env!("CARGO_MANIFEST_DIR"));
     let spec = registry
         .specs()
@@ -1877,21 +1877,18 @@ async fn cancellation_during_tool_execution_records_a_cancelled_pair() {
     });
     let mut agent = AgentLoop::new(&provider, &tools);
 
-    let outcome = agent
-        .run_turn("read the fixture", cancellation)
-        .await
-        .unwrap();
-    let AgentTurnOutcome::Cancelled {
-        model_requests,
-        executions,
-    } = outcome
-    else {
-        panic!("the pending Tool should be cancelled")
-    };
-    assert_eq!(model_requests, 1);
-    assert_eq!(executions.len(), 1);
-    assert_eq!(executions[0].result.status, ToolResultStatus::Cancelled);
-    assert_eq!(agent.history().ensure_all_tool_calls_paired(), Ok(()));
+    assert!(matches!(
+        agent.run_turn("read the fixture", cancellation).await,
+        Err(AgentLoopError::ToolExecutionInterrupted)
+    ));
+    assert!(agent.history().ensure_all_tool_calls_paired().is_err());
+    assert!(
+        !agent
+            .history()
+            .items()
+            .iter()
+            .any(|item| matches!(item, ContentItem::ToolResult { .. }))
+    );
 }
 
 #[tokio::test]

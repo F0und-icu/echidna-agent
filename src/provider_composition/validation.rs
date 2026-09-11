@@ -24,6 +24,7 @@ impl ProviderConfigV1 {
                 profile: self.active_agent_profile.clone(),
             });
         }
+        self.prompts.validate()?;
 
         for (name, mapping) in &self.capability_mappings {
             validate_identifier("capability_mapping", name)?;
@@ -62,6 +63,14 @@ impl ProviderDefinition {
     ) -> Result<(), ProviderCompositionError> {
         validate_non_empty("provider.base_url", &self.base_url)?;
         validate_non_empty("provider.model", &self.model)?;
+        for (field, value) in [
+            ("provider.connect_timeout_ms", self.connect_timeout_ms),
+            ("provider.read_timeout_ms", self.read_timeout_ms),
+        ] {
+            if value == 0 || value > 86_400_000 {
+                return Err(ProviderCompositionError::InvalidTimeout { field });
+            }
+        }
         validate_identifier("provider.capability_mapping", &self.capability_mapping)?;
         if self.generation == 0 {
             return Err(ProviderCompositionError::ZeroGeneration {
@@ -186,6 +195,10 @@ fn validate_credential_reference(
 
 #[derive(Debug, Error)]
 pub enum ProviderCompositionError {
+    #[error("configuration field `{field}` must name a non-empty prompt file path")]
+    InvalidPromptPath { field: &'static str },
+    #[error("configuration field `{field}` must be between 1 and 86400000 milliseconds")]
+    InvalidTimeout { field: &'static str },
     #[error("failed to read Provider configuration `{path}`: {source}")]
     ReadConfiguration {
         path: PathBuf,

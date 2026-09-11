@@ -3,18 +3,22 @@
 //! their existing Domain/App owners.
 
 use crate::adapters::project_event_store::ProjectEventStream;
-use crate::adapters::research_projection::load_compaction_validation_facts;
+use crate::adapters::research_projection::{
+    CompactionValidationFacts, load_compaction_validation_facts,
+};
 use crate::adapters::tools::ToolRegistry;
 use crate::app::agent_loop::AgentLoop;
 use crate::app::session::SessionProjection;
 use crate::domain::context::{ContextDecision, ContextDecisionManifest, ContextPlan};
-use crate::domain::session::SessionEvent;
+use crate::domain::session::{
+    SessionCompaction, SessionError, SessionEvent, SessionState, SessionSummaryDraft,
+};
 use crate::ports::EventSource;
 use crate::ports::model::ModelProvider;
 
 use super::{ChatError, DurableChatSession, event_id, occurred_at};
 
-const RETAINED_RECENT_HISTORY_ITEMS: usize = 12;
+const MAX_REFERENCE_ITEMS_PER_KIND: usize = 32;
 const WARNING_PERCENT: u64 = 80;
 
 pub(super) struct AppliedCompactionSummary {
@@ -33,6 +37,39 @@ impl AppliedCompactionSummary {
 }
 
 impl DurableChatSession {
+    pub(super) fn rebuild_compaction(
+        &self,
+        state: &SessionState,
+        facts: &CompactionValidationFacts,
+        composition: &crate::provider_composition::ProviderComposition,
+        provider_session: crate::domain::context::ProviderSession,
+    ) -> Result<SessionCompaction, ChatError> {
+        // A context-only preflight uses the same configured Provider and Tool
+        // catalog, never `stream` or a second executing AgentLoop.
+        let tools = ToolRegistry::for_project(self.project.root());
+        let mut preview = AgentLoop::with_primary_context(
+            composition.primary_provider(),
+            &tools,
+            composition.agent_profile().primary().model().clone(),
+            composition.agent_profile().primary().profile().clone(),
+            provider_session,
+        )?
+        .with_domain_profile(state.effective_domain_profile())
+        .with_research_phase(state.effective_research_phase());
+        preview.queue_agent_model_profile(composition.agent_profile().clone())?;
+        preview.refresh_current_context(super::context::ChatContextCache::default().refresh(
+            &self.project,
+            &tools,
+            composition,
+        )?)?;
+        let (_, candidate) = select_compaction(state, facts, |candidate| {
+            preview
+                .preflight_compaction(candidate, false)
+                .map_err(ChatError::from)
+        })?;
+        Ok(candidate)
+    }
+
     /// Builds one candidate from strict projections, gives that candidate to
     /// the AgentLoop, appends exactly one durable Event, then applies only the
     /// freshly replayed durable Compaction. Any failure exits Chat rather than
@@ -68,13 +105,12 @@ impl DurableChatSession {
         // these read-only facts and the new Compaction Event are composed.
         let facts = load_compaction_validation_facts(&self.project)
             .map_err(ChatError::ResearchProjection)?;
-        let draft = facts.compose_session_summary_draft(&resumable_history)?;
+        let (draft, compaction) = select_compaction(projection.state(), &facts, |candidate| {
+            agent
+                .preflight_compaction(candidate, true)
+                .map_err(ChatError::from)
+        })?;
         let validation = facts.context();
-        let compaction = projection.state().next_compaction(
-            draft.clone(),
-            RETAINED_RECENT_HISTORY_ITEMS,
-            &validation,
-        )?;
         let result = AppliedCompactionSummary {
             revision: compaction.summary().revision(),
             source_history_items: compaction.source_history_item_count(),
@@ -101,6 +137,47 @@ impl DurableChatSession {
             .map_err(ChatError::from_session_append)?;
         agent.apply_compaction(projection.state(), Some(&validation))?;
         Ok(result)
+    }
+}
+
+/// One candidate/reduction owner shared by explicit compact and stale-source
+/// reconstruction. Complete suffix selection remains Session/History-owned.
+pub(super) fn select_compaction(
+    state: &SessionState,
+    facts: &CompactionValidationFacts,
+    mut fits: impl FnMut(&SessionCompaction) -> Result<bool, ChatError>,
+) -> Result<(SessionSummaryDraft, SessionCompaction), ChatError> {
+    let history = crate::domain::history::normalize_content_items(state.history().items())
+        .map_err(SessionError::from)?;
+    let mut references = MAX_REFERENCE_ITEMS_PER_KIND;
+    loop {
+        let draft = facts.compose_session_summary_draft(
+            &history,
+            state
+                .latest_compaction()
+                .map(|compaction| compaction.summary()),
+            references,
+        )?;
+        let mut retained = state
+            .normalized_history_items()
+            .map_err(SessionError::from)?
+            .len();
+        loop {
+            match state.next_compaction(draft.clone(), retained, &facts.context()) {
+                Ok(candidate) if fits(&candidate)? => return Ok((draft, candidate)),
+                Ok(_) => {}
+                Err(SessionError::CompactionSummaryTooLarge { .. }) => break,
+                Err(error) => return Err(error.into()),
+            }
+            if retained == 0 {
+                break;
+            }
+            retained /= 2;
+        }
+        if references == 0 {
+            return Err(ChatError::CompactionNotUseful);
+        }
+        references /= 2;
     }
 }
 

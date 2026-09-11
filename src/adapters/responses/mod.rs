@@ -5,6 +5,7 @@ mod request;
 mod response;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_stream::try_stream;
 use eventsource_stream::Eventsource;
@@ -21,12 +22,17 @@ use crate::ports::model::{
     ModelEventStream, ModelProvider, ModelProviderError, ModelRequest, ModelStreamEvent,
 };
 
+pub(crate) const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 30_000;
+pub(crate) const DEFAULT_READ_TIMEOUT_MS: u64 = 300_000;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResponsesHttpConfig {
     base_url: String,
     model: String,
     credential_reference: String,
     capabilities: ModelCapabilities,
+    connect_timeout: Duration,
+    read_timeout: Duration,
 }
 
 impl ResponsesHttpConfig {
@@ -41,7 +47,15 @@ impl ResponsesHttpConfig {
             model: model.into(),
             credential_reference: credential_reference.into(),
             capabilities,
+            connect_timeout: Duration::from_millis(DEFAULT_CONNECT_TIMEOUT_MS),
+            read_timeout: Duration::from_millis(DEFAULT_READ_TIMEOUT_MS),
         }
+    }
+
+    pub(crate) fn with_timeouts(mut self, connect_ms: u64, read_ms: u64) -> Self {
+        self.connect_timeout = Duration::from_millis(connect_ms);
+        self.read_timeout = Duration::from_millis(read_ms);
+        self
     }
 
     fn endpoint(&self) -> String {
@@ -71,7 +85,11 @@ impl ResponsesHttpAdapter {
 
     pub fn new(config: ResponsesHttpConfig, credential_source: Arc<dyn CredentialSource>) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .connect_timeout(config.connect_timeout)
+                .read_timeout(config.read_timeout)
+                .build()
+                .expect("Responses HTTP client initialization failed"),
             config,
             credential_source,
             image_resolver: None,

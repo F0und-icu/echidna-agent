@@ -23,8 +23,9 @@ If the user explicitly authorizes development sub-agents, every delegated agent 
 
 ## Current Phase
 
-- Architecture v1.6 is the latest locally frozen additive extension over immutable v1 through v1.5. Its remote seal remains unauthorized; local implementation status is governed by `STATUS.md`.
-- M0 through M4-S4 and F2a are complete and remotely sealed. M5-S1a and M5-S1b are locally authorized in sequence; their exact scope and state are governed by `STATUS.md` and `IMPLEMENTATION_PLAN.md`.
+- Architecture v1.7 is the latest locally frozen additive extension over immutable v1 through v1.6. ADR-0017 governs F3 interactive runtime repairs; its remote seal remains unauthorized and exact local verification is governed by `STATUS.md`.
+- M5-S2 is remotely sealed. F3 repairs interactive continuity only; benchmark/non-interactive execution, Git/Actions and Live remain separate authorization scopes.
+- M0 through M5-S2 and F2a are complete and remotely sealed; historical evidence and current F3 scope/state are governed by `STATUS.md` and `IMPLEMENTATION_PLAN.md`.
 - F1a Config/Composition Root, F1b protocol-first Responses HTTP/SSE Adapter, F1c first-version CLI Chat and F1d local inline Provider credentials are complete and remotely sealed by PR `#46` at Squash Merge `6eb4959`; one synthetic F1c DeepSeek Live Chat passed.
 - F1d preserves one configuration and Adapter path: Config v1 may select exactly one inline `api_key` or existing `credential_ref` per Provider. M5 work must preserve that same composition path.
 - F1e Responses Reasoning Continuation is complete and remotely sealed by PR `#48` at Squash Merge `2f6a9e5`, including one configuration-driven DeepSeek Full-only Live Tool Loop. Completed reasoning stays in provider delivery, never Conversation History; a redundant encrypted sidecar is ignored only beside valid plaintext reasoning, while encrypted-only remains unsupported. Further Actions and Live requests remain unauthorized unless the operator explicitly enables them.
@@ -83,6 +84,8 @@ Do not use multi-agent development orchestration unless the current user explici
 - One Wire API has one request encoding, transport and response-decoding owner. The fixed `http_sse + responses` binding is protocol-first: URL, model and credential reference never create a vendor binding. Add a wire-level extension only when fixtures prove a real reusable protocol difference.
 - Completed Responses reasoning is provider delivery state, not Conversation History. Full-only replay preserves reasoning/call/result order; loss under Context budget or replacement fails explicitly. Opaque encrypted reasoning stays Adapter-local and may be ignored only when complete supported plaintext reasoning is present.
 - CLI first; Web remains optional.
+- F3 checkpoints History before dependent execution/resampling. Resume after an append-only Research suffix validates the old exact prefix then appends a new current-target Compaction; never apply stale references directly. Explicit Prompt files/Core Memory and current facts use the fixed pre-sampling Context owner, not a registry. Compaction budget/reduction checks precede append; Provider deadlines never authorize retries.
+- F3 interruption exception: a dropped unobserved executor future has no established terminal outcome; never manufacture its cancelled Receipt/Result. Persist known completed outcomes, stop the Turn and retain explicit unknown recovery state. Executor-returned cancelled outcomes remain real observations, not proof of zero side effects.
 
 ## Forbidden Dependencies and Scope
 

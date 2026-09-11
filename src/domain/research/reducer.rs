@@ -476,6 +476,15 @@ impl ResearchState {
         self.latest_target_snapshot_id.as_ref()
     }
 
+    /// Returns the single event-order current TargetSnapshot projection. This
+    /// is deliberately a read-only convenience over the same latest-ID rule
+    /// used by image intake and Compaction; Context must not invent a second
+    /// notion of "current target".
+    pub(crate) fn current_target_snapshot(&self) -> Option<&TargetSnapshotRecord> {
+        self.latest_target_snapshot_id()
+            .and_then(|id| self.target_snapshot(id))
+    }
+
     pub fn hypotheses_by_dedup_key(&self, dedup_key: &str) -> Vec<&HypothesisRecord> {
         self.hypotheses
             .values()

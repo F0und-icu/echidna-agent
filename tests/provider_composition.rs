@@ -46,6 +46,99 @@ fn valid_config() -> String {
     provider_config::fixture()
 }
 
+#[test]
+fn empty_prompt_path_is_rejected_before_relative_path_resolution() {
+    let credentials = Arc::new(RecordingCredentialSource::default());
+    let config = format!("{}\n[prompts]\npersonal_file = \"\"\n", valid_config());
+    assert!(load("empty-prompt-path", &config, credentials.clone()).is_err());
+    assert!(credentials.references().is_empty());
+}
+
+#[test]
+fn transport_deadline_config_rejects_zero_and_unbounded_values_before_credentials() {
+    for field in ["connect_timeout_ms", "read_timeout_ms"] {
+        for value in [0, 86_400_001] {
+            let credentials = Arc::new(RecordingCredentialSource::default());
+            let config = valid_config().replacen(
+                "[providers.primary]",
+                &format!("[providers.primary]\n{field} = {value}"),
+                1,
+            );
+            let error = load("invalid-deadline", &config, credentials.clone())
+                .err()
+                .unwrap();
+            assert!(error.to_string().contains(field));
+            assert!(credentials.references().is_empty());
+        }
+    }
+}
+
+#[tokio::test]
+async fn configured_read_deadline_bounds_headers_and_partial_sse_without_retry() {
+    use futures_util::StreamExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::time::{Duration, timeout};
+
+    for send_partial_sse in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = [0; 8192];
+            assert!(socket.read(&mut bytes).await.unwrap() > 0);
+            if send_partial_sse {
+                socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n").await.unwrap();
+            }
+            // Keep the first request open. A timeout must not resubmit it.
+            assert!(
+                timeout(Duration::from_millis(400), listener.accept())
+                    .await
+                    .is_err()
+            );
+        });
+        let credentials = Arc::new(RecordingCredentialSource::default());
+        let config = valid_config()
+            .replacen("http://127.0.0.1:1/v1", &endpoint, 1)
+            .replacen(
+                "[providers.primary]",
+                "[providers.primary]\nconnect_timeout_ms = 1000\nread_timeout_ms = 80",
+                1,
+            );
+        let composition = load("provider-deadline", &config, credentials.clone()).unwrap();
+        let mut stream = composition
+            .primary_provider()
+            .stream(ModelRequest::full(ModelInputIR::current(
+                "fixture",
+                vec![ContentItem::user_text("fixture")],
+                ModelRequestRequirements::default(),
+            )))
+            .unwrap();
+        let error = timeout(Duration::from_secs(3), async {
+            loop {
+                match stream.next().await {
+                    Some(Err(error)) => break error,
+                    Some(Ok(_)) => {}
+                    None => panic!("stalled response must fail explicitly"),
+                }
+            }
+        })
+        .await
+        .expect("configured deadline must bound the stalled request");
+        assert!(matches!(
+            error,
+            ModelProviderError::TransportFailure { .. }
+                | ModelProviderError::ProtocolFailure { .. }
+        ));
+        assert_eq!(
+            credentials.references(),
+            vec!["CYBER_AGENT_PRIMARY_API_KEY"]
+        );
+        drop(stream);
+        server.await.unwrap();
+    }
+}
+
 fn inline_primary_config() -> String {
     valid_config().replacen(
         "credential_ref = \"CYBER_AGENT_PRIMARY_API_KEY\"",

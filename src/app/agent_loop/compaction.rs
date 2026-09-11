@@ -9,7 +9,7 @@ use crate::domain::session::{
 use crate::ports::model::ModelProvider;
 use crate::ports::tool::ToolExecutor;
 
-use super::{AgentLoop, AgentLoopConfigurationError};
+use super::{AgentLoop, AgentLoopConfigurationError, AgentLoopError, context_state};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct AppliedCompaction {
@@ -36,6 +36,93 @@ where
     Provider: ModelProvider + ?Sized,
     Tools: ToolExecutor + ?Sized,
 {
+    /// Compile a proposed next-Turn context without changing runtime state or
+    /// contacting a Provider. The regular Context owner budgets all prompts,
+    /// tools, facts and retained History; a tiny future input is only a probe,
+    /// never a guarantee that an arbitrarily large next input will fit.
+    pub(crate) fn preflight_compaction(
+        &self,
+        compaction: &SessionCompaction,
+        require_reduction: bool,
+    ) -> Result<bool, AgentLoopError> {
+        use crate::domain::context::{ContextDecision, ContextFragmentSource, ContextPlannerError};
+        use crate::domain::model::ContentItem;
+        use crate::domain::tools::DeferredActivationSet;
+
+        let capabilities = self.provider.capabilities();
+        let budget = self.context_planner.default_budget(&capabilities)?;
+        let tool_plan = self.tools.resolve_tool_plan(
+            &self.active_tool_exposure_plan,
+            &DeferredActivationSet::default(),
+        )?;
+        let empty_provenance = std::collections::BTreeMap::new();
+        let compile = |items: &[ContentItem], summary| {
+            let mut history = items.to_vec();
+            history.push(ContentItem::user_text("Continue."));
+            context_state::compile_context(context_state::ContextCompilationInput {
+                prompt_composition: &self.prompt_composition,
+                world_state: self.world_state.as_ref(),
+                project_snapshot: self.project_snapshot.as_ref(),
+                project_memory_core: self.project_memory_core.as_ref(),
+                session_summary: summary,
+                history: &history,
+                history_provenance: &empty_provenance,
+                turn_history_start: items.len(),
+                planner: &self.context_planner,
+                cache: None,
+                budget,
+                capabilities: &capabilities,
+                tool_specs: tool_plan.advertised_specs(),
+                prior_manifest: None,
+            })
+            .map(|(plan, _)| plan)
+        };
+        let candidate = match compile(compaction.retained_history(), Some(compaction.summary())) {
+            Ok(plan) => plan,
+            Err(AgentLoopError::ContextPlanner(
+                ContextPlannerError::RequiredFragmentsExceedBudget { .. }
+                | ContextPlannerError::RenderedInputExceedsBudget { .. },
+            )) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        let complete = candidate
+            .context_decision_manifest()
+            .candidates()
+            .iter()
+            .all(|entry| {
+                !matches!(
+                    entry.source(),
+                    ContextFragmentSource::SessionSummary | ContextFragmentSource::RecentHistory
+                ) || matches!(entry.decision(), ContextDecision::Include)
+            });
+        if !complete {
+            return Ok(false);
+        }
+        if !require_reduction {
+            return Ok(true);
+        }
+        let previous = match compile(self.history.items(), self.session_summary.as_ref()) {
+            Ok(plan) => plan,
+            Err(AgentLoopError::ContextPlanner(
+                ContextPlannerError::RequiredFragmentsExceedBudget { .. }
+                | ContextPlannerError::RenderedInputExceedsBudget { .. },
+            )) => return Ok(true),
+            Err(error) => return Err(error),
+        };
+        // Compare planner demand rather than serialized event bytes or item
+        // count: a compact-looking Summary can cost more than short History.
+        let demand = |plan: &crate::domain::context::ContextPlan| {
+            let manifest = plan.context_decision_manifest();
+            u64::from(manifest.fixed_input_tokens())
+                + manifest
+                    .candidates()
+                    .iter()
+                    .map(|entry| u64::from(entry.token_estimate()))
+                    .sum::<u64>()
+        };
+        Ok(demand(&candidate) < demand(&previous))
+    }
+
     /// Verifies the active Session/Primary binding before a caller appends a
     /// new Compaction fact. The durable Compaction itself is still validated
     /// and applied only by [`Self::apply_compaction`].

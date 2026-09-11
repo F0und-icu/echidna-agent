@@ -30,6 +30,7 @@ pub(super) struct ContextCompilationInput<'a> {
     pub(super) prompt_composition: &'a PromptComposition,
     pub(super) world_state: Option<&'a ResearchWorldState>,
     pub(super) project_snapshot: Option<&'a ProjectSnapshotContext>,
+    pub(super) project_memory_core: Option<&'a ContextFragment>,
     pub(super) session_summary: Option<&'a SessionSummary>,
     pub(super) history: &'a [ContentItem],
     pub(super) history_provenance: &'a BTreeMap<usize, ContextProvenance>,
@@ -40,6 +41,62 @@ pub(super) struct ContextCompilationInput<'a> {
     pub(super) capabilities: &'a ModelCapabilities,
     pub(super) tool_specs: &'a [ToolSpec],
     pub(super) prior_manifest: Option<&'a FullLogicalManifest>,
+}
+
+/// One fixed, typed replacement for volatile facts before a later sampling
+/// Step. It contains no ordering or delivery decision: ContextPlanner remains
+/// the sole compiler after AgentLoop installs these candidates.
+#[derive(Clone, Debug)]
+pub(crate) struct CurrentContextState {
+    world_state: ResearchWorldState,
+    project_snapshot: ProjectSnapshotContext,
+    project_memory_core: Option<ContextFragment>,
+    personal_prompt: Option<String>,
+    project_prompt: Option<String>,
+}
+
+impl CurrentContextState {
+    pub(crate) fn new(
+        world_state: ResearchWorldState,
+        project_snapshot: ProjectSnapshotContext,
+        project_memory_core: Option<ContextFragment>,
+        personal_prompt: Option<String>,
+        project_prompt: Option<String>,
+    ) -> Self {
+        Self {
+            world_state,
+            project_snapshot,
+            project_memory_core,
+            personal_prompt,
+            project_prompt,
+        }
+    }
+
+    pub(crate) fn world_state(&self) -> &ResearchWorldState {
+        &self.world_state
+    }
+
+    pub(crate) fn project_snapshot(&self) -> &ProjectSnapshotContext {
+        &self.project_snapshot
+    }
+
+    pub(crate) fn project_memory_core(&self) -> Option<&ContextFragment> {
+        self.project_memory_core.as_ref()
+    }
+
+    pub(crate) fn apply_prompt_sources(
+        &self,
+        composition: PromptComposition,
+    ) -> Result<PromptComposition, crate::domain::research_control::ResearchControlError> {
+        let composition = match &self.personal_prompt {
+            Some(prompt) => composition.with_personal(prompt.clone())?,
+            None => composition,
+        };
+        match &self.project_prompt {
+            Some(prompt) => composition.with_project(prompt.clone()),
+            None => Ok(composition),
+        }
+    }
 }
 
 /// The committed and current local facts needed to prove one state-diff
@@ -59,6 +116,8 @@ pub(super) struct StateDiffDeliveryInput<'a> {
     pub(super) world_state: Option<&'a ResearchWorldState>,
     pub(super) committed_project_snapshot: Option<&'a ProjectSnapshotContext>,
     pub(super) project_snapshot: Option<&'a ProjectSnapshotContext>,
+    pub(super) committed_project_memory_core: Option<&'a ContextFragment>,
+    pub(super) project_memory_core: Option<&'a ContextFragment>,
     pub(super) history: &'a [ContentItem],
     pub(super) history_provenance: &'a BTreeMap<usize, ContextProvenance>,
     pub(super) turn_history_start: usize,
@@ -71,6 +130,7 @@ pub(super) fn compile_context(
         prompt_composition,
         world_state,
         project_snapshot,
+        project_memory_core,
         session_summary,
         history,
         history_provenance,
@@ -115,6 +175,17 @@ pub(super) fn compile_context(
             &mut fragments,
             &mut cache_summary,
             project_snapshot.full_fragment()?,
+            planner,
+            cache,
+            capabilities,
+            budget,
+        )?;
+    }
+    if let Some(project_memory_core) = project_memory_core {
+        push_cached_fragment(
+            &mut fragments,
+            &mut cache_summary,
+            project_memory_core.clone(),
             planner,
             cache,
             capabilities,
@@ -196,6 +267,8 @@ pub(super) fn state_diff_delivery_input(
         world_state,
         committed_project_snapshot,
         project_snapshot,
+        committed_project_memory_core,
+        project_memory_core,
         history,
         history_provenance,
         turn_history_start,
@@ -250,6 +323,13 @@ pub(super) fn state_diff_delivery_input(
         }
         (None, None) => {}
         _ => return continuation_unavailable_or_none(retains_reasoning),
+    }
+    // Core Memory has no diff representation. It is always a complete
+    // authoritative Markdown fragment, so a content/presence change requires
+    // the normal Full logical Context rather than an append that could retain
+    // stale memory beside reasoning continuation.
+    if !same_memory_core(committed_project_memory_core, project_memory_core) {
+        return continuation_unavailable_or_none(retains_reasoning);
     }
     let mut candidate = committed_input.clone();
     let mut delivery_map = committed_delivery_map.clone();
@@ -326,6 +406,18 @@ pub(super) fn state_diff_delivery_input(
         }
         Err(ContextPlannerError::RenderedInputExceedsBudget { .. }) => Ok(None),
         Err(error) => Err(error.into()),
+    }
+}
+
+fn same_memory_core(previous: Option<&ContextFragment>, current: Option<&ContextFragment>) -> bool {
+    match (previous, current) {
+        (None, None) => true,
+        (Some(previous), Some(current)) => {
+            previous.id() == current.id()
+                && previous.content_hash() == current.content_hash()
+                && previous.source() == current.source()
+        }
+        _ => false,
     }
 }
 

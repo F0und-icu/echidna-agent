@@ -9,7 +9,7 @@
 - Codex 本地源码：`codex/`
 - Codex 最新设计复核提交：`868c9edb0da913a5fc699a71664e65f44f6058b0`
 - 分析文档：`Codex架构与漏洞挖掘Agent复用评估.md`
-- 冻结架构：`docs/architecture/CYBER_AGENT_ARCHITECTURE_V1.md` 至 `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_6.md` 的完整 additive chain
+- 冻结架构：`docs/architecture/CYBER_AGENT_ARCHITECTURE_V1.md` 至 `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_7.md` 的完整 additive chain
 - 模型组合决策：`docs/adr/ADR-0002-capability-driven-primary-vision-models.md`
 - 研究控制决策：`docs/adr/ADR-0009-stable-research-persona-domain-profile-and-phase.md`
 - 不可变 Step/Tool Plan 决策：`docs/adr/ADR-0010-immutable-sampling-step-and-tool-plan.md`
@@ -19,6 +19,7 @@
 - ToolFailure/准确率可观测性决策：`docs/adr/ADR-0014-narrow-tool-failure-and-accuracy-observability.md`
 - Responses reasoning continuation 决策：`docs/adr/ADR-0015-responses-reasoning-continuation.md`
 - 冗余 encrypted reasoning sidecar 决策：`docs/adr/ADR-0016-redundant-encrypted-reasoning-sidecar.md`
+- 交互运行连续性修复：`docs/adr/ADR-0017-interactive-runtime-continuity.md`
 - 唯一 Provider 装配决策：`docs/adr/ADR-0006-single-provider-composition-root.md`
 - 开发计划：`docs/development/IMPLEMENTATION_PLAN.md`
 - 精简代码治理：`docs/development/LEAN_CODE_GOVERNANCE.md`
@@ -30,10 +31,10 @@
 
 当前状态：
 
-- 阶段：Implementation；M0 至 M4-S2 和 F1a-F1e 已远端封存。
+- 阶段：Implementation；M0 至 M5-S2 和 F1a-F1e/F2a 已远端封存；F3 已完成本地修复、独立审计、完整离线 Gate 及带明确限制的合成 Live 验收，已授权远端交付，具体验证与 Git 状态见 STATUS。
 - 当前代码基线已具备一个 AgentLoop、项目/会话/研究/审计事实、固定领域 Prompt Profiles、多模态组合、Replay/Eval、唯一 Provider Composition Root 和第一版 CLI Chat。
 - Architecture v1.5/v1.6 已在本地冻结：Provider-visible completed reasoning 与 Conversation History 分离，并仅在有完整 `reasoning_text` 时忽略冗余 Adapter-local encrypted sidecar；architecture-manifest 远端封存仍未授权。
-- F1e 已完成本地 Gate、一次配置驱动 DeepSeek Full-only Tool Loop，并通过 PR `#48` 远端封存。GitHub Run `33295806720` 因账单/额度原因零 Step 失败，用户明确授权该次不重跑 Actions 的合并并暂停后续 Actions。当前 Slice 恢复为 M4-S3c `READY_NOT_AUTHORIZED`；具体事实始终以 `docs/development/STATUS.md` 为准。
+- Architecture v1.7 / ADR-0017 约束 F3 的逐阶段持久化、Research 前缀恢复、当前上下文接入、预算压缩与网络超时。本轮不实现非交互执行或 benchmark 适配，不自动授权 Git、Actions 或 Live。
 
 ## 1. 产品定义
 
@@ -830,12 +831,12 @@ StepSnapshot 只计算这一级指纹。如果它与缓存一致，直接复用 
 
 ### 8.8 Compaction
 
-达到预算阈值时：
+当前正式 Chat 仅由操作者显式 `/compact` 触发；预算阈值只提示：
 
 1. 生成结构化 Session Summary。
 2. 保留最近消息和完整 Tool Call/Result 对。
-3. 用 Summary 替换较早历史。
-4. 写入 `Compaction` 审计事件。
+3. 使用同一个 ContextPlanner 检查下一 Turn 探测输入的预算与实际缩减效果；按完整配对后缀缩减保留量，无收益或无法容纳则在写入前拒绝。
+4. 先写入 `Compaction` 事件，再用其 Summary/保留后缀更新运行时。
 5. 原始会话仍保留在本地 `events.jsonl`，不删除。
 
 Session Summary v2 分离：
@@ -843,7 +844,7 @@ Session Summary v2 分离：
 - `EvidenceSpine`：TargetSnapshot、active Hypothesis、Experiment、Finding、NextAction、Artifact、ExecutionReceipt 引用，以及绑定的 Research stream identity + watermark/hash。
 - `NarrativeSummary`：当前目标、简短进展、未解决问题和下一步说明；它有损、bounded 且不是事实。
 
-Compaction Event 只证明本次压缩已发生。Evidence Spine 引用现有事实，Narrative 只帮助续写；两者都不能创建或升级 Research claim。append 前验证每个引用的 Project/stream/type/watermark，Resume/Rebuild 对 missing、cross-project、stale 或 type mismatch 严格失败。历史 Summary v1 通过 Upcaster 保持可读，不把旧字符串升级成 typed evidence。
+Compaction Event 只证明本次压缩已发生。Evidence Spine 是有界导航引用子集，Narrative 只帮助续写；两者都不能创建或升级 Research claim。append 前验证每个引用的 Project/stream/type/watermark。Research 仅追加时，先严格验证旧 Summary 的完整历史前缀 hash/引用，再以当前目标重建新 Compaction 并写入，最后 Resume；缺失、跨项目、篡改和类型不匹配仍失败。历史 Summary v1 保持可读，不把旧字符串升级成 typed evidence。预算预检不能保证任意长度的未来输入都可容纳。
 
 ## 9. Prompt 管理与优化
 
@@ -855,7 +856,9 @@ Compaction Event 只证明本次压缩已发生。Evidence Spine 引用现有事
 - DomainProfile Prompt：固定 source、web、mobile、binary 领域研究指引。
 - ResearchPhase Prompt：固定 mapping、hypothesis、experiment、verification、evidence_curation 当前目标指引。
 
-固定 Base/Domain/Phase Prompt 保存为独立 Markdown 资源并以 `include_str!` 进入单一二进制；Personal/Project Prompt 是本地可编辑输入。不建设运行时 Prompt 文件系统 loader 或动态 Registry。
+固定 Base/Domain/Phase Prompt 保存为独立 Markdown 资源并以 `include_str!` 进入单一二进制；Personal/Project Prompt 由 Config v1 的可选 `[prompts] personal_file/project_file` 显式选择，路径相对配置文件解析。正式 Chat 在采样前读取配置的 UTF-8 普通文件；缺失的显式文件报错。没有目录搜索、自动发现、Persona/Prompt Registry；doctor 不读取 Prompt 内容。Project Core Memory 使用现有 Memory owner 读取并通过 ContextPlanner 接入，缺失与空文件区分。
+
+F3 固定处理点在每个采样 Step 前更新 Research/Project/Memory/Prompt 候选，随后捕获 immutable SamplingStepPlan。Domain/Phase 操作者选择仍只在 Turn 边界生效。History 在 user/model/result 检查点持久化：模型 ToolCalls 必须先落盘才执行依赖工具，真实 Receipt/Result 必须先落盘才重采样；中断未知状态不得被伪造为成功或自动重试。
 
 Prompt renderer 与 Prompt 内容分离：当前只有固定 `generic-v1`，只拥有 fragment separator、instruction/content channel 渲染和 ContextDeliveryMap emission，不拥有人格、Domain/Phase、Tool Schema 或 Provider wire。
 
@@ -2084,6 +2087,8 @@ M1 总完成标准：M1a、M1b、M1c 分别有可运行集成测试，任一后�
 这些问题在对应里程碑开始时决定，不提前搭建抽象。
 
 ## 25. 下一步
+
+F3 当前更新：M5-S1a/S1b/S2 已完成并远端封存；F3 已通过独立 Terra xhigh 审计、完整离线 Gate（406 passed / 2 Live ignored）、Lean Review、正式 CLI 合成 Live 和本地分发验证，正在执行已授权远端交付。Full-only 活跃推理遇核心上下文替换或无法保留的预算时仍显式停止，Resume／显式压缩后恢复；不能宣称无缝热替换。非交互执行与 benchmark 适配暂不实现，下一 Slice 未授权。以下为此前 milestone 封存时的历史交接，不是当前 Slice 授权；当前状态仅以 STATUS 为准。
 
 具体状态始终以 `docs/development/STATUS.md` 为准。F1a-F1e 已远端封存；F1e 的远端 Gate 由用户在 GitHub 账单/额度导致零 Step 失败后明确单次豁免，后续 Actions 暂停。Architecture v1.2 至 v1.6 的远端架构封存仍未授权。
 

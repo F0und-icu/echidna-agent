@@ -116,7 +116,9 @@ impl ConversationHistory {
         self.items.push(item);
     }
 
-    fn unpaired_tool_calls_in_call_order(&self) -> Vec<(ToolCallId, ToolName)> {
+    /// Returns unpaired Calls in their original model order. The History
+    /// normalizer and Chat recovery both consume this sole pairing view.
+    pub(crate) fn unpaired_tool_calls_in_call_order(&self) -> Vec<(ToolCallId, ToolName)> {
         self.items
             .iter()
             .filter_map(|item| match item {
@@ -139,7 +141,9 @@ impl ConversationHistory {
 /// Call/Result pairing owner. Complete pairs and non-Tool items keep their
 /// input order. Orphan Results are historical noise and are omitted; every
 /// Call without a Result receives one deterministic terminal Result at the
-/// end of the normalized History.
+/// end of the normalized History. That synthetic result is an explicit
+/// interruption-uncertainty marker: it proves neither that execution did not
+/// start nor that an effect can be replayed.
 ///
 /// Duplicate Call IDs, duplicate Results, and Result/Call tool-name
 /// mismatches remain malformed History and are rejected rather than repaired.
@@ -172,7 +176,11 @@ pub fn normalize_content_items(items: &[ContentItem]) -> Result<Vec<ContentItem>
             call_id,
             tool_name,
             status: super::tools::ToolResultStatus::Cancelled,
-            output: serde_json::json!({"error": "aborted"}),
+            output: serde_json::json!({
+                "error": "aborted",
+                "execution_status": "unknown",
+                "guidance": "do_not_assume_no_effect_or_auto_rerun"
+            }),
         })?;
     }
 

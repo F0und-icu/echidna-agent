@@ -52,6 +52,15 @@ string_id!(RerunReason);
 string_id!(JobId);
 string_id!(PtySessionId);
 
+impl ExecutionId {
+    /// The one stable execution identity for a model-originated Tool Call.
+    /// Recovery uses the same identity to distinguish a durable Receipt with a
+    /// missing paired History result from an execution that never started.
+    pub(crate) fn for_model_call(call_id: &ToolCallId) -> Self {
+        Self::new(format!("execution:{call_id}"))
+    }
+}
+
 // Stable semantic identity of one completely resolved model-visible Tool
 // plan. It is distinct from an individual ToolExecutionPlan fingerprint.
 string_id!(ResolvedToolPlanFingerprint);

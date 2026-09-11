@@ -13,7 +13,7 @@ use crate::domain::tools::{
 };
 use crate::ports::tool::ToolExecutor;
 
-use super::agent_loop::ToolExecutionStartStage;
+use super::agent_loop::{AgentLoopError, ToolExecutionReceiptStage, ToolExecutionStartStage};
 use super::cancellation::AgentCancellation;
 
 type ActiveFuture<'tools> =
@@ -27,6 +27,7 @@ pub(super) struct ScheduledToolBatch {
 pub(super) enum ScheduledToolResult {
     Executed(Box<ToolExecutionOutcome>),
     NotStarted(ToolResult),
+    Interrupted,
 }
 
 /// Executes one completed model sample's valid plans. Resource conflict rules
@@ -40,7 +41,8 @@ pub(super) async fn execute_batch<Tools: ToolExecutor + ?Sized>(
     cancellation: &AgentCancellation,
     completed_receipts: &mut BTreeMap<IdempotencyKey, ToolExecutionOutcome>,
     start_stage: &mut Option<&mut ToolExecutionStartStage<'_>>,
-) -> ScheduledToolBatch {
+    completion_stage: &mut Option<&mut ToolExecutionReceiptStage<'_>>,
+) -> Result<ScheduledToolBatch, AgentLoopError> {
     let mut outcomes = (0..plans.len()).map(|_| None).collect::<Vec<_>>();
     let mut followers = vec![Vec::new(); plans.len()];
     let mut leaders = BTreeMap::<IdempotencyKey, usize>::new();
@@ -48,6 +50,7 @@ pub(super) async fn execute_batch<Tools: ToolExecutor + ?Sized>(
 
     for (index, plan) in plans.iter().enumerate() {
         if let Some(outcome) = completed_outcome(plan, completed_receipts) {
+            checkpoint_completion(completion_stage, &outcome)?;
             outcomes[index] = Some(ScheduledToolResult::Executed(Box::new(outcome)));
             continue;
         }
@@ -89,6 +92,7 @@ pub(super) async fn execute_batch<Tools: ToolExecutor + ?Sized>(
         match select(next_completion, wait_for_cancellation).await {
             Either::Left((Some((index, outcome)), _)) => {
                 active.remove(&index);
+                checkpoint_completion(completion_stage, &outcome)?;
                 if outcome.receipt.status != ToolResultStatus::Cancelled
                     && let Some(key) = completion_key(&plans[index])
                 {
@@ -97,6 +101,7 @@ pub(super) async fn execute_batch<Tools: ToolExecutor + ?Sized>(
                 for follower in &followers[index] {
                     let follower_outcome =
                         ToolExecutionOutcome::deduplicated_for(&plans[*follower], &outcome);
+                    checkpoint_completion(completion_stage, &follower_outcome)?;
                     outcomes[*follower] =
                         Some(ScheduledToolResult::Executed(Box::new(follower_outcome)));
                 }
@@ -108,14 +113,12 @@ pub(super) async fn execute_batch<Tools: ToolExecutor + ?Sized>(
     }
 
     if cancelled {
-        // Dropping `running` cancels adapter futures (including child
-        // processes configured with kill-on-drop). Only plans which crossed
-        // the start boundary receive execution Receipts. Pending plans remain
-        // paired pre-execution failures without a fabricated Receipt.
+        // Dropping a future does not establish its external effect. Preserve
+        // unobserved active executions as unknown, never as synthetic Receipt
+        // facts. Pending plans are known not to have crossed the start point.
+        drop(running);
         for index in active.keys().copied().collect::<Vec<_>>() {
-            outcomes[index] = Some(ScheduledToolResult::Executed(Box::new(
-                ToolExecutionOutcome::cancelled(plans[index].clone(), "agent_cancelled"),
-            )));
+            outcomes[index] = Some(ScheduledToolResult::Interrupted);
         }
         for index in pending {
             outcomes[index] = Some(ScheduledToolResult::NotStarted(not_started_result(
@@ -132,11 +135,12 @@ pub(super) async fn execute_batch<Tools: ToolExecutor + ?Sized>(
                         "every dedupe leader is completed, active, or pending at cancellation",
                     ) {
                         ScheduledToolResult::Executed(source) => {
-                            ScheduledToolResult::Executed(Box::new(
-                                ToolExecutionOutcome::deduplicated_for(&plans[*follower], source),
-                            ))
+                            let outcome =
+                                ToolExecutionOutcome::deduplicated_for(&plans[*follower], source);
+                            checkpoint_completion(completion_stage, &outcome)?;
+                            ScheduledToolResult::Executed(Box::new(outcome))
                         }
-                        ScheduledToolResult::NotStarted(_) => {
+                        ScheduledToolResult::NotStarted(_) | ScheduledToolResult::Interrupted => {
                             ScheduledToolResult::NotStarted(not_started_result(&plans[*follower]))
                         }
                     },
@@ -149,10 +153,24 @@ pub(super) async fn execute_batch<Tools: ToolExecutor + ?Sized>(
         .into_iter()
         .map(|outcome| outcome.expect("the scheduler completes or cancels every staged Tool plan"))
         .collect();
-    ScheduledToolBatch {
+    Ok(ScheduledToolBatch {
         outcomes,
         cancelled,
+    })
+}
+
+/// The scheduler owns exactly when a per-call completed outcome crosses the
+/// fixed durability stage. Actual futures checkpoint on completion; cached,
+/// deduplicated outcomes checkpoint when they are created. Unobserved active
+/// cancellation and pending plans never fabricate a Receipt.
+fn checkpoint_completion(
+    completion_stage: &mut Option<&mut ToolExecutionReceiptStage<'_>>,
+    outcome: &ToolExecutionOutcome,
+) -> Result<(), AgentLoopError> {
+    if let Some(stage) = completion_stage.as_deref_mut() {
+        stage(outcome)?;
     }
+    Ok(())
 }
 
 fn not_started_result(plan: &ToolExecutionPlan) -> ToolResult {

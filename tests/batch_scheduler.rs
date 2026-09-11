@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use cyber_agent::app::agent_loop::{AgentLoop, AgentTurnOutcome};
+use cyber_agent::app::agent_loop::{AgentLoop, AgentLoopError, AgentTurnOutcome};
 use cyber_agent::app::cancellation::AgentCancellation;
 use cyber_agent::domain::model::ContentItem;
 use cyber_agent::domain::model::{CapabilityMappingVersion, ModelCapabilities, ModelEvent};
@@ -484,7 +484,7 @@ async fn cancelled_receipts_do_not_block_a_later_same_resource_execution() {
 }
 
 #[tokio::test]
-async fn cancellation_receipts_only_cover_resource_wave_plans_that_actually_started() {
+async fn unobserved_active_cancellation_has_no_receipt_and_pending_plans_stay_pre_execution() {
     let provider = ScriptedProvider::new([batch_response(vec![
         call("call-started", "device:shared"),
         call("call-pending", "device:shared"),
@@ -501,16 +501,11 @@ async fn cancellation_receipts_only_cover_resource_wave_plans_that_actually_star
         signal.cancel();
     };
     let (outcome, ()) = tokio::join!(turn, cancel);
-    let AgentTurnOutcome::Cancelled { executions, .. } = outcome.unwrap() else {
-        panic!("the resource wave should be cancelled");
-    };
+    assert!(matches!(
+        outcome,
+        Err(AgentLoopError::ToolExecutionInterrupted)
+    ));
     assert_eq!(trace.executions.load(Ordering::SeqCst), 1);
-    assert_eq!(executions.len(), 1, "only the started plan has a Receipt");
-    assert_eq!(
-        executions[0].receipt.execution_id.as_str(),
-        "execution:call-started"
-    );
-    assert_eq!(executions[0].result.status, ToolResultStatus::Cancelled);
 
     let results = agent
         .history()
@@ -521,12 +516,10 @@ async fn cancellation_receipts_only_cover_resource_wave_plans_that_actually_star
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(results.len(), 2);
-    assert_eq!(results[0].call_id.as_str(), "call-started");
-    assert_eq!(results[0].status, ToolResultStatus::Cancelled);
-    assert_eq!(results[1].call_id.as_str(), "call-pending");
-    assert_eq!(results[1].status, ToolResultStatus::Failed);
-    assert_eq!(results[1].output["failure"]["stage"], "pre_execution");
-    assert!(results[1].output["failure"].get("execution_id").is_none());
-    assert_eq!(agent.history().ensure_all_tool_calls_paired(), Ok(()));
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].call_id.as_str(), "call-pending");
+    assert_eq!(results[0].status, ToolResultStatus::Failed);
+    assert_eq!(results[0].output["failure"]["stage"], "pre_execution");
+    assert!(results[0].output["failure"].get("execution_id").is_none());
+    assert!(agent.history().ensure_all_tool_calls_paired().is_err());
 }

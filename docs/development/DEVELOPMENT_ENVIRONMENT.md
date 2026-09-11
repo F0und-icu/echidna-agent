@@ -111,6 +111,12 @@ Cargo.lock 必须提交，因为项目交付二进制。
 
 F1a 首先实现显式配置文件路径：CLI 使用 `--config <path>`，通用 Live Smoke 使用 `CYBER_AGENT_LIVE_CONFIG=<path>` 指向同一个 Config v1。操作系统标准配置目录的自动发现保持 Deferred，不能在不同入口各实现一套搜索规则。
 
+F3 为每个 `[providers.<id>]` 增加可选 `connect_timeout_ms`（默认 `30000`）与 `read_timeout_ms`（默认 `300000`）；两者均为 `1..=86400000` 毫秒。连接超时约束连接建立，读取超时约束单次网络读取等待（包含响应头/后续 SSE），不是整场研究或模型总生成时限；持续发送心跳的连接可能持续更久。超时返回显式错误，不自动重发模型请求或工具执行。
+
+可选顶层 `[prompts]` 使用 `personal_file = "personal.md"`、`project_file = "project.md"`；相对路径以配置文件所在目录为基准，不读取 Codex 文件。正式 Chat 每次采样前读取这些显式 UTF-8 普通文件，未配置即不添加，已配置但不存在/无效即报错。`doctor` 只验证配置，不读取 Prompt 内容。项目 `core.md` 通过现有 Project Memory 路径进入 ContextPlanner，受统一预算约束，不能变成第二个证据源。
+
+F3 Live 已验证的限制：对 `incremental_input = false` 且存在活跃 completed reasoning 的会话，Core Memory 替换或当前预算无法完整保留续传时，CLI 可能以 `completed Provider reasoning continuation cannot be retained by the current Context plan` 显式退出，而不是丢弃推理或自动重试。可使用原配置 `chat --resume <id>` 恢复；上下文压力较高且具备 TargetSnapshot 时，在新的模型请求前显式 `/compact`。恢复会重新验证事实，不保证任意输入均可容纳，也不能凭空补回缺失的 ToolResult。
+
 配置保存：
 
 - Provider Profile。

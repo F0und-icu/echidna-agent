@@ -7,6 +7,7 @@
 //! model streaming retain their existing owners.
 
 mod compaction;
+mod context;
 mod vision;
 
 use std::io::{self, Write};
@@ -20,14 +21,13 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use crate::adapters::artifact_store::LocalArtifactStore;
 use crate::adapters::fragment_cache::LocalFragmentCache;
 use crate::adapters::project_event_store::{Project, ProjectEventStream};
-use crate::adapters::project_snapshot::LocalProjectSnapshot;
 use crate::adapters::research_projection::{
-    CompactionValidationFacts, load_compaction_validation_facts, load_research_state,
+    CompactionValidationFacts, load_compaction_validation_facts,
 };
 use crate::adapters::tools::ToolRegistry;
 use crate::app::agent_loop::{
-    AgentLoop, AgentLoopError, AgentTurnOutcome, AssistantTextDeltaStage, CliRuntimeStages,
-    ToolExecutionReceiptStage, ToolExecutionStartStage, ViewImageFollowUpFuture,
+    AgentLoop, AgentLoopError, AgentTurnOutcome, AssistantTextDeltaStage, ChatDurabilityCheckpoint,
+    ChatDurabilityStage, CliRuntimeStages, ToolExecutionStartStage, ViewImageFollowUpFuture,
 };
 use crate::app::cancellation::AgentCancellation;
 use crate::app::request_audit::RequestAuditService;
@@ -42,10 +42,7 @@ use crate::domain::request_audit::{
 use crate::domain::research_control::{ResearchPhase, ResearchPhaseSelection};
 use crate::domain::session::{SessionEvent, SessionLifecycle, SessionState};
 use crate::domain::tools::ToolExecutionOutcome;
-use crate::domain::world_state::{ProjectSnapshotContext, ResearchWorldState};
 use crate::ports::EventSource;
-use crate::ports::model::ModelProvider;
-use crate::ports::tool::ToolExecutor;
 use crate::provider_composition::ProviderComposition;
 
 static NEXT_CHAT_SESSION: AtomicU64 = AtomicU64::new(1);
@@ -68,10 +65,11 @@ pub(crate) async fn run(
     };
     let session = DurableChatSession::new(project, session_id.clone())?;
     let (session_state, provider_session, disposition, compaction_validation) =
-        session.start_or_resume(explicit_resume)?;
+        session.start_or_resume(explicit_resume, composition)?;
     let domain = requested_domain.unwrap_or_else(|| session_state.effective_domain_profile());
 
     let tools = ToolRegistry::for_project(session.project.root());
+    let mut context_cache = context::ChatContextCache::default();
     let mut agent = AgentLoop::with_primary_context(
         composition.primary_provider(),
         &tools,
@@ -190,6 +188,8 @@ pub(crate) async fn run(
                 );
                 continue;
             }
+            let current = context_cache.refresh(&session.project, &tools, composition)?;
+            agent.refresh_current_context(current)?;
             println!("{}", session.compact(&mut agent)?.message());
             continue;
         }
@@ -241,7 +241,10 @@ pub(crate) async fn run(
         let phase = session.prepare_phase_for_turn(disposition, pending_phase.take())?;
         agent.queue_research_phase(phase);
 
-        refresh_agent_context(&session.project, &tools, &mut agent)?;
+        // Prompt/core filesystem failures occur before a possible scoped
+        // Vision request as well as before the Primary Provider request.
+        let current = context_cache.refresh(&session.project, &tools, composition)?;
+        agent.refresh_current_context(current)?;
         let cancellation = AgentCancellation::new();
         let initial_image = match pending_image.take() {
             Some(image) => {
@@ -275,7 +278,6 @@ pub(crate) async fn run(
         io::stdout().flush()?;
 
         let signal_cancellation = cancellation.clone();
-        let history_start = agent.history().items().len();
         let mut text_delta = |text: &str| {
             print!("{text}");
             io::stdout()
@@ -298,34 +300,39 @@ pub(crate) async fn run(
                 plan.call.call_id
             );
         };
-        let mut record_execution = |outcome: &ToolExecutionOutcome| {
-            let disposition = session
-                .record_execution(outcome)
-                .map_err(ChatError::into_execution_receipt_agent_loop_error)?;
-            match disposition {
-                ReceiptRecordDisposition::Recorded { event_id } => {
-                    let _ = writeln!(
-                        io::stderr(),
-                        "[tool {}] name={} execution_id={} receipt_event={} call_id={}",
-                        tool_terminal_label(outcome.receipt.status),
-                        outcome.result.tool_name,
-                        outcome.receipt.execution_id,
-                        event_id,
-                        outcome.result.call_id
-                    );
+        let mut durability = |checkpoint: ChatDurabilityCheckpoint<'_>| match checkpoint {
+            ChatDurabilityCheckpoint::History(items) => session
+                .record_history(items)
+                .map_err(ChatError::into_history_checkpoint_agent_loop_error),
+            ChatDurabilityCheckpoint::ExecutionReceipt(outcome) => {
+                let disposition = session
+                    .record_execution(outcome)
+                    .map_err(ChatError::into_execution_receipt_agent_loop_error)?;
+                match disposition {
+                    ReceiptRecordDisposition::Recorded { event_id } => {
+                        let _ = writeln!(
+                            io::stderr(),
+                            "[tool {}] name={} execution_id={} receipt_event={} call_id={}",
+                            tool_terminal_label(outcome.receipt.status),
+                            outcome.result.tool_name,
+                            outcome.receipt.execution_id,
+                            event_id,
+                            outcome.result.call_id
+                        );
+                    }
+                    ReceiptRecordDisposition::Existing { event_id } => {
+                        let _ = writeln!(
+                            io::stderr(),
+                            "[tool deduplicated] name={} source_execution_id={} source_receipt_event={} call_id={}",
+                            outcome.result.tool_name,
+                            outcome.receipt.execution_id,
+                            event_id,
+                            outcome.result.call_id
+                        );
+                    }
                 }
-                ReceiptRecordDisposition::Existing { event_id } => {
-                    let _ = writeln!(
-                        io::stderr(),
-                        "[tool deduplicated] name={} source_execution_id={} source_receipt_event={} call_id={}",
-                        outcome.result.tool_name,
-                        outcome.receipt.execution_id,
-                        event_id,
-                        outcome.result.call_id
-                    );
-                }
+                Ok(())
             }
-            Ok(())
         };
         let follow_up_session = &session;
         let follow_up_composition = composition;
@@ -346,8 +353,15 @@ pub(crate) async fn run(
                 .map_err(vision::follow_up_error)
             })
         };
+        let mut refresh_context = || {
+            context_cache
+                .refresh(&session.project, &tools, composition)
+                .map_err(|error| AgentLoopError::ContextRefresh {
+                    message: error.to_string(),
+                })
+        };
         let outcome = {
-            let turn = agent.run_turn_audited_with_vision_stages(
+            let turn = agent.run_turn_audited_with_context_refresh_and_vision_stages(
                 line,
                 initial_image,
                 cancellation,
@@ -357,7 +371,8 @@ pub(crate) async fn run(
                     &mut follow_up,
                     &mut text_delta as &mut AssistantTextDeltaStage<'_>,
                     &mut tool_start as &mut ToolExecutionStartStage<'_>,
-                    &mut record_execution as &mut ToolExecutionReceiptStage<'_>,
+                    &mut durability as &mut ChatDurabilityStage<'_>,
+                    &mut refresh_context,
                 ),
             );
             tokio::pin!(turn);
@@ -373,15 +388,12 @@ pub(crate) async fn run(
 
         match outcome {
             Ok(AgentTurnOutcome::Completed { .. }) => {
-                session.record_history(&agent.history().items()[history_start..])?;
                 println!();
             }
             Ok(AgentTurnOutcome::Cancelled { .. }) => {
-                session.record_history(&agent.history().items()[history_start..])?;
                 println!("\n[request cancelled]");
             }
             Err(error) => {
-                session.record_history(&agent.history().items()[history_start..])?;
                 println!();
                 return Err(ChatError::Agent(error));
             }
@@ -393,23 +405,6 @@ pub(crate) async fn run(
             }
         }
     }
-}
-
-fn refresh_agent_context<Provider>(
-    project: &Project,
-    tools: &ToolRegistry,
-    agent: &mut AgentLoop<'_, '_, Provider, ToolRegistry>,
-) -> Result<(), ChatError>
-where
-    Provider: ModelProvider + ?Sized,
-{
-    let research_state = load_research_state(project).map_err(ChatError::ResearchProjection)?;
-    agent.set_world_state(ResearchWorldState::from_research_state(&research_state)?);
-    let timestamp = occurred_at();
-    let snapshot =
-        LocalProjectSnapshot::new(project).inspect(&tools.specs(), &[], timestamp.as_str())?;
-    agent.set_project_snapshot(ProjectSnapshotContext::new(snapshot.snapshot)?);
-    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -450,6 +445,7 @@ impl DurableChatSession {
     fn start_or_resume(
         &self,
         explicit_resume: bool,
+        composition: &ProviderComposition,
     ) -> Result<
         (
             SessionState,
@@ -493,6 +489,11 @@ impl DurableChatSession {
                     session_id: self.session_id.as_str().to_owned(),
                 });
             }
+            if let Some(call_id) = unresolved_receipted_tool_call(projection.state()) {
+                return Err(ChatError::UnresolvedExecutionReceipt {
+                    call_id: call_id.as_str().to_owned(),
+                });
+            }
             if let Some(compaction) = projection
                 .state()
                 .latest_compaction()
@@ -500,7 +501,24 @@ impl DurableChatSession {
             {
                 let facts = load_compaction_validation_facts(&self.project)
                     .map_err(ChatError::ResearchProjection)?;
-                compaction.validate_references(&facts.context())?;
+                match compaction.validate_references(&facts.context()) {
+                    Ok(()) => {},
+                    Err(crate::domain::session::SessionError::CompactionEvidenceStaleResearchRevision { .. }) => {
+                        let historical = crate::adapters::research_projection::load_historical_compaction_facts(
+                            &self.project,
+                            compaction.summary().evidence_spine().expect("v2 has an EvidenceSpine").source(),
+                        ).map_err(ChatError::ResearchProjection)?;
+                        compaction.validate_references(&historical.context())?;
+                        let rebuilt = self.rebuild_compaction(projection.state(), &facts, composition, provider_session.clone())?;
+                        let recovery_sequence = store.next_sequence()?;
+                        let recovery = SessionEvent::CompactionCreated { compaction: rebuilt }.into_envelope(
+                            event_id(self.project.project_id(), &self.session_id, recovery_sequence.get(), "compaction-rebuild"),
+                            stream_id.clone(), recovery_sequence, occurred_at(),
+                        )?;
+                        projection.append(&mut store, recovery).map_err(ChatError::from_session_append)?;
+                    },
+                    Err(error) => return Err(error.into()),
+                }
                 compaction_validation = Some(facts);
             }
             (
@@ -522,6 +540,7 @@ impl DurableChatSession {
                 SessionDisposition::Started,
             )
         };
+        let sequence = store.next_sequence()?;
         let event = event.into_envelope(
             event_id(
                 self.project.project_id(),
@@ -678,6 +697,16 @@ impl DurableChatSession {
         let stream_id = ProjectEventStream::Session(self.session_id.clone()).stream_id();
         let mut projection =
             SessionProjection::replay(EventSource::read_events(&store, &stream_id)?)?;
+        self.record_execution_receipt(&mut projection, &mut store, &stream_id, outcome)
+    }
+
+    fn record_execution_receipt(
+        &self,
+        projection: &mut SessionProjection,
+        store: &mut crate::adapters::project_event_store::JsonlEventStore<'_>,
+        stream_id: &StreamId,
+        outcome: &ToolExecutionOutcome,
+    ) -> Result<ReceiptRecordDisposition, ChatError> {
         if let Some(record) = projection
             .state()
             .execution_receipts()
@@ -704,9 +733,14 @@ impl DurableChatSession {
                 receipt: outcome.receipt.clone(),
             }
         }
-        .into_envelope(receipt_event_id.clone(), stream_id, sequence, occurred_at())?;
+        .into_envelope(
+            receipt_event_id.clone(),
+            stream_id.clone(),
+            sequence,
+            occurred_at(),
+        )?;
         projection
-            .append(&mut store, event)
+            .append(store, event)
             .map_err(ChatError::from_session_append)?;
         Ok(ReceiptRecordDisposition::Recorded {
             event_id: receipt_event_id,
@@ -714,12 +748,25 @@ impl DurableChatSession {
     }
 
     fn record_history(&self, items: &[crate::domain::model::ContentItem]) -> Result<(), ChatError> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        let mut writer = self.project.open_writer()?;
+        let mut store = writer.open_session(self.session_id.clone(), None)?;
+        let stream_id = ProjectEventStream::Session(self.session_id.clone()).stream_id();
+        let mut projection =
+            SessionProjection::replay(EventSource::read_events(&store, &stream_id)?)?;
+        self.append_history_items(&mut projection, &mut store, &stream_id, items)
+    }
+
+    fn append_history_items(
+        &self,
+        projection: &mut SessionProjection,
+        store: &mut crate::adapters::project_event_store::JsonlEventStore<'_>,
+        stream_id: &StreamId,
+        items: &[crate::domain::model::ContentItem],
+    ) -> Result<(), ChatError> {
         for item in items {
-            let mut writer = self.project.open_writer()?;
-            let mut store = writer.open_session(self.session_id.clone(), None)?;
-            let stream_id = ProjectEventStream::Session(self.session_id.clone()).stream_id();
-            let mut projection =
-                SessionProjection::replay(EventSource::read_events(&store, &stream_id)?)?;
             let sequence = store.next_sequence()?;
             let event = SessionEvent::HistoryItemRecorded { item: item.clone() }.into_envelope(
                 event_id(
@@ -728,12 +775,12 @@ impl DurableChatSession {
                     sequence.get(),
                     "history",
                 ),
-                stream_id,
+                stream_id.clone(),
                 sequence,
                 occurred_at(),
             )?;
             projection
-                .append(&mut store, event)
+                .append(store, event)
                 .map_err(ChatError::from_session_append)?;
         }
         Ok(())
@@ -813,6 +860,8 @@ fn event_id(project_id: &ProjectId, session_id: &StreamId, sequence: u64, kind: 
 #[derive(Debug, Error)]
 pub(crate) enum ChatError {
     #[error(transparent)]
+    ContextRefresh(#[from] context::ChatContextRefreshError),
+    #[error(transparent)]
     Io(#[from] io::Error),
     #[error(transparent)]
     Project(#[from] crate::adapters::project_event_store::ProjectEventStoreError),
@@ -858,6 +907,33 @@ pub(crate) enum ChatError {
         "strict Session History changed independently from the active AgentLoop; Compaction was not appended"
     )]
     CompactionRuntimeHistoryMismatch,
+    #[error(
+        "Compaction did not yield a smaller usable next-Turn Context within the configured budget; no Compaction appended"
+    )]
+    CompactionNotUseful,
+    #[error(
+        "Tool Call `{call_id}` has a durable ExecutionReceipt but no paired durable ToolResult; recovery refuses to invent an aborted result or replay the Tool"
+    )]
+    UnresolvedExecutionReceipt { call_id: String },
+}
+
+fn unresolved_receipted_tool_call(
+    state: &SessionState,
+) -> Option<crate::domain::tools::ToolCallId> {
+    state
+        .history()
+        .unpaired_tool_calls_in_call_order()
+        .into_iter()
+        .find_map(|(call_id, _)| {
+            state
+                .execution_receipts()
+                .iter()
+                .any(|record| {
+                    record.receipt.execution_id
+                        == crate::domain::tools::ExecutionId::for_model_call(&call_id)
+                })
+                .then_some(call_id)
+        })
 }
 
 impl ChatError {
@@ -876,6 +952,15 @@ impl ChatError {
         match self {
             Self::Agent(error) => error,
             error => AgentLoopError::RequestAuditCommit {
+                message: error.to_string(),
+            },
+        }
+    }
+
+    fn into_history_checkpoint_agent_loop_error(self) -> AgentLoopError {
+        match self {
+            Self::Agent(error) => error,
+            error => AgentLoopError::HistoryCheckpointCommit {
                 message: error.to_string(),
             },
         }

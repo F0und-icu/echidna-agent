@@ -1,6 +1,7 @@
 //! One read-only composition of Research facts with Project Session Receipt facts.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 
 use crate::adapters::project_event_store::{
     Project, read_existing_research_events, read_existing_session_events,
@@ -18,6 +19,104 @@ use crate::domain::session::{
 };
 
 const MAX_COMPACTION_NARRATIVE_FIELD_BYTES: usize = 1536;
+
+/// Ephemeral receipt-only cache for one interactive process. It is not a
+/// fact store: every Session entry is guarded by an exact JSONL byte digest
+/// and can be discarded/rebuilt from the existing authoritative streams.
+#[derive(Default)]
+pub(crate) struct SessionReceiptCatalogCache {
+    sessions: BTreeMap<crate::domain::events::StreamId, CachedSessionReceipts>,
+}
+
+#[derive(Clone)]
+struct CachedSessionReceipts {
+    source_digest: String,
+    receipts: Vec<(ExecutionReceiptId, crate::domain::tools::ExecutionReceipt)>,
+}
+
+impl SessionReceiptCatalogCache {
+    /// Reuses only unchanged individual Session receipt projections. A normal
+    /// History checkpoint changes the active Session file, but never causes
+    /// every other project Session to be replayed.
+    pub(crate) fn refresh(
+        &mut self,
+        project: &Project,
+    ) -> Result<(ResearchReferenceCatalog, String), String> {
+        let session_ids = project
+            .existing_session_ids()
+            .map_err(|error| error.to_string())?;
+        let live = session_ids.iter().cloned().collect::<BTreeSet<_>>();
+        self.sessions.retain(|id, _| live.contains(id));
+
+        for session_id in session_ids {
+            let path = project
+                .session_stream_path_existing(&session_id)
+                .map_err(|error| error.to_string())?;
+            let before = session_source_digest(&path)?;
+            let reuse = self
+                .sessions
+                .get(&session_id)
+                .is_some_and(|cached| cached.source_digest == before);
+            if reuse {
+                continue;
+            }
+            let receipts = load_session_receipts(project, &session_id)?;
+            let after = session_source_digest(&path)?;
+            if before != after {
+                return Err(format!(
+                    "Session `{session_id}` changed while refreshing its receipt projection"
+                ));
+            }
+            self.sessions.insert(
+                session_id,
+                CachedSessionReceipts {
+                    source_digest: after,
+                    receipts,
+                },
+            );
+        }
+
+        let mut catalog = ResearchReferenceCatalog::default();
+        let mut identity = Vec::new();
+        for (session_id, cached) in &self.sessions {
+            for (receipt_id, receipt) in &cached.receipts {
+                catalog
+                    .insert_execution_receipt(receipt_id.clone(), receipt.clone())
+                    .map_err(|error| error.to_string())?;
+                identity.push((session_id.as_str(), receipt_id.as_str(), receipt));
+            }
+        }
+        let bytes = serde_json::to_vec(&identity).map_err(|error| error.to_string())?;
+        Ok((catalog, blake3::hash(&bytes).to_hex().to_string()))
+    }
+}
+
+fn session_source_digest(path: &std::path::Path) -> Result<String, String> {
+    fs::read(path)
+        .map(|bytes| blake3::hash(&bytes).to_hex().to_string())
+        .map_err(|error| format!("read Session stream `{}`: {error}", path.display()))
+}
+
+fn load_session_receipts(
+    project: &Project,
+    session_id: &crate::domain::events::StreamId,
+) -> Result<Vec<(ExecutionReceiptId, crate::domain::tools::ExecutionReceipt)>, String> {
+    let events = read_existing_session_events(project, session_id)
+        .map_err(|error| format!("Session `{session_id}` cannot be read: {error}"))?;
+    let session = SessionReducer
+        .reduce(events)
+        .map_err(|error| format!("Session `{session_id}` cannot be reduced: {error}"))?;
+    Ok(session
+        .execution_receipts()
+        .iter()
+        .map(|record| {
+            (
+                ExecutionReceiptId::new(record.event_id.as_str()),
+                record.receipt.clone(),
+            )
+        })
+        .collect())
+}
 
 /// Ephemeral read-only facts borrowed by Summary v2 validation. Every field is
 /// rebuilt from the authoritative Project Research and Session streams.
@@ -41,15 +140,41 @@ impl CompactionValidationFacts {
 
     /// Builds the one deterministic production Summary candidate from the
     /// current strict Research projection and resumable Session History. The
-    /// Evidence Spine contains references only; the bounded narrative copies
-    /// only the latest user/assistant continuation text and remains derived.
+    /// Evidence Spine contains references only; the bounded narrative keeps
+    /// the initial/latest request and continuation and remains derived.
     pub(crate) fn compose_session_summary_draft(
         &self,
         history: &[ContentItem],
+        previous: Option<&crate::domain::session::SessionSummary>,
+        reference_limit: usize,
     ) -> Result<SessionSummaryDraft, SessionError> {
         crate::domain::history::ConversationHistory::from_complete_content_items(history)?;
-        let current_goal = latest_text(history, MessageRole::User)
+        let latest_goal = latest_text(history, MessageRole::User)
+            .or_else(|| {
+                previous
+                    .and_then(|summary| summary.narrative())
+                    .map(|narrative| narrative.current_goal())
+            })
             .ok_or(SessionError::CompactionResumableHistoryRequired)?;
+        let initial_goal = history
+            .iter()
+            .find_map(|item| match item {
+                ContentItem::Text {
+                    role: MessageRole::User,
+                    text,
+                } if !text.trim().is_empty() => Some(text.as_str()),
+                _ => None,
+            })
+            .unwrap_or(latest_goal);
+        let current_goal = if initial_goal == latest_goal {
+            bounded_text(latest_goal, MAX_COMPACTION_NARRATIVE_FIELD_BYTES)
+        } else {
+            format!(
+                "Initial request: {}\nLatest request: {}",
+                bounded_text(initial_goal, 640),
+                bounded_text(latest_goal, 640)
+            )
+        };
         let progress = latest_text(history, MessageRole::Assistant).map_or_else(
             || {
                 "No assistant continuation text was durably recorded for the latest goal."
@@ -216,21 +341,47 @@ impl CompactionValidationFacts {
             .map(|record| record.id.clone())
             .collect::<BTreeSet<NextActionId>>();
 
+        // This is a bounded navigation spine, not a complete copied ledger.
+        // Omitted references remain discoverable in the authoritative stream.
+        let unresolved = hypothesis_refs
+            .iter()
+            .take(reference_limit.min(4))
+            .map(|id| {
+                format!(
+                    "Re-read hypothesis {} for its current unresolved state.",
+                    id.as_str()
+                )
+            })
+            .collect();
+        let mut next_steps = next_action_refs
+            .iter()
+            .take(reference_limit.min(4))
+            .map(|id| {
+                format!(
+                    "Re-read next action {}; do not infer completion from this summary.",
+                    id.as_str()
+                )
+            })
+            .collect::<Vec<_>>();
+        next_steps.push("This lossy summary retains a bounded reference subset; consult current Research facts before continuing.".to_owned());
         let evidence_spine = EvidenceSpine::new(
             self.research_stream.clone(),
             vec![current_target_id],
-            hypothesis_refs.into_iter().collect(),
-            experiment_refs.into_iter().collect(),
-            finding_refs.into_iter().collect(),
-            next_action_refs.into_iter().collect(),
-            artifact_refs.into_iter().collect(),
-            execution_receipt_refs.into_iter().collect(),
+            hypothesis_refs.into_iter().take(reference_limit).collect(),
+            experiment_refs.into_iter().take(reference_limit).collect(),
+            finding_refs.into_iter().take(reference_limit).collect(),
+            next_action_refs.into_iter().take(reference_limit).collect(),
+            artifact_refs.into_iter().take(reference_limit).collect(),
+            execution_receipt_refs
+                .into_iter()
+                .take(reference_limit)
+                .collect(),
         )?;
         let narrative = NarrativeSummary::new(
-            bounded_text(current_goal, MAX_COMPACTION_NARRATIVE_FIELD_BYTES),
+            current_goal,
             bounded_text(&progress, MAX_COMPACTION_NARRATIVE_FIELD_BYTES),
-            Vec::new(),
-            Vec::new(),
+            unresolved,
+            next_steps,
         )?;
         SessionSummaryDraft::new(evidence_spine, narrative)
     }
@@ -356,6 +507,18 @@ pub(crate) fn load_research_state(project: &Project) -> Result<ResearchState, St
     load_research_projection(project).map(|(state, _)| state)
 }
 
+/// Reduces Research against a caller-refreshed ephemeral receipt catalog.
+/// The caller owns the cache lifetime; this helper owns no additional state.
+pub(crate) fn load_research_state_with_references(
+    project: &Project,
+    references: &ResearchReferenceCatalog,
+) -> Result<ResearchState, String> {
+    let events = read_existing_research_events(project).map_err(|error| error.to_string())?;
+    ResearchReducer
+        .reduce_with_references(events, references)
+        .map_err(|error| error.to_string())
+}
+
 /// Rebuilds the one authoritative Research projection and the ephemeral
 /// Session Receipt catalog it requires. Callers receive no writer and the
 /// catalog is never serialized as a second fact source.
@@ -363,18 +526,42 @@ pub(crate) fn load_research_projection(
     project: &Project,
 ) -> Result<(ResearchState, ResearchReferenceCatalog), String> {
     let references = load_reference_catalog(project)?;
-    let events = read_existing_research_events(project).map_err(|error| error.to_string())?;
-    let state = ResearchReducer
-        .reduce_with_references(events, &references)
-        .map_err(|error| error.to_string())?;
+    let state = load_research_state_with_references(project, &references)?;
     Ok((state, references))
 }
 
 pub(crate) fn load_compaction_validation_facts(
     project: &Project,
 ) -> Result<CompactionValidationFacts, String> {
+    load_compaction_facts_at(project, None)
+}
+
+/// Replays the original exact Research prefix, never treating an advanced
+/// current stream as if it were the old Summary's source. The caller must
+/// still validate the old Summary against this historical context.
+pub(crate) fn load_historical_compaction_facts(
+    project: &Project,
+    source: &ResearchStreamIdentity,
+) -> Result<CompactionValidationFacts, String> {
+    let facts = load_compaction_facts_at(project, Some(source.watermark().get()))?;
+    if &facts.research_stream != source {
+        return Err(
+            "Compaction historical Research prefix identity/hash does not match".to_owned(),
+        );
+    }
+    Ok(facts)
+}
+
+fn load_compaction_facts_at(
+    project: &Project,
+    watermark: Option<u64>,
+) -> Result<CompactionValidationFacts, String> {
     let (references, execution_receipt_ids) = load_reference_catalog_and_receipt_ids(project)?;
-    let events = read_existing_research_events(project).map_err(|error| error.to_string())?;
+    let mut events = read_existing_research_events(project).map_err(|error| error.to_string())?;
+    if let Some(watermark) = watermark {
+        // Identity validation below checks contiguous sequences and exact hash.
+        events.retain(|event| event.sequence.get() <= watermark);
+    }
     let research_stream =
         ResearchStreamIdentity::from_events(project.project_id().clone(), &events)
             .map_err(|error| error.to_string())?;

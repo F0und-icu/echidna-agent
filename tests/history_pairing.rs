@@ -161,7 +161,11 @@ fn normalization_preserves_complete_pairs_drops_orphans_and_repairs_open_calls_i
                 call_id: first_open_call.call_id,
                 tool_name: first_open_call.name,
                 status: ToolResultStatus::Cancelled,
-                output: json!({"error": "aborted"}),
+                output: json!({
+                    "error": "aborted",
+                    "execution_status": "unknown",
+                    "guidance": "do_not_assume_no_effect_or_auto_rerun"
+                }),
             }
         }
     );
@@ -172,7 +176,11 @@ fn normalization_preserves_complete_pairs_drops_orphans_and_repairs_open_calls_i
                 call_id: second_open_call.call_id,
                 tool_name: second_open_call.name,
                 status: ToolResultStatus::Cancelled,
-                output: json!({"error": "aborted"}),
+                output: json!({
+                    "error": "aborted",
+                    "execution_status": "unknown",
+                    "guidance": "do_not_assume_no_effect_or_auto_rerun"
+                }),
             }
         }
     );
