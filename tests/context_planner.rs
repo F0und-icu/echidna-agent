@@ -31,6 +31,61 @@ fn capabilities() -> ModelCapabilities {
     }
 }
 
+#[test]
+fn large_windows_use_bounded_headroom_without_a_hidden_input_cap() {
+    for (window, output, tools) in [
+        (128, 16, 16),
+        (32768, 4096, 4096),
+        (65536, 8192, 8192),
+        (1_048_576, 8192, 16384),
+        (2_097_152, 8192, 16384),
+        (u32::MAX, 8192, 16384),
+    ] {
+        let mut caps = capabilities();
+        caps.context_window = window;
+        let budget = ContextPlanner::current().default_budget(&caps).unwrap();
+        assert_eq!(budget.context_window_tokens(), window);
+        assert_eq!(budget.reserved_output_tokens(), output);
+        assert_eq!(budget.reserved_tool_loop_tokens(), tools);
+        assert_eq!(budget.input_token_limit(), window - output - tools);
+    }
+}
+
+#[test]
+fn capped_budget_policy_invalidates_fingerprint_even_when_small_budget_is_unchanged() {
+    let old = ContextPlanner::new(ContextPlannerVersions::new(
+        "context-planner:1",
+        "utf8-rendered-channel-budget:2",
+        "output-and-tool-loop-eighths:1",
+    ));
+    let current = ContextPlanner::current();
+    let caps = capabilities();
+    let compile_with = |planner: &ContextPlanner| {
+        planner
+            .compile(
+                vec![fragment(
+                    "user",
+                    ContextFragmentSource::UserInput,
+                    ContextFragmentPriority::Required,
+                )],
+                planner.default_budget(&caps).unwrap(),
+                &caps,
+                Vec::new(),
+                ModelRequestRequirements::default(),
+                None,
+            )
+            .unwrap()
+    };
+    assert_eq!(
+        old.default_budget(&caps).unwrap(),
+        current.default_budget(&caps).unwrap()
+    );
+    assert_ne!(
+        compile_with(&old).context_fingerprint(),
+        compile_with(&current).context_fingerprint()
+    );
+}
+
 fn planner() -> ContextPlanner {
     ContextPlanner::new(ContextPlannerVersions::new(
         "planner:1",

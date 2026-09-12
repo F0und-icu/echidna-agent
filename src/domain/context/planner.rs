@@ -75,7 +75,7 @@ impl ContextPlanner {
         Self::new(ContextPlannerVersions::new(
             "context-planner:1",
             "utf8-rendered-channel-budget:2",
-            "output-and-tool-loop-eighths:1",
+            "capped-output-and-tool-loop-eighths:2",
         ))
     }
 
@@ -95,7 +95,13 @@ impl ContextPlanner {
         capabilities: &ModelCapabilities,
     ) -> Result<ContextBudget, ContextPlannerError> {
         let reserve = capabilities.context_window / 8;
-        ContextBudget::new(capabilities.context_window, reserve, reserve)
+        // Headroom grows with small windows, not indefinitely with model capacity.
+        // Chat, Compaction and scoped Vision all resolve this same policy.
+        ContextBudget::new(
+            capabilities.context_window,
+            reserve.min(8_192),
+            reserve.min(16_384),
+        )
     }
 
     #[allow(clippy::too_many_arguments)]

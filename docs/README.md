@@ -16,7 +16,7 @@
 4. `task.md` 中当前产品范围、架构约束和里程碑。
 5. `docs/development/IMPLEMENTATION_PLAN.md`。
 6. `docs/development/LEAN_CODE_GOVERNANCE.md`。
-7. 最新的冻结架构链：`docs/architecture/CYBER_AGENT_ARCHITECTURE_V1.md` 至 `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_7.md`。
+7. 最新的冻结架构链：`docs/architecture/CYBER_AGENT_ARCHITECTURE_V1.md` 至 `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_9.md`。
 8. 已接受的 `docs/adr/ADR-*.md`。
 9. `docs/development/GIT_VERSION_RELEASE.md` 和 `docs/development/DEVELOPMENT_ENVIRONMENT.md`。
 10. `Codex架构与漏洞挖掘Agent复用评估.md`。
@@ -38,6 +38,8 @@
 | `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_5.md` | 架构 v1.5 Provider reasoning continuation 与双 History 权威边界 | 本地冻结；远端封存未授权前不修改 |
 | `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_6.md` | 架构 v1.6 冗余 encrypted reasoning sidecar 的 Adapter-local 边界 | 本地冻结；远端封存未授权前不修改 |
 | `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_7.md` | 架构 v1.7 交互连续性、当前上下文与预算恢复；ADR-0017 | 本地冻结；远端封存待授权 |
+| `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_8.md` | 架构 v1.8 默认 CLI 思考展示、仅开发构建 debug；ADR-0018 | 本地冻结；远端封存待授权 |
+| `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_9.md` | 架构 v1.9 可读工具/调试内容与大窗口预算；ADR-0019 | 本地冻结；远端封存未授权 |
 | `docs/architecture/SEALED_MANIFEST.md` | 封存来源、提交基线和 Hash 清单 | 只追加新封存记录 |
 | `docs/development/IMPLEMENTATION_PLAN.md` | 按 Slice 可执行的开发步骤和验收门 | 可以，不能追溯改写已完成 Slice |
 | `docs/development/STATUS.md` | 当前唯一工作状态和下一动作 | 每个 Slice 开始/结束更新 |

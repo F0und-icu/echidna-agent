@@ -8,6 +8,7 @@
 
 mod compaction;
 mod context;
+mod tool_output;
 mod vision;
 
 use std::io::{self, Write};
@@ -274,11 +275,13 @@ pub(crate) async fn run(
             }
             None => None,
         };
-        print!("assistant> ");
-        io::stdout().flush()?;
-
         let signal_cancellation = cancellation.clone();
+        let mut answer_started = false;
         let mut text_delta = |text: &str| {
+            if !answer_started && !text.is_empty() {
+                print!("assistant> ");
+                answer_started = true;
+            }
             print!("{text}");
             io::stdout()
                 .flush()
@@ -291,14 +294,9 @@ pub(crate) async fn run(
                 .record_request_audit(attempt)
                 .map_err(ChatError::into_request_audit_agent_loop_error)
         };
+        let tool_output = std::cell::RefCell::new(tool_output::ToolOutput::default());
         let mut tool_start = |plan: &crate::domain::tools::ToolExecutionPlan| {
-            let _ = writeln!(
-                io::stderr(),
-                "[tool started] name={} execution_id={} call_id={}",
-                plan.call.name,
-                plan.execution_id,
-                plan.call.call_id
-            );
+            tool_output.borrow_mut().started(plan);
         };
         let mut durability = |checkpoint: ChatDurabilityCheckpoint<'_>| match checkpoint {
             ChatDurabilityCheckpoint::History(items) => session
@@ -308,29 +306,10 @@ pub(crate) async fn run(
                 let disposition = session
                     .record_execution(outcome)
                     .map_err(ChatError::into_execution_receipt_agent_loop_error)?;
-                match disposition {
-                    ReceiptRecordDisposition::Recorded { event_id } => {
-                        let _ = writeln!(
-                            io::stderr(),
-                            "[tool {}] name={} execution_id={} receipt_event={} call_id={}",
-                            tool_terminal_label(outcome.receipt.status),
-                            outcome.result.tool_name,
-                            outcome.receipt.execution_id,
-                            event_id,
-                            outcome.result.call_id
-                        );
-                    }
-                    ReceiptRecordDisposition::Existing { event_id } => {
-                        let _ = writeln!(
-                            io::stderr(),
-                            "[tool deduplicated] name={} source_execution_id={} source_receipt_event={} call_id={}",
-                            outcome.result.tool_name,
-                            outcome.receipt.execution_id,
-                            event_id,
-                            outcome.result.call_id
-                        );
-                    }
-                }
+                tool_output.borrow_mut().recorded(
+                    outcome,
+                    matches!(disposition, ReceiptRecordDisposition::Existing),
+                );
                 Ok(())
             }
         };
@@ -707,15 +686,13 @@ impl DurableChatSession {
         stream_id: &StreamId,
         outcome: &ToolExecutionOutcome,
     ) -> Result<ReceiptRecordDisposition, ChatError> {
-        if let Some(record) = projection
+        if projection
             .state()
             .execution_receipts()
             .iter()
-            .find(|record| record.receipt == outcome.receipt)
+            .any(|record| record.receipt == outcome.receipt)
         {
-            return Ok(ReceiptRecordDisposition::Existing {
-                event_id: record.event_id.clone(),
-            });
+            return Ok(ReceiptRecordDisposition::Existing);
         }
         let sequence = store.next_sequence()?;
         let receipt_event_id = event_id(
@@ -733,18 +710,11 @@ impl DurableChatSession {
                 receipt: outcome.receipt.clone(),
             }
         }
-        .into_envelope(
-            receipt_event_id.clone(),
-            stream_id.clone(),
-            sequence,
-            occurred_at(),
-        )?;
+        .into_envelope(receipt_event_id, stream_id.clone(), sequence, occurred_at())?;
         projection
             .append(store, event)
             .map_err(ChatError::from_session_append)?;
-        Ok(ReceiptRecordDisposition::Recorded {
-            event_id: receipt_event_id,
-        })
+        Ok(ReceiptRecordDisposition::Recorded)
     }
 
     fn record_history(&self, items: &[crate::domain::model::ContentItem]) -> Result<(), ChatError> {
@@ -788,8 +758,8 @@ impl DurableChatSession {
 }
 
 enum ReceiptRecordDisposition {
-    Recorded { event_id: EventId },
-    Existing { event_id: EventId },
+    Recorded,
+    Existing,
 }
 
 fn parse_phase(value: &str) -> Result<ResearchPhase, ChatError> {
@@ -802,14 +772,6 @@ fn parse_phase(value: &str) -> Result<ResearchPhase, ChatError> {
         value => Err(ChatError::UnknownPhase {
             value: value.to_owned(),
         }),
-    }
-}
-
-fn tool_terminal_label(status: crate::domain::tools::ToolResultStatus) -> &'static str {
-    match status {
-        crate::domain::tools::ToolResultStatus::Succeeded => "completed",
-        crate::domain::tools::ToolResultStatus::Failed => "failed",
-        crate::domain::tools::ToolResultStatus::Cancelled => "cancelled",
     }
 }
 

@@ -148,7 +148,8 @@ tool_call = true
 structured_output = true
 incremental_input = false
 usage_reporting = true
-context_window = 32768
+# 仅适用于已确认支持该窗口的模型；否则填写服务端实际容量。
+context_window = 1048576
 
 [agent_profiles.default]
 primary = "primary"
@@ -158,6 +159,10 @@ generation = 1
 
 示例中的 Base URL、模型名和 Capability 值必须由用户按目标服务的真实契约填写；每个 Provider 必须且只能配置内联 `api_key` 或 `credential_ref = "CYBER_AGENT_*_API_KEY"`。配置拒绝 `context_window = 0`，也不会从 URL、Model slug 或凭据来源猜测能力。当前实现只接受 `binding = "http_sse"` 与 `wire_api = "responses"` 组合。任何实现该协议的服务都复用同一个 Adapter；仅修改 URL、Model、凭据来源或 Capability Mapping 不需要新增厂商 binding。Chat Completions 或改变 wire 语义的“兼容”接口仍明确不支持。
 
+F5 的 ContextPlanner 默认回复预留 `min(window/8, 8192)`，工具循环预留 `min(window/8, 16384)`。32K 配置保持 4096+4096；1M 配置为 8192+16384，剩余 1024000 输入额度，不再固定扣掉四分之一。该额度使用现有保守估算，并非模型输出上限或精确 tokenizer。Primary/Vision 各自按真实容量配置；已有个人配置不会自动从 32768 改写为 1M。修改 capability mapping 时递增其 version；显式 Resume 后使用新配置。
+
+F5 工具输出显示名称、参数、结果与完成/失败/取消/复用区别，参数和结果各至多 4096 UTF-8 字节、36 行预览；超限明确提示，完整 ToolResult 不受影响。debug 只展示实际发送的 Prompt/输入/Tool 定义/响应格式，标记 Full 或增量；主模型答案仍在 assistant stdout 流式显示一次，思考与 scoped Vision debug 在 stderr 显示。不再输出 routine SSE JSON、usage 或长传输 ID 包装。完整 debug 仍不进入 release。
+
 `doctor` 不发起 Provider 请求，也不显示 Key；内联配置会被正常解析：
 
 ```sh
@@ -165,6 +170,12 @@ cargo run --locked -- --config /absolute/path/to/cyber-agent.toml doctor
 ```
 
 ### 6.2 项目级配置
+
+CLI 默认将 Provider 实际返回的明文思考作为连续流式文本输出到 stderr：仅在开头显示一次角色/请求标识和未完成状态，逐段刷新，保留换行与制表符，响应结束或中断时单独提示。不会为每个 delta 打印 JSON；其他终端控制字符仍转义。未完成思考不视为最终回答，且不进入 Conversation History。此行为在 release 也保留。开发构建可运行 `cargo run --locked -- --config /absolute/path/provider.toml chat --debug`，按 F5 展示实际发送内容（Prompt、ToolSpecs、Full/增量输入）和模型流式输出，不再逐条打印 SSE JSON。标准 `cargo build --release` 中 `--debug` 字段、完整 wire 输出及其脱敏分支由 `cfg(debug_assertions)` 编译移除，不是仅默认关闭。
+
+debug 不打印鉴权 Header/API Key、opaque encrypted reasoning 或图片 Base64；相关省略显式标记。普通 Prompt/工具文本可能包含敏感研究材料，不能把终端输出当作可公开日志。程序不创建额外日志文件，只有操作者主动重定向 stderr 才会保存输出。只有模型实际返回的 reasoning 可显示；未返回的内部思考不补写。开启 debug 不授权真实模型测试。
+
+非 JSON 响应无法可靠按字段脱敏，因此仅显示省略标记。debug 新增的 HTTP 错误体读取和所有 HTTP 错误体展示上限为 64 KiB；超限时不打印局部内容，只显示省略标记。既有增量拒绝识别继续完整读取错误体，保持原有 Full fallback 行为，不受 debug 开关或展示上限影响。正常 SSE 文本不按此错误体限额截断。
 
 目标项目的 `.cyber-agent/` 保存项目状态。它不属于 Cyber Agent 源码仓库。
 

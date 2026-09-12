@@ -1049,6 +1049,26 @@ Deliverables:
 
 No new crate, second AgentLoop, fact store, generic Hook, benchmark adapter, non-interactive entry, vendor protocol, automatic retry or real Provider request. Permanent regressions stay in `tests/`. Each implementation workstream has finite ownership; final independent review covers their integration. Gate order remains focused → affected → independent audit → repairs → full Gate → Lean Review.
 
+### F4：Opt-in CLI Provider Debug
+
+Operator presentation refinement: default reasoning is readable streaming text, not per-delta JSON. Show one role/request heading marked uncommitted, flush each text delta, preserve newlines/tabs while escaping other terminal controls, and label response completion/interruption. Keep exact-text item dedupe and full debug JSON unchanged. Verify visibility before the mock server releases completion, in both development and release builds.
+
+Deliver default labeled Provider reasoning stderr in all builds, including release. Add `chat --debug` only in development builds (`cfg(debug_assertions)`) through the existing Provider Composition Root. The protocol Adapter prints sanitized actual encoded requests and incoming response events, labeled by Primary/Vision role and request ID. Do not rebuild a Prompt, change wire bytes, persist another log, alter History or add a general observer framework.
+
+Cover debug-off/default reasoning, request/body correspondence, Tool calls/results, streaming completion/failure, Full/incremental delivery, image redaction and Primary/Vision composition. Diagnostics omit credentials, encrypted sidecars and image bytes; reasoning stderr may show Provider-returned plaintext but Assistant stdout/History may not. Standard release must retain reasoning and reject `--debug`; full wire debug code is excluded. No automatic input rewrite, real model test or Git delivery is included. Follow the existing focused → affected → independent audit → fixes → full Gate → Lean Review sequence.
+
+### F5：Readable CLI Content and Large-Window Budget
+
+Current authorization update: the operator has now authorized a fresh Terra xhigh independent read-only audit and subsequent bounded synthetic Live Test. Resolve review findings and complete the offline Gate first. Git/Actions/Codex login access remain excluded. The original implementation-stage stop boundary below is historical, not a denial of the new authorization.
+
+Completion: F5 is COMPLETE_LOCAL as of 2026-09-11. Independent audit APPROVE, full Gate/Lean Review and the separately authorized bounded development/release Live passed; see STATUS for exact counts and evidence. Secondary Vision identified the synthetic colors correctly but estimated incorrect region dimensions; full-1M capacity was not exercised. No production repair, Git publication, Actions or next Slice followed this Live acceptance.
+
+Subsequent delivery authorization: implementation `bd585ec` is published in Draft PR #68 on `codex/f4-f5-cli-content-budget` with `[skip ci]`. Current state is REMOTE_SUBMITTED_PENDING_MERGE; no merge, Release, Actions or next Slice implementation is included. The preceding no-Git statement describes the completed Live checkpoint.
+
+Operator-authorized direct implementation by the main agent; no delegation, Git, Actions or Live. ADR-0019 / architecture v1.9 govern readable bounded Tool arguments/results, content-focused development debug without per-SSE noise or duplicated Primary answers, and capped default Context reserves. Preserve actual wire observation, credential/image/opaque redaction, release exclusion, durable Receipt boundaries and unknown outcomes. Existing explicit context_window supports million-token mappings without model-name inference; no new configuration path.
+
+Focused tests → affected tests → fresh operator-authorized independent audit → fixes → complete Gate → Lean Review. Stop for audit authorization after implementation/affected validation; F4 approvals do not apply.
+
 ## 7. 失败与阻塞处理
 
 - 同一错误先定位最小失败层：Domain、Port、Adapter、Integration、Environment。

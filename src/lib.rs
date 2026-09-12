@@ -23,6 +23,7 @@ pub mod trace_eval_runtime;
 mod cli_chat;
 mod cli_inspection;
 mod cli_session;
+mod terminal_content;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -44,6 +45,10 @@ enum CliCommand {
     Init,
     /// Start an interactive research session.
     Chat {
+        /// Show sanitized sent prompts and model content, without SSE envelopes (development builds only).
+        #[cfg(debug_assertions)]
+        #[arg(long)]
+        debug: bool,
         /// Resume one durable Session ID, or `latest`; `--session` is kept as an alias.
         #[arg(
             long = "resume",
@@ -360,6 +365,7 @@ fn run_chat(
     session: Option<String>,
     domain: Option<CliDomainProfile>,
     phase: Option<CliResearchPhase>,
+    #[cfg(debug_assertions)] debug: bool,
 ) -> Result<(), CliError> {
     let config = config.ok_or(CliError::ChatConfigurationRequired)?;
     let config = ProviderComposition::load_config(config)?;
@@ -369,6 +375,8 @@ fn run_chat(
         config,
         Arc::new(adapters::credentials::ProcessEnvironmentCredentialSource),
         project.clone(),
+        #[cfg(debug_assertions)]
+        debug,
     )?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
@@ -401,7 +409,16 @@ where
             session,
             domain,
             phase,
-        }) => run_chat(cli.config.as_deref(), session, domain, phase),
+            #[cfg(debug_assertions)]
+            debug,
+        }) => run_chat(
+            cli.config.as_deref(),
+            session,
+            domain,
+            phase,
+            #[cfg(debug_assertions)]
+            debug,
+        ),
         Some(CliCommand::Doctor) => {
             let composition = load_provider_composition(cli.config.as_deref())?;
             print_json(&doctor_report(composition.as_ref()))

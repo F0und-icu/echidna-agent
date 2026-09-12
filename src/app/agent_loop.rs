@@ -207,7 +207,8 @@ pub(crate) type ToolExecutionStartStage<'a> = dyn FnMut(&ToolExecutionPlan) + 'a
 
 /// The one fixed stage for user-visible assistant text while a response is
 /// streaming. Reasoning is intentionally not part of this stage and remains
-/// outside Conversation History and CLI output.
+/// outside Conversation History and Assistant output. The protocol Adapter may
+/// present returned reasoning separately on labeled CLI stderr (ADR-0018).
 pub type AssistantTextDeltaStage<'a> = dyn FnMut(&str) -> Result<(), AgentLoopError> + 'a;
 
 /// The fixed callback bundle used only by production CLI Vision composition.

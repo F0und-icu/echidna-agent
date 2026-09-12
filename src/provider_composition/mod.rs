@@ -42,7 +42,13 @@ impl ProviderComposition {
         path: impl AsRef<Path>,
         credential_source: Arc<dyn CredentialSource>,
     ) -> Result<Self, ProviderCompositionError> {
-        Self::compose(Self::load_config(path)?, credential_source, None)
+        Self::compose(
+            Self::load_config(path)?,
+            credential_source,
+            None,
+            #[cfg(debug_assertions)]
+            false,
+        )
     }
 
     /// Strictly decodes and validates Config v1 before any runtime-only input
@@ -62,8 +68,15 @@ impl ProviderComposition {
         config: ValidatedProviderConfig,
         credential_source: Arc<dyn CredentialSource>,
         project: Project,
+        #[cfg(debug_assertions)] debug: bool,
     ) -> Result<Self, ProviderCompositionError> {
-        Self::compose(config, credential_source, Some(project))
+        Self::compose(
+            config,
+            credential_source,
+            Some(project),
+            #[cfg(debug_assertions)]
+            debug,
+        )
     }
 
     pub fn agent_profile(&self) -> &AgentModelProfile {
@@ -104,6 +117,7 @@ impl ProviderComposition {
         config: ValidatedProviderConfig,
         credential_source: Arc<dyn CredentialSource>,
         project: Option<Project>,
+        #[cfg(debug_assertions)] debug: bool,
     ) -> Result<Self, ProviderCompositionError> {
         let config = config.0;
         let prompt_sources = config.prompts.clone();
@@ -116,6 +130,9 @@ impl ProviderComposition {
             config.capabilities(primary_definition),
             Arc::clone(&credential_source),
             project.as_ref(),
+            project.as_ref().map(|_| "primary"),
+            #[cfg(debug_assertions)]
+            debug,
         );
         let vision = agent.vision.as_deref().map(|vision_id| {
             let definition = config.provider(vision_id);
@@ -125,6 +142,9 @@ impl ProviderComposition {
                 config.capabilities(definition),
                 Arc::clone(&credential_source),
                 project.as_ref(),
+                project.as_ref().map(|_| "vision"),
+                #[cfg(debug_assertions)]
+                debug,
             )
         });
         let agent_profile = config.active_agent_model_profile()?;
@@ -145,6 +165,8 @@ fn compose_provider(
     capabilities: ModelCapabilities,
     credential_source: Arc<dyn CredentialSource>,
     project: Option<&Project>,
+    cli_role: Option<&'static str>,
+    #[cfg(debug_assertions)] debug: bool,
 ) -> Arc<dyn ModelProvider> {
     let (credential_reference, credential_source) = match definition.credential() {
         ProviderCredential::Reference(reference) => (reference.to_owned(), credential_source),
@@ -173,6 +195,11 @@ fn compose_provider(
                 Some(project) => adapter.with_project_image_resolver(project.clone()),
                 None => adapter,
             };
+            let adapter = adapter.with_cli_output(
+                cli_role,
+                #[cfg(debug_assertions)]
+                debug,
+            );
             Arc::new(adapter)
         }
     }

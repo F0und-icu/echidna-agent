@@ -9,7 +9,7 @@
 - Codex 本地源码：`codex/`
 - Codex 最新设计复核提交：`868c9edb0da913a5fc699a71664e65f44f6058b0`
 - 分析文档：`Codex架构与漏洞挖掘Agent复用评估.md`
-- 冻结架构：`docs/architecture/CYBER_AGENT_ARCHITECTURE_V1.md` 至 `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_7.md` 的完整 additive chain
+- 冻结架构：`docs/architecture/CYBER_AGENT_ARCHITECTURE_V1.md` 至 `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_9.md` 的完整 additive chain
 - 模型组合决策：`docs/adr/ADR-0002-capability-driven-primary-vision-models.md`
 - 研究控制决策：`docs/adr/ADR-0009-stable-research-persona-domain-profile-and-phase.md`
 - 不可变 Step/Tool Plan 决策：`docs/adr/ADR-0010-immutable-sampling-step-and-tool-plan.md`
@@ -30,6 +30,12 @@
 - GitHub 私有仓库：`F0und-icu/cyber-agent`
 
 当前状态：
+
+- F4/F5 已远端提交：实现 `bd585ec`，短分支 `codex/f4-f5-cli-content-budget`，Draft PR #68，使用 `[skip ci]`。状态为 `REMOTE_SUBMITTED_PENDING_MERGE`；未合并 main、未创建 Tag/Release、不开始下一 Slice，Actions 继续暂停。下列 Live 完成记录中的 Git 未授权是当时测试边界，以本条及 STATUS 的当前交付状态为准。
+
+- F5 已 `COMPLETE_LOCAL`：全新 Terra xhigh 独立只读审计 APPROVE，完整 post-audit Gate（421 passed / 2 Live ignored）、Lean Review 和 release 展示检查（8 passed）均通过。具体凭据来源获明确授权后，2026-09-11 开发版 debug/工具/Secondary Vision 与 release Chat 合成 Live 均 exit 0；2 Sessions、7 RequestAudits、5 model ToolCalls、6 Receipts、1 VisionObservation 的持久事实核验通过。Vision 左红右蓝正确，但区域尺寸估计错误，不能作为精确坐标或已验证证据；1M 配置与 1024000 输入预算路径通过，不代表实测满 1M 容量。临时凭据副本已删除，原配置及 Codex 登录状态未动。具体限制见 STATUS；未修改生产代码，Git/Actions/下一 Slice 未授权。
+
+- F4 及其可读性改进已本地完成独立审计、完整离线 Gate 与 release 验证：所有构建默认在独立 stderr 连续流式展示 Provider 返回的明文思考，仅保留一次开头标识和明确的完成／中断提示；开发构建额外提供 `chat --debug` 结构化请求/响应诊断，标准 release 编译移除该开关和完整 wire 调试路径。具体边界见 ADR-0018/STATUS；未改写用户输入、未新增模型请求，改动尚未提交远端。
 
 - 阶段：Implementation；M0 至 M5-S2 和 F1a-F1e/F2a 已远端封存；F3 已完成独立审计、完整离线 Gate、带明确限制的合成 Live 验收，并经 PR #67 / Squash Merge `5873c08` 远端封存，具体验证与 Git 状态见 STATUS。
 - 当前代码基线已具备一个 AgentLoop、项目/会话/研究/审计事实、固定领域 Prompt Profiles、多模态组合、Replay/Eval、唯一 Provider Composition Root 和第一版 CLI Chat。
@@ -774,6 +780,7 @@ ContextPlanner 使用唯一 `generic-v1` renderer，并产生不进入模型文�
 Context Builder 必须：
 
 - 根据模型 context window 计算可用预算。
+- F5 默认预留为 `min(window/8, 8192)` 回复和 `min(window/8, 16384)` 工具循环；1,048,576 窗口的输入额度为 1,024,000。Chat、Compaction、Vision 复用同一 ContextPlanner 和版本化策略，不设隐藏 32K 工作上限。窗口来自显式 CapabilityMapping，不按模型名称推断，也不代表服务端必然支持该容量。
 - 为模型回复和工具循环保留空间。
 - 对工具输出进行头尾保留和结构化截断。
 - 将大型内容保存为 Artifact，Prompt 中只传摘要、路径和 Hash。
@@ -1120,7 +1127,7 @@ Full Access 不等于无条件记录敏感值：
 - ResearchPhaseSelected：Phase、generation、source 和稳定 Reason Code
 - CompactionCreated / StreamRecovered
 
-完整模型请求快照默认关闭，只在本地 debug 配置下保存到当前 Session 的 `request-snapshots/`。Prompt Hash、Context Fingerprint、Fragment Manifest 和 Usage 始终保留。
+完整模型请求快照落盘保持 Deferred。F4 的 `chat --debug` 仅在开发构建输出本地 stderr，不创建 `request-snapshots/` 或第二日志；请求审计仍复用既有事实与 Blob。Provider 明文思考默认单独显示，包括 release，但不进入 Assistant stdout 或 Conversation History。
 
 仅记录 Hash 不足以长期审计，因为 Prompt、Memory 和项目文件以后可能变化。默认审计因此保存轻量 `RequestAuditManifest`：
 
@@ -1167,7 +1174,7 @@ Cyber Agent 只允许三类有意义的对外网络请求：
 
 指标只写当前项目的本地 Event/summary，不上传。`/metrics` 显示当前 Session 和项目累计值。
 
-默认审计级别不保存每次完整 Request Snapshot，只保存事件、Hash、Fragment Manifest 和指标。完整 Snapshot 作为本地 debug 开关，避免默认产生大量重复磁盘写入。
+默认审计级别不保存每次完整 Request Snapshot，只保存事件、Hash、Fragment Manifest 和指标。完整 Snapshot 文件持久化保持 Deferred；F4 的开发构建 `chat --debug` 只输出脱敏后的请求/响应到 stderr，不新增文件或重复事实源。
 
 ### 12.4 Trace Replay 和 Shadow Eval
 

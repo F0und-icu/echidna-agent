@@ -1,3 +1,7 @@
+#[path = "cli_chat_cases/f4_output.rs"]
+mod f4_output;
+#[path = "cli_chat_cases/f5_output.rs"]
+mod f5_output;
 #[path = "support/provider_config.rs"]
 mod provider_config;
 mod support;
@@ -3147,16 +3151,11 @@ fn m5_cli_reports_real_tool_start_and_persisted_terminal_receipt() {
     server.requests.recv().unwrap();
     server.join();
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(
-        stderr.contains(
-            "[tool started] name=read_file execution_id=execution:m5-read call_id=m5-read"
-        )
-    );
-    assert!(
-        stderr.contains(
-            "[tool completed] name=read_file execution_id=execution:m5-read receipt_event="
-        )
-    );
+    assert!(stderr.contains("┌ 工具 #1 · read_file · 执行中"));
+    assert!(stderr.contains("└ 工具 #1 · read_file · 完成"));
+    assert!(stderr.contains("path: target.txt"));
+    assert!(stderr.contains("content: bounded fixture\n"));
+    assert!(!stderr.contains("execution:m5-read"));
     assert!(!stderr.to_ascii_lowercase().contains("reasoning"));
     assert_eq!(
         session_events(project.path(), &session_id(project.path()))
@@ -3205,11 +3204,14 @@ fn m5_cli_labels_deduplicated_tool_calls_without_a_second_start_or_receipt() {
     server.join();
 
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert_eq!(stderr.matches("[tool started]").count(), 1, "{stderr}");
-    assert_eq!(stderr.matches("[tool completed]").count(), 1, "{stderr}");
-    assert_eq!(stderr.matches("[tool deduplicated]").count(), 1, "{stderr}");
-    assert!(stderr.contains("source_execution_id=execution:m5-job-leader"));
-    assert!(stderr.contains("call_id=m5-job-follower"));
+    assert_eq!(stderr.matches("· 执行中").count(), 1, "{stderr}");
+    assert_eq!(stderr.matches("· 完成").count(), 2, "{stderr}");
+    assert_eq!(
+        stderr.matches("复用已有收据（未再次执行）").count(),
+        1,
+        "{stderr}"
+    );
+    assert!(!stderr.contains("execution:m5-job-leader"));
 
     let events = session_events(project.path(), &session_id(project.path()));
     assert_eq!(
@@ -3323,11 +3325,9 @@ fn f3_graceful_interrupt_never_fabricates_a_receipt_for_unobserved_external_effe
         String::from_utf8_lossy(&output.stderr)
     );
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert_eq!(stderr.matches("[tool started]").count(), 2, "{stderr}");
-    assert!(stderr.contains(
-        "[tool failed] name=run_command execution_id=execution:m5-failed receipt_event="
-    ));
-    assert!(!stderr.contains("[tool cancelled]"));
+    assert_eq!(stderr.matches("· 执行中").count(), 2, "{stderr}");
+    assert!(stderr.contains("· run_command · 失败"));
+    assert!(!stderr.contains("· 取消"));
     assert!(stderr.contains("external effects are unknown"));
 
     let events = session_events(project.path(), &session_id(project.path()));

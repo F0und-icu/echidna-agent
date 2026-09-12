@@ -1,6 +1,7 @@
 //! One provider-neutral Responses HTTP/SSE implementation selected entirely
 //! by explicit configuration.
 
+mod cli_output;
 mod request;
 mod response;
 
@@ -24,6 +25,8 @@ use crate::ports::model::{
 
 pub(crate) const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 30_000;
 pub(crate) const DEFAULT_READ_TIMEOUT_MS: u64 = 300_000;
+#[cfg(debug_assertions)]
+const MAX_DEBUG_ERROR_BODY_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResponsesHttpConfig {
@@ -69,6 +72,9 @@ pub struct ResponsesHttpAdapter {
     config: ResponsesHttpConfig,
     credential_source: Arc<dyn CredentialSource>,
     image_resolver: Option<Arc<ImageArtifactResolver>>,
+    cli_role: Option<&'static str>,
+    #[cfg(debug_assertions)]
+    debug: bool,
 }
 
 pub(crate) type ImageArtifactResolver =
@@ -93,6 +99,9 @@ impl ResponsesHttpAdapter {
             config,
             credential_source,
             image_resolver: None,
+            cli_role: None,
+            #[cfg(debug_assertions)]
+            debug: false,
         }
     }
 
@@ -103,6 +112,19 @@ impl ResponsesHttpAdapter {
         self.image_resolver = Some(Arc::new(move |artifact_id| {
             resolve_project_image_artifact(&project, artifact_id)
         }));
+        self
+    }
+
+    pub(crate) fn with_cli_output(
+        mut self,
+        role: Option<&'static str>,
+        #[cfg(debug_assertions)] debug: bool,
+    ) -> Self {
+        self.cli_role = role;
+        #[cfg(debug_assertions)]
+        {
+            self.debug = debug;
+        }
         self
     }
 }
@@ -177,8 +199,19 @@ impl ModelProvider for ResponsesHttpAdapter {
         )?;
         let endpoint = self.config.endpoint();
         let client = self.client.clone();
+        let cli_role = self.cli_role;
+        #[cfg(debug_assertions)]
+        let full_debug = self.debug;
 
         let stream = try_stream! {
+            let mut diagnostics = cli_role.map(|role| cli_output::RequestOutput::new(role, api_key,
+                #[cfg(debug_assertions)]
+                full_debug,
+            ));
+            #[cfg(debug_assertions)]
+            if let Some(diagnostics) = &diagnostics {
+                diagnostics.request(&request);
+            }
             let response = client
                 .post(endpoint)
                 .header(ACCEPT, "text/event-stream")
@@ -191,15 +224,34 @@ impl ModelProvider for ResponsesHttpAdapter {
                 })?;
 
             let status = response.status();
+            #[cfg(debug_assertions)]
+            if let Some(diagnostics) = &diagnostics {
+                diagnostics.status(status.as_u16());
+            }
             let mut response_events = if status.is_success() {
                 response.bytes_stream().eventsource()
             } else {
                 if continuation_requested {
                     let body = response.text().await.unwrap_or_default();
+                    #[cfg(debug_assertions)]
+                    if let Some(diagnostics) = &diagnostics {
+                        diagnostics.http_error_body(&body);
+                    }
                     if response::continuation_rejected_http_body(&body) {
                         Err(ModelProviderError::ContinuationRejected {
                             code: "previous_response_not_found".to_owned(),
                         })?;
+                    }
+                } else {
+                    #[cfg(debug_assertions)]
+                    if full_debug {
+                        let body = read_debug_error_body(response).await;
+                        if let Some(diagnostics) = &diagnostics {
+                            match &body {
+                                Ok(body) => diagnostics.http_error_body(body),
+                                Err(reason) => diagnostics.response_omitted(reason),
+                            }
+                        }
                     }
                 }
                 Err(ModelProviderError::HttpFailure {
@@ -222,6 +274,11 @@ impl ModelProvider for ResponsesHttpAdapter {
                     continue;
                 }
 
+                #[cfg(debug_assertions)]
+                if let Some(diagnostics) = &diagnostics {
+                    diagnostics.response(&event.data);
+                }
+
                 let decoded = response::decode_stream_event(
                     &event.data,
                     usage_required,
@@ -229,9 +286,15 @@ impl ModelProvider for ResponsesHttpAdapter {
                     continuation_requested,
                 )?;
                 for model_event in decoded.events {
+                    if let Some(diagnostics) = &mut diagnostics {
+                        diagnostics.model_event(&model_event);
+                    }
                     yield ModelStreamEvent::Event(model_event);
                 }
                 if let Some(completion) = decoded.completion {
+                    if let Some(diagnostics) = &mut diagnostics {
+                        diagnostics.completed();
+                    }
                     yield ModelStreamEvent::Completed(completion);
                     break;
                 }
@@ -240,4 +303,22 @@ impl ModelProvider for ResponsesHttpAdapter {
 
         Ok(Box::pin(stream))
     }
+}
+
+/// Bound only the extra diagnostic read; existing continuation classification
+/// retains its complete-body behavior independently of presentation.
+#[cfg(debug_assertions)]
+async fn read_debug_error_body(mut response: reqwest::Response) -> Result<String, &'static str> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| "HTTP error body unavailable")?
+    {
+        if chunk.len() > MAX_DEBUG_ERROR_BODY_BYTES - body.len() {
+            return Err("HTTP error body omitted: exceeds 65536 bytes");
+        }
+        body.extend_from_slice(&chunk);
+    }
+    String::from_utf8(body).map_err(|_| "HTTP error body is not UTF-8")
 }
