@@ -16,7 +16,7 @@
 4. `task.md` 中当前产品范围、架构约束和里程碑。
 5. `docs/development/IMPLEMENTATION_PLAN.md`。
 6. `docs/development/LEAN_CODE_GOVERNANCE.md`。
-7. 最新的冻结架构链：`docs/architecture/CYBER_AGENT_ARCHITECTURE_V1.md` 至 `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_11.md`；ADR-0021 约束请求准入预算与显式交互恢复，ADR-0020 保留 Vision 坐标边界。
+7. 最新的冻结架构链：`docs/architecture/CYBER_AGENT_ARCHITECTURE_V1.md` 至 `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_12.md`；ADR-0022 约束运行句柄身份，ADR-0021 约束请求准入与显式恢复，ADR-0020 保留 Vision 坐标边界。
 8. 已接受的 `docs/adr/ADR-*.md`。
 9. `docs/development/GIT_VERSION_RELEASE.md` 和 `docs/development/DEVELOPMENT_ENVIRONMENT.md`。
 10. `Codex架构与漏洞挖掘Agent复用评估.md`。

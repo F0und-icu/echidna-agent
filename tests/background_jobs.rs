@@ -14,6 +14,141 @@ use serde_json::{Value, json};
 
 static NEXT_PROJECT_ID: AtomicU64 = AtomicU64::new(1);
 
+#[test]
+fn ctf_r3a_fresh_processes_have_distinct_job_and_pty_handles() {
+    let probe = || {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "runtime_handle_subprocess_probe", "--nocapture"])
+            .env("CYBER_AGENT_TEST_HANDLE_PROBE", "1")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while child.try_wait().unwrap().is_none() {
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("runtime identity probe exceeded its deadline");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .find_map(|line| {
+                line.split_once("RUNTIME_HANDLES=")
+                    .map(|(_, value)| value.to_owned())
+            })
+            .expect("child probe must return the actual issued handles")
+    };
+    let first = probe();
+    let second = probe();
+    let (first_job, first_pty) = first.split_once('|').unwrap();
+    let (second_job, second_pty) = second.split_once('|').unwrap();
+    assert!(first_job.starts_with("job:v2:"));
+    assert!(first_pty.starts_with("pty:v2:"));
+    assert_ne!(first_job, second_job);
+    assert_ne!(first_pty, second_pty);
+}
+
+#[tokio::test]
+async fn runtime_handle_subprocess_probe() {
+    if std::env::var_os("CYBER_AGENT_TEST_HANDLE_PROBE").is_none() {
+        return;
+    }
+    let project = TestProject::new("handle-child");
+    let tools = ToolRegistry::for_project(&project.root);
+    let job = tools
+        .execute(plan(
+            &tools,
+            "job",
+            "start_job",
+            json!({"argv":["sh","-c","exit 0"]}),
+        ))
+        .await;
+    let job_id = job.result.output["job_id"].as_str().unwrap();
+    poll_until_terminal(&tools, job_id, 0, 0).await;
+    let pty = tools
+        .execute(plan(
+            &tools,
+            "pty",
+            "start_pty",
+            json!({"argv":["sh","-c","exit 0"]}),
+        ))
+        .await;
+    let pty_id = pty.result.output["pty_session_id"].as_str().unwrap();
+    let stopped = tools
+        .execute(plan(
+            &tools,
+            "stop",
+            "stop_pty",
+            json!({"pty_session_id":pty_id}),
+        ))
+        .await;
+    assert_eq!(stopped.result.status, ToolResultStatus::Succeeded);
+    println!("RUNTIME_HANDLES={job_id}|{pty_id}");
+}
+
+#[tokio::test]
+async fn ctf_r3a_old_job_handles_cannot_control_a_new_registry() {
+    let project = TestProject::new("runtime-handles");
+    let old = ToolRegistry::for_project(&project.root);
+    let started = old
+        .execute(plan(
+            &old,
+            "old",
+            "start_job",
+            json!({"argv":["sh","-c","exit 0"]}),
+        ))
+        .await;
+    let old_id = started.result.output["job_id"].as_str().unwrap();
+    poll_until_terminal(&old, old_id, 0, 0).await;
+    let fresh = ToolRegistry::for_project(&project.root);
+    let started = fresh
+        .execute(plan(
+            &fresh,
+            "fresh",
+            "start_job",
+            json!({
+                "argv":["sh","-c","read line; printf 'fresh:%s' \"$line\""], "timeout_ms":10000
+            }),
+        ))
+        .await;
+    let fresh_id = started.result.output["job_id"].as_str().unwrap();
+    assert_ne!(old_id, fresh_id);
+    for stale in [old_id, "job:1"] {
+        for (name, arguments) in [
+            ("poll_job", json!({"job_id":stale})),
+            (
+                "input_job",
+                json!({"job_id":stale,"input":"wrong\n","close":true}),
+            ),
+            ("stop_job", json!({"job_id":stale})),
+        ] {
+            let outcome = fresh.execute(plan(&fresh, "stale", name, arguments)).await;
+            assert_eq!(outcome.result.status, ToolResultStatus::Failed);
+        }
+    }
+    let input = fresh
+        .execute(plan(
+            &fresh,
+            "valid",
+            "input_job",
+            json!({"job_id":fresh_id,"input":"safe\n","close":true}),
+        ))
+        .await;
+    assert_eq!(input.result.status, ToolResultStatus::Succeeded);
+    let output = poll_until_terminal(&fresh, fresh_id, 0, 0).await;
+    assert_eq!(output.result.output["stdout"]["data"], "fresh:safe");
+}
+
 struct TestProject {
     root: PathBuf,
 }

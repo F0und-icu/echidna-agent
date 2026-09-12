@@ -333,7 +333,7 @@ fn unknown_session(plan: ToolExecutionPlan, session_id: &PtySessionId) -> ToolEx
     ToolExecutionOutcome::failed(
         plan,
         "pty_session_not_found",
-        json!({"pty_session_id": session_id, "error": "PTY session does not exist in this process"}),
+        json!({"pty_session_id": session_id, "error": "PTY handle is unknown in this runtime; historical or other-runtime handles may be expired. No process was reattached."}),
     )
 }
 

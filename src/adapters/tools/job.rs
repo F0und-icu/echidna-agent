@@ -8,7 +8,6 @@ mod launch;
 mod supervisor;
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use tokio::process::ChildStdin;
@@ -17,6 +16,7 @@ use tokio::sync::{Mutex as AsyncMutex, oneshot, watch};
 use crate::domain::tools::{JobCompletion, JobId, JobStatus};
 
 use super::output::CapturedOutput;
+use super::process_identity::ProcessHandleSequence;
 
 pub(super) use control::{
     execute_input, execute_poll, execute_stop, normalize_input, normalize_poll, normalize_stop,
@@ -29,20 +29,19 @@ pub(in crate::adapters::tools::job) use supervisor::JobSupervisor;
 /// pretending an OS process can survive a restart.
 pub(super) struct BackgroundJobs {
     pub(in crate::adapters::tools::job) jobs: Arc<Mutex<JobTable>>,
-    next_job_sequence: AtomicU64,
+    handles: ProcessHandleSequence,
 }
 
 impl BackgroundJobs {
     pub(super) fn new() -> Self {
         Self {
             jobs: Arc::new(Mutex::new(JobTable::default())),
-            next_job_sequence: AtomicU64::new(0),
+            handles: ProcessHandleSequence::new(),
         }
     }
 
     pub(in crate::adapters::tools::job) fn next_job_id(&self) -> JobId {
-        let sequence = self.next_job_sequence.fetch_add(1, Ordering::Relaxed) + 1;
-        JobId::new(format!("job:{sequence}"))
+        JobId::new(self.handles.next("job"))
     }
 }
 

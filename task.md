@@ -31,6 +31,8 @@
 
 当前状态：
 
+- 当前 CTF-R3a1 按 ADR-0022 / Architecture v1.12 隔离运行实例的 Job/PTY 句柄。R2b 已经 #72 合并并完成一次有界合成 Live；R3a2 原始输出与 R3b 子项检查点仍未完成，不能以句柄修复替代。准确开工、验收与远端状态见 STATUS。
+
 - 当前 CTF-R2b 的增量契约为 ADR-0021 / Architecture v1.11：一个 Config 驱动的 Primary/Vision 每 Turn 请求准入预算；状态完整的 typed stop 可返回 CLI，显式 `/resume` 重建 ProviderSession 后才接受新任务。停止不自动丢 reasoning、重试或重发输入。完整实现/验收状态见 STATUS；下列旧阶段状态是历史记录。冻结 v1 至 v1.10 不修改。
 
 - 当前 F6a 为 `COMPLETE_LOCAL_LIVE_PASS`：全新 Terra xhigh 独立审计 APPROVE，完整 post-audit Gate（427 passed / 2 Live ignored，fmt/Clippy/build）、最终 Lean Review 均通过。两组正式 CLI DeepSeek Live 通过：32×16 原图返回两个 16×16 区域；2100×512 缩至 2048×499 后返回两个 1024×499 区域。尺寸/坐标/原始响应/审计一致，模型不确定性保留，不外推复杂截图定位准确性。Observation v2 保存 frame，v1 保持坐标系未知；ADR-0020 / Architecture v1.10 定义兼容边界。临时凭据副本已删除，原配置及 Codex 登录未动；未提交 F6a、未开始长上下文或 TUI，具体证据见 STATUS。

@@ -6,7 +6,6 @@ mod supervisor;
 
 use std::collections::BTreeMap;
 use std::io::Write;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use portable_pty::{ChildKiller, MasterPty};
@@ -22,6 +21,7 @@ pub(super) use launch::{execute_start, normalize_start};
 pub(in crate::adapters::tools::pty) use supervisor::PtySupervisor;
 
 use super::output::CapturedOutput;
+use super::process_identity::ProcessHandleSequence;
 
 type PtyWriter = Box<dyn Write + Send>;
 type PtyMaster = Box<dyn MasterPty + Send>;
@@ -32,20 +32,19 @@ type PtyKiller = Box<dyn ChildKiller + Send + Sync>;
 /// unsafe claim that an OS terminal survives a new Cyber Agent process.
 pub(super) struct PtySessions {
     pub(in crate::adapters::tools::pty) sessions: Arc<Mutex<PtySessionTable>>,
-    next_session_sequence: AtomicU64,
+    handles: ProcessHandleSequence,
 }
 
 impl PtySessions {
     pub(super) fn new() -> Self {
         Self {
             sessions: Arc::new(Mutex::new(PtySessionTable::default())),
-            next_session_sequence: AtomicU64::new(0),
+            handles: ProcessHandleSequence::new(),
         }
     }
 
     pub(in crate::adapters::tools::pty) fn next_session_id(&self) -> PtySessionId {
-        let sequence = self.next_session_sequence.fetch_add(1, Ordering::Relaxed) + 1;
-        PtySessionId::new(format!("pty:{sequence}"))
+        PtySessionId::new(self.handles.next("pty"))
     }
 
     pub(in crate::adapters::tools::pty) fn insert(

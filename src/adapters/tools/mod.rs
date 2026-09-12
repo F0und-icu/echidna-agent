@@ -10,6 +10,7 @@ mod http_request;
 mod job;
 mod memory;
 mod output;
+mod process_identity;
 mod pty;
 mod research;
 mod resources;

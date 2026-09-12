@@ -3,20 +3,38 @@
 ## Series authorization — all CTF reliability repairs (2026-09-12)
 
 - The operator now authorizes completing the CTF repair series, its independent audits, bounded Live Tests and remote submissions. This supersedes earlier one-Slice/no-Live/no-publication stop statements for this series only. Each Slice still needs its own Scope Lock, tests → independent audit → repairs → full Gate → Lean Review; do not silently skip remaining issues or count Deferred research ideas as delivered functionality.
-- R1 and R2a are remotely merged; current implementation is CTF-R2b. Proceed in repair plan order through R3a/R3b/R4/R5 and R6 acceptance after each closure, without repeated routine authorization prompts. Main agent implements; authorized independent reviews use fresh Terra xhigh for cross-boundary work or Luna xhigh for finite single-module checks. New contracts require the plan's minimal ADR/design gate before code.
+- R1/R2a/R2b are remotely merged; current implementation is CTF-R3a1. Proceed in repair plan order through R3a/R3b/R4/R5 and R6 acceptance after each closure, without repeated routine authorization prompts. Main agent implements; authorized independent reviews use fresh Terra xhigh for cross-boundary work or Luna xhigh for finite single-module checks. New contracts require the plan's minimal ADR/design gate before code.
 - Live scope follows the documented ceilings: L1 up to three synthetic sessions, six actual requests/five minutes each; L2 one allowlisted PWN challenge, 30 minutes/48 actual requests total. Use explicit Cyber Agent configuration and credentials only, fresh Project/Session, external per-run logs, no target WP/EXP/solutions. Record exact configuration, inputs, environment and counters before each lane. No automatic retries or budget increases; absent essential configuration/target/container authority must be reported rather than invented.
 - Remote submission may create short `codex/` branches, commits and Draft PRs with `[skip ci]` after verified closure. Actions remain paused. No forced history rewrite, PR merge, Tag/Release, branch-protection change or architecture remote hash seal is inferred. Preserve the existing debug diff as a separate R5 item. Do not touch Codex login/auth/config or upstream `codex/`.
 - Subsequent explicit reply also authorizes ordinary merges of verified #68/#69 and accepted repair PRs: no Actions, required-check bypass, force-push or branch-protection changes. This overrides only the preceding merge exclusion. Remote checks and exact heads are verified before each mutation.
 
-## Current Slice — CTF-R2b Scope Lock
+## Current Slice — CTF-R3a1 runtime-handle isolation
+
+- R2b is REMOTE_MERGED: PR #72 ordinary squash `4de3f6e44f513bca254cfcbb13cf540462b2d928`, implementation `3bd4c9e`, governance `f5b42aa`, Live record `7db686e`. Exact merged tree equals delivered head; Actions run list was empty at pre-merge verification. Complete Gate443/2ignored, release17 and one bounded L1 Live PASS. The two R5 debug files remain uncommitted and unchanged.
+- R3a is split into R3a1 (runtime handles) and R3a2 (retained output/Blob and post-execution failure contract) to keep independent audits finite. R3a1 does not close output-loss CTF-14 or partial-batch CTF-15. R3a2 precedes R3b and the long target lane; no substitute Prompt-only fix is inferred.
+- State: COMPLETE_LOCAL_PENDING_DELIVERY on `codex/ctf-r3a1-runtime-handles`, based on merged R2b. Main agent implemented; fresh audit APPROVE and post-audit Gate/Lean PASS. Contract: ADR-0022/additive v1.12. One private runtime-handle namespace/sequence owner shared by existing Job and PTY tables; no durable process recovery, clock-derived identity, new dependency, Port, Event, Tool argument schema or configuration. Old handle strings remain readable but cannot be issued again by new tables.
+- Allowlist: private `adapters/tools/process_identity.rs`, existing tools module registration, Job/PTY ID issuance and unknown-handle diagnostics; `tests/background_jobs.rs`, `tests/pty_sessions.rs` and a subprocess fixture only if needed. No command/output/Session changes in this sub-Slice. Tests cover distinct same-process registries and fresh subprocesses, stale/legacy poll/input/stop/resize rejection without affecting current handles.
+- Sequence: focused → affected Job/PTY/leases/scheduler/CLI → fresh Terra xhigh read-only audit (ten minutes) → repairs → complete Gate → Lean → separate authorized delivery. No additional Live needed for pure local opaque-handle identity; remaining L1/L2 authorization and limits unchanged.
+
+### R3a1 pre-audit evidence
+
+- Final closure: complete post-audit fmt/locked all-target all-feature Clippy/tests/dev build all exit0. 447 unique passed, two Live ignored,449 discovered; child probe re-executions are not extra unique tests. CLI60 passed in204.72s, preserving the existing 32/33-request boundary. No new Live, release build, packaging or remote CI is claimed for this pure runtime-identity Slice.
+- Final Lean Review PASS after Gate: one43-line private identity module with two existing table consumers; both duplicated bare/wrapping sequence implementations removed. No public API, Port, Event/Tool/Config schema, dependency, cache, retry, persistent process table or upstream port. Checked counter exhaustion and probabilistic cross-lifetime uniqueness are explicit. Existing test modules gained finite production-path regressions and a bounded subprocess probe, not a new test framework or public helper. Inline-test/whitespace/generic-provider and unchanged Cargo/toolchain/workflow scans PASS; upstream is clean.
+- Final audit and Gate use unchanged R3a1 source. Preserved R5 debug pair remains outside audit/staging scope; integrated Gate includes that separately unsealed delta. R3a2 output and R3b partial-execution persistence remain open. During Gate, a separate read-only design consultation explored R3a2 alternatives outside the repo; no R3a2 contract or source was accepted/implemented.
+
+- Subsequent fresh GPT-5.6 Terra xhigh `/root/ctf_r3a1_independent_audit` completed its finite read-only review within ten minutes: APPROVE, no blocking finding or requested repair. It verified private shared identity ownership, checked exhaustion, exact lookup/control boundaries, legacy readback and probabilistic identity claims, real subprocess tests and unchanged dependencies/Port/Schema/History. No independent test or Live rerun was performed by the reviewer. Post-audit complete Gate is now running; Lean/delivery remain pending.
+
+- IMPLEMENTED_LOCAL_PENDING_INDEPENDENT_AUDIT. Red fixtures independently confirmed `job:1` and `pty:1` collision across two registries. Green focused cases cover both old/legacy control rejection while new input/output/resize still work, and two distinct subprocesses issuing real Job+PTY handles. No clock assumption or public test hook.
+- Affected eight-suite command passed94 unique tests with one existing Live ignored: background Jobs10, PTY8, scheduler6, file-write/lease10, domain Tools4, Tool loop24, Replay23 and CLI smoke9. Child handle probes execute only through a fake environment injected into isolated test subprocesses, with a10-second bound and no mutation of the developer's environment. Permanent tests remain top-level.
+- Review scope is only the R3a1 delta against `4de3f6e`, including untracked process_identity/ADR/v1.12 files. Exclude the preserved R5 debug pair. Check namespace/checked counter and exact-table controls, no unsafe legacy reattachment, lifecycle/lease behavior, schema/History compatibility and real production consumers. Full post-audit Gate/Lean and delivery are not claimed yet.
+
+## Completed CTF-R2b Scope Lock (historical)
 
 - State: COMPLETE_LOCAL_PENDING_DELIVERY; main agent implemented on `codex/ctf-r2b-bounded-recovery`, based on R2a squash `4e4f0f4e0ccb49a5155f9fdc695b39f2cf3e0249` (PR #71 MERGED). Independent audit, full Gate/Lean and release checks PASS. No Actions/new Live ran yet. Older R2a pending text below is historical.
 - Contract-first: ADR-0021 and additive Architecture v1.11 define one conservative per-Turn Primary/Vision admission budget and explicit `/resume` after paired, durable, typed stops. Stop never silently clears reasoning or replays input/tools. No automatic compaction, catch-all recovery, new provider binding or new dependencies.
 - Production allowlist: existing App AgentLoop/stages, one private `app/model_request_budget` and one private `agent_loop/recovery` module; existing Vision analysis/session, CLI chat/vision and one finite CLI recovery module if needed; Config/Composition Root validation. Budget/stop data has real Primary/Vision/CLI consumers only. No new Port/Event/fact schema or public test entrypoint; config adds one optional runtime limit with one validator/default.
 - Tests: focused new `tests/cli_chat_cases/ctf_recovery.rs`, existing CLI registration/context cases, Provider composition, Tool loop, Vision/durability/Session/Compaction affected suites. Cover limits 1/2/default32/>32, initial/follow-up Vision/fallback accounting, return-to-prompt, explicit Full recovery, no duplicate user/tool, rejected pending task, fatal persistence/unknown state. Generic mocks only until offline closure.
 - Sequence: focused → affected → fresh Terra xhigh read-only audit (ten-minute scope limit) → repairs/re-review if needed → complete Gate → Lean → authorized delivery and bounded Live per series. Prior debug delta stays separately preserved for R5.
-
-### R2b independent audit and offline closure
 
 ### R2b bounded synthetic Live — L1 lane 1 PASS
 
@@ -126,14 +144,14 @@
 
 ## Current State
 
-- Architecture version: `1.11.0` (ADR-0021); v1/v1.1 remain remotely sealed; additive v1.2 through v1.11 retain separate remote hash-seal authorization
+- Architecture version: `1.12.0` (ADR-0022); v1/v1.1 remain remotely sealed; additive v1.2 through v1.12 retain separate remote hash-seal authorization
 - Phase: `IMPLEMENTATION`
-- Implementation: `COMPLETE_LOCAL_PENDING_DELIVERY` (CTF-R2b); R1/R2a and prior F6a are remotely merged
+- Implementation: `COMPLETE_LOCAL_PENDING_DELIVERY` (CTF-R3a1); R1/R2a/R2b and prior F6a are remotely merged
 - Current milestone: `M5` optional interface and personal distribution evaluation
-- Current slice: `CTF-R2b`
+- Current slice: `CTF-R3a1`
 - Slice state: `COMPLETE_LOCAL_PENDING_DELIVERY`; current series authorization permits remote delivery and verified merges after validation, without Actions.
-- Lean governance: CTF-R2b PASS after independent review and complete Gate; earlier Slice evidence remains separately recorded below
-- Local Git initialized: `yes`; active branch is `codex/ctf-r2b-bounded-recovery`. #68/#69/#70/#71 are merged; origin/main is `4e4f0f4`. No Tag, Release, forced rewrite or Actions occurred.
+- Lean governance: CTF-R3a1 PASS after independent review and complete Gate; earlier Slice evidence remains separately recorded below
+- Local Git initialized: `yes`; active branch is `codex/ctf-r3a1-runtime-handles`. #68/#69/#70/#71/#72 are merged; origin/main is `4de3f6e`. No Tag, Release, forced rewrite or Actions occurred.
 - Remote repository: `F0und-icu/cyber-agent` private; F3 implementation is sealed through PR `#67` and Squash Merge `5873c08`
 - Documentation baseline commit: `55ff3be`
 - Current code base: M5-S1a, M5-S1b, M5-S2 and F3 are remotely sealed. No release Tag or GitHub Release is started; architecture hash-manifest publication remains separate from implementation delivery.

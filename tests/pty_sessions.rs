@@ -15,6 +15,74 @@ use serde_json::{Value, json};
 
 static NEXT_PROJECT_ID: AtomicU64 = AtomicU64::new(1);
 
+#[tokio::test]
+async fn ctf_r3a_old_pty_handles_cannot_control_a_new_registry() {
+    let project = TestProject::new("runtime-handles");
+    let old = ToolRegistry::for_project(&project.root);
+    let started = old
+        .execute(plan(
+            &old,
+            "old",
+            "start_pty",
+            json!({"argv":["sh","-c","exit 0"]}),
+        ))
+        .await;
+    let old_id = started.result.output["pty_session_id"].as_str().unwrap();
+    poll_until_terminal(&old, old_id, 0).await;
+    let fresh = ToolRegistry::for_project(&project.root);
+    let started = fresh
+        .execute(plan(
+            &fresh,
+            "fresh",
+            "start_pty",
+            json!({
+                "argv":["sh","-c","read line; printf 'fresh:%s' \"$line\""]
+            }),
+        ))
+        .await;
+    let fresh_id = started.result.output["pty_session_id"].as_str().unwrap();
+    assert_ne!(old_id, fresh_id);
+    for stale in [old_id, "pty:1"] {
+        for (name, arguments) in [
+            ("poll_pty", json!({"pty_session_id":stale})),
+            (
+                "input_pty",
+                json!({"pty_session_id":stale,"input":"wrong\n"}),
+            ),
+            (
+                "resize_pty",
+                json!({"pty_session_id":stale,"rows":20,"cols":40}),
+            ),
+            ("stop_pty", json!({"pty_session_id":stale})),
+        ] {
+            let outcome = fresh.execute(plan(&fresh, "stale", name, arguments)).await;
+            assert_eq!(outcome.result.status, ToolResultStatus::Failed);
+        }
+    }
+    let resized = fresh
+        .execute(plan(
+            &fresh,
+            "valid-resize",
+            "resize_pty",
+            json!({"pty_session_id":fresh_id,"rows":30,"cols":90}),
+        ))
+        .await;
+    assert_eq!(resized.result.status, ToolResultStatus::Succeeded);
+    let input = fresh
+        .execute(plan(
+            &fresh,
+            "valid",
+            "input_pty",
+            json!({"pty_session_id":fresh_id,"input":"safe\n"}),
+        ))
+        .await;
+    assert_eq!(input.result.status, ToolResultStatus::Succeeded);
+    let output = poll_until_terminal(&fresh, fresh_id, 0).await;
+    let text = output.result.output["output"]["data"].as_str().unwrap();
+    assert!(text.contains("fresh:safe"));
+    assert!(!text.contains("wrong"));
+}
+
 struct TestProject {
     root: PathBuf,
 }

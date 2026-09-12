@@ -7,6 +7,11 @@ milestone history remains in `docs/development/STATUS.md` and Git history.
 
 ### Fixed
 
+- CTF-R3a1: Job/PTY handles use runtime-local opaque namespaces and checked
+  sequences, preventing stale bare-counter handles from controlling new processes.
+  History and Tool argument schemas are unchanged; output/partial-batch durability
+  repairs remain separate.
+
 - CTF-R2a: continuation refusal distinguishes Core Memory replacement, incompatible
   baseline/history/state projections and an over-budget delivery candidate.
   Budget failures report the existing planner estimate/limit, not inferred Provider

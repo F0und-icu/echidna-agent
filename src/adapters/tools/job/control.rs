@@ -269,7 +269,7 @@ fn unknown_job(plan: ToolExecutionPlan, job_id: &JobId) -> ToolExecutionOutcome 
     ToolExecutionOutcome::failed(
         plan,
         "job_not_found",
-        json!({"job_id": job_id, "error": "Job does not exist in this process"}),
+        json!({"job_id": job_id, "error": "Job handle is unknown in this runtime; historical or other-runtime handles may be expired. No process was reattached."}),
     )
 }
 

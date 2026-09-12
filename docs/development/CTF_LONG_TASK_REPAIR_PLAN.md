@@ -94,6 +94,8 @@ L1/L2 仍用第 11 节的固定上限与隔离要求。凭据只从显式 Cyber 
 
 ### R3a 原始输出与 Job 身份
 
+执行拆分：R3a1 先按 ADR-0022/v1.12 完成 Job/PTY 运行身份隔离，独立验收与交付；R3a2 再落实输出 Blob/完整性/限额及执行后持久化失败边界，契约定稿后编码。这样避免把纯句柄修复、输出 Schema 和跨 Port 失败模型放在一个累计审计 diff 中。R3a1 不关闭输出丢尾或批次部分结果问题。
+
 入口：`src/adapters/tools/command.rs`、`output`、`job`，以及现有 Artifact/ToolResult/CLI 消费路径。
 
 - 将模型/CLI 预览额度与原始捕获保留额度分开。模型得到有界头尾片段、截断说明和可回读引用，大输出不全部塞进 Context。
