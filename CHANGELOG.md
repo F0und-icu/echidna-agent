@@ -7,6 +7,11 @@ milestone history remains in `docs/development/STATUS.md` and Git history.
 
 ### Fixed
 
+- CTF-R2a: continuation refusal distinguishes Core Memory replacement, incompatible
+  baseline/history/state projections and an over-budget delivery candidate.
+  Budget failures report the existing planner estimate/limit, not inferred Provider
+  usage. Compatible Prompt/state updates still continue without discarding reasoning.
+
 - CTF-R1: resumed unknown Tool results now precede later user messages, including
   images. Real results across a user boundary fail explicitly rather than being
   reordered. Recovery does not rewrite durable History, invent Receipts or rerun Tools.

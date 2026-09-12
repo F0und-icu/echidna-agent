@@ -697,12 +697,21 @@ async fn reasoning_continuation_that_exceeds_context_budget_fails_before_resampl
     let tools = ToolRegistry::for_project(&project.root);
     let mut agent = AgentLoop::new(&provider, &tools);
 
-    assert_eq!(
-        agent
-            .run_turn("inspect the fixture", AgentCancellation::new())
-            .await,
-        Err(AgentLoopError::ProviderContinuationUnavailable)
+    let error = agent
+        .run_turn("inspect the fixture", AgentCancellation::new())
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("DELIVERY_BUDGET_EXCEEDED"),
+        "{error}"
     );
+    assert!(matches!(error,
+        AgentLoopError::ProviderContinuationUnavailable {
+            reason: cyber_agent::app::agent_loop::ContinuationRejection::DeliveryBudgetExceeded {
+                rendered_input_tokens, input_token_limit,
+            }
+        } if rendered_input_tokens > input_token_limit && input_token_limit > 0
+    ));
     assert_eq!(provider.requests().len(), 1);
     assert!(
         agent

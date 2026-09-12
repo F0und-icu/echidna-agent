@@ -926,8 +926,10 @@ where
                                         candidate_assessment,
                                     )
                                 }
-                                _ if retains_reasoning => {
-                                    return Err(AgentLoopError::ProviderContinuationUnavailable);
+                                BaselineAssessment::FullRequest { reason } if retains_reasoning => {
+                                    return Err(AgentLoopError::ProviderContinuationUnavailable {
+                                        reason: ContinuationRejection::BaselineRejected { reason },
+                                    });
                                 }
                                 _ => (
                                     full_input.clone(),
@@ -1563,6 +1565,33 @@ pub enum AgentTurnOutcome {
     },
 }
 
+/// Why a completed provider delivery cannot accompany the current logical
+/// Context. These describe rejected local candidates, never Provider usage.
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
+pub enum ContinuationRejection {
+    #[error("MISSING_BASELINE: committed delivery provenance or manifest is unavailable")]
+    MissingBaseline,
+    #[error("HISTORY_REPLACED: current History cannot be appended without loss")]
+    HistoryReplaced,
+    #[error("RESEARCH_PROJECTION_CHANGED: full Research projections are not both retained")]
+    ResearchProjectionChanged,
+    #[error("PROJECT_PROJECTION_CHANGED: full Project projections are not both retained")]
+    ProjectProjectionChanged,
+    #[error("CORE_MEMORY_CHANGED: Core Memory was replaced and has no append-only representation")]
+    CoreMemoryChanged,
+    #[error(
+        "BASELINE_REJECTED: {reason:?} is incompatible with this exact reasoning/state-diff replay"
+    )]
+    BaselineRejected { reason: BaselineInvalidationReason },
+    #[error(
+        "DELIVERY_BUDGET_EXCEEDED: actual delivery candidate estimate={rendered_input_tokens} input tokens, planner limit={input_token_limit}; Provider usage=unavailable"
+    )]
+    DeliveryBudgetExceeded {
+        rendered_input_tokens: u32,
+        input_token_limit: u32,
+    },
+}
+
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum AgentLoopError {
     #[error(transparent)]
@@ -1598,9 +1627,9 @@ pub enum AgentLoopError {
     #[error("an incremental-capable Provider completed without a continuation identity")]
     ContinuationIdentityMissing,
     #[error(
-        "completed Provider reasoning continuation cannot be retained by the current Context plan"
+        "completed Provider reasoning continuation cannot be retained: {reason}; candidate was not sent; no automatic retry or reasoning discard"
     )]
-    ProviderContinuationUnavailable,
+    ProviderContinuationUnavailable { reason: ContinuationRejection },
     #[error("the selected RequestAudit delivery does not match the actual Provider request")]
     RequestAuditDeliveryMismatch,
     #[error("RequestAudit commit failed: {message}")]

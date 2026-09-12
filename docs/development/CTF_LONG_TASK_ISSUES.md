@@ -1,9 +1,9 @@
 # CTF 长任务问题清单与方案讨论
 
 - 更新日期：2026-09-12。
-- 状态：问题索引持续保留；操作者已授权首包 `CTF-R1` 本地实现，未封存的问题不能提前关闭。
+- 状态：操作者已授权连续完成修复、独立审计、限额 Live、提交与普通合并；未封存的问题不能提前关闭，准确进度以 STATUS 顶部为准。
 - 本文件是后续方案讨论的问题索引，不是实施授权、冻结架构或完成验收。
-- 修复计划：[CTF_LONG_TASK_REPAIR_PLAN.md](CTF_LONG_TASK_REPAIR_PLAN.md)。STATUS 锁定 R0 合成前置 + R1 配对，其余包仍待启动；Live、委派和 Git 分别等待授权。
+- 修复计划：[CTF_LONG_TASK_REPAIR_PLAN.md](CTF_LONG_TASK_REPAIR_PLAN.md)。R1 已经 PR #70 远端合并，R2a 独立审计通过、完整 Gate 重跑待完成；其余包按序推进。Actions、登录访问、目标答案及越额 Live 仍排除。
 - 测试目录：`/tmp/cyber-agent-ctf-live.VBUX7a`。
 - 分轮详细证据与历史指纹：`/tmp/cyber-agent-ctf-live.VBUX7a-issues.md`。该文件和原始日志留在 Git 外；同名日志已被后续运行覆盖，不得混用不同轮次的 hash。
 - 当前证据可用性（2026-09-12 计划检查）：上述目录及旁路 issues 文件均已不存在。以下保留的是此前分析结论，不是本轮对原始日志的重新核验；实现前需补合成最小回归，新的 Live 日志分轮保留。
@@ -11,7 +11,7 @@
 
 ## 当前边界
 
-只允许 STATUS 中 `CTF-R1` 的本地代码、永久合成回归和计划记录；不运行 Live、真实目标 harness、Docker 操作、Git 提交/推送/合并或 Actions。个人知识库/检索增补仅为计划，不实施。
+只实施 STATUS 当前 Scope Lock。Live 与交付按顶部连续授权的限额和验收顺序执行；Docker 新资源范围仍需明确，不接管未知容器。个人知识库/检索增补仅为计划，不实施。
 
 此前已实现的 debug 工具定义隐藏改动保留在本地，未撤销、未提交。其 13 项唯一离线用例通过是已有结果，不是本次重新测试；未进行独立审计、完整 Slice Gate 或 release 重建。其他问题均未宣称修复。
 
@@ -23,7 +23,7 @@
 
 缺少 `user -> open call -> later user` 的跨轮次回归及实际交付断言。后续方案应保持唯一 Normalizer、真实结果优先和中断副作用未知，不能制造执行 Receipt 或自动重跑。
 
-修复进度：`CTF-R1` 已用永久回归重现上述位置错误，并在唯一 History owner 改为下一 User Text/Image 前补 unknown；迟到真实 Result 明确拒绝。专项/受影响测试与独立审计完成度以 STATUS 为准；本问题暂不标为封存或 Live 通过。
+修复进度：`CTF-R1` 已用永久回归重现上述位置错误，并在唯一 History owner 改为下一 User Text/Image 前补 unknown；迟到真实 Result 明确拒绝。独立审计、完整 Gate/Lean 通过并经 PR #70 合并。离线实现已封存；本轮 Live 尚未执行。
 
 ### CTF-02：续接拒绝与“上下文超限”混淆（P1）
 
@@ -31,7 +31,7 @@ Session `chat-1789138136-423411000-53629-1` 有 13 个 RequestAudit、20 个真�
 
 配置窗口为 1048576；末次已发送请求的审计组件总大小 178464 bytes，不是 token usage，不能据此声称耗尽 1M。最后请求发出后，project.md 在回复完成前被编辑；代码的 PromptChanged、累积状态差分与 exact reasoning replay 限制支持这一组合触发方向，但未用回归/分支跟踪最终证明。
 
-待讨论：区分预算不足、Prompt/Memory 热更新、历史替换与交付不兼容，提供可解释的容量/估算用量/拒绝原因。不得静默丢弃必需 reasoning、移除完整性检查或自动重跑工具。
+R2a 离线修复已通过独立审计、完整 Gate/Lean：区分 Memory 替换、基线/History/投影不兼容和实际交付候选超预算；预算字段来自既有 Planner，不是 usage。五组夹具证明 Prompt-only/普通状态差分允许，Memory 与组合 Prompt+Project 拒绝，不外推原始已删除日志的唯一根因。可恢复交互属于 R2b，尚未实现；没有静默丢弃 reasoning 或自动重跑工具。
 
 ### CTF-03：环境已探测，但未验证任务所需工具（P2）
 

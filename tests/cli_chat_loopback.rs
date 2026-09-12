@@ -1,3 +1,5 @@
+#[path = "cli_chat_cases/ctf_context.rs"]
+mod ctf_context;
 #[path = "cli_chat_cases/ctf_resume.rs"]
 mod ctf_resume;
 #[path = "cli_chat_cases/f4_output.rs"]
@@ -3983,7 +3985,7 @@ mod f3_context {
         config
     }
 
-    fn write_sse_response(socket: &mut std::net::TcpStream, body: &str) {
+    pub(super) fn write_sse_response(socket: &mut std::net::TcpStream, body: &str) {
         let headers = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             body.len()
@@ -3993,11 +3995,19 @@ mod f3_context {
         socket.flush().unwrap();
     }
 
-    fn accept_before_deadline(listener: &TcpListener, label: &str) -> std::net::TcpStream {
+    pub(super) fn accept_before_deadline(
+        listener: &TcpListener,
+        label: &str,
+    ) -> std::net::TcpStream {
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
             match listener.accept() {
-                Ok((socket, _)) => return socket,
+                Ok((socket, _)) => {
+                    // macOS may inherit O_NONBLOCK from the listener. The
+                    // bounded HTTP reader expects a blocking accepted stream.
+                    socket.set_nonblocking(false).unwrap();
+                    return socket;
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     assert!(
                         Instant::now() < deadline,

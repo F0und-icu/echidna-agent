@@ -23,7 +23,7 @@ use crate::domain::tools::ToolSpec;
 use crate::domain::world_state::{ProjectSnapshotContext, ResearchWorldState};
 use crate::ports::context::ContextFragmentCache;
 
-use super::AgentLoopError;
+use super::{AgentLoopError, ContinuationRejection};
 
 /// The complete local inputs for one Planner-owned Context compilation.
 pub(super) struct ContextCompilationInput<'a> {
@@ -281,14 +281,23 @@ pub(super) fn state_diff_delivery_input(
         .iter()
         .any(|item| matches!(item, ContentItem::Reasoning { .. }));
     let Some(committed_delivery_map) = committed_delivery_map else {
-        return continuation_unavailable_or_none(retains_reasoning);
+        return continuation_unavailable_or_none(
+            retains_reasoning,
+            ContinuationRejection::MissingBaseline,
+        );
     };
     committed_delivery_map.validate_against(committed_input)?;
     let Some(committed_manifest) = committed_manifest else {
-        return continuation_unavailable_or_none(retains_reasoning);
+        return continuation_unavailable_or_none(
+            retains_reasoning,
+            ContinuationRejection::MissingBaseline,
+        );
     };
     if committed_history_len > history.len() || !plan_allows_history_append(current_plan) {
-        return continuation_unavailable_or_none(retains_reasoning);
+        return continuation_unavailable_or_none(
+            retains_reasoning,
+            ContinuationRejection::HistoryReplaced,
+        );
     }
 
     let mut state_fragments = Vec::new();
@@ -299,14 +308,22 @@ pub(super) fn state_diff_delivery_input(
             if !fragment_is_completely_included(current_plan, &current_full)
                 || !committed_fragment_was_completely_included(committed_manifest, &previous_full)
             {
-                return continuation_unavailable_or_none(retains_reasoning);
+                return continuation_unavailable_or_none(
+                    retains_reasoning,
+                    ContinuationRejection::ResearchProjectionChanged,
+                );
             }
             if let Some(fragment) = current.diff_fragment(previous)? {
                 state_fragments.push(fragment);
             }
         }
         (None, None) => {}
-        _ => return continuation_unavailable_or_none(retains_reasoning),
+        _ => {
+            return continuation_unavailable_or_none(
+                retains_reasoning,
+                ContinuationRejection::ResearchProjectionChanged,
+            );
+        }
     }
     match (committed_project_snapshot, project_snapshot) {
         (Some(previous), Some(current)) => {
@@ -315,21 +332,32 @@ pub(super) fn state_diff_delivery_input(
             if !fragment_is_completely_included(current_plan, &current_full)
                 || !committed_fragment_was_completely_included(committed_manifest, &previous_full)
             {
-                return continuation_unavailable_or_none(retains_reasoning);
+                return continuation_unavailable_or_none(
+                    retains_reasoning,
+                    ContinuationRejection::ProjectProjectionChanged,
+                );
             }
             if let Some(fragment) = current.diff_fragment(previous)? {
                 state_fragments.push(fragment);
             }
         }
         (None, None) => {}
-        _ => return continuation_unavailable_or_none(retains_reasoning),
+        _ => {
+            return continuation_unavailable_or_none(
+                retains_reasoning,
+                ContinuationRejection::ProjectProjectionChanged,
+            );
+        }
     }
     // Core Memory has no diff representation. It is always a complete
     // authoritative Markdown fragment, so a content/presence change requires
     // the normal Full logical Context rather than an append that could retain
     // stale memory beside reasoning continuation.
     if !same_memory_core(committed_project_memory_core, project_memory_core) {
-        return continuation_unavailable_or_none(retains_reasoning);
+        return continuation_unavailable_or_none(
+            retains_reasoning,
+            ContinuationRejection::CoreMemoryChanged,
+        );
     }
     let mut candidate = committed_input.clone();
     let mut delivery_map = committed_delivery_map.clone();
@@ -401,9 +429,15 @@ pub(super) fn state_diff_delivery_input(
             delivery_map.validate_against(&candidate)?;
             Ok(Some((candidate, delivery_map)))
         }
-        Err(ContextPlannerError::RenderedInputExceedsBudget { .. }) if retains_reasoning => {
-            Err(AgentLoopError::ProviderContinuationUnavailable)
-        }
+        Err(ContextPlannerError::RenderedInputExceedsBudget {
+            rendered_input_tokens,
+            input_token_limit,
+        }) if retains_reasoning => Err(AgentLoopError::ProviderContinuationUnavailable {
+            reason: ContinuationRejection::DeliveryBudgetExceeded {
+                rendered_input_tokens,
+                input_token_limit,
+            },
+        }),
         Err(ContextPlannerError::RenderedInputExceedsBudget { .. }) => Ok(None),
         Err(error) => Err(error.into()),
     }
@@ -423,9 +457,10 @@ fn same_memory_core(previous: Option<&ContextFragment>, current: Option<&Context
 
 fn continuation_unavailable_or_none(
     retains_reasoning: bool,
+    reason: ContinuationRejection,
 ) -> Result<Option<(ModelInputIR, ContextDeliveryMap)>, AgentLoopError> {
     if retains_reasoning {
-        Err(AgentLoopError::ProviderContinuationUnavailable)
+        Err(AgentLoopError::ProviderContinuationUnavailable { reason })
     } else {
         Ok(None)
     }

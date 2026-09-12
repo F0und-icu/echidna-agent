@@ -1087,6 +1087,12 @@ F6a delivery addendum: after the acceptance checkpoint above, the operator autho
 
 后续连续执行授权：操作者已授权完成全部 CTF 修复、独立审计、限额 Live 和远端提交。STATUS 顶部 series authorization 优先于本节历史逐次授权/停止措辞；仍逐包 Scope Lock → 测试 → 独立审计 → 修复 → Gate → Lean，不启用 Actions 或推定 merge。当前先收口 CTF-R1，再顺序推进 R2–R6。
 
+#### CTF-R2a：续接拒绝诊断
+
+R1 完成并提交 `63fdb14` 后启动。只在既有 AgentLoop/context_state 拒绝路径添加 typed reason 和已计算的预算字段；不改拒绝/重试/恢复策略，不增加估算器或伪造 Provider usage。用独立 Prompt、Memory、Project/Research、reasoning 长度及组合 fixture 验证真实触发分支、次数和耐久结果。完整文件/测试/审计 Scope Lock 见 STATUS。R2b 的交互恢复与配置预算须先落实最小 ADR，不能混入本包。
+
+R2a 本地收口：专项/受影响回归、全新 Terra xhigh 独立审计及 test-only socket 修复复审、完整 Gate、Lean 均 PASS。首次完整 Gate 暴露 macOS accepted socket 的非阻塞继承，已在既有夹具 helper 修复并完整重跑，未改生产网络行为。交付分支从 R1 合并 main `e6c5bdb` 建立，保留并排除独立 debug diff；随后按 series authorization 推进 R2b。准确命令/证据与远端状态见 STATUS。
+
 CTF 长任务的 R0–R6 工作包、CTF-01 至 CTF-18 映射、轻量检索候选、唯一职责、设计准入、回归与分级 Live 见 [CTF_LONG_TASK_REPAIR_PLAN.md](CTF_LONG_TASK_REPAIR_PLAN.md)。当前仅下列首包开工，其余保留候选状态。Codex 桌面聊天恢复不属于产品实现。
 
 #### CTF-R1：合成验证前置与 Resume 配对
