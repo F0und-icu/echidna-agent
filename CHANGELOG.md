@@ -5,6 +5,12 @@ milestone history remains in `docs/development/STATUS.md` and Git history.
 
 ## Unreleased
 
+### Fixed
+
+- CTF-R1: resumed unknown Tool results now precede later user messages, including
+  images. Real results across a user boundary fail explicitly rather than being
+  reordered. Recovery does not rewrite durable History, invent Receipts or rerun Tools.
+
 ### Added
 
 - F6a: secondary Vision observations bind regions to exact delivered-image

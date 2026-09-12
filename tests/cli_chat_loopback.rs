@@ -1,3 +1,5 @@
+#[path = "cli_chat_cases/ctf_resume.rs"]
+mod ctf_resume;
 #[path = "cli_chat_cases/f4_output.rs"]
 mod f4_output;
 #[path = "cli_chat_cases/f5_output.rs"]

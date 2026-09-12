@@ -1083,6 +1083,24 @@ Checkpoint: COMPLETE_LOCAL_LIVE_PASS. Fresh Terra xhigh independent review APPRO
 
 F6a delivery addendum: after the acceptance checkpoint above, the operator authorized remote submission. Implementation `82b42e1` is published in Draft PR #69, stacked on still-open #68, with `[skip ci]`. Current state is REMOTE_SUBMITTED_PENDING_MERGE; neither PR is merged and no Actions/next Slice/new Live is authorized. Earlier Git-excluded wording describes the implementation/Live checkpoint, not this separately authorized delivery.
 
+### 当前修复队列（2026-09-12）
+
+后续连续执行授权：操作者已授权完成全部 CTF 修复、独立审计、限额 Live 和远端提交。STATUS 顶部 series authorization 优先于本节历史逐次授权/停止措辞；仍逐包 Scope Lock → 测试 → 独立审计 → 修复 → Gate → Lean，不启用 Actions 或推定 merge。当前先收口 CTF-R1，再顺序推进 R2–R6。
+
+CTF 长任务的 R0–R6 工作包、CTF-01 至 CTF-18 映射、轻量检索候选、唯一职责、设计准入、回归与分级 Live 见 [CTF_LONG_TASK_REPAIR_PLAN.md](CTF_LONG_TASK_REPAIR_PLAN.md)。当前仅下列首包开工，其余保留候选状态。Codex 桌面聊天恢复不属于产品实现。
+
+#### CTF-R1：合成验证前置与 Resume 配对
+
+操作者已授权本地实施，由主 Agent 直接实现。完整 Scope Lock/文件边界见 STATUS。仅在 `domain/history` 唯一所有者修正开放 Call 的 unknown 标记顺序：下一 User Text/Image 前闭合，合法 assistant narration/并行组不乱序；真实 Result 跨 User 边界明确拒绝，不能重排真实事实。派生标记不写回 History、不制造 Receipt、不重跑工具。
+
+先增加最小失败回归，再实现；通过新临时项目、项目外 fake config 和多行 binary 输入验证持久 User History 与实际 Full 请求。复用既有受限 loopback/子进程 helper，不建测试服务框架。保留尾部开放调用、坏配对、幂等、Session/Compaction/Context/Responses 回归。
+
+执行顺序：专项 → 受影响 → 单独授权的新独立审计 → 修复 → 完整 Gate → Lean Review。无审计授权则停在交接；不 Live、不写 Git、不读目标/WP/EXP、不操作 Docker、不实现检索或下一包。先前 debug 修改保留并单独列账。
+
+当前交接：`IMPLEMENTED_LOCAL_PENDING_INDEPENDENT_AUDIT`。已完成红→绿最小回归，12 个受影响 suite 共 207 项通过，2 项 Live ignored；尚未独立审计或完整 Gate/Lean 封存。实际文件与有限审计清单见 STATUS；不自动进入 R2。
+
+后续收口：独立 Terra xhigh APPROVE，无阻断项；post-audit 全部 Gate、inline-test 扫描及 Lean PASS。当前 `COMPLETE_LOCAL_PENDING_DELIVERY`，series authorization 允许完成远端交付后继续 R2a，普通 PR 合并另已明确授权，Actions 仍暂停。具体基线和证据以 STATUS 顶部为准。
+
 ## 7. 失败与阻塞处理
 
 - 同一错误先定位最小失败层：Domain、Port、Adapter、Integration、Environment。

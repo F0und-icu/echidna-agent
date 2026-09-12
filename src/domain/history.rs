@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use thiserror::Error;
 
-use super::model::ContentItem;
+use super::model::{ContentItem, MessageRole};
 use super::tools::{ToolCall, ToolCallId, ToolName, ToolResult};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -140,10 +140,12 @@ impl ConversationHistory {
 /// Produces a complete, provider-safe History while retaining the one Tool
 /// Call/Result pairing owner. Complete pairs and non-Tool items keep their
 /// input order. Orphan Results are historical noise and are omitted; every
-/// Call without a Result receives one deterministic terminal Result at the
-/// end of the normalized History. That synthetic result is an explicit
-/// interruption-uncertainty marker: it proves neither that execution did not
-/// start nor that an effect can be replayed.
+/// Call without a Result receives one deterministic terminal Result before
+/// the next User message, or at the end if there is no later User message.
+/// Assistant narration can interleave a parallel Call group. A real Result
+/// across a User boundary is rejected, not reordered. The synthetic result is
+/// an explicit interruption-uncertainty marker: it proves neither that execution
+/// did not start nor that an effect can be replayed.
 ///
 /// Duplicate Call IDs, duplicate Results, and Result/Call tool-name
 /// mismatches remain malformed History and are rejected rather than repaired.
@@ -171,8 +173,39 @@ pub fn normalize_content_items(items: &[ContentItem]) -> Result<Vec<ContentItem>
         }
     }
 
-    for (call_id, tool_name) in history.unpaired_tool_calls_in_call_order() {
-        history.append_tool_result(ToolResult {
+    // Validate the whole input first so a late real Result cannot be replaced
+    // by a synthetic marker. Replay each User-delimited group through the same
+    // pairing owner; scanning only that group avoids rescanning every prefix.
+    let mut normalized = Vec::with_capacity(history.items.len());
+    let mut group = ConversationHistory::default();
+    for item in &history.items {
+        if matches!(
+            item,
+            ContentItem::Text {
+                role: MessageRole::User,
+                ..
+            } | ContentItem::ImageArtifact {
+                role: MessageRole::User,
+                ..
+            }
+        ) {
+            normalized.extend(finish_recovery_group(std::mem::take(&mut group), &history)?);
+        }
+        group.append_content_item(item.clone())?;
+    }
+    normalized.extend(finish_recovery_group(group, &history)?);
+    Ok(normalized)
+}
+
+fn finish_recovery_group(
+    mut group: ConversationHistory,
+    complete_input: &ConversationHistory,
+) -> Result<Vec<ContentItem>, HistoryError> {
+    for (call_id, tool_name) in group.unpaired_tool_calls_in_call_order() {
+        if complete_input.tool_pairs[&call_id].completed {
+            return Err(HistoryError::ToolResultAfterUserMessage { call_id });
+        }
+        group.append_tool_result(ToolResult {
             call_id,
             tool_name,
             status: super::tools::ToolResultStatus::Cancelled,
@@ -184,7 +217,7 @@ pub fn normalize_content_items(items: &[ContentItem]) -> Result<Vec<ContentItem>
         })?;
     }
 
-    Ok(history.items)
+    Ok(group.items)
 }
 
 /// Selects a recent normalized History suffix without splitting any Tool
@@ -252,6 +285,10 @@ pub enum HistoryError {
     MissingToolCall { call_id: ToolCallId },
     #[error("Tool Call `{call_id}` has no Tool Result")]
     MissingToolResult { call_id: ToolCallId },
+    #[error(
+        "Tool Result `{call_id}` crosses a later User message; recovery refuses to reorder execution facts"
+    )]
+    ToolResultAfterUserMessage { call_id: ToolCallId },
     #[error("Tool Result `{call_id}` already exists in History")]
     DuplicateToolResult { call_id: ToolCallId },
     #[error(

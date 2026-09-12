@@ -3,6 +3,135 @@ use cyber_agent::domain::model::ContentItem;
 use cyber_agent::domain::tools::{ToolCall, ToolCallId, ToolName, ToolResult, ToolResultStatus};
 use serde_json::json;
 
+#[test]
+fn normalization_closes_open_calls_before_later_user_text_or_image() {
+    use cyber_agent::domain::artifacts::ArtifactId;
+    use cyber_agent::domain::model::MessageRole;
+
+    for boundary in [
+        ContentItem::user_text("resume without repeating the unknown execution"),
+        ContentItem::ImageArtifact {
+            role: MessageRole::User,
+            artifact_id: ArtifactId::new("resume-image"),
+        },
+    ] {
+        let input = vec![
+            ContentItem::user_text("inspect"),
+            ContentItem::ToolCall {
+                call: call("open", "run_command"),
+            },
+            boundary.clone(),
+        ];
+        let original = input.clone();
+        let normalized = normalize_content_items(&input).unwrap();
+        assert_eq!(normalized.len(), 4);
+        assert!(matches!(
+            &normalized[2],
+            ContentItem::ToolResult { result }
+                if result.call_id.as_str() == "open"
+                    && result.status == ToolResultStatus::Cancelled
+                    && result.output["execution_status"] == "unknown"
+                    && result.output["guidance"] == "do_not_assume_no_effect_or_auto_rerun"
+        ));
+        assert_eq!(normalized[3], boundary);
+        assert_eq!(normalize_content_items(&normalized).unwrap(), normalized);
+        assert_eq!(input, original);
+    }
+}
+
+#[test]
+fn normalization_preserves_parallel_partial_results_and_repairs_each_user_group() {
+    let prefix = vec![
+        ContentItem::user_text("inspect"),
+        ContentItem::ToolCall {
+            call: call("a", "read_file"),
+        },
+        ContentItem::assistant_text("also inspect the other file"),
+        ContentItem::ToolCall {
+            call: call("b", "read_file"),
+        },
+        ContentItem::ToolCall {
+            call: call("c", "read_file"),
+        },
+        ContentItem::ToolResult {
+            result: result("c", "read_file", ToolResultStatus::Failed),
+        },
+    ];
+    let mut input = prefix.clone();
+    input.extend([
+        ContentItem::user_text("continue"),
+        ContentItem::ToolCall {
+            call: call("d", "list_files"),
+        },
+        ContentItem::user_text("continue again"),
+    ]);
+    let normalized = normalize_content_items(&input).unwrap();
+    assert_eq!(&normalized[..prefix.len()], &prefix);
+    let ids: Vec<_> = normalized
+        .iter()
+        .filter_map(|item| match item {
+            ContentItem::ToolResult { result } => Some(result.call_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ids, ["c", "a", "b", "d"]);
+    assert_eq!(normalized[8], ContentItem::user_text("continue"));
+    assert_eq!(normalized[11], ContentItem::user_text("continue again"));
+    assert_eq!(normalize_content_items(&normalized).unwrap(), normalized);
+}
+
+#[test]
+fn normalization_rejects_late_real_results_without_reordering_or_replacing_them() {
+    use cyber_agent::domain::artifacts::ArtifactId;
+    use cyber_agent::domain::model::MessageRole;
+
+    for boundary in [
+        ContentItem::user_text("later user"),
+        ContentItem::ImageArtifact {
+            role: MessageRole::User,
+            artifact_id: ArtifactId::new("image"),
+        },
+    ] {
+        let input = vec![
+            ContentItem::ToolCall {
+                call: call("late", "read_file"),
+            },
+            boundary,
+            ContentItem::ToolResult {
+                result: result("late", "read_file", ToolResultStatus::Succeeded),
+            },
+        ];
+        assert_eq!(
+            normalize_content_items(&input),
+            Err(HistoryError::ToolResultAfterUserMessage {
+                call_id: ToolCallId::new("late"),
+            })
+        );
+    }
+}
+
+#[test]
+fn normalization_retains_legal_out_of_order_parallel_results_and_assistant_items() {
+    let input = vec![
+        ContentItem::user_text("inspect"),
+        ContentItem::ToolCall {
+            call: call("a", "read_file"),
+        },
+        ContentItem::ToolCall {
+            call: call("b", "read_file"),
+        },
+        ContentItem::assistant_text("inspecting both"),
+        ContentItem::ToolResult {
+            result: result("b", "read_file", ToolResultStatus::Succeeded),
+        },
+        ContentItem::ToolResult {
+            result: result("a", "read_file", ToolResultStatus::Succeeded),
+        },
+        ContentItem::user_text("next turn"),
+    ];
+    assert_eq!(normalize_content_items(&input).unwrap(), input);
+}
+
 fn call(id: &str, name: &str) -> ToolCall {
     ToolCall::new(
         ToolCallId::new(id),
