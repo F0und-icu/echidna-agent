@@ -10,6 +10,7 @@ mod inspection_metrics;
 mod inspection_prompt;
 mod inspection_shared;
 mod inspection_snapshot;
+pub(crate) mod model_request_budget;
 mod model_sample;
 pub mod model_streaming;
 pub(crate) mod observation;

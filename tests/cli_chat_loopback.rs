@@ -1,5 +1,7 @@
 #[path = "cli_chat_cases/ctf_context.rs"]
 mod ctf_context;
+#[path = "cli_chat_cases/ctf_recovery.rs"]
+mod ctf_recovery;
 #[path = "cli_chat_cases/ctf_resume.rs"]
 mod ctf_resume;
 #[path = "cli_chat_cases/f4_output.rs"]
@@ -539,14 +541,45 @@ fn f2a_join_server(server: LoopbackServer, label: &str) {
         .unwrap_or_else(|_| panic!("F2a {label} loopback server panicked"));
 }
 
-fn f2a_wait_child(mut child: Child, label: &str) -> std::process::Output {
-    let deadline = Instant::now() + F2A_WAIT;
+fn f2a_wait_child(child: Child, label: &str) -> std::process::Output {
+    wait_child_before_deadline(child, label, F2A_WAIT)
+}
+
+fn wait_child_before_deadline(
+    mut child: Child,
+    label: &str,
+    timeout: Duration,
+) -> std::process::Output {
+    let deadline = Instant::now() + timeout;
+    // Drain both pipes while waiting: a long Tool loop must not deadlock the
+    // child on the test harness's pipe capacity before its deadline.
+    let stdout = child.stdout.take().map(|mut stdout| {
+        thread::spawn(move || {
+            let mut bytes = Vec::new();
+            stdout.read_to_end(&mut bytes).unwrap();
+            bytes
+        })
+    });
+    let stderr = child.stderr.take().map(|mut stderr| {
+        thread::spawn(move || {
+            let mut bytes = Vec::new();
+            stderr.read_to_end(&mut bytes).unwrap();
+            bytes
+        })
+    });
     loop {
         match child.try_wait() {
-            Ok(Some(_)) => {
-                return child.wait_with_output().unwrap_or_else(|error| {
-                    panic!("failed to collect F2a {label} output: {error}")
-                });
+            Ok(Some(status)) => {
+                child.wait().unwrap();
+                return std::process::Output {
+                    status,
+                    stdout: stdout
+                        .map(|reader| reader.join().unwrap())
+                        .unwrap_or_default(),
+                    stderr: stderr
+                        .map(|reader| reader.join().unwrap())
+                        .unwrap_or_default(),
+                };
             }
             Ok(None) if Instant::now() < deadline => {
                 thread::sleep(Duration::from_millis(20));
@@ -554,9 +587,15 @@ fn f2a_wait_child(mut child: Child, label: &str) -> std::process::Output {
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
+                if let Some(reader) = stdout {
+                    let _ = reader.join();
+                }
+                if let Some(reader) = stderr {
+                    let _ = reader.join();
+                }
                 panic!(
                     "F2a {label} child did not exit within {} seconds",
-                    F2A_WAIT.as_secs()
+                    timeout.as_secs()
                 );
             }
             Err(error) => panic!("failed to poll F2a {label} child: {error}"),

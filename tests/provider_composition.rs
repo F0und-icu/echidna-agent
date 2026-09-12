@@ -55,6 +55,34 @@ fn empty_prompt_path_is_rejected_before_relative_path_resolution() {
 }
 
 #[test]
+fn request_budget_config_validates_without_credentials_or_vendor_binding() {
+    for value in [0, 10_001] {
+        let credentials = Arc::new(RecordingCredentialSource::default());
+        let config = format!(
+            "{}\n[runtime]\nmodel_request_limit_per_turn = {value}\n",
+            valid_config()
+        );
+        let error = load("invalid-request-budget", &config, credentials.clone())
+            .err()
+            .unwrap();
+        assert!(matches!(
+            error,
+            ProviderCompositionError::InvalidModelRequestLimit
+        ));
+        assert!(credentials.references().is_empty());
+    }
+    for value in [1, 2, 32, 33, 10_000] {
+        let credentials = Arc::new(RecordingCredentialSource::default());
+        let config = format!(
+            "{}\n[runtime]\nmodel_request_limit_per_turn = {value}\n",
+            valid_config()
+        );
+        assert!(load("valid-request-budget", &config, credentials.clone()).is_ok());
+        assert!(credentials.references().is_empty());
+    }
+}
+
+#[test]
 fn transport_deadline_config_rejects_zero_and_unbounded_values_before_credentials() {
     for field in ["connect_timeout_ms", "read_timeout_ms"] {
         for value in [0, 86_400_001] {

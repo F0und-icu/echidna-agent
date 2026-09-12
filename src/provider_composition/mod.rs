@@ -15,7 +15,7 @@ use crate::domain::profile::AgentModelProfile;
 use crate::domain::request_audit::RequestAdapterVersion;
 use crate::ports::model::ModelProvider;
 
-pub(crate) use config::PromptSources;
+pub(crate) use config::{PromptSources, RuntimeSettings};
 use config::{ProviderBinding, ProviderConfigV1, ProviderCredential, ProviderDefinition, WireApi};
 pub use validation::ProviderCompositionError;
 
@@ -27,6 +27,7 @@ pub struct ProviderComposition {
     vision: Option<Arc<dyn ModelProvider>>,
     primary_request_adapter_version: RequestAdapterVersion,
     prompt_sources: PromptSources,
+    runtime: RuntimeSettings,
 }
 
 /// One strictly decoded and validated Config v1 value awaiting runtime-only
@@ -113,6 +114,10 @@ impl ProviderComposition {
         &self.prompt_sources
     }
 
+    pub(crate) fn runtime(&self) -> RuntimeSettings {
+        self.runtime
+    }
+
     fn compose(
         config: ValidatedProviderConfig,
         credential_source: Arc<dyn CredentialSource>,
@@ -155,6 +160,7 @@ impl ProviderComposition {
             vision,
             primary_request_adapter_version: ResponsesHttpAdapter::request_adapter_version(),
             prompt_sources,
+            runtime: config.runtime,
         })
     }
 }

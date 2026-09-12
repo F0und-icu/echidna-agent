@@ -23,6 +23,23 @@ pub(super) struct ProviderConfigV1 {
     pub(super) agent_profiles: BTreeMap<String, AgentProfileDefinition>,
     #[serde(default)]
     pub(super) prompts: PromptSources,
+    #[serde(default)]
+    pub(super) runtime: RuntimeSettings,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct RuntimeSettings {
+    pub(crate) model_request_limit_per_turn: usize,
+}
+
+impl Default for RuntimeSettings {
+    fn default() -> Self {
+        Self {
+            model_request_limit_per_turn:
+                crate::app::model_request_budget::DEFAULT_MODEL_REQUEST_LIMIT,
+        }
+    }
 }
 
 impl ProviderConfigV1 {

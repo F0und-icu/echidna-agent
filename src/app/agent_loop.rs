@@ -2,6 +2,7 @@
 
 mod compaction;
 mod context_state;
+mod recovery;
 mod request_audit;
 
 pub(crate) use context_state::CurrentContextState;
@@ -58,7 +59,7 @@ use super::tool_scheduler::{ScheduledToolResult, execute_batch};
 use compaction::AppliedCompaction;
 use request_audit::RequestAuditStage;
 
-const MAX_MODEL_REQUESTS_PER_TURN: usize = 32;
+use crate::app::model_request_budget::{DEFAULT_MODEL_REQUEST_LIMIT, ModelRequestBudget};
 static NEXT_PRIMARY_RUNTIME_SESSION: AtomicU64 = AtomicU64::new(1);
 
 /// Opaque proof that the Vision Session service durably prepared exactly one
@@ -215,6 +216,7 @@ pub type AssistantTextDeltaStage<'a> = dyn FnMut(&str) -> Result<(), AgentLoopEr
 /// Grouping these existing stages keeps the entry point bounded without
 /// introducing a registry or another lifecycle owner.
 pub(crate) struct CliRuntimeStages<'a> {
+    request_budget: Arc<ModelRequestBudget>,
     follow_up: &'a mut ViewImageFollowUp<'a>,
     text_delta: &'a mut AssistantTextDeltaStage<'a>,
     tool_start: &'a mut ToolExecutionStartStage<'a>,
@@ -229,8 +231,10 @@ impl<'a> CliRuntimeStages<'a> {
         tool_start: &'a mut ToolExecutionStartStage<'a>,
         durability: &'a mut ChatDurabilityStage<'a>,
         context_refresh: &'a mut ContextRefreshStage<'a>,
+        request_budget: Arc<ModelRequestBudget>,
     ) -> Self {
         Self {
+            request_budget,
             follow_up,
             text_delta,
             tool_start,
@@ -241,6 +245,7 @@ impl<'a> CliRuntimeStages<'a> {
 }
 
 struct StreamingStages<'a> {
+    request_budget: Option<Arc<ModelRequestBudget>>,
     text_delta: Option<&'a mut AssistantTextDeltaStage<'a>>,
     tool_start: Option<&'a mut ToolExecutionStartStage<'a>>,
     record_execution: Option<&'a mut ToolExecutionReceiptStage<'a>>,
@@ -251,6 +256,7 @@ struct StreamingStages<'a> {
 impl StreamingStages<'_> {
     fn none() -> Self {
         Self {
+            request_budget: None,
             text_delta: None,
             tool_start: None,
             record_execution: None,
@@ -702,6 +708,7 @@ where
             None,
             None,
             StreamingStages {
+                request_budget: None,
                 text_delta: Some(text_delta),
                 tool_start: None,
                 record_execution: Some(record_execution),
@@ -736,6 +743,7 @@ where
             initial_image,
             Some(stages.follow_up),
             StreamingStages {
+                request_budget: Some(stages.request_budget),
                 text_delta: Some(stages.text_delta),
                 tool_start: Some(stages.tool_start),
                 record_execution: None,
@@ -756,12 +764,15 @@ where
         stages: StreamingStages<'_>,
     ) -> Result<AgentTurnOutcome, AgentLoopError> {
         let StreamingStages {
+            request_budget,
             mut text_delta,
             mut tool_start,
             mut record_execution,
             mut durability,
             mut context_refresh,
         } = stages;
+        let request_budget = request_budget
+            .unwrap_or_else(|| Arc::new(ModelRequestBudget::new(DEFAULT_MODEL_REQUEST_LIMIT)));
         self.apply_pending_configuration()?;
         if cancellation.is_cancelled() {
             return Ok(AgentTurnOutcome::Cancelled {
@@ -791,9 +802,7 @@ where
         let turn_id = TurnId::new(format!("turn:{}", self.next_turn_sequence));
         let mut deferred_activations = DeferredActivationSet::default();
         let mut executions = Vec::new();
-        let mut provider_requests = 0;
-
-        for request_index in 0..MAX_MODEL_REQUESTS_PER_TURN {
+        for request_index in 0..request_budget.limit() {
             if let Some(refresh) = context_refresh.as_deref_mut() {
                 self.refresh_current_context(refresh()?)?;
             }
@@ -957,7 +966,9 @@ where
             self.last_baseline_assessment = Some(assessment.clone());
             let (request, request_delivery_map) =
                 self.request_for_assessment(&delivery_input, &delivery_map, &assessment)?;
-            reserve_provider_request(&mut provider_requests)?;
+            request_budget
+                .admit(ProviderSessionRole::Primary)
+                .map_err(|limit| AgentLoopError::ModelRequestLimit { limit })?;
             self.last_context_plan = Some(plan.clone());
             self.last_sampling_step_plan = Some(sampling_step.clone());
             self.record_request_audit_attempt(
@@ -1027,7 +1038,9 @@ where
                                 InternalRequestMetadata::default(),
                             )?;
                         }
-                        reserve_provider_request(&mut provider_requests)?;
+                        request_budget
+                            .admit(ProviderSessionRole::Primary)
+                            .map_err(|limit| AgentLoopError::ModelRequestLimit { limit })?;
                         let fallback_request = ModelRequest::full(delivery_input.clone());
                         delivery_map.validate_against(&delivery_input)?;
                         self.record_request_audit_attempt(
@@ -1061,7 +1074,7 @@ where
                 ModelStreamOutcome::Completed { events, completion } => (events, completion),
                 ModelStreamOutcome::Cancelled { .. } => {
                     return Ok(AgentTurnOutcome::Cancelled {
-                        model_requests: provider_requests,
+                        model_requests: request_budget.counts().primary,
                         executions,
                     });
                 }
@@ -1109,7 +1122,7 @@ where
             if tool_calls.is_empty() {
                 return Ok(AgentTurnOutcome::Completed {
                     assistant_text,
-                    model_requests: provider_requests,
+                    model_requests: request_budget.counts().primary,
                     executions,
                 });
             }
@@ -1128,15 +1141,25 @@ where
                 deferred_activations
                     .apply_search_result(&execution.result, sampling_step.resolved_tool_plan())?;
             }
+            let image_history_start = self.history.items().len();
             let view_image_follow_up = self
                 .append_view_image_contexts(&scheduled.executions, &mut view_image_follow_up)
                 .await;
+            // A later scoped image can stop after earlier observations were
+            // admitted. Checkpoint those known contexts before propagating it.
+            if let Some(stage) = durability.as_deref_mut()
+                && self.history.items().len() > image_history_start
+            {
+                stage(ChatDurabilityCheckpoint::History(
+                    &self.history.items()[image_history_start..],
+                ))?;
+            }
             executions.extend(scheduled.executions);
             match view_image_follow_up {
                 Ok(()) => {}
                 Err(AgentLoopError::ViewImageFollowUpCancelled) if cancellation.is_cancelled() => {
                     return Ok(AgentTurnOutcome::Cancelled {
-                        model_requests: provider_requests,
+                        model_requests: request_budget.counts().primary,
                         executions,
                     });
                 }
@@ -1144,14 +1167,14 @@ where
             }
             if scheduled.cancelled {
                 return Ok(AgentTurnOutcome::Cancelled {
-                    model_requests: provider_requests,
+                    model_requests: request_budget.counts().primary,
                     executions,
                 });
             }
         }
 
         Err(AgentLoopError::ModelRequestLimit {
-            limit: MAX_MODEL_REQUESTS_PER_TURN,
+            limit: request_budget.limit(),
         })
     }
 
@@ -1477,16 +1500,6 @@ fn planning_failure_result(call: &ToolCall, error: ToolExecutorError) -> ToolRes
     )
 }
 
-fn reserve_provider_request(provider_requests: &mut usize) -> Result<(), AgentLoopError> {
-    if *provider_requests == MAX_MODEL_REQUESTS_PER_TURN {
-        return Err(AgentLoopError::ModelRequestLimit {
-            limit: MAX_MODEL_REQUESTS_PER_TURN,
-        });
-    }
-    *provider_requests += 1;
-    Ok(())
-}
-
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum AgentLoopConfigurationError {
     #[error("the AgentLoop requires a primary ProviderSession")]
@@ -1656,6 +1669,8 @@ pub enum AgentLoopError {
     },
     #[error("the fixed view_image follow-up was cancelled before the next model sample")]
     ViewImageFollowUpCancelled,
+    #[error("scoped Vision Provider failed after its durable failure checkpoint: {message}")]
+    VisionProviderStopped { message: String },
     #[error("the Agent reached the per-Turn model-request limit of {limit}")]
     ModelRequestLimit { limit: usize },
     #[error(

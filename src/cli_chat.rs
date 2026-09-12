@@ -8,6 +8,7 @@
 
 mod compaction;
 mod context;
+mod recovery;
 mod tool_output;
 mod vision;
 
@@ -31,6 +32,7 @@ use crate::app::agent_loop::{
     ChatDurabilityStage, CliRuntimeStages, ToolExecutionStartStage, ViewImageFollowUpFuture,
 };
 use crate::app::cancellation::AgentCancellation;
+use crate::app::model_request_budget::ModelRequestBudget;
 use crate::app::request_audit::RequestAuditService;
 use crate::app::session::{AppendAfterDurableError, SessionProjection};
 use crate::domain::context::{ProviderSession, ProviderSessionId, ProviderSessionRole};
@@ -65,7 +67,7 @@ pub(crate) async fn run(
         None => new_session_id(),
     };
     let session = DurableChatSession::new(project, session_id.clone())?;
-    let (session_state, provider_session, disposition, compaction_validation) =
+    let (session_state, provider_session, mut disposition, compaction_validation) =
         session.start_or_resume(explicit_resume, composition)?;
     let domain = requested_domain.unwrap_or_else(|| session_state.effective_domain_profile());
 
@@ -96,7 +98,7 @@ pub(crate) async fn run(
     );
 
     println!(
-        "{} session `{}` with domain `{}` and phase `{}`. Enter a line, or use /paste, /image, /domain, /phase, /context, /compact, /exit or EOF.",
+        "{} session `{}` with domain `{}` and phase `{}`. Enter a line, or use /paste, /image, /domain, /phase, /context, /compact, /resume, /exit or EOF.",
         disposition.message(),
         session_id.as_str(),
         domain.id(),
@@ -107,6 +109,7 @@ pub(crate) async fn run(
     let mut pending_domain = requested_domain.map(DomainProfileSelection::operator);
     let mut pending_phase = requested_phase.map(ResearchPhaseSelection::operator);
     let mut pending_image: Option<vision::PendingImage> = None;
+    let mut recovery_required = false;
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     loop {
         print!("you> ");
@@ -116,7 +119,7 @@ pub(crate) async fn run(
             signal = tokio::signal::ctrl_c() => {
                 signal?;
                 println!("\nInterrupted while waiting for input; Session `{}` remains active.", session_id.as_str());
-                return Ok(());
+                return recovery::exit_status(recovery_required);
             }
         };
         let Some(line) = line else {
@@ -124,7 +127,7 @@ pub(crate) async fn run(
                 "EOF received; Session `{}` remains active.",
                 session_id.as_str()
             );
-            return Ok(());
+            return recovery::exit_status(recovery_required);
         };
         let line = if line == "/paste" {
             println!("Paste mode; finish with /end on its own line.");
@@ -149,7 +152,7 @@ pub(crate) async fn run(
                             "EOF received during paste; Session `{}` remains active and the incomplete paste was discarded.",
                             session_id.as_str()
                         );
-                        return Ok(());
+                        return recovery::exit_status(recovery_required);
                     }
                 }
             }
@@ -168,7 +171,7 @@ pub(crate) async fn run(
                 "Session `{}` remains active for explicit resume.",
                 session_id.as_str()
             );
-            return Ok(());
+            return recovery::exit_status(recovery_required);
         }
         if line == "/context" {
             match agent.last_context_plan() {
@@ -179,6 +182,28 @@ pub(crate) async fn run(
                     "Context pressure is unavailable before the first model request; Provider usage is not inferred."
                 ),
             }
+            continue;
+        }
+        if line == "/resume" {
+            if !recovery_required {
+                println!("No stopped Turn needs recovery; no ProviderSession was replaced.");
+                continue;
+            }
+            let (state, provider_session, resumed, validation) =
+                session.start_or_resume(true, composition)?;
+            let validation = validation.as_ref().map(|facts| facts.context());
+            agent.resume_from_session(&state, provider_session, validation.as_ref())?;
+            disposition = resumed;
+            recovery_required = false;
+            println!(
+                "ProviderSession rebuilt from durable History; volatile reasoning cleared by explicit /resume. No request sent or Tool retried. Enter a new instruction or /compact."
+            );
+            continue;
+        }
+        if recovery_required {
+            println!(
+                "Task input not accepted or saved: use /resume first, or /context /exit. No old input or Tool will be retried."
+            );
             continue;
         }
         if line == "/compact" {
@@ -247,6 +272,9 @@ pub(crate) async fn run(
         let current = context_cache.refresh(&session.project, &tools, composition)?;
         agent.refresh_current_context(current)?;
         let cancellation = AgentCancellation::new();
+        let request_budget = Arc::new(ModelRequestBudget::new(
+            composition.runtime().model_request_limit_per_turn,
+        ));
         let initial_image = match pending_image.take() {
             Some(image) => {
                 let preparation = vision::prepare_primary_context(
@@ -255,6 +283,7 @@ pub(crate) async fn run(
                     image,
                     &line,
                     cancellation.clone(),
+                    Arc::clone(&request_budget),
                 );
                 tokio::pin!(preparation);
                 let prepared = tokio::select! {
@@ -270,8 +299,23 @@ pub(crate) async fn run(
                             Err(error) => return Err(error),
                         }
                     }
-                }?;
-                Some(prepared)
+                };
+                match prepared {
+                    Ok(prepared) => Some(prepared),
+                    Err(error) => {
+                        let error = vision::follow_up_error(error);
+                        if agent.permits_explicit_recovery(&error) {
+                            session.validate_stopped_runtime(&agent)?;
+                            recovery_required = true;
+                            recovery::report_stop(&error, &request_budget);
+                            println!(
+                                "Initial image/task was not submitted to Primary; reattach the image explicitly after /resume if needed."
+                            );
+                            continue;
+                        }
+                        return Err(ChatError::Agent(error));
+                    }
+                }
             }
             None => None,
         };
@@ -317,9 +361,11 @@ pub(crate) async fn run(
         let follow_up_composition = composition;
         let follow_up_task = line.clone();
         let follow_up_cancellation = cancellation.clone();
+        let follow_up_budget = Arc::clone(&request_budget);
         let mut follow_up = move |selection| -> ViewImageFollowUpFuture<'_> {
             let task = follow_up_task.clone();
             let cancellation = follow_up_cancellation.clone();
+            let request_budget = Arc::clone(&follow_up_budget);
             Box::pin(async move {
                 vision::prepare_primary_context(
                     follow_up_session,
@@ -327,6 +373,7 @@ pub(crate) async fn run(
                     vision::PendingImage::from_selection(selection),
                     &task,
                     cancellation,
+                    request_budget,
                 )
                 .await
                 .map_err(vision::follow_up_error)
@@ -352,6 +399,7 @@ pub(crate) async fn run(
                     &mut tool_start as &mut ToolExecutionStartStage<'_>,
                     &mut durability as &mut ChatDurabilityStage<'_>,
                     &mut refresh_context,
+                    Arc::clone(&request_budget),
                 ),
             );
             tokio::pin!(turn);
@@ -374,8 +422,16 @@ pub(crate) async fn run(
             }
             Err(error) => {
                 println!();
-                return Err(ChatError::Agent(error));
+                if !agent.permits_explicit_recovery(&error) {
+                    return Err(ChatError::Agent(error));
+                }
+                session.validate_stopped_runtime(&agent)?;
+                recovery_required = true;
+                recovery::report_stop(&error, &request_budget);
             }
+        }
+        if !recovery_required {
+            recovery::report_budget(&request_budget);
         }
         if let Some(plan) = agent.last_context_plan() {
             let pressure = compaction::ContextPressure::from_plan(plan);
@@ -473,6 +529,10 @@ impl DurableChatSession {
                     call_id: call_id.as_str().to_owned(),
                 });
             }
+            projection
+                .state()
+                .normalized_history_items()
+                .map_err(crate::domain::session::SessionError::from)?;
             if let Some(compaction) = projection
                 .state()
                 .latest_compaction()
@@ -821,6 +881,8 @@ fn event_id(project_id: &ProjectId, session_id: &StreamId, sequence: u64, kind: 
 
 #[derive(Debug, Error)]
 pub(crate) enum ChatError {
+    #[error("Session has an unresolved stopped Turn; resume its Session explicitly")]
+    UnresolvedTurnStop,
     #[error(transparent)]
     ContextRefresh(#[from] context::ChatContextRefreshError),
     #[error(transparent)]
@@ -866,9 +928,9 @@ pub(crate) enum ChatError {
     #[error("Vision analysis was cancelled before the Primary request")]
     VisionCancelled,
     #[error(
-        "strict Session History changed independently from the active AgentLoop; Compaction was not appended"
+        "strict Session History changed independently from the active AgentLoop; recovery or Compaction was not applied"
     )]
-    CompactionRuntimeHistoryMismatch,
+    RuntimeHistoryMismatch,
     #[error(
         "Compaction did not yield a smaller usable next-Turn Context within the configured budget; no Compaction appended"
     )]

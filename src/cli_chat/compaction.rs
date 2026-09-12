@@ -93,13 +93,7 @@ impl DurableChatSession {
             .history()
             .ensure_all_tool_calls_paired()
             .map_err(crate::domain::session::SessionError::from)?;
-        let resumable_history = projection
-            .state()
-            .normalized_history_items()
-            .map_err(crate::domain::session::SessionError::from)?;
-        if agent.history().items() != resumable_history {
-            return Err(ChatError::CompactionRuntimeHistoryMismatch);
-        }
+        super::recovery::validate_runtime_history(projection.state(), agent)?;
 
         // The Writer lock freezes both Research and Session appenders while
         // these read-only facts and the new Compaction Event are composed.

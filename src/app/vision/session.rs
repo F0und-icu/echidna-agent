@@ -78,6 +78,7 @@ pub(crate) enum PreparedVisionSecondaryTerminal {
 pub struct VisionSessionService<'blobs, Blobs: ?Sized> {
     blobs: &'blobs Blobs,
     binding: RequestAuditBinding,
+    request_budget: Option<std::sync::Arc<crate::app::model_request_budget::ModelRequestBudget>>,
 }
 
 impl<'blobs, Blobs> VisionSessionService<'blobs, Blobs>
@@ -86,7 +87,19 @@ where
     Blobs::Error: std::fmt::Debug,
 {
     pub fn new(blobs: &'blobs Blobs, binding: RequestAuditBinding) -> Self {
-        Self { blobs, binding }
+        Self {
+            blobs,
+            binding,
+            request_budget: None,
+        }
+    }
+
+    pub(crate) fn with_request_budget(
+        mut self,
+        budget: std::sync::Arc<crate::app::model_request_budget::ModelRequestBudget>,
+    ) -> Self {
+        self.request_budget = Some(budget);
+        self
     }
 
     /// Commits one Direct route and returns the only token that can insert its
@@ -220,6 +233,7 @@ where
     {
         let mut audit_stamp = Some(prepared.audit);
         let analysis = VisionAnalysisService::new(provider, self.blobs)
+            .with_request_budget(self.request_budget.clone())
             .analyze_image(prepared.analysis, audit_context, cancellation, |attempt| {
                 let stamp = audit_stamp.take().ok_or_else(|| {
                     "Vision analysis attempted more than one RequestAudit commit".to_owned()
@@ -490,4 +504,23 @@ pub enum VisionSessionError {
     AnalysisFailed { failure: Box<VisionAnalysisFailure> },
     #[error(transparent)]
     AgentLoop(#[from] AgentLoopError),
+}
+
+impl VisionSessionError {
+    /// Only this App owner knows that a Provider failure reached the durable
+    /// Vision terminal boundary. Persistence and malformed-output errors are
+    /// not converted into recoverable request failures.
+    pub(crate) fn into_recoverable_stop(self) -> Result<AgentLoopError, Self> {
+        match self {
+            Self::Analysis(VisionAnalysisError::RequestLimit { limit }) => {
+                Ok(AgentLoopError::ModelRequestLimit { limit })
+            }
+            Self::AnalysisFailed { failure } if failure.error_code == "provider_failure" => {
+                Ok(AgentLoopError::VisionProviderStopped {
+                    message: failure.message,
+                })
+            }
+            error => Err(error),
+        }
+    }
 }

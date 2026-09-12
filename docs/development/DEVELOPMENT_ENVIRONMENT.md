@@ -115,6 +115,8 @@ F3 为每个 `[providers.<id>]` 增加可选 `connect_timeout_ms`（默认 `3000
 
 可选顶层 `[prompts]` 使用 `personal_file = "personal.md"`、`project_file = "project.md"`；相对路径以配置文件所在目录为基准，不读取 Codex 文件。正式 Chat 每次采样前读取这些显式 UTF-8 普通文件，未配置即不添加，已配置但不存在/无效即报错。`doctor` 只验证配置，不读取 Prompt 内容。项目 `core.md` 通过现有 Project Memory 路径进入 ContextPlanner，受统一预算约束，不能变成第二个证据源。
 
+可选顶层 `[runtime]` 使用 `model_request_limit_per_turn = 32`（允许 1..=10000）。额度由 Primary 与 Vision 共享，在每个操作者 Turn、初始 Vision 之前创建；旧配置默认32，不按模型品牌选择额度。CLI 显示 admitted Primary/Vision/total 与 remaining，这是保守的本地准入计数，不代表 Provider usage 或费用。失败准入不退款、Full fallback 也占一个槽，最后一次 Tool 结果仍按原规则保存。上下文/模型/额度停止后使用 `/resume` 显式重建 ProviderSession，再输入新任务或 `/compact`；不会自动重发旧任务或重试工具。纯 CLI 指令不调用模型，跨 Turn Live 总额度仍由外部测试 harness 限制。旧严格 Config v1 版本不认识此新增表，回退旧二进制前需移除它。
+
 F3 Live 已验证的限制：对 `incremental_input = false` 且存在活跃 completed reasoning 的会话，Core Memory 替换或当前预算无法完整保留续传时，CLI 可能以 `completed Provider reasoning continuation cannot be retained by the current Context plan` 显式退出，而不是丢弃推理或自动重试。可使用原配置 `chat --resume <id>` 恢复；上下文压力较高且具备 TargetSnapshot 时，在新的模型请求前显式 `/compact`。恢复会重新验证事实，不保证任意输入均可容纳，也不能凭空补回缺失的 ToolResult。
 
 配置保存：

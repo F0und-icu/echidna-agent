@@ -11,12 +11,14 @@ enum Change {
 
 #[test]
 fn ctf_r2a_isolates_prompt_memory_state_and_combined_continuation_changes() {
-    for change in [
-        Change::ExternalPrompt,
-        Change::CoreMemory,
-        Change::Project,
-        Change::Research,
-        Change::PromptAndProject,
+    for (change, recover) in [
+        (Change::ExternalPrompt, false),
+        (Change::CoreMemory, false),
+        (Change::Project, false),
+        (Change::Research, false),
+        (Change::PromptAndProject, false),
+        (Change::CoreMemory, true),
+        (Change::PromptAndProject, true),
     ] {
         let root = TemporaryDirectory::new("ctf-r2a-context");
         let harness = TemporaryDirectory::new("ctf-r2a-harness");
@@ -36,7 +38,7 @@ fn ctf_r2a_isolates_prompt_memory_state_and_combined_continuation_changes() {
             Change::PromptAndProject => Some("BASELINE_REJECTED: PromptChanged"),
             _ => None,
         };
-        let request_count = if rejected.is_some() { 1 } else { 2 };
+        let request_count = if rejected.is_some() && !recover { 1 } else { 2 };
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
@@ -109,19 +111,29 @@ fn ctf_r2a_isolates_prompt_memory_state_and_combined_continuation_changes() {
             thread: server_thread,
         };
         let output = f2a_wait_child(
-            spawn_f2a_chat(root.path(), &config, "inspect target\n/exit\n", &[]),
+            spawn_f2a_chat(
+                root.path(),
+                &config,
+                if recover {
+                    "inspect target\n/resume\ncontinue explicitly\n/exit\n"
+                } else {
+                    "inspect target\n/exit\n"
+                },
+                &[],
+            ),
             "CTF R2a context",
         );
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert_eq!(
             output.status.success(),
-            rejected.is_none(),
+            rejected.is_none() || recover,
             "{change:?}: {stderr}"
         );
         if let Some(reason) = rejected {
             assert!(stderr.contains(reason), "{change:?}: {stderr}");
             assert!(stderr.contains("candidate was not sent"));
             assert!(!stderr.contains("DELIVERY_BUDGET_EXCEEDED"));
+            assert!(String::from_utf8_lossy(&output.stdout).contains("Use /resume"));
         }
         let mut wires = Vec::new();
         for _ in 0..request_count {
@@ -138,6 +150,20 @@ fn ctf_r2a_isolates_prompt_memory_state_and_combined_continuation_changes() {
             cyber_agent::domain::model::ContentItem::Reasoning { .. }
         )));
         assert_audits_reconstruct(root.path(), &state);
+        if recover {
+            assert!(wires[1].get("previous_response_id").is_none());
+            assert!(!json_contains_type(&wires[1]["input"], "reasoning"));
+            assert!(json_contains_type(
+                &wires[1]["input"],
+                "function_call_output"
+            ));
+            assert!(wires[1].to_string().contains("continue explicitly"));
+            assert!(wires[1].to_string().contains(match change {
+                Change::CoreMemory => "memory after",
+                Change::PromptAndProject => "prompt after",
+                _ => unreachable!(),
+            }));
+        }
         if rejected.is_none() {
             let second = &wires[1];
             assert!(second.get("previous_response_id").is_none());

@@ -117,6 +117,7 @@ pub(super) async fn prepare_primary_context(
     pending: PendingImage,
     task: &str,
     cancellation: AgentCancellation,
+    request_budget: std::sync::Arc<crate::app::model_request_budget::ModelRequestBudget>,
 ) -> Result<InitialImagePrimaryContext, ChatError> {
     let decision = require_image_route(composition)?;
     let profile = composition.agent_profile();
@@ -146,7 +147,8 @@ pub(super) async fn prepare_primary_context(
             .vision()
             .map(|vision| vision.capabilities().semantic_hash()),
     };
-    let service = VisionSessionService::new(&session.artifacts, binding.clone());
+    let service = VisionSessionService::new(&session.artifacts, binding.clone())
+        .with_request_budget(request_budget);
 
     match decision.route {
         VisionRoute::PrimaryDirect => service
@@ -288,6 +290,10 @@ fn require_image_route(
 }
 
 fn vision_error(error: crate::app::vision::VisionSessionError) -> ChatError {
+    let error = match error.into_recoverable_stop() {
+        Ok(error) => return ChatError::Agent(error),
+        Err(error) => error,
+    };
     match error {
         crate::app::vision::VisionSessionError::AnalysisFailed { failure }
             if failure.error_code == "cancelled" =>
@@ -315,6 +321,7 @@ fn image_operation_id(session_id: &StreamId) -> String {
 
 pub(super) fn follow_up_error(error: ChatError) -> AgentLoopError {
     match error {
+        ChatError::Agent(error) => error,
         ChatError::VisionCancelled => AgentLoopError::ViewImageFollowUpCancelled,
         error => AgentLoopError::InitialImageContext {
             message: error.to_string(),

@@ -25,6 +25,11 @@ impl ProviderConfigV1 {
             });
         }
         self.prompts.validate()?;
+        if !(1..=crate::app::model_request_budget::MAX_MODEL_REQUEST_LIMIT)
+            .contains(&self.runtime.model_request_limit_per_turn)
+        {
+            return Err(ProviderCompositionError::InvalidModelRequestLimit);
+        }
 
         for (name, mapping) in &self.capability_mappings {
             validate_identifier("capability_mapping", name)?;
@@ -195,6 +200,8 @@ fn validate_credential_reference(
 
 #[derive(Debug, Error)]
 pub enum ProviderCompositionError {
+    #[error("runtime.model_request_limit_per_turn must be between 1 and 10000")]
+    InvalidModelRequestLimit,
     #[error("configuration field `{field}` must name a non-empty prompt file path")]
     InvalidPromptPath { field: &'static str },
     #[error("configuration field `{field}` must be between 1 and 86400000 milliseconds")]

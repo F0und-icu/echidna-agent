@@ -27,6 +27,8 @@
 | `ModelInputIR`、`ModelEvent`、`ModelCapabilities` | `domain/model` | Adapter 只做 wire 编解码并调用统一校验 |
 | Provider-neutral Model Port 与通用 Provider 错误 | `ports/model` | Adapter 私有错误只在边界映射一次 |
 | Streaming 完成、断流和应用级取消 | `app/model_streaming` 或后续唯一 AgentLoop 服务 | Transport 只提供流、释放和协议错误 |
+| Primary/Vision 每 Turn 请求准入 | 私有 `app/model_request_budget` | Config 唯一路径验证额度；CLI 在初始 Vision 前创建并透传同一预算，显示 admission 而非 Provider usage；不新建 retry/计费/持久日志 |
+| 可恢复停止与显式恢复 | App AgentLoop 的有限 typed classifier + 原 Session Resume | CLI 验证耐久/运行时 History 一致后提示；`/resume` 前禁止新任务，无自动 reasoning 丢弃或工具重试，未知和持久化错误仍 fatal |
 | Responses 请求、响应和 SSE DTO | `adapters/responses` | 不得进入 Domain 或 App 契约；Provider 配置不得复制协议类型 |
 | CLI reasoning 展示与开发构建 wire debug | `adapters/responses/cli_output` | 既有 Composition Root 选择 CLI 呈现；不重建请求、不写第二份事实；release 保留 reasoning 但排除完整 debug |
 | 终端内容转义与有界预览 | 私有 `terminal_content` | Tool/debug 仅复用派生视图；不修改事实、Tool 输出或 Context 预算 |

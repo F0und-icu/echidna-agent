@@ -18,6 +18,11 @@ milestone history remains in `docs/development/STATUS.md` and Git history.
 
 ### Added
 
+- CTF-R2b: optional Config v1 runtime request ceiling shared by Primary and
+  Vision (default 32). Typed, durable model/context/budget stops return to the
+  CLI and require explicit `/resume` before new work; no old input or Tool is
+  automatically retried. Admission counters are not Provider usage.
+
 - F6a: secondary Vision observations bind regions to exact delivered-image
   dimensions. Out-of-bounds regions fail explicitly without retry or Primary
   injection; in-bounds regions remain unverified model observations.

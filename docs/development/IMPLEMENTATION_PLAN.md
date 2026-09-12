@@ -1093,6 +1093,12 @@ R1 完成并提交 `63fdb14` 后启动。只在既有 AgentLoop/context_state �
 
 R2a 本地收口：专项/受影响回归、全新 Terra xhigh 独立审计及 test-only socket 修复复审、完整 Gate、Lean 均 PASS。首次完整 Gate 暴露 macOS accepted socket 的非阻塞继承，已在既有夹具 helper 修复并完整重跑，未改生产网络行为。交付分支从 R1 合并 main `e6c5bdb` 建立，保留并排除独立 debug diff；随后按 series authorization 推进 R2b。准确命令/证据与远端状态见 STATUS。
 
+#### CTF-R2b：有界请求与显式交互恢复
+
+从已合并 R2a main 开始，先接受 ADR-0021 / Architecture v1.11。Config v1 唯一路径添加可选 runtime 请求额度（默认32，1..=10000），共享 Primary/Vision 的保守 admission counter，不把它伪装成服务端 usage。App 对 paired/durable typed stop 分类；CLI 返回输入但必须显式 `/resume` 后才能提交新任务，沿用原 Session/Compaction 校验和新 ProviderSession，不自动丢 reasoning、重发旧输入、重试工具或压缩。完整范围和反例测试见 STATUS 与 ADR；与 R3 输出/执行耐久增量分开验收。
+
+R2b 本地收口：全新 Terra xhigh 独立只读审计 APPROVE；审计后完整 Gate 443项通过、2项Live ignored，Lean PASS；release CTF11项、F4展示6项及标准release构建通过。共享准入/显式恢复只在有限私有所有者实现，保持无新依赖/Port/Event/公开测试入口。后续按系列授权交付并进行有界合成Live；不把 admission/RequestAudit 当作实测 wire requests 或 usage。剩余 R3–R6 未因此封存。
+
 CTF 长任务的 R0–R6 工作包、CTF-01 至 CTF-18 映射、轻量检索候选、唯一职责、设计准入、回归与分级 Live 见 [CTF_LONG_TASK_REPAIR_PLAN.md](CTF_LONG_TASK_REPAIR_PLAN.md)。当前仅下列首包开工，其余保留候选状态。Codex 桌面聊天恢复不属于产品实现。
 
 #### CTF-R1：合成验证前置与 Resume 配对

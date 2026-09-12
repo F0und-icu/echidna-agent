@@ -194,6 +194,7 @@ pub struct VisionAnalysisOutput {
 pub struct VisionAnalysisService<'provider, 'blobs, Provider: ?Sized, Blobs: ?Sized> {
     provider: &'provider Provider,
     blobs: &'blobs Blobs,
+    request_budget: Option<std::sync::Arc<crate::app::model_request_budget::ModelRequestBudget>>,
 }
 
 impl<'provider, 'blobs, Provider, Blobs> VisionAnalysisService<'provider, 'blobs, Provider, Blobs>
@@ -203,7 +204,19 @@ where
     Blobs::Error: std::fmt::Debug,
 {
     pub fn new(provider: &'provider Provider, blobs: &'blobs Blobs) -> Self {
-        Self { provider, blobs }
+        Self {
+            provider,
+            blobs,
+            request_budget: None,
+        }
+    }
+
+    pub(crate) fn with_request_budget(
+        mut self,
+        budget: Option<std::sync::Arc<crate::app::model_request_budget::ModelRequestBudget>>,
+    ) -> Self {
+        self.request_budget = budget;
+        self
     }
 
     /// Audits one exact full request before the sole Provider call. Every
@@ -256,6 +269,11 @@ where
         .map_err(|error| VisionAnalysisError::AuditShape {
             message: error.to_string(),
         })?;
+        if let Some(budget) = &self.request_budget {
+            budget
+                .admit(ProviderSessionRole::Vision)
+                .map_err(|limit| VisionAnalysisError::RequestLimit { limit })?;
+        }
         let audit = record_audit(attempt).map_err(|error| VisionAnalysisError::AuditCommit {
             message: error.to_string(),
         })?;
@@ -488,6 +506,8 @@ fn context_error(error: impl Display) -> VisionAnalysisError {
 
 #[derive(Debug, Error)]
 pub enum VisionAnalysisError {
+    #[error("the Agent reached the per-Turn model-request limit of {limit}")]
+    RequestLimit { limit: usize },
     #[error("Vision input `{field}` must not be empty")]
     RequiredInput { field: &'static str },
     #[error("Vision analysis requires a Vision ProviderSession")]
