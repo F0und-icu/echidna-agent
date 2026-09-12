@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::adapters::artifact_store::LocalArtifactStore;
-use crate::adapters::image::{PreparedLocalImage, prepare_local_image};
-use crate::domain::image::{ImageDeliveryBudget, ImageInputLimits};
+use crate::adapters::image::{LOCAL_IMAGE_INPUT_LIMITS, PreparedLocalImage, prepare_local_image};
+use crate::domain::image::ImageDeliveryBudget;
 use crate::domain::tools::{ResourceKey, ToolExecutionOutcome, ToolExecutionPlan};
 use crate::domain::vision::VIEW_IMAGE_SELECTION_SCHEMA_VERSION;
 use crate::ports::artifact::ArtifactStore;
@@ -20,8 +20,6 @@ use super::filesystem::resolve_path;
 use super::resources::ResourceKeyResolver;
 use super::{decode_arguments, invalid_plan};
 
-const INPUT_LIMITS: ImageInputLimits =
-    ImageInputLimits::new(32 * 1024 * 1024, 12_000, 12_000, 64_000_000);
 const DELIVERY_BUDGET: ImageDeliveryBudget =
     ImageDeliveryBudget::new(4 * 1024 * 1024, 2_048, 2_048, 4_000_000);
 
@@ -86,7 +84,7 @@ pub(super) async fn execute(project_root: &Path, plan: ToolExecutionPlan) -> Too
         return invalid_plan(plan, error);
     }
     let source = resolve_path(project_root, &arguments.source_path);
-    let prepared = match prepare_local_image(&source, INPUT_LIMITS, DELIVERY_BUDGET) {
+    let prepared = match prepare_local_image(&source, LOCAL_IMAGE_INPUT_LIMITS, DELIVERY_BUDGET) {
         Ok(prepared) => prepared,
         Err(error) => return image_failure(plan, "view_image_invalid", error),
     };

@@ -5,12 +5,14 @@
 //! `view_image` result contract because they evolve for different reasons.
 
 mod facts;
+mod geometry;
 mod view_image;
 
 pub use facts::{
-    VISION_FACT_SCHEMA_VERSION, VisionAnalysisFailure, VisionFactError, VisionObservation,
-    VisionObservationId, VisionRegion, VisionRouteRecord,
+    VISION_FACT_SCHEMA_VERSION, VISION_OBSERVATION_SCHEMA_VERSION, VisionAnalysisFailure,
+    VisionFactError, VisionObservation, VisionObservationId, VisionRegion, VisionRouteRecord,
 };
+pub use geometry::VisionImageGeometry;
 pub use view_image::{
     VIEW_IMAGE_SELECTION_SCHEMA_VERSION, ViewImageSelection, ViewImageSelectionError,
 };

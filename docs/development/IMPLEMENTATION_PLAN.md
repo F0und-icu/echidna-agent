@@ -1069,6 +1069,20 @@ Operator-authorized direct implementation by the main agent; no delegation, Git,
 
 Focused tests → affected tests → fresh operator-authorized independent audit → fixes → complete Gate → Lean Review. Stop for audit authorization after implementation/affected validation; F4 approvals do not apply.
 
+### F6a：Vision Coordinate Reliability
+
+Operator authorized continuing with the first recommended optimization. Keep this local Slice bounded to exact delivered-image geometry, secondary Vision bounds and legacy replay. ADR-0020 / Architecture v1.10 apply.
+
+- Resolve source/delivery dimensions from immutable image Blobs through the existing image Adapter, sharing image inspection and Artifact resolution rather than adding an App decoder or vendor path.
+- Supply versioned geometry text through the existing ContextPlanner/RequestAudit; new Observation v2 carries the same typed frame. Coordinates are top-left delivered-image pixels, not original-image or screen coordinates. No automatic scaling/clamping or confidence promotion.
+- Preserve v1 observation reads as unknown-coordinate legacy without rewriting bytes. Unknown versions and malformed v2 fail explicitly. Replay must bind new geometry to its audited request and preserve raw reply equality.
+- Cover exact-edge rectangles, overflow/out-of-bounds, empty regions, original versus resized delivery, malformed frame, legacy replay, audit/frame tampering and failure/receipt continuity; keep primary_direct behavior unchanged.
+- Focused tests → affected tests → fresh independent audit → repairs → full Gate → Lean Review. Stop at the audit handoff if separate review authorization is absent. The operator subsequently authorized a bounded synthetic Live after offline closure; no Git publication/merge, Actions, general router, new dependency, TUI or next optimization Slice.
+
+Checkpoint: COMPLETE_LOCAL_LIVE_PASS. Fresh Terra xhigh independent review APPROVE, no P1/P2; complete post-audit Gate passed (427 unique tests / 2 Live ignored, fmt/Clippy/build), final Lean Review PASS. Separately authorized formal CLI Live passed original 32×16 and resized 2048×499 delivered-frame cases, including audit/raw/Receipt/readback checks. This does not establish arbitrary localization quality or full-1M capacity. Stop; Git publication and next Slice remain excluded. See STATUS for evidence and schema/downgrade limits.
+
+F6a delivery addendum: after the acceptance checkpoint above, the operator authorized remote submission. Implementation `82b42e1` is published in Draft PR #69, stacked on still-open #68, with `[skip ci]`. Current state is REMOTE_SUBMITTED_PENDING_MERGE; neither PR is merged and no Actions/next Slice/new Live is authorized. Earlier Git-excluded wording describes the implementation/Live checkpoint, not this separately authorized delivery.
+
 ## 7. 失败与阻塞处理
 
 - 同一错误先定位最小失败层：Domain、Port、Adapter、Integration、Environment。

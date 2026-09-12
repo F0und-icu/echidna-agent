@@ -7,6 +7,9 @@ milestone history remains in `docs/development/STATUS.md` and Git history.
 
 ### Added
 
+- F6a: secondary Vision observations bind regions to exact delivered-image
+  dimensions. Out-of-bounds regions fail explicitly without retry or Primary
+  injection; in-bounds regions remain unverified model observations.
 - Labeled, continuously streamed Provider-returned plaintext reasoning on CLI
   stderr in development and release builds, without adding reasoning to History.
 - Development-only `chat --debug` for readable actual request content and
@@ -24,7 +27,14 @@ milestone history remains in `docs/development/STATUS.md` and Git history.
 
 ### Migration
 
-- No Config/Event schema, dependency or credential-source changes. Existing
+- F4/F5: no Config/Event schema, dependency or credential-source changes. Existing
   configured windows are unchanged; no model-name-based capacity inference.
-- Vision Live color recognition passed, but estimated region coordinates were
-  inaccurate. Vision observations remain derived, non-verified evidence.
+- F6a: new Observation payloads use v2 with image geometry; legacy v1 remains
+  readable with unknown coordinate space. Config, model reply, route/failure
+  and Session envelope versions are unchanged. Older binaries that only read
+  v1 cannot resume v2 sessions; never strip geometry or rewrite historical facts
+  to downgrade them.
+- Historical F5 Live recognized colors but estimated invalid region dimensions.
+  F6a Live passed two original/resized synthetic half-region cases with exact
+  delivered-frame coordinates; general localization accuracy remains unverified.
+  Vision observations remain derived, unverified model observations.

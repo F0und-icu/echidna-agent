@@ -10,6 +10,7 @@ use crate::domain::events::EventId;
 use crate::domain::profile::{VisionMode, VisionRoute, VisionRouteReason};
 
 pub const VISION_FACT_SCHEMA_VERSION: u16 = 1;
+pub const VISION_OBSERVATION_SCHEMA_VERSION: u16 = 2;
 
 macro_rules! vision_id {
     ($name:ident, $doc:literal) => {
@@ -147,7 +148,7 @@ pub struct VisionRegion {
 }
 
 impl VisionRegion {
-    fn validate(&self) -> Result<(), VisionFactError> {
+    pub(super) fn validate(&self) -> Result<(), VisionFactError> {
         require_nonempty("region.label", &self.label)?;
         if self.width == 0 || self.height == 0 {
             return Err(VisionFactError::InvalidRegion);
@@ -166,6 +167,9 @@ pub struct VisionObservation {
     pub route_event_id: EventId,
     pub source_artifact_id: ArtifactId,
     pub derived_artifact_ids: Vec<ArtifactId>,
+    /// Absent only for historical schema v1; never infer legacy geometry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_geometry: Option<super::VisionImageGeometry>,
     pub task_hash: String,
     pub summary: String,
     pub extracted_text: Option<String>,
@@ -184,10 +188,22 @@ pub struct VisionObservation {
 
 impl VisionObservation {
     pub fn validate(&self) -> Result<(), VisionFactError> {
-        if self.schema_version != VISION_FACT_SCHEMA_VERSION {
+        if !matches!(
+            self.schema_version,
+            VISION_FACT_SCHEMA_VERSION | VISION_OBSERVATION_SCHEMA_VERSION
+        ) {
             return Err(VisionFactError::UnsupportedSchemaVersion {
                 received: self.schema_version,
             });
+        }
+        match (self.schema_version, &self.image_geometry) {
+            (VISION_FACT_SCHEMA_VERSION, None) => {}
+            (VISION_OBSERVATION_SCHEMA_VERSION, Some(geometry)) => geometry.validate(
+                &self.source_artifact_id,
+                &self.derived_artifact_ids,
+                &self.regions,
+            )?,
+            _ => return Err(VisionFactError::ImageGeometryVersionMismatch),
         }
         require_nonempty("observation_id", self.id.as_str())?;
         require_nonempty("route_event_id", self.route_event_id.as_str())?;
@@ -233,6 +249,8 @@ impl VisionObservation {
             "observation_id": self.id,
             "source_artifact_id": self.source_artifact_id,
             "derived_artifact_ids": self.derived_artifact_ids,
+            "image_geometry": self.image_geometry,
+            "region_coordinate_space": if self.image_geometry.is_some() { "delivery_pixels" } else { "unknown_legacy" },
             "task_hash": self.task_hash,
             "summary": self.summary,
             "extracted_text": self.extracted_text,
@@ -349,6 +367,12 @@ pub enum VisionFactError {
     SecondaryRouteMissingVisionIdentity,
     #[error("a Vision observation region must have non-zero dimensions")]
     InvalidRegion,
+    #[error("Vision image geometry is inconsistent with its selected Artifacts or dimensions")]
+    InvalidImageGeometry,
+    #[error("Vision observation v2 requires image geometry; legacy v1 must not invent it")]
+    ImageGeometryVersionMismatch,
+    #[error("Vision region {index} exceeds the delivered-image pixel bounds")]
+    RegionOutOfBounds { index: usize },
     #[error("a Vision observation requires a ProviderSession with the Vision role")]
     VisionProviderSessionRequired,
     #[error("Vision observation Blob ID is invalid: {message}")]

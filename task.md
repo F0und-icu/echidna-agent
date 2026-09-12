@@ -9,7 +9,7 @@
 - Codex 本地源码：`codex/`
 - Codex 最新设计复核提交：`868c9edb0da913a5fc699a71664e65f44f6058b0`
 - 分析文档：`Codex架构与漏洞挖掘Agent复用评估.md`
-- 冻结架构：`docs/architecture/CYBER_AGENT_ARCHITECTURE_V1.md` 至 `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_9.md` 的完整 additive chain
+- 冻结架构：`docs/architecture/CYBER_AGENT_ARCHITECTURE_V1.md` 至 `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_10.md` 的完整 additive chain
 - 模型组合决策：`docs/adr/ADR-0002-capability-driven-primary-vision-models.md`
 - 研究控制决策：`docs/adr/ADR-0009-stable-research-persona-domain-profile-and-phase.md`
 - 不可变 Step/Tool Plan 决策：`docs/adr/ADR-0010-immutable-sampling-step-and-tool-plan.md`
@@ -31,6 +31,9 @@
 
 当前状态：
 
+- 当前 F6a 为 `COMPLETE_LOCAL_LIVE_PASS`：全新 Terra xhigh 独立审计 APPROVE，完整 post-audit Gate（427 passed / 2 Live ignored，fmt/Clippy/build）、最终 Lean Review 均通过。两组正式 CLI DeepSeek Live 通过：32×16 原图返回两个 16×16 区域；2100×512 缩至 2048×499 后返回两个 1024×499 区域。尺寸/坐标/原始响应/审计一致，模型不确定性保留，不外推复杂截图定位准确性。Observation v2 保存 frame，v1 保持坐标系未知；ADR-0020 / Architecture v1.10 定义兼容边界。临时凭据副本已删除，原配置及 Codex 登录未动；未提交 F6a、未开始长上下文或 TUI，具体证据见 STATUS。
+
+- F6a 随后获明确授权并已远端提交：实现 `82b42e1`，分支 `codex/f6a-vision-coordinate-contract`，Draft PR #69，基于尚未合并的 #68 分支，仅展示 F6a 增量。当前交付状态为 `REMOTE_SUBMITTED_PENDING_MERGE`；前述未提交说明是 Live 完成时的历史边界。两个 PR 均未合并，Actions 继续暂停；不启动下一 Slice。
 - F4/F5 已远端提交：实现 `bd585ec`，短分支 `codex/f4-f5-cli-content-budget`，Draft PR #68，使用 `[skip ci]`。状态为 `REMOTE_SUBMITTED_PENDING_MERGE`；未合并 main、未创建 Tag/Release、不开始下一 Slice，Actions 继续暂停。下列 Live 完成记录中的 Git 未授权是当时测试边界，以本条及 STATUS 的当前交付状态为准。
 
 - F5 已 `COMPLETE_LOCAL`：全新 Terra xhigh 独立只读审计 APPROVE，完整 post-audit Gate（421 passed / 2 Live ignored）、Lean Review 和 release 展示检查（8 passed）均通过。具体凭据来源获明确授权后，2026-09-11 开发版 debug/工具/Secondary Vision 与 release Chat 合成 Live 均 exit 0；2 Sessions、7 RequestAudits、5 model ToolCalls、6 Receipts、1 VisionObservation 的持久事实核验通过。Vision 左红右蓝正确，但区域尺寸估计错误，不能作为精确坐标或已验证证据；1M 配置与 1024000 输入预算路径通过，不代表实测满 1M 容量。临时凭据副本已删除，原配置及 Codex 登录状态未动。具体限制见 STATUS；未修改生产代码，Git/Actions/下一 Slice 未授权。

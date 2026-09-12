@@ -14,11 +14,10 @@ use futures_util::StreamExt;
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderValue};
 
 use crate::adapters::credentials::CredentialSource;
+use crate::adapters::image::resolve_project_image_artifact;
 use crate::domain::artifacts::ArtifactId;
 use crate::domain::model::ModelCapabilities;
 use crate::domain::request_audit::RequestAdapterVersion;
-use crate::domain::research::ResearchState;
-use crate::ports::artifact::ArtifactStore;
 use crate::ports::model::{
     ModelEventStream, ModelProvider, ModelProviderError, ModelRequest, ModelStreamEvent,
 };
@@ -110,7 +109,7 @@ impl ResponsesHttpAdapter {
         project: crate::adapters::project_event_store::Project,
     ) -> Self {
         self.image_resolver = Some(Arc::new(move |artifact_id| {
-            resolve_project_image_artifact(&project, artifact_id)
+            resolve_project_image_artifact(&project, artifact_id).map_err(request_encoding_error)
         }));
         self
     }
@@ -127,34 +126,6 @@ impl ResponsesHttpAdapter {
         }
         self
     }
-}
-
-fn resolve_project_image_artifact(
-    project: &crate::adapters::project_event_store::Project,
-    artifact_id: &ArtifactId,
-) -> Result<(String, Vec<u8>), ModelProviderError> {
-    let state: ResearchState = crate::adapters::research_projection::load_research_state(project)
-        .map_err(request_encoding_error)?;
-    let record = state.artifact(artifact_id).ok_or_else(|| {
-        request_encoding_error(format!(
-            "image Artifact `{artifact_id}` is not present in the selected project"
-        ))
-    })?;
-    if !matches!(record.media_type.as_str(), "image/png" | "image/jpeg") {
-        return Err(request_encoding_error(format!(
-            "Artifact `{artifact_id}` media type `{}` is not PNG or JPEG",
-            record.media_type
-        )));
-    }
-    let bytes = crate::adapters::artifact_store::LocalArtifactStore::for_project(project)
-        .read_blob(&record.blob_id)
-        .map_err(request_encoding_error)?;
-    if u64::try_from(bytes.len()).expect("usize always fits u64") != record.size_bytes {
-        return Err(request_encoding_error(format!(
-            "Artifact `{artifact_id}` size does not match its immutable Blob"
-        )));
-    }
-    Ok((record.media_type.clone(), bytes))
 }
 
 fn request_encoding_error(error: impl ToString) -> ModelProviderError {

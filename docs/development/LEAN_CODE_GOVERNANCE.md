@@ -31,6 +31,8 @@
 | CLI reasoning 展示与开发构建 wire debug | `adapters/responses/cli_output` | 既有 Composition Root 选择 CLI 呈现；不重建请求、不写第二份事实；release 保留 reasoning 但排除完整 debug |
 | 终端内容转义与有界预览 | 私有 `terminal_content` | Tool/debug 仅复用派生视图；不修改事实、Tool 输出或 Context 预算 |
 | Tool 执行展示 | 私有 `cli_chat/tool_output` | 使用已有 start/durable receipt 回调；长 ID 保留在原审计源；未知结果不得展示完成 |
+| Vision 图像坐标系与范围 | `domain/vision/geometry` | 图片 Adapter 提供字节尺寸；Analysis、Observation 校验和 Replay 消费同一契约，不静默缩放/夹取区域 |
+| 图片字节检查与 Artifact 解析 | `adapters/image` | CLI geometry 与 Responses 复用同一不可变 Blob/Artifact 解析；App 不解码图片或读路径 |
 | Completed reasoning continuation | `domain/model` 的语义项 + AgentLoop provider delivery state | Conversation History 拒绝 reasoning；opaque encrypted sidecar 与 wire ID 保持 Adapter-local |
 | Tool 类型、Effect 和执行收据 | `domain/tools` | Tool Adapter 只执行并返回结果 |
 | Tool Call/Result 配对和 History 修复 | 一个纯 History Normalizer | AgentLoop、Context Planner、Adapter 不各自修复 |

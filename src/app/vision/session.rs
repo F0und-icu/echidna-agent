@@ -64,13 +64,13 @@ pub(crate) struct PreparedVisionSecondaryRequest {
 
 pub(crate) enum PreparedVisionSecondaryTerminal {
     Observation {
-        observation: VisionObservation,
+        observation: Box<VisionObservation>,
         terminal: VisionEventStamp,
         primary_profile: crate::domain::context::ModelProfile,
         primary_capability_hash: String,
     },
     Failure {
-        failure: VisionAnalysisFailure,
+        failure: Box<VisionAnalysisFailure>,
         terminal: VisionEventStamp,
     },
 }
@@ -230,14 +230,14 @@ where
 
         match analysis {
             Ok(output) => Ok(PreparedVisionSecondaryTerminal::Observation {
-                observation: output.observation,
+                observation: Box::new(output.observation),
                 terminal: prepared.terminal,
                 primary_profile: prepared.primary_profile,
                 primary_capability_hash: prepared.primary_capability_hash,
             }),
             Err(VisionAnalysisError::AttemptFailed { failure }) => {
                 Ok(PreparedVisionSecondaryTerminal::Failure {
-                    failure: *failure,
+                    failure,
                     terminal: prepared.terminal,
                 })
             }
@@ -265,6 +265,7 @@ where
                 primary_profile,
                 primary_capability_hash,
             } => {
+                let observation = *observation;
                 let observation_event_id = terminal.event_id.clone();
                 self.append_terminal(
                     SessionEvent::VisionObservationRecorded {
@@ -288,15 +289,13 @@ where
             PreparedVisionSecondaryTerminal::Failure { failure, terminal } => {
                 self.append_terminal(
                     SessionEvent::VisionAnalysisFailed {
-                        failure: failure.clone(),
+                        failure: (*failure).clone(),
                     },
                     terminal,
                     projection,
                     sink,
                 )?;
-                Err(VisionSessionError::AnalysisFailed {
-                    failure: Box::new(failure),
-                })
+                Err(VisionSessionError::AnalysisFailed { failure })
             }
         }
     }

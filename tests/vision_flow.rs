@@ -42,7 +42,8 @@ use cyber_agent::domain::tools::{
     ExecutionId, ToolCall, ToolExecutionOutcome, ToolExecutionPlan, ToolSpec,
 };
 use cyber_agent::domain::vision::{
-    VISION_FACT_SCHEMA_VERSION, ViewImageSelection, VisionObservationId, VisionRouteRecord,
+    VISION_FACT_SCHEMA_VERSION, ViewImageSelection, VisionImageGeometry, VisionObservationId,
+    VisionRouteRecord,
 };
 use cyber_agent::ports::EventSink;
 use cyber_agent::ports::artifact::{ArtifactStore, StoredBlob};
@@ -54,6 +55,8 @@ use cyber_agent::ports::tool::{ToolExecutionFuture, ToolExecutor, ToolExecutorEr
 use futures_util::stream;
 use sha2::{Digest, Sha256};
 
+#[path = "vision_flow_cases/geometry.rs"]
+mod geometry;
 mod support;
 
 fn capabilities(image_input: bool, incremental_input: bool) -> ModelCapabilities {
@@ -306,6 +309,13 @@ fn vision_input(vision_capabilities: &ModelCapabilities) -> VisionAnalysisInput 
         source_artifact_id: ArtifactId::new("artifact:original"),
         delivery_artifact_id: ArtifactId::new("artifact:budgeted"),
         derived_artifact_ids: vec![ArtifactId::new("artifact:budgeted")],
+        image_geometry: VisionImageGeometry {
+            delivery_artifact_id: ArtifactId::new("artifact:budgeted"),
+            source_width: 1200,
+            source_height: 800,
+            delivery_width: 600,
+            delivery_height: 400,
+        },
         task: "Inspect this screenshot for a potentially exposed debug control.".to_owned(),
         model: ModelIdentity::new("fixture-vision", "vision-v1"),
         provider_profile: ModelProfile::new("vision", 1),
@@ -429,7 +439,7 @@ async fn secondary_path_commits_route_audit_observation_then_primary_without_sen
     );
     assert!(matches!(
         vision_requests[0].input().content_items.as_slice(),
-        [ContentItem::Text { .. }, ContentItem::ImageArtifact { artifact_id, .. }]
+        [ContentItem::Text { .. }, ContentItem::ImageArtifact { artifact_id, .. }, ContentItem::Text { .. }]
             if artifact_id.as_str() == "artifact:budgeted"
     ));
 
@@ -470,7 +480,11 @@ async fn secondary_path_commits_route_audit_observation_then_primary_without_sen
         .validate_against(vision_requests[0].input())
         .unwrap();
     assert_eq!(vision_map.instruction_spans().len(), 1);
-    assert_eq!(vision_map.content_items().len(), 2);
+    assert_eq!(vision_map.content_items().len(), 3);
+    assert_eq!(
+        vision_map.content_items()[2].provenance(),
+        vision_map.content_items()[1].provenance()
+    );
     assert_eq!(
         vision_map.content_items()[0].provenance().origin(),
         ContextOrigin::OperatorInput
@@ -947,7 +961,7 @@ async fn targeted_reanalysis_appends_new_observations_and_replay_validates_raw_b
         .rposition(|event| event.event_type.as_str() == "vision.observation_recorded")
         .unwrap();
     let mut unknown_schema = sink.events.clone();
-    unknown_schema[second_terminal_index].payload["schema_version"] = serde_json::json!(2);
+    unknown_schema[second_terminal_index].payload["schema_version"] = serde_json::json!(3);
     assert!(matches!(
         SessionProjection::replay(unknown_schema),
         Err(SessionError::MalformedPayload { .. })

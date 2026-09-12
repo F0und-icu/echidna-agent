@@ -16,7 +16,7 @@
 4. `task.md` 中当前产品范围、架构约束和里程碑。
 5. `docs/development/IMPLEMENTATION_PLAN.md`。
 6. `docs/development/LEAN_CODE_GOVERNANCE.md`。
-7. 最新的冻结架构链：`docs/architecture/CYBER_AGENT_ARCHITECTURE_V1.md` 至 `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_9.md`。
+7. 最新的冻结架构链：`docs/architecture/CYBER_AGENT_ARCHITECTURE_V1.md` 至 `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_10.md`；ADR-0020 约束新 Vision 坐标边界。
 8. 已接受的 `docs/adr/ADR-*.md`。
 9. `docs/development/GIT_VERSION_RELEASE.md` 和 `docs/development/DEVELOPMENT_ENVIRONMENT.md`。
 10. `Codex架构与漏洞挖掘Agent复用评估.md`。
@@ -40,6 +40,7 @@
 | `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_7.md` | 架构 v1.7 交互连续性、当前上下文与预算恢复；ADR-0017 | 本地冻结；远端封存待授权 |
 | `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_8.md` | 架构 v1.8 默认 CLI 思考展示、仅开发构建 debug；ADR-0018 | 本地冻结；远端封存待授权 |
 | `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_9.md` | 架构 v1.9 可读工具/调试内容与大窗口预算；ADR-0019 | 本地冻结；远端封存未授权 |
+| `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_10.md` | 架构 v1.10 Vision 送入图坐标系与历史未知语义；ADR-0020 | 本地冻结；验证见 STATUS，远端封存未授权 |
 | `docs/architecture/SEALED_MANIFEST.md` | 封存来源、提交基线和 Hash 清单 | 只追加新封存记录 |
 | `docs/development/IMPLEMENTATION_PLAN.md` | 按 Slice 可执行的开发步骤和验收门 | 可以，不能追溯改写已完成 Slice |
 | `docs/development/STATUS.md` | 当前唯一工作状态和下一动作 | 每个 Slice 开始/结束更新 |
@@ -72,7 +73,7 @@ Codex Luna xhigh 或其他高推理 Codex 执行开发任务时，必须按顺�
 3. 当前 Slice 在 `docs/development/IMPLEMENTATION_PLAN.md` 中的完整章节
 4. `docs/development/LEAN_CODE_GOVERNANCE.md`
 5. `task.md` 的相关架构章节和测试红线
-6. 冻结架构 v1 至 v1.7 的完整 additive chain 及相关 ADR 中与该 Slice 相关的接口契约
+6. 冻结架构 v1 至当前最新版本的完整 additive chain 及相关 ADR 中与该 Slice 相关的接口契约
 7. 已有源码、测试和工作树状态
 
 用户明确授权开发子 Agent 时，每个子 Agent 也必须自行读取上述文件；父 Agent 的摘要不能替代本地治理文件。

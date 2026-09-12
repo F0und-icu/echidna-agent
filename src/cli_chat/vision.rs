@@ -162,6 +162,13 @@ pub(super) async fn prepare_primary_context(
             )
             .map_err(vision_error),
         VisionRoute::SecondaryTool => {
+            let image_geometry = crate::adapters::image::resolve_vision_geometry(
+                &session.project,
+                &pending.selection,
+            )
+            .map_err(|error| ChatError::ImageIntake {
+                message: error.to_string(),
+            })?;
             let vision_profile = profile
                 .vision()
                 .ok_or_else(|| ChatError::VisionComposition {
@@ -208,6 +215,7 @@ pub(super) async fn prepare_primary_context(
                             source_artifact_id: pending.selection.source_artifact_id,
                             delivery_artifact_id: pending.selection.delivery_artifact_id,
                             derived_artifact_ids: pending.selection.derived_artifact_ids,
+                            image_geometry,
                             task: task.to_owned(),
                             model: vision_profile.model().clone(),
                             provider_profile: vision_profile.profile().clone(),

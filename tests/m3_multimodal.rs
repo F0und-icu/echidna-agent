@@ -217,6 +217,7 @@ fn route_matrix_and_secondary_context_are_deterministic() {
         route_event_id: EventId::new("event:route"),
         source_artifact_id: ArtifactId::new("artifact:source"),
         derived_artifact_ids: vec![ArtifactId::new("artifact:derived")],
+        image_geometry: None,
         task_hash: "task-hash".to_owned(),
         summary: "login view has a debug control".to_owned(),
         extracted_text: Some("debug".to_owned()),

@@ -2,6 +2,8 @@
 mod f4_output;
 #[path = "cli_chat_cases/f5_output.rs"]
 mod f5_output;
+#[path = "cli_chat_cases/f6a_geometry.rs"]
+mod f6a_geometry;
 #[path = "support/provider_config.rs"]
 mod provider_config;
 mod support;

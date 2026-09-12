@@ -5,6 +5,7 @@ use thiserror::Error;
 use super::analysis::decode_model_reply;
 use crate::domain::artifacts::ArtifactId;
 use crate::domain::events::EventId;
+use crate::domain::model::{ContentItem, MessageRole};
 use crate::domain::profile::VisionRoute;
 use crate::domain::session::SessionState;
 use crate::domain::vision::VisionObservation;
@@ -59,6 +60,31 @@ where
             }
             return Err(VisionReplayError::ObservationMissing);
         };
+        if let Some(geometry) = &observation.image_geometry {
+            let audit = session
+                .request_audits()
+                .iter()
+                .find(|audit| audit.audit_event_id() == &observation.request_audit_event_id)
+                .ok_or(VisionReplayError::GeometryAuditMismatch)?;
+            let input = audit
+                .reconstruct(|id| self.blobs.read_blob(id))
+                .map_err(|error| VisionReplayError::GeometryAuditRead {
+                    message: format!("{error:?}"),
+                })?;
+            let metadata = ContentItem::Text {
+                role: MessageRole::User,
+                text: geometry.context_text(&observation.source_artifact_id),
+            };
+            // The fixed scoped request is task, image, runtime geometry. A
+            // user task that happens to contain geometry JSON is not proof.
+            if !matches!(input.content_items.as_slice(),
+                [ContentItem::Text { role: MessageRole::User, .. },
+                 ContentItem::ImageArtifact { role: MessageRole::User, artifact_id }, frame]
+                if artifact_id == &geometry.delivery_artifact_id && frame == &metadata)
+            {
+                return Err(VisionReplayError::GeometryAuditMismatch);
+            }
+        }
         let bytes = self
             .blobs
             .read_blob(&observation.raw_observation_blob_id)
@@ -83,6 +109,10 @@ where
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum VisionReplayError {
+    #[error("Vision image geometry does not match its audited image request")]
+    GeometryAuditMismatch,
+    #[error("Vision geometry RequestAudit cannot be reconstructed: {message}")]
+    GeometryAuditRead { message: String },
     #[error("the requested Vision route is not present in the replayed Session")]
     RouteMissing,
     #[error("the replayed route is not a secondary_tool route")]

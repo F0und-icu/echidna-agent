@@ -7,9 +7,15 @@ use image::ImageFormat as DecoderFormat;
 use image::ImageReader;
 use thiserror::Error;
 
+use crate::domain::artifacts::ArtifactId;
 use crate::domain::image::{
     ImageContractError, ImageDeliveryBudget, ImageFormat, ImageInputLimits, ValidatedImageMetadata,
 };
+use crate::domain::vision::{ViewImageSelection, VisionImageGeometry};
+use crate::ports::artifact::ArtifactStore;
+
+pub(crate) const LOCAL_IMAGE_INPUT_LIMITS: ImageInputLimits =
+    ImageInputLimits::new(32 * 1024 * 1024, 12_000, 12_000, 64_000_000);
 
 const DERIVATIVE_FORMAT: ImageFormat = ImageFormat::Png;
 const MAX_ENCODE_ATTEMPTS: usize = 32;
@@ -61,23 +67,12 @@ pub fn prepare_local_image(
         .into());
     }
     let bytes = fs::read(path).map_err(LocalImageError::Read)?;
-    let format = format_from_bytes(&bytes)?;
+    let original_metadata = inspect_image_bytes(&bytes, limits)?;
+    let format = original_metadata.format;
+    let (width, height) = (original_metadata.width, original_metadata.height);
     // Read only the format header before allocating the decoded pixel buffer.
     // Local images are untrusted research inputs, so the declared dimensions
     // and pixel count must fail the Domain contract before a full decode.
-    let (width, height) =
-        ImageReader::with_format(std::io::Cursor::new(&bytes), decoder_format(format))
-            .into_dimensions()
-            .map_err(|error| LocalImageError::CorruptImage {
-                message: error.to_string(),
-            })?;
-    let original_metadata = ValidatedImageMetadata::new(
-        format,
-        width,
-        height,
-        u64::try_from(bytes.len()).expect("usize always fits u64"),
-        limits,
-    )?;
     let mut reader = ImageReader::with_format(std::io::Cursor::new(&bytes), decoder_format(format));
     let mut decoder_limits = image::Limits::default();
     decoder_limits.max_image_width = Some(limits.max_width);
@@ -150,6 +145,95 @@ pub fn prepare_local_image(
     })
 }
 
+fn inspect_image_bytes(
+    bytes: &[u8],
+    limits: ImageInputLimits,
+) -> Result<ValidatedImageMetadata, LocalImageError> {
+    let format = format_from_bytes(bytes)?;
+    let (width, height) =
+        ImageReader::with_format(std::io::Cursor::new(bytes), decoder_format(format))
+            .into_dimensions()
+            .map_err(|error| LocalImageError::CorruptImage {
+                message: error.to_string(),
+            })?;
+    Ok(ValidatedImageMetadata::new(
+        format,
+        width,
+        height,
+        bytes.len() as u64,
+        limits,
+    )?)
+}
+
+/// Shared immutable Artifact resolution for wire delivery and CLI geometry.
+pub(crate) fn resolve_project_image_artifact(
+    project: &crate::adapters::project_event_store::Project,
+    artifact_id: &ArtifactId,
+) -> Result<(String, Vec<u8>), LocalImageError> {
+    let error = |message: String| LocalImageError::Artifact { message };
+    let state = crate::adapters::research_projection::load_research_state(project)
+        .map_err(|err| error(err.to_string()))?;
+    let record = state.artifact(artifact_id).ok_or_else(|| {
+        error(format!(
+            "image Artifact `{artifact_id}` is not present in the selected project"
+        ))
+    })?;
+    if !matches!(record.media_type.as_str(), "image/png" | "image/jpeg") {
+        return Err(error(format!(
+            "Artifact `{artifact_id}` media type `{}` is not PNG or JPEG",
+            record.media_type
+        )));
+    }
+    let bytes = crate::adapters::artifact_store::LocalArtifactStore::for_project(project)
+        .read_blob(&record.blob_id)
+        .map_err(|err| error(err.to_string()))?;
+    if bytes.len() as u64 != record.size_bytes {
+        return Err(error(format!(
+            "Artifact `{artifact_id}` size does not match its immutable Blob"
+        )));
+    }
+    Ok((record.media_type.clone(), bytes))
+}
+
+pub(crate) fn resolve_vision_geometry(
+    project: &crate::adapters::project_event_store::Project,
+    selection: &ViewImageSelection,
+) -> Result<VisionImageGeometry, LocalImageError> {
+    let metadata = |id: &ArtifactId| -> Result<ValidatedImageMetadata, LocalImageError> {
+        let (media_type, bytes) = resolve_project_image_artifact(project, id)?;
+        let metadata = inspect_image_bytes(&bytes, LOCAL_IMAGE_INPUT_LIMITS)?;
+        if metadata.format.media_type() != media_type {
+            return Err(LocalImageError::Artifact {
+                message: "image media type differs from immutable bytes".to_owned(),
+            });
+        }
+        Ok(metadata)
+    };
+    let source = metadata(&selection.source_artifact_id)?;
+    let delivery = if selection.delivery_artifact_id == selection.source_artifact_id {
+        source
+    } else {
+        metadata(&selection.delivery_artifact_id)?
+    };
+    let geometry = VisionImageGeometry {
+        delivery_artifact_id: selection.delivery_artifact_id.clone(),
+        source_width: source.width,
+        source_height: source.height,
+        delivery_width: delivery.width,
+        delivery_height: delivery.height,
+    };
+    geometry
+        .validate(
+            &selection.source_artifact_id,
+            &selection.derived_artifact_ids,
+            &[],
+        )
+        .map_err(|error| LocalImageError::Artifact {
+            message: error.to_string(),
+        })?;
+    Ok(geometry)
+}
+
 fn format_from_bytes(bytes: &[u8]) -> Result<ImageFormat, LocalImageError> {
     match image::guess_format(bytes) {
         Ok(DecoderFormat::Png) => Ok(ImageFormat::Png),
@@ -172,6 +256,8 @@ const fn decoder_format(format: ImageFormat) -> DecoderFormat {
 
 #[derive(Debug, Error)]
 pub enum LocalImageError {
+    #[error("image Artifact cannot be resolved: {message}")]
+    Artifact { message: String },
     #[error(transparent)]
     Contract(#[from] ImageContractError),
     #[error("image source must not be a symbolic link")]

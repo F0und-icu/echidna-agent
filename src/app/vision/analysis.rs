@@ -25,13 +25,14 @@ use crate::domain::request_audit::{
 };
 use crate::domain::tools::{DeferredActivationSet, ResolvedToolPlan, ToolExposurePlan, ToolSpec};
 use crate::domain::vision::{
-    VISION_FACT_SCHEMA_VERSION, VisionAnalysisFailure, VisionObservation, VisionObservationId,
-    VisionRegion,
+    VISION_FACT_SCHEMA_VERSION, VISION_OBSERVATION_SCHEMA_VERSION, VisionAnalysisFailure,
+    VisionImageGeometry, VisionObservation, VisionObservationId, VisionRegion,
 };
 use crate::ports::artifact::ArtifactStore;
 use crate::ports::model::{ModelProvider, ModelRequest};
 
 const VISION_INSTRUCTIONS: &str = "Analyze the supplied local image for vulnerability research. Return only one JSON object, without Markdown or commentary. The object must contain exactly these fields: schema_version (the integer 1), summary (string), extracted_text (string or null), regions (array), security_relevant_clues (array of strings), and uncertainty (array of strings). Every regions item must contain exactly label (string), x (non-negative integer), y (non-negative integer), width (positive integer), and height (positive integer); do not add description or any other field. Use an empty array when no bounded region or clue is available. Do not call tools and do not claim a verified finding.";
+const REGION_INSTRUCTIONS: &str = "Use the supplied vision_image_geometry, not estimated image dimensions. Region coordinates are integer pixels in the delivered image, with origin at its top-left, x increasing right and y increasing down. Right and bottom edges are exclusive: x + width <= delivery_width and y + height <= delivery_height. Do not use original-image, normalized or device-screen coordinates. Do not convert coordinates implicitly. If a region cannot be localized reliably in this frame, return regions: [] and explain uncertainty. In-bounds coordinates are still unverified model observations.";
 
 /// All caller-owned identities for a single targeted image analysis.
 #[derive(Clone, Debug)]
@@ -41,6 +42,7 @@ pub struct VisionAnalysisInput {
     pub source_artifact_id: ArtifactId,
     pub delivery_artifact_id: ArtifactId,
     pub derived_artifact_ids: Vec<ArtifactId>,
+    pub image_geometry: VisionImageGeometry,
     pub task: String,
     pub model: ModelIdentity,
     pub provider_profile: ModelProfile,
@@ -85,6 +87,16 @@ impl VisionAnalysisInput {
         {
             return Err(VisionAnalysisError::DeliveryArtifactNotSelected);
         }
+        if self.image_geometry.delivery_artifact_id != self.delivery_artifact_id {
+            return Err(VisionAnalysisError::ImageGeometry {
+                message: "geometry does not identify the selected delivery Artifact".to_owned(),
+            });
+        }
+        self.image_geometry
+            .validate(&self.source_artifact_id, &self.derived_artifact_ids, &[])
+            .map_err(|error| VisionAnalysisError::ImageGeometry {
+                message: error.to_string(),
+            })?;
         Ok(())
     }
 
@@ -104,7 +116,7 @@ impl VisionAnalysisInput {
             RetentionClass::Stable,
             FreshnessIdentity::new(self.delivery_artifact_id.as_str())
                 .map_err(context_error)?
-                .with_producer_version("vision-analysis:1"),
+                .with_producer_version("vision-analysis:2"),
             ContextReferences::new(
                 Vec::new(),
                 artifact_refs,
@@ -130,19 +142,24 @@ impl VisionAnalysisInput {
                         role: MessageRole::User,
                         artifact_id: self.delivery_artifact_id.clone(),
                     },
+                    ContentItem::Text {
+                        role: MessageRole::User,
+                        text: self.image_geometry.context_text(&self.source_artifact_id),
+                    },
                 ],
             },
         )
-        .and_then(|fragment| fragment.with_content_item_provenance(1, image_provenance))
+        .and_then(|fragment| fragment.with_content_item_provenance(1, image_provenance.clone()))
+        .and_then(|fragment| fragment.with_content_item_provenance(2, image_provenance))
         .map_err(context_error)?;
         let fragments = vec![
             ContextFragment::new(
-                ContextFragmentId::new("vision:instructions:v1").map_err(context_error)?,
+                ContextFragmentId::new("vision:instructions:v2").map_err(context_error)?,
                 ContextFragmentSource::BasePrompt,
                 ContextFragmentPriority::Required,
                 FragmentCachePolicy::ContentAddressed,
                 ContextFragmentContent::Instructions {
-                    text: VISION_INSTRUCTIONS.to_owned(),
+                    text: format!("{VISION_INSTRUCTIONS}\n{REGION_INSTRUCTIONS}"),
                 },
             )
             .map_err(context_error)?,
@@ -319,12 +336,30 @@ where
                     error,
                 )
             })?;
+        input
+            .image_geometry
+            .validate(
+                &input.source_artifact_id,
+                &input.derived_artifact_ids,
+                &reply.regions,
+            )
+            .map_err(|error| {
+                attempt_failed(
+                    &input,
+                    &task_hash,
+                    audit.audit_event_id(),
+                    &request_input_hash,
+                    "model_reply_geometry_invalid",
+                    format!("{error}; raw_observation_blob_id={}", stored.blob_id),
+                )
+            })?;
         let observation = VisionObservation {
-            schema_version: VISION_FACT_SCHEMA_VERSION,
+            schema_version: VISION_OBSERVATION_SCHEMA_VERSION,
             id: input.observation_id.clone(),
             route_event_id: input.route_event_id.clone(),
             source_artifact_id: input.source_artifact_id.clone(),
             derived_artifact_ids: input.derived_artifact_ids.clone(),
+            image_geometry: Some(input.image_geometry.clone()),
             task_hash,
             summary: reply.summary,
             extracted_text: reply.extracted_text,
@@ -428,8 +463,7 @@ impl VisionModelReply {
     }
 
     pub(super) fn matches_observation(&self, observation: &VisionObservation) -> bool {
-        self.schema_version == observation.schema_version
-            && self.summary == observation.summary
+        self.summary == observation.summary
             && self.extracted_text == observation.extracted_text
             && self.regions == observation.regions
             && self.security_relevant_clues == observation.security_relevant_clues
@@ -464,6 +498,8 @@ pub enum VisionAnalysisError {
     SourceRepeatedAsDerivative,
     #[error("the Vision delivery Artifact must be the source or one selected derivative")]
     DeliveryArtifactNotSelected,
+    #[error("Vision image geometry is invalid: {message}")]
+    ImageGeometry { message: String },
     #[error("the selected Vision Provider capability identity does not match the request")]
     CapabilityIdentityMismatch,
     #[error("Vision Context cannot be compiled through generic-v1: {message}")]
