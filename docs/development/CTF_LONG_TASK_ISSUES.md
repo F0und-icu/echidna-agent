@@ -41,6 +41,8 @@ R2a 离线修复已通过独立审计、完整 Gate/Lean：区分 Memory 替换�
 
 ### CTF-04：macOS/GNU 差异与 cwd 误诊（P2）
 
+R4b 离线验收完成：独立审计/有限复审、完整 Gate476通过/2 Live跳过、Release4项和 Lean PASS。固定探测不再从 ENOENT 推断程序缺失；通过版本化 Binary/Mapping 和原 ToolSpec 指导实际执行位置、程序实现/参数及路径别名检查。旧 generation1 选择按 ADR-0025 保持可读，新请求 generation2 可审计；不新增 GNU/BSD 分类器、容器探测或全量重复检查。受控 CLI 验证真实合成程序输出及 canonical alias，不代表真实模型工具选择质量已通过；仍需 R6 有界 Live。
+
 R4a 已完成独立审计、完整 Gate 和 release 离线验收：通用命令错误保留 program、effective cwd、真实失败阶段和原始 OS 错误；根路径由既有显示 owner 输出 `.`。合成回归验证缺程序/目录/解释器/权限、非零退出及单命令/串行/并行一致性，没有按 ENOENT 猜测原因或改调度器。程序实现身份、平台参数指导和别名说明仍属 R4b；本项未整体关闭，也未追认旧日志为可重放证据。
 
 模型知道主机是 macOS，却调用不兼容的 GNU nm 参数，属于本次具体的规划/工具选择错误。macOS 上也可能安装 GNU/LLVM 工具，不能仅根据 OS 推断同名程序的参数集。

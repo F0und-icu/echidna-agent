@@ -1291,7 +1291,7 @@ async fn context_planner_and_cache_feed_the_baseline_without_owning_delivery() {
         vec![
             "prompt:base:pragmatic-vulnerability-researcher:1",
             "prompt:domain:source:1",
-            "prompt:phase:mapping:1",
+            "prompt:phase:mapping:2",
         ]
     );
     assert_eq!(

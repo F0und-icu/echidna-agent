@@ -124,6 +124,8 @@ R3a1 已由 #73 合并。R3a2 按已接受 ADR-0023/v1.13 完成本地审计/Gat
 
 ## 7. R4：让模型基于实际环境选工具
 
+R4b 采用最小修复：复用现有 `probe_failed` 而不把 ENOENT 推断成 `missing`；不新增输出字段或固定工具探测项。程序路径/实现/参数及容器身份按需通过普通命令获取，不以 host OS、单独版本数字或 fingerprint 推断。Binary/Mapping 资源升级的历史选择兼容性由 ADR-0025/v1.15 约束；新请求及 ToolSpec 进入既有 hash/audit，机械 Replay 不重写旧字节。路径别名是可观察事实，不硬编码映射规则。离线夹具验证交付，不证明模型会正确选择每条命令。
+
 实现拆分：R4a 先修 command 唯一执行 owner 的失败诊断（program/effective cwd/process stage/原始 OS error），并由既有 path-display owner 修正空根路径为 `.`；保留现有结果 Schema/error string、退出码、收据和重试语义。R4b 再处理环境观察和按需工具指导，变化的 Schema 必须先单独说明兼容性。R3b2 已经 #76 合并；R4a Scope Lock 见 STATUS。永久测试以行为命名，不新增 CTF 模式或预定解题工作流。
 
 - 复用现有 `inspect_environment` 和 command execution owner；主机 OS、架构、实际 cwd、程序路径/实现/版本和容器观察要分开。

@@ -16,7 +16,6 @@ pub(super) struct FixedProbe {
 #[serde(rename_all = "snake_case")]
 pub(super) enum ProbeStatus {
     Available,
-    Missing,
     VersionFailed,
     ProbeFailed,
 }
@@ -190,11 +189,7 @@ fn observation(output: &FixedProbeOutput) -> ProbeObservation {
 
 fn probe_status(output: &FixedProbeOutput) -> ProbeStatus {
     if output.error.is_some() {
-        if output.not_found {
-            ProbeStatus::Missing
-        } else {
-            ProbeStatus::ProbeFailed
-        }
+        ProbeStatus::ProbeFailed
     } else if output.exit_code == Some(0) {
         ProbeStatus::Available
     } else {

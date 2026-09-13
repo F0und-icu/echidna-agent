@@ -442,7 +442,6 @@ pub(super) struct FixedProbeOutput {
     pub(super) stdout: BoundedText,
     pub(super) stderr: BoundedText,
     pub(super) error: Option<String>,
-    pub(super) not_found: bool,
     captures: Vec<PendingOutputCapture>,
 }
 
@@ -492,7 +491,6 @@ async fn run_probe_at(
             stdout: bounded_text(&[], max_bytes / 2),
             stderr: bounded_text(&[], max_bytes / 2),
             error: Some("fixed probe has no program".to_owned()),
-            not_found: false,
             captures: Vec::new(),
         };
     };
@@ -513,7 +511,6 @@ async fn run_probe_at(
                 exit_code: None,
                 stdout: bounded_text(&[], max_bytes / 2),
                 stderr: bounded_text(&[], max_bytes / 2),
-                not_found: error.kind() == std::io::ErrorKind::NotFound,
                 error: Some(message),
                 captures: Vec::new(),
             };
@@ -561,7 +558,6 @@ async fn run_probe_at(
         stdout: stdout.preview(max_each),
         stderr: stderr.preview(max_each),
         error,
-        not_found: false,
         captures,
     }
 }

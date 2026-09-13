@@ -9,7 +9,7 @@
 - Codex 本地源码：`codex/`
 - Codex 最新设计复核提交：`868c9edb0da913a5fc699a71664e65f44f6058b0`
 - 分析文档：`Codex架构与漏洞挖掘Agent复用评估.md`
-- 冻结架构：`docs/architecture/CYBER_AGENT_ARCHITECTURE_V1.md` 至 `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_11.md` 的完整 additive chain
+- 冻结架构：`docs/architecture/CYBER_AGENT_ARCHITECTURE_V1.md` 至 `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_15.md` 的完整 additive chain
 - 模型组合决策：`docs/adr/ADR-0002-capability-driven-primary-vision-models.md`
 - 研究控制决策：`docs/adr/ADR-0009-stable-research-persona-domain-profile-and-phase.md`
 - 不可变 Step/Tool Plan 决策：`docs/adr/ADR-0010-immutable-sampling-step-and-tool-plan.md`
@@ -31,7 +31,7 @@
 
 当前状态：
 
-- R3a1/R3a2/R3b1/R3b2 已由 #73 至 #76 合并：运行句柄、原始输出、ADR-0024 / Architecture v1.14 子项检查点和有界进度均已离线验收。当前 R4a 只修通用命令诊断和空根路径展示；R4b 再处理环境观察与指导，不增加 CTF 模式或解题流程。R2b 已完成一次有界合成 Live；准确验收和剩余限额见 STATUS。
+- R3a1 至 R4a 已由 #73 至 #77 合并。当前 R4b 按 ADR-0025 / Architecture v1.15 修正环境探测误判并更新 Binary/Mapping 指导：保留旧选择读取，新请求使用新版提示词；不增加探测框架、CTF 模式或解题流程。R2b 已完成一次有界合成 Live；准确验收和剩余限额见 STATUS。
 
 - 当前 CTF-R2b 的增量契约为 ADR-0021 / Architecture v1.11：一个 Config 驱动的 Primary/Vision 每 Turn 请求准入预算；状态完整的 typed stop 可返回 CLI，显式 `/resume` 重建 ProviderSession 后才接受新任务。停止不自动丢 reasoning、重试或重发输入。完整实现/验收状态见 STATUS；下列旧阶段状态是历史记录。冻结 v1 至 v1.10 不修改。
 

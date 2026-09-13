@@ -16,7 +16,7 @@
 4. `task.md` 中当前产品范围、架构约束和里程碑。
 5. `docs/development/IMPLEMENTATION_PLAN.md`。
 6. `docs/development/LEAN_CODE_GOVERNANCE.md`。
-7. 最新的冻结架构链：`docs/architecture/CYBER_AGENT_ARCHITECTURE_V1.md` 至 `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_14.md`；ADR-0024 约束真实子命令检查点，ADR-0023/0022/0021 保留原始输出、运行句柄和有界恢复。
+7. 最新的冻结架构链：`docs/architecture/CYBER_AGENT_ARCHITECTURE_V1.md` 至 `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_15.md`；ADR-0025 约束环境指导与旧 Prompt 选择兼容，ADR-0024/0023/0022/0021 保留真实子项检查点、原始输出、运行句柄和有界恢复。
 8. 已接受的 `docs/adr/ADR-*.md`。
 9. `docs/development/GIT_VERSION_RELEASE.md` 和 `docs/development/DEVELOPMENT_ENVIRONMENT.md`。
 10. `Codex架构与漏洞挖掘Agent复用评估.md`。

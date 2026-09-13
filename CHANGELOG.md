@@ -7,6 +7,12 @@ milestone history remains in `docs/development/STATUS.md` and Git history.
 
 ### Fixed
 
+- R4b: fixed environment probes no longer infer program absence from ambiguous
+  ENOENT failures. Versioned Binary/Mapping guidance distinguishes host, target,
+  container, tool dialect and observed path aliases. Generation-1 selections
+  remain readable while new requests use generation-2 prompts; no automatic
+  preflight, new probe list or CTF-specific workflow is introduced.
+
 - R4a: command process errors retain the requested program, effective cwd,
   observed failure stage and original OS error, without guessing an ENOENT
   cause or changing execution/retry semantics. Project-root paths now display

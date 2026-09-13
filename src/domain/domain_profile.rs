@@ -88,7 +88,8 @@ impl DomainProfileSelection {
     }
 
     pub fn validate(self) -> Result<(), DomainProfileSelectionError> {
-        if self.profile_generation != self.profile.generation() {
+        let legacy_prompt = self.profile == DomainProfile::Binary && self.profile_generation == 1;
+        if self.profile_generation != self.profile.generation() && !legacy_prompt {
             return Err(DomainProfileSelectionError::GenerationMismatch {
                 profile: self.profile,
                 expected: self.profile.generation(),
@@ -134,7 +135,10 @@ impl DomainProfile {
     pub const ALL: [Self; 4] = [Self::Source, Self::Web, Self::Mobile, Self::Binary];
 
     pub const fn generation(self) -> u64 {
-        1
+        match self {
+            Self::Binary => 2,
+            _ => 1,
+        }
     }
 
     pub const fn id(self) -> &'static str {
@@ -166,7 +170,7 @@ impl DomainProfile {
             Self::Source => include_str!("domain_profile/prompts/source-v1.md"),
             Self::Web => include_str!("domain_profile/prompts/web-v1.md"),
             Self::Mobile => include_str!("domain_profile/prompts/mobile-v1.md"),
-            Self::Binary => include_str!("domain_profile/prompts/binary-v1.md"),
+            Self::Binary => include_str!("domain_profile/prompts/binary-v2.md"),
         }
     }
 

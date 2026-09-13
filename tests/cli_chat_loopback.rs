@@ -12,6 +12,8 @@ mod ctf_progress;
 mod ctf_recovery;
 #[path = "cli_chat_cases/ctf_resume.rs"]
 mod ctf_resume;
+#[path = "cli_chat_cases/environment_guidance.rs"]
+mod environment_guidance;
 #[path = "cli_chat_cases/f4_output.rs"]
 mod f4_output;
 #[path = "cli_chat_cases/f5_output.rs"]
@@ -3633,7 +3635,7 @@ fn new_chat_writes_one_default_phase_before_its_first_provider_request() {
             "schema_version": 1,
             "selection": {
                 "phase": "mapping",
-                "phase_generation": 1,
+                "phase_generation": 2,
                 "source": "default",
                 "reason_code": "NEW_SESSION_DEFAULT_MAPPING"
             }
@@ -3686,7 +3688,7 @@ fn legacy_resume_keeps_replay_read_only_then_writes_legacy_mapping_on_real_turn(
             "schema_version": 1,
             "selection": {
                 "phase": "mapping",
-                "phase_generation": 1,
+                "phase_generation": 2,
                 "source": "default",
                 "reason_code": "LEGACY_DEFAULT_MAPPING"
             }

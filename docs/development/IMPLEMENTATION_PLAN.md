@@ -1085,6 +1085,10 @@ F6a delivery addendum: after the acceptance checkpoint above, the operator autho
 
 ### 当前修复队列（2026-09-12）
 
+R4a 已通过 PR#77 合并（`f753acf`）。当前 R4b 复用固定探测/命令 owner：ENOENT 不推断程序缺失，ToolSpec 解释 host/container、实际程序身份和路径别名的观察边界；任务特定检查仍用普通命令，不自动增加探测。Binary/Mapping 提示词升至 generation2，ADR-0025/v1.15 明确旧 generation1 选择可读且历史请求不改写。专项/受影响/独立审计/Gate/Lean 与准确交付状态见 STATUS。真实模型遵循度和长任务收益留待 R6，不能由离线夹具推定。
+
+R4b 本地验收完成：独立审计和测试修正复审 APPROVE，最终完整 Gate476通过/2 Live跳过、Release4项及标准构建/无debug帮助检查通过，Lean PASS。先前 Gate 的过紧窗口夹具保留完整失败和修正记录，未改产品预算。普通远端交付后下一包为 R5；现有 debug 差异仍独立保留，R6 Live 未因此完成。
+
 最新入口：R3b2 已经 PR#76 合并（`07a96de`），R3 离线验收完成。R4 分为两个有限包：当前 R4a 只修通用命令失败诊断与空 cwd 展示，复用现有 error string/path owner，不增加 Schema 或执行流程；R4b 再处理环境观察及使用指导，若改变 Schema 必须先过版本/兼容性设计门。主 Agent 实现，独立 Terra xhigh 限时审计；精确 Scope Lock 见 STATUS。测试按行为命名，CTF 只作为问题来源，不成为产品模式。
 
 R4a 本地验收完成：独立 Terra xhigh APPROVE，完整 Gate472通过/2 Live跳过、release6项和 Lean PASS。普通远端交付后进入 R4b；不以本包宣称已解决 GNU/BSD/LLVM 工具能力选择或完成真实长测。精确交付状态见 STATUS/Git。

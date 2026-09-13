@@ -46,7 +46,12 @@ async fn inspect_environment_fixture_child() {
     let Ok(fixture) = std::env::var(FIXTURE_ENV) else {
         return;
     };
-    let tools = ToolRegistry::for_project(env!("CARGO_MANIFEST_DIR"));
+    let root = if fixture == "bad-cwd" {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("nonexistent-environment-fixture-cwd")
+    } else {
+        Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
+    };
+    let tools = ToolRegistry::for_project(root);
     let plan = tools
         .plan(
             ExecutionId::new("inspect-environment-fixture-execution"),
@@ -127,26 +132,48 @@ fn inspect_environment_reports_available_versions_and_device_counts_without_raw_
 }
 
 #[test]
-fn inspect_environment_distinguishes_missing_probes() {
+fn inspect_environment_does_not_infer_program_absence_from_enoent() {
     let fixture = support::TemporaryDirectory::new("inspect-environment-missing");
     let output = run_fixture_child("missing", fixture.path());
 
-    assert_eq!(output["git"]["status"], "missing");
-    assert_eq!(output["os"]["kernel"]["status"], "missing");
+    assert_eq!(output["git"]["status"], "probe_failed");
+    assert_eq!(output["os"]["kernel"]["status"], "probe_failed");
     assert!(
         output["toolchain"]
             .as_array()
             .unwrap()
             .iter()
-            .all(|entry| entry["status"] == "missing" && entry["version"].is_null())
+            .all(|entry| entry["status"] == "probe_failed" && entry["version"].is_null())
     );
     assert!(
         output["connected_devices"]
             .as_array()
             .unwrap()
             .iter()
-            .all(|entry| entry["status"] == "missing" && entry["count"] == 0)
+            .all(|entry| entry["status"] == "probe_failed" && entry["count"] == 0)
     );
+}
+
+#[test]
+fn inspect_environment_preserves_unknown_for_bad_cwd_interpreter_and_permissions() {
+    let fixture = support::TemporaryDirectory::new("environment-ambiguous-spawn");
+    write_available_fixture(fixture.path());
+    let bad_cwd = run_fixture_child("bad-cwd", fixture.path());
+    assert_eq!(bad_cwd["git"]["status"], "probe_failed");
+    assert_eq!(bad_cwd["git"]["available"], false);
+
+    write_executable(fixture.path(), "git", "#!/no-such-fixture-interpreter\n");
+    let interpreter = run_fixture_child("interpreter", fixture.path());
+    assert_eq!(interpreter["git"]["status"], "probe_failed");
+    assert!(interpreter["git"]["version"].is_null());
+    fs::set_permissions(
+        fixture.path().join("git"),
+        fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    let denied = run_fixture_child("permission", fixture.path());
+    assert_eq!(denied["git"]["status"], "probe_failed");
+    assert_eq!(denied["git"]["available"], false);
 }
 
 #[test]

@@ -38,7 +38,10 @@ impl ResearchPhase {
     ];
 
     pub const fn generation(self) -> u64 {
-        1
+        match self {
+            Self::Mapping => 2,
+            _ => 1,
+        }
     }
 
     pub const fn id(self) -> &'static str {
@@ -53,7 +56,7 @@ impl ResearchPhase {
 
     pub const fn prompt(self) -> &'static str {
         match self {
-            Self::Mapping => include_str!("prompts/mapping-v1.md"),
+            Self::Mapping => include_str!("prompts/mapping-v2.md"),
             Self::Hypothesis => include_str!("prompts/hypothesis-v1.md"),
             Self::Experiment => include_str!("prompts/experiment-v1.md"),
             Self::Verification => include_str!("prompts/verification-v1.md"),

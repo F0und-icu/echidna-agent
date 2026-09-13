@@ -148,7 +148,16 @@ impl ToolRegistry {
             builtin_spec.version = "2".to_owned();
         }
         if tool == BuiltinTool::RunCommands {
+            builtin_spec.version = "4".to_owned();
+        }
+        if tool == BuiltinTool::RunCommand {
             builtin_spec.version = "3".to_owned();
+        }
+        if matches!(
+            tool,
+            BuiltinTool::InspectEnvironment | BuiltinTool::HttpRequest
+        ) {
+            builtin_spec.version = "2".to_owned();
         }
         debug_assert_eq!(&builtin_spec.name, name);
         builtin_spec.exposure = tool.default_exposure();
@@ -1287,12 +1296,12 @@ fn canonical_description(name: &str) -> String {
         ),
         "run_command" => (
             "a batch or interactive terminal is needed.",
-            "argv, not a shell string.",
+            "argv, not a shell string. Omitted/null cwd uses the project root; '.' is project-relative. For a path discrepancy, compare pwd -P and the requested path before assuming a missing directory: symlink aliases such as /tmp and /private/tmp may refer to one location, but must be observed. Check the actual program path/implementation/version in the intended host or container before choosing platform-specific flags; ENOENT alone cannot distinguish program, cwd, interpreter or loader absence.",
             "bounded lossy retained-prefix head/tail preview; output_captures contains durable raw Blob refs for read_output after publication.",
         ),
         "run_commands" => (
-            "one command or dependent ordering is needed.",
-            "independent batches.",
+            "one command or a long/interactive process is needed; use run_command, start_job or start_pty instead.",
+            "short independent checks in parallel, or explicit serial order for dependent steps. cwd has the same project-relative semantics as run_command; a child failure is not proof of broken parallel execution. Serial ordering does not stop later commands after an earlier command fails; only submit later steps whose prerequisites are already established.",
             "ordered results and failures.",
         ),
         "start_job" => (
@@ -1352,13 +1361,13 @@ fn canonical_description(name: &str) -> String {
         ),
         "http_request" => (
             "a crawl, scanner, Provider request, or vendor client is needed.",
-            "structured method, URL, bounded body, and explicit Artifact provenance.",
+            "a known URL addressing a concrete knowledge gap: version-matched documentation, exact source or original advisory; retain source and target applicability. Use structured method, bounded body and explicit Artifact provenance. This is not a search engine; respect project exclusions on solution material.",
             "status, final URL, safe metadata, timing, preview, and response Artifact.",
         ),
         "inspect_environment" => (
-            "arbitrary probing, command execution, or a persistent environment database is needed.",
-            "the fixed bounded OS, runtime, Git, proxy, toolchain, and connected-device snapshot.",
-            "structured availability and versions plus a stable environment fingerprint.",
+            "arbitrary probing, container inspection, command execution, or a persistent environment database is needed.",
+            "the fixed bounded agent-host OS, runtime, Git, proxy, toolchain and connected-device observation when absent or stale. Reuse applicable results, not a full probe every Turn. For task-specific program paths, GNU/BSD/LLVM identity, flags and container prerequisites use bounded run_command(s) at the intended execution location; host OS and a version token alone do not establish these capabilities.",
+            "structured fixed-probe status and parsed version tokens plus an observation fingerprint, not an executable identity or container fingerprint. available means this probe and version parse succeeded; false does not prove absence. probe_failed includes ambiguous spawn failures; missing is legacy-only. Device count is meaningful only with available status. No raw probe output is disclosed.",
         ),
         "memory_read" => (
             "a mutation or verified Research fact is needed.",

@@ -30,6 +30,70 @@ use sha2::{Digest, Sha256};
 const FIXTURE_DIRECTORY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/m4_profiles");
 const MANIFEST_SHA256: &str = "7bee1a2304ecb0a1100bc5b5183b51a0f384fac03b695d0cda8cd00fbfefa6c8";
 
+#[test]
+fn revised_environment_prompts_preserve_only_known_legacy_selections() {
+    use cyber_agent::domain::domain_profile::DomainProfileSelection;
+    for generation in [1, 2] {
+        let domain: DomainProfileSelection = serde_json::from_value(json!({
+            "profile":"binary", "profile_generation":generation,
+            "source":"operator", "reason_code":"OPERATOR_SELECTED"
+        }))
+        .unwrap();
+        domain.validate().unwrap();
+        let phase: ResearchPhaseSelection = serde_json::from_value(json!({
+            "phase":"mapping", "phase_generation":generation,
+            "source":"default", "reason_code":"NEW_SESSION_DEFAULT_MAPPING"
+        }))
+        .unwrap();
+        phase.validate().unwrap();
+        let composition = PromptComposition::current()
+            .with_domain_profile(domain.profile())
+            .with_research_phase(phase.phase());
+        let fragments = composition.fragments().unwrap();
+        assert_eq!(fragments[1].id().as_str(), "prompt:domain:binary:2");
+        assert_eq!(fragments[2].id().as_str(), "prompt:phase:mapping:2");
+        // Readback must not silently migrate durable selections.
+        assert_eq!(
+            serde_json::to_value(domain).unwrap()["profile_generation"],
+            generation
+        );
+        assert_eq!(
+            serde_json::to_value(phase).unwrap()["phase_generation"],
+            generation
+        );
+    }
+    for generation in [0, 3, u64::MAX] {
+        let domain: DomainProfileSelection = serde_json::from_value(json!({
+            "profile":"binary", "profile_generation":generation,
+            "source":"operator", "reason_code":"OPERATOR_SELECTED"
+        }))
+        .unwrap();
+        assert!(domain.validate().is_err());
+        let phase: ResearchPhaseSelection = serde_json::from_value(json!({
+            "phase":"mapping", "phase_generation":generation,
+            "source":"operator", "reason_code":"OPERATOR_SELECTED"
+        }))
+        .unwrap();
+        assert!(phase.validate().is_err());
+    }
+    let old_binary = include_str!("../src/domain/domain_profile/prompts/binary-v1.md");
+    let old_mapping = include_str!("../src/domain/research_control/prompts/mapping-v1.md");
+    assert_ne!(old_binary, DomainProfile::Binary.prompt());
+    assert_ne!(old_mapping, ResearchPhase::Mapping.prompt());
+    for text in [
+        "GNU/BSD/LLVM",
+        "actual execution location",
+        "Reuse applicable observations",
+    ] {
+        assert!(DomainProfile::Binary.prompt().contains(text));
+    }
+    assert!(
+        ResearchPhase::Mapping
+            .prompt()
+            .contains("not repeat a full probe every Turn")
+    );
+}
+
 fn capabilities() -> ModelCapabilities {
     ModelCapabilities {
         text_input: true,
@@ -92,7 +156,14 @@ fn stable_base_domain_and_phase_compile_into_one_orthogonal_contract() {
 
     for (profile, id, target_kind) in expected {
         assert_eq!(profile.id(), id);
-        assert_eq!(profile.generation(), 1);
+        assert_eq!(
+            profile.generation(),
+            if profile == DomainProfile::Binary {
+                2
+            } else {
+                1
+            }
+        );
         assert_eq!(profile.target_kind(), target_kind);
         assert!(profile.supports_target_kind(target_kind));
         assert!(!profile.supports_target_kind(TargetKind::Firmware));
@@ -123,8 +194,8 @@ fn stable_base_domain_and_phase_compile_into_one_orthogonal_contract() {
                 .collect::<Vec<_>>(),
             vec![
                 "prompt:base:pragmatic-vulnerability-researcher:1".to_owned(),
-                format!("prompt:domain:{id}:1"),
-                "prompt:phase:mapping:1".to_owned(),
+                format!("prompt:domain:{id}:{}", profile.generation()),
+                "prompt:phase:mapping:2".to_owned(),
             ]
         );
         assert_eq!(fragments[1].source(), ContextFragmentSource::DomainPrompt);

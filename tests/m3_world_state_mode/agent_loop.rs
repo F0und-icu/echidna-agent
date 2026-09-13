@@ -291,10 +291,10 @@ async fn truncated_world_state_plan_never_injects_an_unplanned_diff() {
     let root = TemporaryDirectory::new("m3-truncated-world-state");
     let tools = ToolRegistry::for_project(root.path());
     let constrained_capabilities = ModelCapabilities {
-        // Exact M4-S3e1 Research schemas are part of the fixed model input.
-        // Keep enough room for that contract while still forcing the
+        // Exact Research schemas and R4b tool guidance are fixed model input.
+        // Keep enough room for those contracts while still forcing the
         // deliberately oversized WorldState through the truncation path.
-        context_window: 18_432,
+        context_window: 20_480,
         ..incremental_capabilities()
     };
     let provider = ScriptedProvider::new(
