@@ -150,6 +150,13 @@ impl ConversationHistory {
 /// Duplicate Call IDs, duplicate Results, and Result/Call tool-name
 /// mismatches remain malformed History and are rejected rather than repaired.
 pub fn normalize_content_items(items: &[ContentItem]) -> Result<Vec<ContentItem>, HistoryError> {
+    normalize_with_subcommands(items, &[])
+}
+
+pub(crate) fn normalize_with_subcommands(
+    items: &[ContentItem],
+    children: &[super::tools::SubcommandCheckpoint],
+) -> Result<Vec<ContentItem>, HistoryError> {
     let mut history = ConversationHistory::default();
     for item in items {
         match item {
@@ -189,31 +196,46 @@ pub fn normalize_content_items(items: &[ContentItem]) -> Result<Vec<ContentItem>
                 ..
             }
         ) {
-            normalized.extend(finish_recovery_group(std::mem::take(&mut group), &history)?);
+            normalized.extend(finish_recovery_group(
+                std::mem::take(&mut group),
+                &history,
+                children,
+            )?);
         }
         group.append_content_item(item.clone())?;
     }
-    normalized.extend(finish_recovery_group(group, &history)?);
+    normalized.extend(finish_recovery_group(group, &history, children)?);
     Ok(normalized)
 }
 
 fn finish_recovery_group(
     mut group: ConversationHistory,
     complete_input: &ConversationHistory,
+    children: &[super::tools::SubcommandCheckpoint],
 ) -> Result<Vec<ContentItem>, HistoryError> {
     for (call_id, tool_name) in group.unpaired_tool_calls_in_call_order() {
         if complete_input.tool_pairs[&call_id].completed {
             return Err(HistoryError::ToolResultAfterUserMessage { call_id });
         }
+        let mut output = serde_json::json!({
+            "error": "aborted",
+            "execution_status": "unknown",
+            "guidance": "do_not_assume_no_effect_or_auto_rerun"
+        });
+        let mut known = children
+            .iter()
+            .filter(|child| child.call_id == call_id)
+            .collect::<Vec<_>>();
+        if !known.is_empty() {
+            known.sort_by_key(|child| child.index);
+            output["completed_children"] = serde_json::json!(known);
+            output["unobserved_children"] = serde_json::json!("unknown");
+        }
         group.append_tool_result(ToolResult {
             call_id,
             tool_name,
             status: super::tools::ToolResultStatus::Cancelled,
-            output: serde_json::json!({
-                "error": "aborted",
-                "execution_status": "unknown",
-                "guidance": "do_not_assume_no_effect_or_auto_rerun"
-            }),
+            output,
         })?;
     }
 

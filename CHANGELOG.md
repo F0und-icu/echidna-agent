@@ -7,6 +7,13 @@ milestone history remains in `docs/development/STATUS.md` and Git history.
 
 ### Fixed
 
+- CTF-R3b1: interactive command batches persist each observed child after raw
+  Blob publication and before acknowledgement. Resume and Compaction retain
+  known children beside explicit unknown parent state; no batch is rerun.
+  `session show` reports the child checkpoint count. Receipt v2 is unchanged;
+  run_commands uses catalog version3 and new child Events require a compatible
+  reader. Progress presentation/backpressure remains the separate R3b2 work.
+
 - CTF-R3a2: process previews are separate from bounded raw
   byte retention. Receipt v2 and ToolResult carry matching Blob references;
   `read_output` supports exact bounded binary readback. Publication failures

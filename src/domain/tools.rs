@@ -14,9 +14,12 @@ mod capture;
 mod failure;
 mod resolution;
 mod resource;
+mod subcommand;
+pub use subcommand::SubcommandCheckpoint;
+pub(crate) use subcommand::reconcile_subcommands;
 
 pub(crate) use capture::{
-    MAX_CAPTURE_EXECUTION_BYTES, MAX_CAPTURE_STREAM_BYTES, PendingOutputCapture, capture_schema,
+    MAX_CAPTURE_STREAM_BYTES, PendingOutputCapture, batch_capture_stream_limit, capture_schema,
     validate_captures,
 };
 pub use capture::{OutputCapture, OutputStream};
@@ -812,6 +815,8 @@ fn tool_failure_message(output: &Value, fallback_code: &str) -> String {
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum ToolContractError {
+    #[error("invalid observed subcommand checkpoint")]
+    InvalidSubcommandCheckpoint,
     #[error("invalid process output capture or Receipt/Result capture mismatch")]
     InvalidOutputCapture,
     #[error("failed to encode a stable Tool fingerprint: {message}")]

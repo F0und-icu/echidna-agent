@@ -31,7 +31,7 @@
 
 当前状态：
 
-- CTF-R3a1 的运行实例 Job/PTY 句柄已由 #73 合并。R3a2 原始输出按 ADR-0023 / Architecture v1.13 完成本地审计、完整 Gate、release CLI回归及 Lean，远端状态见 STATUS；R3b 子项检查点仍未完成。R2b 已经 #72 合并并完成一次有界合成 Live；终态输出不能替代部分批次耐久性。
+- CTF-R3a1 的运行实例 Job/PTY 句柄已由 #73 合并；R3a2 原始输出经审计、完整 Gate、release CLI及 Lean 后由 #74 合并。当前 R3b1 按 ADR-0024 / Architecture v1.14 建立观察、发布、Session 子项检查点、确认的路径；R3b2 再完成不阻塞执行的进度展示。R2b 已经 #72 合并并完成一次有界合成 Live；准确验收和剩余限额见 STATUS。
 
 - 当前 CTF-R2b 的增量契约为 ADR-0021 / Architecture v1.11：一个 Config 驱动的 Primary/Vision 每 Turn 请求准入预算；状态完整的 typed stop 可返回 CLI，显式 `/resume` 重建 ProviderSession 后才接受新任务。停止不自动丢 reasoning、重试或重发输入。完整实现/验收状态见 STATUS；下列旧阶段状态是历史记录。冻结 v1 至 v1.10 不修改。
 

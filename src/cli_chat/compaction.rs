@@ -141,7 +141,8 @@ pub(super) fn select_compaction(
     facts: &CompactionValidationFacts,
     mut fits: impl FnMut(&SessionCompaction) -> Result<bool, ChatError>,
 ) -> Result<(SessionSummaryDraft, SessionCompaction), ChatError> {
-    let history = crate::domain::history::normalize_content_items(state.history().items())
+    let history = state
+        .full_normalized_history()
         .map_err(SessionError::from)?;
     let mut references = MAX_REFERENCE_ITEMS_PER_KIND;
     loop {

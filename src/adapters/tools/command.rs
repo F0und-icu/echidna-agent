@@ -11,11 +11,13 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 
 use crate::domain::tools::{
-    MAX_CAPTURE_EXECUTION_BYTES, MAX_CAPTURE_STREAM_BYTES, OutputStream, PendingOutputCapture,
-    ResourceKey, ToolEffect, ToolExecutionOutcome, ToolExecutionPlan, ToolParallelism,
+    MAX_CAPTURE_STREAM_BYTES, OutputStream, PendingOutputCapture, ResourceKey, ToolEffect,
+    ToolExecutionOutcome, ToolExecutionPlan, ToolParallelism, batch_capture_stream_limit,
     scheduling_conflicts,
 };
+use crate::domain::tools::{OutputCapture, SubcommandCheckpoint};
 use crate::ports::tool::ToolExecutorError;
+use crate::ports::tool::ToolObservationSender;
 
 use super::filesystem::{display_path, resolve_path};
 use super::output::{BoundedText, CapturedOutput, bounded_text};
@@ -150,6 +152,14 @@ pub(super) async fn execute_batch(
     project_root: &Path,
     plan: ToolExecutionPlan,
 ) -> ToolExecutionOutcome {
+    execute_batch_observed(project_root, plan, None).await
+}
+
+pub(super) async fn execute_batch_observed(
+    project_root: &Path,
+    plan: ToolExecutionPlan,
+    observer: Option<ToolObservationSender>,
+) -> ToolExecutionOutcome {
     let arguments: RunCommandsArgs =
         match decode_arguments("run_commands", plan.call.arguments.clone()) {
             Ok(arguments) => arguments,
@@ -160,11 +170,22 @@ pub(super) async fn execute_batch(
         Err(error) => return invalid_plan(plan, error),
     };
     let max_each = per_item_limit(plan.output_policy.max_bytes, arguments.commands.len());
-    let raw_each =
-        MAX_CAPTURE_STREAM_BYTES.min(MAX_CAPTURE_EXECUTION_BYTES / (2 * arguments.commands.len()));
+    let raw_each = batch_capture_stream_limit(arguments.commands.len());
+    let observation = BatchObservation {
+        plan: &plan,
+        count: arguments.commands.len(),
+        observer: observer.as_ref(),
+    };
     let results = match arguments.mode {
         CommandBatchMode::Serial => {
-            run_serial(project_root, &arguments.commands, max_each, raw_each).await
+            run_serial(
+                project_root,
+                &arguments.commands,
+                max_each,
+                raw_each,
+                &observation,
+            )
+            .await
         }
         CommandBatchMode::Parallel => {
             run_parallel(
@@ -173,12 +194,14 @@ pub(super) async fn execute_batch(
                 &resource_sets,
                 max_each,
                 raw_each,
+                &observation,
             )
             .await
         }
     };
     let partial_failure = results.iter().any(|output| output.result.is_err());
     let mut captures = Vec::new();
+    let mut published = Vec::new();
     let commands = results
         .into_iter()
         .enumerate()
@@ -187,6 +210,7 @@ pub(super) async fn execute_batch(
                 capture.child_index = Some(index as u8);
             }
             captures.extend(output.captures);
+            published.extend(output.published);
             match output.result {
                 Ok(value) => json!({"index": index, "status": "succeeded", "result": value}),
                 Err(value) => json!({"index": index, "status": "failed", "result": value}),
@@ -198,7 +222,34 @@ pub(super) async fn execute_batch(
         json!({"commands": commands, "partial_failure": partial_failure}),
     );
     outcome.pending_captures = captures;
+    if observer.is_some() {
+        outcome.result.output["output_captures"] =
+            serde_json::to_value(&published).expect("capture serialization");
+        outcome.receipt.output_captures = published;
+    }
     outcome
+}
+
+struct BatchObservation<'a> {
+    plan: &'a ToolExecutionPlan,
+    count: usize,
+    observer: Option<&'a ToolObservationSender>,
+}
+
+impl BatchObservation<'_> {
+    async fn completed(&self, index: usize, mut output: CapturedCommand) -> CapturedCommand {
+        if let Some(observer) = self.observer {
+            for capture in &mut output.captures {
+                capture.child_index = Some(index as u8);
+            }
+            let checkpoint =
+                SubcommandCheckpoint::observed(self.plan, self.count, index, output.result.clone());
+            output.published = observer
+                .checkpoint(checkpoint, std::mem::take(&mut output.captures))
+                .await;
+        }
+        output
+    }
 }
 
 pub(super) fn validate_command(
@@ -283,10 +334,18 @@ async fn run_serial(
     commands: &[RunCommandArgs],
     max_bytes: usize,
     raw_bytes: usize,
+    observation: &BatchObservation<'_>,
 ) -> Vec<CapturedCommand> {
     let mut results = Vec::with_capacity(commands.len());
-    for command in commands {
-        results.push(run(project_root, command, max_bytes, raw_bytes).await);
+    for (index, command) in commands.iter().enumerate() {
+        results.push(
+            observation
+                .completed(
+                    index,
+                    run(project_root, command, max_bytes, raw_bytes).await,
+                )
+                .await,
+        );
     }
     results
 }
@@ -299,6 +358,7 @@ async fn run_parallel(
     resource_sets: &[Vec<ResourceKey>],
     max_bytes: usize,
     raw_bytes: usize,
+    observation: &BatchObservation<'_>,
 ) -> Vec<CapturedCommand> {
     let mut pending = (0..commands.len()).collect::<VecDeque<_>>();
     let mut results = (0..commands.len()).map(|_| None).collect::<Vec<_>>();
@@ -321,10 +381,14 @@ async fn run_parallel(
                 wave.push(index);
             }
         }
-        let completed = join_all(
-            wave.iter()
-                .map(|index| run(project_root, &commands[*index], max_bytes, raw_bytes)),
-        )
+        let completed = join_all(wave.iter().map(|index| async move {
+            observation
+                .completed(
+                    *index,
+                    run(project_root, &commands[*index], max_bytes, raw_bytes).await,
+                )
+                .await
+        }))
         .await;
         for (index, result) in wave.into_iter().zip(completed) {
             results[index] = Some(result);
@@ -362,12 +426,14 @@ async fn run(
     CapturedCommand {
         result,
         captures: output.captures,
+        published: Vec::new(),
     }
 }
 
 struct CapturedCommand {
     result: Result<Value, Value>,
     captures: Vec<PendingOutputCapture>,
+    published: Vec<OutputCapture>,
 }
 
 pub(super) struct FixedProbeOutput {

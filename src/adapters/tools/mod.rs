@@ -147,6 +147,9 @@ impl ToolRegistry {
         ) {
             builtin_spec.version = "2".to_owned();
         }
+        if tool == BuiltinTool::RunCommands {
+            builtin_spec.version = "3".to_owned();
+        }
         debug_assert_eq!(&builtin_spec.name, name);
         builtin_spec.exposure = tool.default_exposure();
         builtin_spec
@@ -241,6 +244,24 @@ impl ToolExecutor for ToolRegistry {
     }
 
     fn execute(&self, plan: ToolExecutionPlan) -> ToolExecutionFuture<'_> {
+        self.execute_with_observer(plan, None)
+    }
+
+    fn execute_observed(
+        &self,
+        plan: ToolExecutionPlan,
+        observer: crate::ports::tool::ToolObservationSender,
+    ) -> ToolExecutionFuture<'_> {
+        self.execute_with_observer(plan, Some(observer))
+    }
+}
+
+impl ToolRegistry {
+    fn execute_with_observer(
+        &self,
+        plan: ToolExecutionPlan,
+        observer: Option<crate::ports::tool::ToolObservationSender>,
+    ) -> ToolExecutionFuture<'_> {
         let tool = self.tools.get(&plan.call.name).copied();
         Box::pin(async move {
             let Some(tool) = tool else {
@@ -269,17 +290,21 @@ impl ToolExecutor for ToolRegistry {
             } else {
                 Vec::new()
             };
-            match tokio::time::timeout(
-                Duration::from_millis(plan.timeout_ms),
-                tool.execute(
-                    &self.project_root,
-                    &self.jobs,
-                    &self.ptys,
-                    &self.active_leases,
-                    &specs,
-                    plan,
-                ),
-            )
+            match tokio::time::timeout(Duration::from_millis(plan.timeout_ms), async {
+                if tool == BuiltinTool::RunCommands && observer.is_some() {
+                    command::execute_batch_observed(&self.project_root, plan, observer).await
+                } else {
+                    tool.execute(
+                        &self.project_root,
+                        &self.jobs,
+                        &self.ptys,
+                        &self.active_leases,
+                        &specs,
+                        plan,
+                    )
+                    .await
+                }
+            })
             .await
             {
                 Ok(outcome) => outcome,

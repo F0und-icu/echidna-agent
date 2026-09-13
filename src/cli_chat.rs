@@ -344,6 +344,9 @@ pub(crate) async fn run(
             tool_output.borrow_mut().started(plan);
         };
         let mut durability = |checkpoint: ChatDurabilityCheckpoint<'_>| match checkpoint {
+            ChatDurabilityCheckpoint::Subcommand(checkpoint) => session
+                .record_subcommand(checkpoint)
+                .map_err(ChatError::into_execution_receipt_agent_loop_error),
             ChatDurabilityCheckpoint::History(items) => session
                 .record_history(items)
                 .map_err(ChatError::into_history_checkpoint_agent_loop_error),
@@ -738,6 +741,36 @@ impl DurableChatSession {
         let mut projection =
             SessionProjection::replay(EventSource::read_events(&store, &stream_id)?)?;
         self.record_execution_receipt(&mut projection, &mut store, &stream_id, outcome)
+    }
+
+    fn record_subcommand(
+        &self,
+        checkpoint: &crate::domain::tools::SubcommandCheckpoint,
+    ) -> Result<(), ChatError> {
+        let mut writer = self.project.open_writer()?;
+        let mut store = writer.open_session(self.session_id.clone(), None)?;
+        let stream_id = ProjectEventStream::Session(self.session_id.clone()).stream_id();
+        let mut projection =
+            SessionProjection::replay(EventSource::read_events(&store, &stream_id)?)?;
+        let sequence = store.next_sequence()?;
+        let event = SessionEvent::SubcommandCheckpointed {
+            checkpoint: checkpoint.clone(),
+        }
+        .into_envelope(
+            event_id(
+                self.project.project_id(),
+                &self.session_id,
+                sequence.get(),
+                "subcommand-checkpoint",
+            ),
+            stream_id,
+            sequence,
+            occurred_at(),
+        )?;
+        projection
+            .append(&mut store, event)
+            .map_err(ChatError::from_session_append)?;
+        Ok(())
     }
 
     fn record_execution_receipt(

@@ -18,10 +18,11 @@ use super::events::{
     ApplyOutcome, CurrentEventUpcaster, EventEnvelope, EventError, EventId, EventReducer,
     EventSequence, EventType, EventUpcaster, OccurredAt, State, StreamId,
 };
-use super::history::{ConversationHistory, HistoryError, normalize_content_items};
+use super::history::{ConversationHistory, HistoryError, normalize_with_subcommands};
 use super::model::ContentItem;
 use super::request_audit::{RequestAuditError, RequestAuditManifest};
 use super::research_control::{ResearchPhase, ResearchPhaseSelection};
+use super::tools::SubcommandCheckpoint;
 use super::tools::{ExecutionReceipt, ExecutionReceiptEventPayload, ExecutionReceiptPayloadError};
 use super::vision::{
     VisionAnalysisFailure, VisionFactError, VisionObservation, VisionObservationId,
@@ -33,6 +34,7 @@ const SESSION_STARTED_EVENT_TYPE: &str = "session.started";
 const SESSION_RESUMED_EVENT_TYPE: &str = "session.resumed";
 const SESSION_ENDED_EVENT_TYPE: &str = "session.ended";
 const RECEIPT_RECORDED_EVENT_TYPE: &str = "tool.execution_receipt_recorded";
+const SUBCOMMAND_CHECKPOINT_EVENT_TYPE: &str = "tool.subcommand_checkpointed";
 const CACHE_HIT_EVENT_TYPE: &str = "tool.result_cache_hit";
 const STREAM_RECOVERED_EVENT_TYPE: &str = "StreamRecovered";
 const HISTORY_ITEM_RECORDED_EVENT_TYPE: &str = "session.history_item_recorded";
@@ -73,6 +75,9 @@ pub enum SessionLifecycle {
 /// the Tool domain's `ExecutionReceipt` rather than defining a Session copy.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionEvent {
+    SubcommandCheckpointed {
+        checkpoint: SubcommandCheckpoint,
+    },
     Started {
         primary_provider_session: ProviderSessionRef,
     },
@@ -141,6 +146,7 @@ impl SessionEvent {
 
     fn event_type(&self) -> EventType {
         match self {
+            Self::SubcommandCheckpointed { .. } => EventType::new(SUBCOMMAND_CHECKPOINT_EVENT_TYPE),
             Self::Started { .. } => EventType::new(SESSION_STARTED_EVENT_TYPE),
             Self::Resumed { .. } => EventType::new(SESSION_RESUMED_EVENT_TYPE),
             Self::Ended => EventType::new(SESSION_ENDED_EVENT_TYPE),
@@ -166,6 +172,7 @@ impl SessionEvent {
 
     fn encode_payload(&self, event_type: &EventType) -> Result<Value, SessionError> {
         let payload = match self {
+            Self::SubcommandCheckpointed { checkpoint } => serde_json::to_value(checkpoint),
             Self::Started {
                 primary_provider_session,
             }
@@ -210,6 +217,13 @@ impl SessionEvent {
 
     fn decode(event_type: &EventType, payload: Value) -> Result<Self, SessionError> {
         match event_type.as_str() {
+            SUBCOMMAND_CHECKPOINT_EVENT_TYPE => {
+                let checkpoint: SubcommandCheckpoint = decode_strict_payload(event_type, payload)?;
+                checkpoint
+                    .validate()
+                    .map_err(|_| SessionError::SubcommandCheckpointMismatch)?;
+                Ok(Self::SubcommandCheckpointed { checkpoint })
+            }
             SESSION_STARTED_EVENT_TYPE => {
                 let payload: SessionLifecyclePayload = decode_strict_payload(event_type, payload)?;
                 require_current_payload_schema(event_type, payload.schema_version)?;
@@ -332,6 +346,7 @@ pub struct SessionState {
     resume_count: u64,
     execution_receipt_count: u64,
     execution_receipts: Vec<SessionExecutionReceiptRecord>,
+    subcommand_checkpoints: Vec<SubcommandCheckpoint>,
     cache_hit_count: u64,
     recovery_count: u64,
     latest_compaction: Option<SessionCompaction>,
@@ -356,6 +371,7 @@ impl Default for SessionState {
             resume_count: 0,
             execution_receipt_count: 0,
             execution_receipts: Vec::new(),
+            subcommand_checkpoints: Vec::new(),
             cache_hit_count: 0,
             recovery_count: 0,
             latest_compaction: None,
@@ -395,11 +411,19 @@ impl SessionState {
     /// History remains available through [`Self::history`].
     pub(crate) fn normalized_history_items(&self) -> Result<Vec<ContentItem>, HistoryError> {
         let Some(compaction) = self.latest_compaction.as_ref() else {
-            return normalize_content_items(self.history.items());
+            return self.full_normalized_history();
         };
         let mut items = compaction.retained_history().to_vec();
         items.extend_from_slice(&self.history.items()[compaction.source_history_item_count()..]);
-        normalize_content_items(&items)
+        normalize_with_subcommands(&items, &self.subcommand_checkpoints)
+    }
+
+    pub(crate) fn full_normalized_history(&self) -> Result<Vec<ContentItem>, HistoryError> {
+        normalize_with_subcommands(self.history.items(), &self.subcommand_checkpoints)
+    }
+
+    pub(crate) fn subcommand_checkpoints(&self) -> &[SubcommandCheckpoint] {
+        &self.subcommand_checkpoints
     }
 
     /// Whether a durable `session.resumed` fact has established the current
@@ -461,6 +485,7 @@ impl SessionState {
             .ok_or(SessionError::CompactionSourceSequenceMissing)?;
         SessionCompaction::from_history(
             &self.history,
+            &self.full_normalized_history()?,
             SessionSummary::from_draft(summary, revision, validation)?,
             source_event_sequence,
             requested_recent_items,
@@ -656,6 +681,22 @@ fn validate_session_stream(state: &SessionState, stream_id: &StreamId) -> Result
     Ok(())
 }
 
+fn validate_child_receipt(
+    state: &SessionState,
+    receipt: &ExecutionReceipt,
+) -> Result<(), SessionError> {
+    for child in state
+        .subcommand_checkpoints
+        .iter()
+        .filter(|child| child.execution_id == receipt.execution_id)
+    {
+        if !child.agrees_with_receipt(receipt) {
+            return Err(SessionError::SubcommandCheckpointMismatch);
+        }
+    }
+    Ok(())
+}
+
 fn apply_session_event(
     state: &mut SessionState,
     event: SessionEvent,
@@ -663,6 +704,49 @@ fn apply_session_event(
     event_id: &EventId,
 ) -> Result<(), SessionError> {
     match event {
+        SessionEvent::SubcommandCheckpointed { checkpoint } => {
+            require_transition(
+                state.lifecycle,
+                SUBCOMMAND_CHECKPOINT_EVENT_TYPE,
+                SessionLifecycle::Active,
+            )?;
+            checkpoint
+                .validate_after(&state.subcommand_checkpoints)
+                .map_err(|_| SessionError::SubcommandCheckpointMismatch)?;
+            let parent = state
+                .history
+                .items()
+                .iter()
+                // Compaction already froze a complete recovery projection for
+                // this prefix. A late child cannot enrich its synthetic Result.
+                .skip(
+                    state
+                        .latest_compaction
+                        .as_ref()
+                        .map_or(0, |compaction| compaction.source_history_item_count()),
+                )
+                .find_map(|item| match item {
+                    ContentItem::ToolCall { call } if call.call_id == checkpoint.call_id => {
+                        Some(call)
+                    }
+                    _ => None,
+                })
+                .ok_or(SessionError::SubcommandCheckpointMismatch)?;
+            if !checkpoint.agrees_with_call(parent)
+                || !state
+                    .history
+                    .unpaired_tool_calls_in_call_order()
+                    .iter()
+                    .any(|(call_id, _)| call_id == &checkpoint.call_id)
+                || state
+                    .execution_receipts
+                    .iter()
+                    .any(|record| record.receipt.execution_id == checkpoint.execution_id)
+            {
+                return Err(SessionError::SubcommandCheckpointMismatch);
+            }
+            state.subcommand_checkpoints.push(checkpoint);
+        }
         SessionEvent::Started {
             primary_provider_session,
         } => {
@@ -690,6 +774,7 @@ fn apply_session_event(
             state.lifecycle = SessionLifecycle::Ended;
         }
         SessionEvent::ExecutionReceiptRecorded { receipt } => {
+            validate_child_receipt(state, &receipt)?;
             state.execution_receipt_count =
                 increment("execution receipt count", state.execution_receipt_count)?;
             state
@@ -700,6 +785,7 @@ fn apply_session_event(
                 });
         }
         SessionEvent::ToolResultCacheHit { receipt } => {
+            validate_child_receipt(state, &receipt)?;
             state.cache_hit_count = increment("cache hit count", state.cache_hit_count)?;
             state
                 .execution_receipts
@@ -718,6 +804,14 @@ fn apply_session_event(
                 SessionLifecycle::Active,
             )?;
             if let ContentItem::ToolResult { result } = &item {
+                if state
+                    .subcommand_checkpoints
+                    .iter()
+                    .filter(|child| child.call_id == result.call_id)
+                    .any(|child| !child.agrees_with_result(result))
+                {
+                    return Err(SessionError::SubcommandCheckpointMismatch);
+                }
                 let execution_id = super::tools::ExecutionId::for_model_call(&result.call_id);
                 if let Some(record) = state
                     .execution_receipts
@@ -751,7 +845,7 @@ fn apply_session_event(
                     received: compaction.source_event_sequence(),
                 });
             }
-            let normalized_history = normalize_content_items(state.history.items())?;
+            let normalized_history = state.full_normalized_history()?;
             if compaction.source_history_item_count() != state.history.items().len()
                 || compaction.retained_from_normalized_history_index() > normalized_history.len()
                 || compaction.retained_history()
@@ -1205,6 +1299,8 @@ impl ResearchPhaseSelectedPayload {
 /// Explicit Session schema, stream, payload and transition failures.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum SessionError {
+    #[error("subcommand checkpoint does not agree with parent execution or prior child facts")]
+    SubcommandCheckpointMismatch,
     #[error("Session Tool output captures lack a matching prior Receipt or disagree with it")]
     OutputCaptureMismatch,
     #[error(transparent)]

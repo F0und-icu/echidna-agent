@@ -1,5 +1,7 @@
 #[path = "support/compaction.rs"]
 mod compaction_support;
+#[path = "support/subcommand.rs"]
+mod subcommand_fixture;
 
 use std::collections::BTreeSet;
 
@@ -38,6 +40,167 @@ fn primary_session() -> ProviderSessionRef {
         role: ProviderSessionRole::Primary,
         generation: 1,
     }
+}
+
+#[test]
+fn compaction_rejects_late_children_of_old_calls_but_accepts_new_calls() {
+    let facts = CompactionFacts::new("late-child-compaction");
+    let reducer = SessionReducer;
+    let mut state = reducer
+        .reduce([
+            envelope(
+                SessionEvent::Started {
+                    primary_provider_session: primary_session(),
+                },
+                "started",
+                1,
+            ),
+            envelope(
+                SessionEvent::HistoryItemRecorded {
+                    item: ContentItem::ToolCall {
+                        call: subcommand_fixture::call(),
+                    },
+                },
+                "call",
+                2,
+            ),
+            EventEnvelope::current(
+                EventId::new("child"),
+                stream_id(),
+                EventSequence::new(3),
+                OccurredAt::new("fixture"),
+                EventType::new("tool.subcommand_checkpointed"),
+                subcommand_fixture::payload(),
+            ),
+        ])
+        .unwrap();
+    let compacted = compaction_event(&state, &facts, "compaction", 4);
+    reducer.apply(&mut state, compacted).unwrap();
+    let before = state.clone();
+    let mut late = subcommand_fixture::payload();
+    late["index"] = json!(1);
+    late["output_captures"][0]["child_index"] = json!(1);
+    assert!(matches!(
+        reducer.apply(
+            &mut state,
+            EventEnvelope::current(
+                EventId::new("late"),
+                stream_id(),
+                EventSequence::new(5),
+                OccurredAt::new("fixture"),
+                EventType::new("tool.subcommand_checkpointed"),
+                late,
+            )
+        ),
+        Err(SessionError::SubcommandCheckpointMismatch)
+    ));
+    assert_eq!(state, before);
+
+    let mut call = subcommand_fixture::call();
+    call.call_id = ToolCallId::new("new-batch");
+    reducer
+        .apply(
+            &mut state,
+            envelope(
+                SessionEvent::HistoryItemRecorded {
+                    item: ContentItem::ToolCall { call },
+                },
+                "new-call",
+                5,
+            ),
+        )
+        .unwrap();
+    let mut child = subcommand_fixture::payload();
+    child["call_id"] = json!("new-batch");
+    child["execution_id"] = json!("execution:new-batch");
+    reducer
+        .apply(
+            &mut state,
+            EventEnvelope::current(
+                EventId::new("new-child"),
+                stream_id(),
+                EventSequence::new(6),
+                OccurredAt::new("fixture"),
+                EventType::new("tool.subcommand_checkpointed"),
+                child,
+            ),
+        )
+        .unwrap();
+    let compacted = compaction_event(&state, &facts, "compaction2", 7);
+    reducer.apply(&mut state, compacted).unwrap();
+    let retained =
+        serde_json::to_value(state.latest_compaction().unwrap().retained_history()).unwrap();
+    assert!(
+        retained
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["result"]["call_id"] == "new-batch"
+                && item["result"]["output"]["completed_children"][0]["call_id"] == "new-batch")
+    );
+}
+
+#[test]
+fn child_checkpoint_compaction_retains_known_observation_and_unknown_parent_without_changing_history()
+ {
+    let facts = CompactionFacts::new("child-compaction");
+    let reducer = SessionReducer;
+    let mut events = vec![
+        envelope(
+            SessionEvent::Started {
+                primary_provider_session: primary_session(),
+            },
+            "started",
+            1,
+        ),
+        envelope(
+            SessionEvent::HistoryItemRecorded {
+                item: ContentItem::ToolCall {
+                    call: subcommand_fixture::call(),
+                },
+            },
+            "call",
+            2,
+        ),
+    ];
+    events.push(EventEnvelope::current(
+        EventId::new("child"),
+        stream_id(),
+        EventSequence::new(3),
+        OccurredAt::new("fixture"),
+        EventType::new("tool.subcommand_checkpointed"),
+        subcommand_fixture::payload(),
+    ));
+    events.push(envelope(
+        SessionEvent::HistoryItemRecorded {
+            item: ContentItem::user_text("explicitly resume"),
+        },
+        "later-user",
+        4,
+    ));
+    let mut state = reducer.reduce(events.clone()).unwrap();
+    let raw = state.history().clone();
+    let compacted = compaction_event(&state, &facts, "compaction", 5);
+    reducer.apply(&mut state, compacted.clone()).unwrap();
+    let retained = state.latest_compaction().unwrap().retained_history();
+    assert_eq!(retained.len(), 3);
+    let json = serde_json::to_value(retained).unwrap();
+    assert_eq!(json[1]["result"]["output"]["execution_status"], "unknown");
+    assert_eq!(
+        json[1]["result"]["output"]["completed_children"][0]["result"]["stdout"],
+        "KNOWN_CHILD"
+    );
+    assert_eq!(state.history(), &raw);
+    events.push(compacted);
+    assert_eq!(reducer.reduce(events).unwrap(), state);
+    let repeated = compaction_event(&state, &facts, "compaction2", 6);
+    reducer.apply(&mut state, repeated).unwrap();
+    assert_eq!(state.history(), &raw);
+    assert!(
+        serde_json::to_string(state.latest_compaction().unwrap().retained_history())
+            .unwrap()
+            .contains("KNOWN_CHILD")
+    );
 }
 
 fn envelope(event: SessionEvent, id: &str, sequence: u64) -> EventEnvelope<Value> {

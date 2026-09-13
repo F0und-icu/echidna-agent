@@ -1,3 +1,5 @@
+#[path = "support/subcommand.rs"]
+mod subcommand_fixture;
 mod support;
 
 use cyber_agent::adapters::project_event_store::{Project, ProjectEventStream};
@@ -50,6 +52,132 @@ fn session_started(sequence: u64) -> EventEnvelope<Value> {
         OccurredAt::new("2026-08-23T00:00:00Z"),
     )
     .unwrap()
+}
+
+#[test]
+fn subcommand_checkpoints_reject_malformed_duplicate_and_inconsistent_parent_facts_atomically() {
+    let reducer = SessionReducer;
+    let mut state = SessionState::default();
+    reducer.apply(&mut state, session_started(1)).unwrap();
+    let item = ContentItem::ToolCall {
+        call: subcommand_fixture::call(),
+    };
+    reducer
+        .apply(
+            &mut state,
+            event(
+                "call",
+                2,
+                "session.history_item_recorded",
+                json!({"schema_version":1,"item":item}),
+            ),
+        )
+        .unwrap();
+    for kind in [
+        "future",
+        "extra",
+        "wrong-parent",
+        "wrong-name",
+        "wrong-count",
+        "bad-index",
+        "bad-status",
+        "bad-result",
+        "bad-capture",
+        "missing-exit",
+    ] {
+        let mut payload = subcommand_fixture::payload();
+        match kind {
+            "future" => payload["schema_version"] = json!(2),
+            "extra" => payload["unknown"] = json!(true),
+            "wrong-parent" => payload["execution_id"] = json!("execution:other"),
+            "wrong-name" => payload["tool_name"] = json!("run_command"),
+            "wrong-count" => payload["child_count"] = json!(3),
+            "bad-index" => payload["index"] = json!(2),
+            "bad-status" => payload["status"] = json!("cancelled"),
+            "bad-result" => payload["result"]["exit_code"] = json!(1),
+            "bad-capture" => payload["output_captures"][0]["child_index"] = json!(1),
+            "missing-exit" => {
+                payload["result"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("exit_code");
+            }
+            _ => unreachable!(),
+        }
+        let mut candidate = state.clone();
+        assert!(
+            reducer
+                .apply(
+                    &mut candidate,
+                    event("bad", 3, "tool.subcommand_checkpointed", payload)
+                )
+                .is_err(),
+            "{kind}"
+        );
+        assert_eq!(candidate, state, "{kind}");
+    }
+    reducer
+        .apply(
+            &mut state,
+            event(
+                "child",
+                3,
+                "tool.subcommand_checkpointed",
+                subcommand_fixture::payload(),
+            ),
+        )
+        .unwrap();
+    let before = state.clone();
+    assert!(
+        reducer
+            .apply(
+                &mut state,
+                event(
+                    "duplicate",
+                    4,
+                    "tool.subcommand_checkpointed",
+                    subcommand_fixture::payload()
+                )
+            )
+            .is_err()
+    );
+    assert_eq!(state, before);
+    let result = ToolResult {
+        call_id: ToolCallId::new("batch"),
+        tool_name: ToolName::new("run_commands"),
+        status: ToolResultStatus::Succeeded,
+        output: json!({"commands":[]}),
+    };
+    assert!(
+        reducer
+            .apply(
+                &mut state,
+                event(
+                    "result",
+                    4,
+                    "session.history_item_recorded",
+                    json!({"schema_version":1,"item":ContentItem::ToolResult { result }})
+                )
+            )
+            .is_err()
+    );
+    assert_eq!(state, before);
+    let receipt = json!({"execution_id":"execution:batch","plan_fingerprint":"a".repeat(64),"status":"succeeded",
+        "exit_reason":null,"output_artifact_ids":[],"environment_change":null,"output_captures":[]});
+    assert!(
+        reducer
+            .apply(
+                &mut state,
+                event(
+                    "receipt",
+                    4,
+                    "tool.execution_receipt_recorded",
+                    json!({"schema_version":2,"receipt":receipt})
+                )
+            )
+            .is_err()
+    );
+    assert_eq!(state, before);
 }
 
 #[test]

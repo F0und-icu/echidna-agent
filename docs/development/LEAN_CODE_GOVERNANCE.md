@@ -39,6 +39,7 @@
 | Tool 类型、Effect 和执行收据 | `domain/tools` | Tool Adapter 只执行并返回结果 |
 | Job/PTY 运行句柄身份 | 私有 `adapters/tools/process_identity` | 两个进程表使用独立 namespace 和 checked sequence；控制仅按原表精确查找，不解析旧序号重连 |
 | 原始进程输出 | `adapters/tools/output` 捕获；`domain/tools/capture` 元数据/一致性；私有 `app/agent_loop/output_capture` 发布 | 复用 ArtifactStore 在 Receipt 前保存，原始 bytes 不缓存/入 History；read_output 复用本地 Blob 校验 owner，引用不升级 Research 证据 |
+| 子命令检查点 | 固定 Tool Port 观察/确认；App 原始发布和 Session append；Domain 纯子项验证 | Adapter 不写 Event；先 Blob 和真实检查点再确认；子项不成为新 ToolCall/Receipt，Resume/Compaction 复用 History owner，UI 不阻塞管道 |
 | Tool Call/Result 配对和 History 修复 | 一个纯 History Normalizer | AgentLoop、Context Planner、Adapter 不各自修复 |
 | Prompt Fragment、排序和上下文预算 | 一个 Context Compiler/Planner | Provider Adapter 只序列化最终 IR |
 | 稳定人格和 Base Contract | 一个版本化 Base Prompt 资源 | Personal/Project Prompt 不能替换证据纪律或运行时不变量 |
@@ -125,6 +126,7 @@ tests/
 - `tests/fixtures/` 保存稳定 wire/Event/History/Image 样本；一个事实样本只保存一份。
 - 第二个 Adapter 出现时复用同一 Port Contract Suite；不得为每个 Adapter 复制一套契约断言。
 - 测试优先通过所属模块的公开行为验证私有 helper；不得只为直接测试 helper 扩大生产 API。
+- 跨 Port/Adapter 改动的受影响验证必须在独立审计前包含 `cargo test --locked --test domain_ports_contract`；不能等完整 Gate 才检查依赖方向，也不能为实现放宽既有 forbidden-dependency 测试。
 - Live Test 继续 ignored/opt-in，和永久离线回归测试分离。
 
 Gate 前运行：

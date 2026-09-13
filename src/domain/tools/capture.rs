@@ -7,7 +7,11 @@ use super::{ExecutionReceipt, ToolContractError, ToolResult};
 use crate::domain::artifacts::BlobId;
 
 pub(crate) const MAX_CAPTURE_STREAM_BYTES: usize = 1024 * 1024;
-pub(crate) const MAX_CAPTURE_EXECUTION_BYTES: usize = 8 * 1024 * 1024;
+const MAX_CAPTURE_EXECUTION_BYTES: usize = 8 * 1024 * 1024;
+
+pub(crate) fn batch_capture_stream_limit(child_count: usize) -> usize {
+    MAX_CAPTURE_STREAM_BYTES.min(MAX_CAPTURE_EXECUTION_BYTES / (2 * child_count.max(1)))
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]

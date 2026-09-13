@@ -14,6 +14,15 @@ pub type ToolExecutionFuture<'executor> =
     Pin<Box<dyn Future<Output = ToolExecutionOutcome> + Send + 'executor>>;
 
 pub trait ToolExecutor: Send + Sync {
+    /// Optional fixed child-checkpoint path; non-command executors retain the
+    /// ordinary execution contract. Only the owning App acknowledges durability.
+    fn execute_observed(
+        &self,
+        plan: ToolExecutionPlan,
+        _observer: ToolObservationSender,
+    ) -> ToolExecutionFuture<'_> {
+        self.execute(plan)
+    }
     /// Returns the immutable canonical catalog. Exposure resolution is pure
     /// and never stored by the executor.
     fn catalog(&self) -> Vec<ToolSpec> {
@@ -80,6 +89,27 @@ pub trait ToolExecutor: Send + Sync {
     }
 
     fn execute(&self, plan: ToolExecutionPlan) -> ToolExecutionFuture<'_>;
+}
+
+/// Opaque bounded handoff shared by the command Adapter and App scheduler.
+#[derive(Clone)]
+pub struct ToolObservationSender(pub(crate) std::sync::Arc<SubcommandHandoff>);
+
+type SubcommandHandoff = dyn Fn(
+        crate::domain::tools::SubcommandCheckpoint,
+        Vec<crate::domain::tools::PendingOutputCapture>,
+    ) -> Pin<Box<dyn Future<Output = Vec<crate::domain::tools::OutputCapture>> + Send>>
+    + Send
+    + Sync;
+
+impl ToolObservationSender {
+    pub(crate) async fn checkpoint(
+        &self,
+        checkpoint: crate::domain::tools::SubcommandCheckpoint,
+        captures: Vec<crate::domain::tools::PendingOutputCapture>,
+    ) -> Vec<crate::domain::tools::OutputCapture> {
+        (self.0)(checkpoint, captures).await
+    }
 }
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]

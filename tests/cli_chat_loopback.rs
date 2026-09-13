@@ -1,3 +1,5 @@
+#[path = "cli_chat_cases/ctf_child_checkpoint.rs"]
+mod ctf_child_checkpoint;
 #[path = "cli_chat_cases/ctf_context.rs"]
 mod ctf_context;
 #[path = "cli_chat_cases/ctf_output.rs"]

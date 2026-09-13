@@ -4,14 +4,13 @@ use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 
-use futures_util::future::{Either, select};
 use futures_util::stream::{FuturesUnordered, StreamExt};
 
 use crate::domain::tools::{
     IdempotencyKey, ToolExecutionOutcome, ToolExecutionPlan, ToolFailure, ToolFailureRetryability,
     ToolResult, ToolResultStatus, ToolRetryPolicy, scheduling_conflicts,
 };
-use crate::ports::tool::ToolExecutor;
+use crate::ports::tool::{ToolExecutor, ToolObservationSender};
 
 use super::agent_loop::{AgentLoopError, ToolExecutionStartStage};
 use super::cancellation::AgentCancellation;
@@ -20,7 +19,44 @@ type ActiveFuture<'tools> =
     Pin<Box<dyn Future<Output = (usize, ToolExecutionOutcome)> + Send + 'tools>>;
 
 pub(super) type CompletionStage<'a> =
-    dyn FnMut(&mut ToolExecutionOutcome) -> Result<(), AgentLoopError> + 'a;
+    dyn FnMut(ExecutionCheckpoint<'_>) -> Result<(), AgentLoopError> + 'a;
+
+pub(super) enum ExecutionCheckpoint<'a> {
+    Parent(&'a mut ToolExecutionOutcome),
+    Child(&'a mut SubcommandObservation),
+}
+
+pub(super) struct SubcommandObservation {
+    pub(super) checkpoint: crate::domain::tools::SubcommandCheckpoint,
+    pub(super) captures: Vec<crate::domain::tools::PendingOutputCapture>,
+    acknowledge: tokio::sync::oneshot::Sender<Vec<crate::domain::tools::OutputCapture>>,
+}
+
+fn observation_sender(
+    sender: tokio::sync::mpsc::Sender<SubcommandObservation>,
+) -> ToolObservationSender {
+    ToolObservationSender(std::sync::Arc::new(move |checkpoint, captures| {
+        let sender = sender.clone();
+        Box::pin(async move {
+            let (acknowledge, received) = tokio::sync::oneshot::channel();
+            if sender
+                .send(SubcommandObservation {
+                    checkpoint,
+                    captures,
+                    acknowledge,
+                })
+                .await
+                .is_ok()
+                && let Ok(captures) = received.await
+            {
+                return captures;
+            }
+            // Only the owning scheduler cancels a producer. Channel closure
+            // cannot manufacture a Tool result or launch dependent work.
+            std::future::pending().await
+        })
+    }))
+}
 
 pub(super) struct ScheduledToolBatch {
     pub(super) outcomes: Vec<ScheduledToolResult>,
@@ -45,6 +81,7 @@ pub(super) async fn execute_batch<Tools: ToolExecutor + ?Sized>(
     completed_receipts: &mut BTreeMap<IdempotencyKey, ToolExecutionOutcome>,
     start_stage: &mut Option<&mut ToolExecutionStartStage<'_>>,
     completion_stage: &mut Option<&mut CompletionStage<'_>>,
+    observe_children: bool,
 ) -> Result<ScheduledToolBatch, AgentLoopError> {
     let mut outcomes = (0..plans.len()).map(|_| None).collect::<Vec<_>>();
     let mut followers = vec![Vec::new(); plans.len()];
@@ -67,8 +104,15 @@ pub(super) async fn execute_batch<Tools: ToolExecutor + ?Sized>(
     let mut active = BTreeMap::<usize, ToolExecutionPlan>::new();
     let mut running = FuturesUnordered::<ActiveFuture<'_>>::new();
     let mut cancelled = cancellation.is_cancelled();
+    let (sender, mut observations) = tokio::sync::mpsc::channel(1);
+    let sender = observation_sender(sender);
+    let mut children = Vec::new();
 
     while !cancelled && (!pending.is_empty() || !running.is_empty()) {
+        if cancellation.is_cancelled() {
+            cancelled = true;
+            break;
+        }
         while let Some(position) = pending
             .iter()
             .position(|index| can_start(&plans[*index], active.values()))
@@ -81,7 +125,11 @@ pub(super) async fn execute_batch<Tools: ToolExecutor + ?Sized>(
                 stage(plan);
             }
             active.insert(index, plan.clone());
-            let execution = tools.execute(plan.clone());
+            let execution = if observe_children {
+                tools.execute_observed(plan.clone(), sender.clone())
+            } else {
+                tools.execute(plan.clone())
+            };
             running.push(Box::pin(async move { (index, execution.await) }));
         }
 
@@ -89,12 +137,28 @@ pub(super) async fn execute_batch<Tools: ToolExecutor + ?Sized>(
             break;
         }
 
-        let next_completion = running.next();
-        let wait_for_cancellation = cancellation.wait_for_cancellation();
-        futures_util::pin_mut!(next_completion, wait_for_cancellation);
-        match select(next_completion, wait_for_cancellation).await {
-            Either::Left((Some((index, mut outcome)), _)) => {
+        let completion = tokio::select! {
+            biased;
+            Some(observation) = observations.recv() => {
+                checkpoint_child(observation, completion_stage, &mut children, &active)?;
+                // Check cancellation before polling acknowledged producers;
+                // otherwise that poll could launch the next serial child.
+                cancelled = cancellation.is_cancelled();
+                continue;
+            }
+            _ = cancellation.wait_for_cancellation() => { cancelled = true; continue; }
+            completed = running.next() => completed,
+        };
+        match completion {
+            Some((index, mut outcome)) => {
+                // Polling an executor may enqueue its last observation and
+                // observe its deadline in the same poll. Drain that accepted
+                // fact before reconciling the terminal parent.
+                while let Ok(observation) = observations.try_recv() {
+                    checkpoint_child(observation, completion_stage, &mut children, &active)?;
+                }
                 active.remove(&index);
+                crate::domain::tools::reconcile_subcommands(&children, &mut outcome)?;
                 checkpoint_completion(completion_stage, &mut outcome)?;
                 if outcome.receipt.status != ToolResultStatus::Cancelled
                     && let Some(key) = completion_key(&plans[index])
@@ -110,12 +174,15 @@ pub(super) async fn execute_batch<Tools: ToolExecutor + ?Sized>(
                 }
                 outcomes[index] = Some(ScheduledToolResult::Executed(Box::new(outcome)));
             }
-            Either::Left((None, _)) => break,
-            Either::Right(((), _)) => cancelled = true,
+            None => break,
         }
     }
 
     if cancelled {
+        observations.close();
+        while let Ok(observation) = observations.try_recv() {
+            checkpoint_child(observation, completion_stage, &mut children, &active)?;
+        }
         // Dropping a future does not establish its external effect. Preserve
         // unobserved active executions as unknown, never as synthetic Receipt
         // facts. Pending plans are known not to have crossed the start point.
@@ -171,8 +238,36 @@ fn checkpoint_completion(
     outcome: &mut ToolExecutionOutcome,
 ) -> Result<(), AgentLoopError> {
     if let Some(stage) = completion_stage.as_deref_mut() {
-        stage(outcome)?;
+        stage(ExecutionCheckpoint::Parent(outcome))?;
     }
+    Ok(())
+}
+
+fn checkpoint_child(
+    mut observation: SubcommandObservation,
+    stage: &mut Option<&mut CompletionStage<'_>>,
+    children: &mut Vec<crate::domain::tools::SubcommandCheckpoint>,
+    active: &BTreeMap<usize, ToolExecutionPlan>,
+) -> Result<(), AgentLoopError> {
+    let child = &observation.checkpoint;
+    if !active.values().any(|plan| {
+        plan.execution_id == child.execution_id
+            && plan.plan_fingerprint == child.plan_fingerprint
+            && child.agrees_with_call(&plan.call)
+    }) {
+        return Err(crate::domain::tools::ToolContractError::InvalidSubcommandCheckpoint.into());
+    }
+    child.validate_after(children)?;
+    let Some(stage) = stage.as_deref_mut() else {
+        return Err(AgentLoopError::ToolOutputPublication {
+            message: "child checkpoint has no durable consumer".to_owned(),
+        });
+    };
+    stage(ExecutionCheckpoint::Child(&mut observation))?;
+    children.push(observation.checkpoint.clone());
+    let _ = observation
+        .acknowledge
+        .send(observation.checkpoint.output_captures);
     Ok(())
 }
 

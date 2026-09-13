@@ -23,7 +23,7 @@ If the user explicitly authorizes development sub-agents, every delegated agent 
 
 ## Current Phase
 
-- Architecture v1.13 is the latest locally frozen additive extension over immutable v1 through v1.12. ADR-0023 governs retained process output before Receipt publication; ADR-0022 preserves runtime-local handles and ADR-0021 bounded recovery. R3a1 is merged through #73; R3a2 verification is governed by STATUS. Remote hash seal remains unauthorized.
+- Architecture v1.14 is the latest locally frozen additive extension over immutable v1 through v1.13. ADR-0024 governs observed command child checkpoints; ADR-0023 preserves retained output before Receipt publication. R3a2 is merged through #74; current R3b1 implementation and later R3b2 presentation are governed by STATUS. Remote hash seal remains unauthorized.
 - F4/F5 (#68), F6a (#69), CTF-R1 (#70) and CTF-R2a (#71) are merged. CTF repair-series authorization permits sequential scoped implementation, independent audits, bounded Live and ordinary verified merges; Actions, required-check bypass, force-push, Codex login access and target WP/EXP remain excluded. Current Slice, exact evidence and remaining limits are governed by STATUS. Historical Vision Live does not establish general localization accuracy or full-1M capacity.
 - M5-S2 and F3 are remotely sealed. F4/F5 are locally complete and previously delivered to Draft PR #68 with `[skip ci]`; that delivery authorization is historical, not permission to publish F6a. F5 independent audit, full Gate/Lean Review and bounded development/release Live passed with the recorded coordinate limitation. F6a addresses coordinate-frame admission; complex localization and full-1M capacity remain unverified. Benchmark/non-interactive execution and Actions remain excluded; exact delivery progress is governed by STATUS.
 - M0 through M5-S2, F2a and F3 are complete and remotely sealed; historical evidence and current F5 scope/state are governed by `STATUS.md` and `IMPLEMENTATION_PLAN.md`.
@@ -148,6 +148,7 @@ If these conditions are not met, use REFERENCE or REIMPLEMENT instead of PORT.
 - Pass argv arrays; do not assemble untrusted shell strings inside tool adapters.
 - Preserve Tool Call/Result pairing.
 - Process captures publish via the fixed App stage before Receipt/dedupe/History; missing stores and publication failures are fatal App errors, not rewritten execution errors. Raw Blob references agree with Receipt v2 and do not fabricate Research Artifact provenance. Running Job/PTY output remains volatile; R3a2 terminal retention does not establish R3b partial-child checkpoints.
+- Child command observations cross one bounded fixed Tool/App acknowledgement path: raw publication and a real Session checkpoint precede acknowledgement and dependent child launch. Children are not extra ToolCalls/Receipts/evidence; unknown parent/child effects remain unknown. Resume/Compaction retain one History projection owner. R3b1 durability alone does not establish R3b2 non-blocking progress presentation.
 - Do not auto-retry completed, external-mutation or interactive tool execution.
 - Do not cache nondeterministic or side-effecting results.
 - Do not silently drop unsupported ContentItems or unknown Events.
@@ -185,6 +186,8 @@ Use Mock/Fixture/Replay Providers by default. Live Provider tests must be explic
 Generic Live Smokes select one explicit Config v1 through `CYBER_AGENT_LIVE_CONFIG`; they must not select a Provider endpoint or model through test code or model environment variables.
 
 New behavior requires tests at the narrowest layer plus an integration test when it crosses Ports.
+
+For Port/Adapter changes, include `cargo test --locked --test domain_ports_contract` in affected verification before independent audit. Do not defer dependency-direction validation to the final Gate or weaken the existing forbidden-dependency test.
 
 Permanent regression tests belong under top-level `tests/` and remain on `main`. Production modules under `src/` must not retain inline `#[cfg(test)] mod tests` after the Slice Gate. Temporary inline tests may be used only during uncommitted exploration and must be migrated to `tests/` or removed before completion; discovered regressions must be preserved before removal. Do not widen production APIs only to make tests reachable.
 

@@ -34,12 +34,13 @@ pub struct SessionCompaction {
 impl SessionCompaction {
     pub(super) fn from_history(
         history: &ConversationHistory,
+        normalized: &[ContentItem],
         summary: SessionSummary,
         source_event_sequence: EventSequence,
         requested_recent_items: usize,
     ) -> Result<Self, SessionError> {
         let (retained_from_normalized_history_index, retained_history) =
-            retain_recent_complete_history(history.items(), requested_recent_items)?;
+            retain_recent_complete_history(normalized, requested_recent_items)?;
         Ok(Self {
             schema_version: summary.schema_version(),
             summary,

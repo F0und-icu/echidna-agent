@@ -195,6 +195,7 @@ pub type ToolExecutionReceiptStage<'a> =
 pub(crate) enum ChatDurabilityCheckpoint<'a> {
     History(&'a [ContentItem]),
     ExecutionReceipt(&'a ToolExecutionOutcome),
+    Subcommand(&'a crate::domain::tools::SubcommandCheckpoint),
 }
 
 /// The fixed Chat persistence handoff. The CLI Session owner supplies this
@@ -1368,19 +1369,40 @@ where
 
         let planned_outcome_count = plans.len();
         let scheduled = {
-            let mut checkpoint_receipt = |outcome: &mut ToolExecutionOutcome| {
-                if let Some(publish) = &self.output_publisher {
-                    publish(outcome)?;
-                }
-                if !outcome.pending_captures.is_empty() {
-                    return Err(AgentLoopError::ToolOutputPublication { message: "process capture requires an ArtifactStore; no Receipt or resampling performed".to_owned() });
-                }
-                outcome.receipt.validate_output_captures(&outcome.result)?;
-                if let Some(stage) = durability_stage.as_deref_mut() {
-                    stage(ChatDurabilityCheckpoint::ExecutionReceipt(outcome))?;
-                }
-                Ok(())
-            };
+            let observe_children = durability_stage.is_some();
+            let mut checkpoint_receipt =
+                |checkpoint: super::tool_scheduler::ExecutionCheckpoint<'_>| {
+                    let outcome = match checkpoint {
+                        super::tool_scheduler::ExecutionCheckpoint::Parent(outcome) => outcome,
+                        super::tool_scheduler::ExecutionCheckpoint::Child(observation) => {
+                            let publish = self.output_publisher.as_deref().ok_or_else(|| {
+                                AgentLoopError::ToolOutputPublication {
+                                    message: "child checkpoint requires an ArtifactStore"
+                                        .to_owned(),
+                                }
+                            })?;
+                            observation.checkpoint.output_captures =
+                                publish(&observation.captures)?;
+                            observation.checkpoint.validate()?;
+                            let stage = durability_stage.as_deref_mut().ok_or_else(|| {
+                                AgentLoopError::ToolOutputPublication {
+                                    message: "child checkpoint requires Session durability"
+                                        .to_owned(),
+                                }
+                            })?;
+                            stage(ChatDurabilityCheckpoint::Subcommand(
+                                &observation.checkpoint,
+                            ))?;
+                            return Ok(());
+                        }
+                    };
+                    output_capture::publish_outcome(self.output_publisher.as_deref(), outcome)?;
+                    outcome.receipt.validate_output_captures(&outcome.result)?;
+                    if let Some(stage) = durability_stage.as_deref_mut() {
+                        stage(ChatDurabilityCheckpoint::ExecutionReceipt(outcome))?;
+                    }
+                    Ok(())
+                };
             let mut scheduler_receipt_stage: Option<
                 &mut super::tool_scheduler::CompletionStage<'_>,
             > = Some(&mut checkpoint_receipt);
@@ -1391,6 +1413,7 @@ where
                 &mut self.completed_idempotency,
                 start_stage,
                 &mut scheduler_receipt_stage,
+                observe_children,
             )
             .await?
         };
