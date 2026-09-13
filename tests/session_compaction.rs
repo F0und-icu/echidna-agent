@@ -177,6 +177,7 @@ fn authoritative_session_events_with_receipt(label: &str) -> Vec<EventEnvelope<V
         status: ToolResultStatus::Succeeded,
         exit_reason: None,
         output_artifact_ids: vec![ArtifactId::new(format!("artifact-{label}"))],
+        output_captures: Vec::new(),
         environment_change: None,
         rerun_reason: None,
         cache_source: None,

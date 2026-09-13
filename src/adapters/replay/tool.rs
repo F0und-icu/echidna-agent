@@ -190,7 +190,7 @@ impl ToolExecutor for ReplayToolExecutor {
             let (source_receipt_event_id, source_receipt, _expected_call, source_result) =
                 step.into_parts();
             let source_receipt_for_use = source_receipt.clone();
-            let outcome = match source_result.status {
+            let mut outcome = match source_result.status {
                 ToolResultStatus::Succeeded => {
                     ToolExecutionOutcome::succeeded(plan, source_result.output)
                 }
@@ -209,6 +209,7 @@ impl ToolExecutor for ReplayToolExecutor {
                     source_result.output,
                 ),
             };
+            outcome.receipt.output_captures = source_receipt_for_use.output_captures.clone();
             self.state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)

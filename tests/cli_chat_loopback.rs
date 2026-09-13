@@ -1,5 +1,7 @@
 #[path = "cli_chat_cases/ctf_context.rs"]
 mod ctf_context;
+#[path = "cli_chat_cases/ctf_output.rs"]
+mod ctf_output;
 #[path = "cli_chat_cases/ctf_recovery.rs"]
 mod ctf_recovery;
 #[path = "cli_chat_cases/ctf_resume.rs"]

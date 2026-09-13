@@ -8,6 +8,10 @@ use crate::domain::artifacts::BlobId;
 
 #[derive(Debug, Error)]
 pub(crate) enum LocalArtifactStoreError {
+    #[error(
+        "output Blob range unavailable: offset={offset}, stored size={size}; maximum capture is 1 MiB"
+    )]
+    OutputRange { offset: u64, size: u64 },
     #[error("inspect Artifact source `{path}`: {source}")]
     SourceInspect {
         path: PathBuf,

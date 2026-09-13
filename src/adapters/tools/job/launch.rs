@@ -115,10 +115,10 @@ pub(in crate::adapters::tools) async fn execute_start(
     };
 
     let stdout_buffer = Arc::new(Mutex::new(CapturedOutput::new(
-        plan.output_policy.max_bytes / 2,
+        crate::domain::tools::MAX_CAPTURE_STREAM_BYTES,
     )));
     let stderr_buffer = Arc::new(Mutex::new(CapturedOutput::new(
-        plan.output_policy.max_bytes / 2,
+        crate::domain::tools::MAX_CAPTURE_STREAM_BYTES,
     )));
     let stdin = Arc::new(AsyncMutex::new(stdin));
     let (stop, stop_receiver) = oneshot::channel();

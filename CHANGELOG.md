@@ -7,6 +7,12 @@ milestone history remains in `docs/development/STATUS.md` and Git history.
 
 ### Fixed
 
+- CTF-R3a2: process previews are separate from bounded raw
+  byte retention. Receipt v2 and ToolResult carry matching Blob references;
+  `read_output` supports exact bounded binary readback. Publication failures
+  stop before Receipt/history/resampling, without execution retry. Running or
+  unobserved interrupted executions are not claimed durable by terminal capture.
+
 - CTF-R3a1: Job/PTY handles use runtime-local opaque namespaces and checked
   sequences, preventing stale bare-counter handles from controlling new processes.
   History and Tool argument schemas are unchanged; output/partial-batch durability

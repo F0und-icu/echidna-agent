@@ -95,8 +95,10 @@ pub(in crate::adapters::tools) async fn execute_poll(
             job.completion.clone(),
         )
     };
-    let stdout = lock_captured_output(&snapshot.1).slice_after_offset(arguments.stdout_offset);
-    let stderr = lock_captured_output(&snapshot.2).slice_after_offset(arguments.stderr_offset);
+    let stdout = lock_captured_output(&snapshot.1)
+        .slice_after_offset(arguments.stdout_offset, plan.output_policy.max_bytes / 2);
+    let stderr = lock_captured_output(&snapshot.2)
+        .slice_after_offset(arguments.stderr_offset, plan.output_policy.max_bytes / 2);
     let (stdout, stderr) = match (stdout, stderr) {
         (Ok(stdout), Ok(stderr)) => (stdout, stderr),
         (stdout, stderr) => {
@@ -111,7 +113,7 @@ pub(in crate::adapters::tools) async fn execute_poll(
             );
         }
     };
-    ToolExecutionOutcome::succeeded(
+    let mut outcome = ToolExecutionOutcome::succeeded(
         plan,
         json!({
             "job_id": arguments.job_id,
@@ -120,7 +122,26 @@ pub(in crate::adapters::tools) async fn execute_poll(
             "stderr": stderr,
             "completion": snapshot.3,
         }),
-    )
+    );
+    if snapshot.3.is_some() {
+        outcome.pending_captures = terminal_captures(jobs, &arguments.job_id);
+    }
+    outcome
+}
+
+fn terminal_captures(
+    jobs: &BackgroundJobs,
+    id: &JobId,
+) -> Vec<crate::domain::tools::PendingOutputCapture> {
+    use crate::domain::tools::OutputStream;
+    let table = lock_table(&jobs.jobs);
+    let Some(job) = table.entries.get(id).filter(|job| job.completion.is_some()) else {
+        return Vec::new();
+    };
+    vec![
+        lock_captured_output(&job.stdout).capture(OutputStream::Stdout, None),
+        lock_captured_output(&job.stderr).capture(OutputStream::Stderr, None),
+    ]
 }
 
 pub(in crate::adapters::tools) async fn execute_input(
@@ -192,7 +213,9 @@ pub(in crate::adapters::tools) async fn execute_stop(
             return unknown_job(plan, &arguments.job_id);
         };
         if let Some(completion) = job.completion.clone() {
-            return terminal_outcome(plan, &arguments.job_id, job.status, completion, true);
+            let status = job.status;
+            drop(table);
+            return terminal_outcome(jobs, plan, &arguments.job_id, status, completion, true);
         }
         let terminal = job.terminal_receiver();
         let stop = job.request_stop();
@@ -217,7 +240,7 @@ pub(in crate::adapters::tools) async fn execute_stop(
             }),
         );
     };
-    terminal_outcome(plan, &arguments.job_id, status, completion, false)
+    terminal_outcome(jobs, plan, &arguments.job_id, status, completion, false)
 }
 
 /// Wait for the supervisor's one terminal publication without polling or
@@ -248,13 +271,14 @@ async fn wait_for_terminal(
 }
 
 fn terminal_outcome(
+    jobs: &BackgroundJobs,
     plan: ToolExecutionPlan,
     job_id: &JobId,
     status: JobStatus,
     completion: crate::domain::tools::JobCompletion,
     already_terminal: bool,
 ) -> ToolExecutionOutcome {
-    ToolExecutionOutcome::succeeded(
+    let mut outcome = ToolExecutionOutcome::succeeded(
         plan,
         json!({
             "job_id": job_id,
@@ -262,7 +286,9 @@ fn terminal_outcome(
             "completion": completion,
             "already_terminal": already_terminal,
         }),
-    )
+    );
+    outcome.pending_captures = terminal_captures(jobs, job_id);
+    outcome
 }
 
 fn unknown_job(plan: ToolExecutionPlan, job_id: &JobId) -> ToolExecutionOutcome {

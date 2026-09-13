@@ -2,6 +2,7 @@
 
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use crate::domain::tools::{OutputStream, PendingOutputCapture};
 use serde_json::{Value, json};
 
 pub(super) struct BoundedText {
@@ -37,6 +38,8 @@ pub(super) struct CapturedOutput {
     truncated: bool,
     read_error: Option<String>,
     sealed: bool,
+    observed_bytes: u64,
+    eof: bool,
 }
 
 impl CapturedOutput {
@@ -47,6 +50,8 @@ impl CapturedOutput {
             truncated: false,
             read_error: None,
             sealed: false,
+            observed_bytes: 0,
+            eof: false,
         }
     }
 
@@ -54,6 +59,7 @@ impl CapturedOutput {
         if self.sealed {
             return;
         }
+        self.observed_bytes = self.observed_bytes.saturating_add(bytes.len() as u64);
         let available = self.limit.saturating_sub(self.bytes.len());
         let captured = available.min(bytes.len());
         self.bytes.extend_from_slice(&bytes[..captured]);
@@ -70,6 +76,45 @@ impl CapturedOutput {
     /// handle, but it can no longer mutate output after terminal publication.
     pub(super) fn seal(&mut self) {
         self.sealed = true;
+        self.eof = self.read_error.is_none();
+    }
+
+    pub(super) fn capture(
+        &self,
+        stream: OutputStream,
+        child_index: Option<u8>,
+    ) -> PendingOutputCapture {
+        PendingOutputCapture {
+            stream,
+            child_index,
+            bytes: self.bytes.clone(),
+            observed_bytes: self.observed_bytes,
+            eof: self.eof,
+            read_error: self.read_error.clone(),
+        }
+    }
+
+    /// The tail is from the retained prefix, never from beyond the raw ceiling.
+    pub(super) fn preview(&self, limit: usize) -> BoundedText {
+        let mut view = bounded_text(&self.bytes, limit);
+        if view.truncated && limit >= 64 {
+            let marker = "\n[...retained prefix...]\n";
+            let side = ((limit - marker.len()) / 2).min(self.bytes.len());
+            let tail = String::from_utf8_lossy(&self.bytes[self.bytes.len() - side..]);
+            let mut start = tail.len().saturating_sub(side);
+            while !tail.is_char_boundary(start) {
+                start += 1;
+            }
+            view.text = format!(
+                "{}{}{}",
+                bounded_text(&self.bytes[..side], side).text,
+                marker,
+                &tail[start..]
+            );
+        }
+        view.original_bytes = usize::try_from(self.observed_bytes).unwrap_or(usize::MAX);
+        view.truncated |= self.truncated || self.observed_bytes > limit as u64;
+        view
     }
 
     /// Makes a bounded capture failure visible to callers. The underlying
@@ -82,7 +127,11 @@ impl CapturedOutput {
         }
     }
 
-    pub(super) fn slice_after_offset(&self, offset: u64) -> Result<Value, OffsetError> {
+    pub(super) fn slice_after_offset(
+        &self,
+        offset: u64,
+        max_bytes: usize,
+    ) -> Result<Value, OffsetError> {
         let offset = usize::try_from(offset).map_err(|_| OffsetError {
             requested: offset,
             available: self.bytes.len(),
@@ -108,11 +157,20 @@ impl CapturedOutput {
                 reason: "offset_not_utf8_boundary",
             });
         }
+        let mut end = available.min(offset.saturating_add(max_bytes));
+        if let Some(valid_end) = utf8_prefix {
+            let text =
+                std::str::from_utf8(&self.bytes[..valid_end]).expect("validated UTF8 prefix");
+            while end > offset && !text.is_char_boundary(end) {
+                end -= 1;
+            }
+        }
+        let data = bounded_text(&self.bytes[offset..end], max_bytes);
         Ok(json!({
             "offset": offset,
-            "next_offset": available,
-            "data": String::from_utf8_lossy(&self.bytes[offset..available]),
-            "truncated": self.truncated,
+            "next_offset": end,
+            "data": data.text,
+            "truncated": self.truncated || end < available || data.truncated,
             "read_error": self.read_error,
         }))
     }

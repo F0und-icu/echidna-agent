@@ -1095,6 +1095,8 @@ R2a 本地收口：专项/受影响回归、全新 Terra xhigh 独立审计及 t
 
 #### CTF-R2b：有界请求与显式交互恢复
 
+当前 R3a1 已通过 #73 普通合并。R3a2 按 ADR-0023/v1.13 契约先行，现已完成独立审计及覆盖补强复审、完整 Gate（458通过/2 Live跳过）、release CLI2项和 Lean；待授权范围内的远端交付。分离原始捕获与预览，App 在 Receipt 前发布有界 Blob，严格 v1→v2 收据兼容及配对引用，提供精确字节回读；不以终态输出替代 R3b 子项检查点。准确状态见 STATUS 顶部。
+
 后续 R3a 按有限审计边界拆成 R3a1 运行句柄身份（ADR-0022/v1.12）和 R3a2 原始输出保留及执行后持久化失败路径。先移除 Job/PTY 两份裸序号句柄；输出 Blob/子命令耐久性不能以该身份修复替代。完整当前 Scope Lock 见 STATUS；R3a2 仍需契约先行，再进入 R3b。
 
 从已合并 R2a main 开始，先接受 ADR-0021 / Architecture v1.11。Config v1 唯一路径添加可选 runtime 请求额度（默认32，1..=10000），共享 Primary/Vision 的保守 admission counter，不把它伪装成服务端 usage。App 对 paired/durable typed stop 分类；CLI 返回输入但必须显式 `/resume` 后才能提交新任务，沿用原 Session/Compaction 校验和新 ProviderSession，不自动丢 reasoning、重发旧输入、重试工具或压缩。完整范围和反例测试见 STATUS 与 ADR；与 R3 输出/执行耐久增量分开验收。

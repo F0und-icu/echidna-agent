@@ -40,6 +40,9 @@ use futures_core::Stream;
 use futures_util::stream;
 use serde_json::{Value, json};
 
+#[path = "tool_loop_cases/output_retention.rs"]
+mod output_retention;
+
 static NEXT_PROJECT_ID: AtomicU64 = AtomicU64::new(1);
 
 struct TestProject {

@@ -12,6 +12,7 @@ mod memory;
 mod output;
 mod process_identity;
 mod pty;
+mod read_output;
 mod research;
 mod resources;
 mod search;
@@ -49,6 +50,7 @@ enum BuiltinTool {
     WriteFile,
     ApplyPatch,
     RunCommand,
+    ReadOutput,
     RunCommands,
     StartJob,
     PollJob,
@@ -90,6 +92,7 @@ impl ToolRegistry {
             (ToolName::new("write_file"), BuiltinTool::WriteFile),
             (ToolName::new("apply_patch"), BuiltinTool::ApplyPatch),
             (ToolName::new("run_command"), BuiltinTool::RunCommand),
+            (ToolName::new("read_output"), BuiltinTool::ReadOutput),
             (ToolName::new("run_commands"), BuiltinTool::RunCommands),
             (ToolName::new("start_job"), BuiltinTool::StartJob),
             (ToolName::new("poll_job"), BuiltinTool::PollJob),
@@ -133,6 +136,17 @@ impl ToolRegistry {
 
     fn canonical_spec(name: &ToolName, tool: BuiltinTool) -> ToolSpec {
         let mut builtin_spec = tool.spec();
+        if matches!(
+            tool,
+            BuiltinTool::RunCommand
+                | BuiltinTool::RunCommands
+                | BuiltinTool::PollJob
+                | BuiltinTool::StopJob
+                | BuiltinTool::PollPty
+                | BuiltinTool::StopPty
+        ) {
+            builtin_spec.version = "2".to_owned();
+        }
         debug_assert_eq!(&builtin_spec.name, name);
         builtin_spec.exposure = tool.default_exposure();
         builtin_spec
@@ -329,6 +343,7 @@ impl BuiltinTool {
             | Self::ResearchUpdate
             | Self::ToolSearch => ToolExposure::Direct,
             Self::WriteFile
+            | Self::ReadOutput
             | Self::StartJob
             | Self::PollJob
             | Self::InputJob
@@ -359,6 +374,7 @@ impl BuiltinTool {
             Self::WriteFile => file_write::normalize_write_file(project_root, arguments),
             Self::ApplyPatch => file_write::normalize_apply_patch(project_root, arguments),
             Self::RunCommand => command::normalize_one(project_root, arguments),
+            Self::ReadOutput => read_output::normalize(arguments),
             Self::RunCommands => command::normalize_batch(project_root, arguments),
             Self::StartJob => job::normalize_start(project_root, arguments),
             Self::PollJob => job::normalize_poll(arguments),
@@ -399,6 +415,7 @@ impl BuiltinTool {
             Self::WriteFile => file_write::execute_write_file(project_root, plan).await,
             Self::ApplyPatch => file_write::execute_apply_patch(project_root, plan).await,
             Self::RunCommand => command::execute_one(project_root, plan).await,
+            Self::ReadOutput => read_output::execute(project_root, plan).await,
             Self::RunCommands => command::execute_batch(project_root, plan).await,
             Self::StartJob => job::execute_start(project_root, jobs, active_leases, plan).await,
             Self::PollJob => job::execute_poll(jobs, plan).await,
@@ -539,6 +556,17 @@ impl BuiltinTool {
                 ToolRetryPolicy::NeverAutoRetry,
                 ToolDeterminism::EnvironmentDependent,
                 30_000,
+            ),
+            Self::ReadOutput => spec(
+                "read_output",
+                read_output::input_schema(),
+                read_output::output_schema(),
+                ToolParallelism::Parallel,
+                None,
+                ToolEffect::ReadOnly,
+                ToolRetryPolicy::ReplaySafe,
+                ToolDeterminism::EnvironmentDependent,
+                5_000,
             ),
             Self::RunCommand => spec(
                 "run_command",
@@ -906,7 +934,7 @@ impl BuiltinTool {
             "required": ["offset", "next_offset", "data", "truncated", "read_error"],
             "additionalProperties": false
         });
-        match self {
+        let mut schema = match self {
             Self::ReadFile => read_file_output_schema(),
             Self::ReadFiles => json!({
                 "type": "object",
@@ -1003,7 +1031,19 @@ impl BuiltinTool {
                 "type": "object", "properties": {"status": {"type": "string"}, "event_appended": boolean, "event_id": {"type": "string"}, "message": {"type": "string"}},
                 "additionalProperties": false
             }),
+        };
+        if matches!(
+            self,
+            Self::RunCommand
+                | Self::RunCommands
+                | Self::PollJob
+                | Self::StopJob
+                | Self::PollPty
+                | Self::StopPty
+        ) {
+            schema["properties"]["output_captures"] = crate::domain::tools::capture_schema();
         }
+        schema
     }
 }
 
@@ -1161,6 +1201,7 @@ fn canonical_description(name: &str) -> String {
         "write_file" => "one atomic expected-hash file replacement",
         "apply_patch" => "one validated file patch",
         "run_command" => "one bounded local command",
+        "read_output" => "reading a retained process-output Blob beyond its preview",
         "run_commands" => "independent bounded commands",
         "start_job" => "long non-interactive work",
         "poll_job" => "new Job output or completion",
@@ -1214,10 +1255,15 @@ fn canonical_description(name: &str) -> String {
             "a verified preimage.",
             "a file mutation.",
         ),
+        "read_output" => (
+            "a current file or running Job/PTY output is needed.",
+            "the exact output_captures Blob ID and byte offset; do not rerun a completed command for truncated output.",
+            "a bounded text view and exact base64 bytes; raw capture is not verified evidence.",
+        ),
         "run_command" => (
             "a batch or interactive terminal is needed.",
             "argv, not a shell string.",
-            "output and truncation.",
+            "bounded lossy retained-prefix head/tail preview; output_captures contains durable raw Blob refs for read_output after publication.",
         ),
         "run_commands" => (
             "one command or dependent ordering is needed.",

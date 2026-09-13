@@ -2,6 +2,7 @@
 
 mod compaction;
 mod context_state;
+mod output_capture;
 mod recovery;
 mod request_audit;
 
@@ -269,6 +270,7 @@ impl StreamingStages<'_> {
 pub struct AgentLoop<'provider, 'tools, Provider: ?Sized, Tools: ?Sized> {
     provider: &'provider Provider,
     tools: &'tools Tools,
+    output_publisher: Option<Box<output_capture::OutputPublisher<'tools>>>,
     prompt_composition: PromptComposition,
     pending_prompt_composition: Option<PromptComposition>,
     world_state: Option<ResearchWorldState>,
@@ -366,6 +368,7 @@ where
             provider,
             tools,
             prompt_composition,
+            output_publisher: None,
             pending_prompt_composition: None,
             world_state: None,
             project_snapshot: None,
@@ -1365,14 +1368,22 @@ where
 
         let planned_outcome_count = plans.len();
         let scheduled = {
-            let mut checkpoint_receipt = |outcome: &ToolExecutionOutcome| {
+            let mut checkpoint_receipt = |outcome: &mut ToolExecutionOutcome| {
+                if let Some(publish) = &self.output_publisher {
+                    publish(outcome)?;
+                }
+                if !outcome.pending_captures.is_empty() {
+                    return Err(AgentLoopError::ToolOutputPublication { message: "process capture requires an ArtifactStore; no Receipt or resampling performed".to_owned() });
+                }
+                outcome.receipt.validate_output_captures(&outcome.result)?;
                 if let Some(stage) = durability_stage.as_deref_mut() {
                     stage(ChatDurabilityCheckpoint::ExecutionReceipt(outcome))?;
                 }
                 Ok(())
             };
-            let mut scheduler_receipt_stage: Option<&mut ToolExecutionReceiptStage<'_>> =
-                Some(&mut checkpoint_receipt);
+            let mut scheduler_receipt_stage: Option<
+                &mut super::tool_scheduler::CompletionStage<'_>,
+            > = Some(&mut checkpoint_receipt);
             execute_batch(
                 self.tools,
                 plans,
@@ -1607,6 +1618,8 @@ pub enum ContinuationRejection {
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum AgentLoopError {
+    #[error("Tool output persistence failed: {message}; execution is not retried")]
+    ToolOutputPublication { message: String },
     #[error(transparent)]
     Model(#[from] ModelStreamingError),
     #[error(transparent)]

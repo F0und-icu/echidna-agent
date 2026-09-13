@@ -10,10 +10,16 @@ use thiserror::Error;
 use super::artifacts::ArtifactId;
 use super::events::{EventId, StreamId};
 
+mod capture;
 mod failure;
 mod resolution;
 mod resource;
 
+pub(crate) use capture::{
+    MAX_CAPTURE_EXECUTION_BYTES, MAX_CAPTURE_STREAM_BYTES, PendingOutputCapture, capture_schema,
+    validate_captures,
+};
+pub use capture::{OutputCapture, OutputStream};
 pub(crate) use failure::{ToolFailure, ToolFailureRetryability};
 pub use resolution::{DeferredActivationSet, ResolvedToolPlan};
 pub use resource::ResourceKey;
@@ -513,6 +519,8 @@ pub struct ExecutionReceipt {
     pub status: ToolResultStatus,
     pub exit_reason: Option<String>,
     pub output_artifact_ids: Vec<ArtifactId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output_captures: Vec<OutputCapture>,
     pub environment_change: Option<String>,
     #[serde(default)]
     pub rerun_reason: Option<RerunReason>,
@@ -543,7 +551,7 @@ pub(crate) struct ExecutionReceiptEventPayload {
 }
 
 impl ExecutionReceiptEventPayload {
-    const CURRENT_SCHEMA_VERSION: u16 = 1;
+    const CURRENT_SCHEMA_VERSION: u16 = 2;
 
     pub(crate) fn current(receipt: ExecutionReceipt) -> Self {
         Self {
@@ -557,6 +565,16 @@ impl ExecutionReceiptEventPayload {
     pub(crate) fn decode_current(
         value: Value,
     ) -> Result<ExecutionReceipt, ExecutionReceiptPayloadError> {
+        let mut value = value;
+        // A chained v1 -> v2 upcast preserves legacy absence, not guessed bytes.
+        if value.get("schema_version").and_then(Value::as_u64) == Some(1) {
+            if value.pointer("/receipt/output_captures").is_some() {
+                return Err(ExecutionReceiptPayloadError::Malformed {
+                    message: "v1 receipt cannot contain v2 output captures".to_owned(),
+                });
+            }
+            value["schema_version"] = Value::from(2);
+        }
         let payload: Self = serde_json::from_value(value).map_err(|error| {
             ExecutionReceiptPayloadError::Malformed {
                 message: error.to_string(),
@@ -567,6 +585,11 @@ impl ExecutionReceiptEventPayload {
                 schema_version: payload.schema_version,
             });
         }
+        validate_captures(&payload.receipt.output_captures).map_err(|error| {
+            ExecutionReceiptPayloadError::Malformed {
+                message: error.to_string(),
+            }
+        })?;
         Ok(payload.receipt)
     }
 }
@@ -643,6 +666,8 @@ pub struct PtySessionCompletion {
 pub struct ToolExecutionOutcome {
     pub receipt: ExecutionReceipt,
     pub result: ToolResult,
+    #[serde(skip)]
+    pub(crate) pending_captures: Vec<PendingOutputCapture>,
 }
 
 impl ToolExecutionOutcome {
@@ -726,6 +751,7 @@ impl ToolExecutionOutcome {
     pub(crate) fn deduplicated_for(plan: &ToolExecutionPlan, source: &Self) -> Self {
         Self {
             receipt: source.receipt.clone(),
+            pending_captures: Vec::new(),
             result: ToolResult {
                 call_id: plan.call.call_id.clone(),
                 tool_name: plan.call.name.clone(),
@@ -759,13 +785,18 @@ impl ToolExecutionOutcome {
             status,
             exit_reason,
             output_artifact_ids: Vec::new(),
+            output_captures: Vec::new(),
             environment_change: None,
             rerun_reason: plan.rerun_reason,
             cache_source: None,
             cache_validation: None,
             file_mutations: Vec::new(),
         };
-        Self { receipt, result }
+        Self {
+            receipt,
+            result,
+            pending_captures: Vec::new(),
+        }
     }
 }
 
@@ -781,6 +812,8 @@ fn tool_failure_message(output: &Value, fallback_code: &str) -> String {
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum ToolContractError {
+    #[error("invalid process output capture or Receipt/Result capture mismatch")]
+    InvalidOutputCapture,
     #[error("failed to encode a stable Tool fingerprint: {message}")]
     Fingerprint { message: String },
     #[error("invalid Tool execution control: {message}")]

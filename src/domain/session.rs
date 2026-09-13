@@ -717,6 +717,21 @@ fn apply_session_event(
                 "session.history_item_recorded",
                 SessionLifecycle::Active,
             )?;
+            if let ContentItem::ToolResult { result } = &item {
+                let execution_id = super::tools::ExecutionId::for_model_call(&result.call_id);
+                if let Some(record) = state
+                    .execution_receipts
+                    .iter()
+                    .find(|record| record.receipt.execution_id == execution_id)
+                {
+                    record
+                        .receipt
+                        .validate_output_captures(result)
+                        .map_err(|_| SessionError::OutputCaptureMismatch)?;
+                } else if result.output.get("output_captures").is_some() {
+                    return Err(SessionError::OutputCaptureMismatch);
+                }
+            }
             state.history.append_content_item(item)?;
             state.history_event_ids.push(event_id.clone());
             if state.latest_compaction.is_some() {
@@ -1190,6 +1205,8 @@ impl ResearchPhaseSelectedPayload {
 /// Explicit Session schema, stream, payload and transition failures.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum SessionError {
+    #[error("Session Tool output captures lack a matching prior Receipt or disagree with it")]
+    OutputCaptureMismatch,
     #[error(transparent)]
     Event(#[from] EventError),
     #[error(transparent)]

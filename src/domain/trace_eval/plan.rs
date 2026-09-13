@@ -134,6 +134,9 @@ impl TraceReplayToolStep {
         if source_result.status != source_receipt.status {
             return Err(TraceReplayPlanError::SourceReceiptStatusMismatch);
         }
+        source_receipt
+            .validate_output_captures(&source_result)
+            .map_err(|_| TraceReplayPlanError::SourceOutputCaptureMismatch)?;
         Ok(Self {
             source_receipt_event_id,
             source_receipt,
@@ -199,6 +202,8 @@ impl TraceReplayPlan {
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum TraceReplayPlanError {
+    #[error("Replay Tool output captures disagree with its source Receipt")]
+    SourceOutputCaptureMismatch,
     #[error("a Replay semantic sample has no text or Tool Call output")]
     ModelStepHasNoSemanticOutput,
     #[error("a Replay Tool step has an empty required field")]

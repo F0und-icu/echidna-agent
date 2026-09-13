@@ -112,7 +112,7 @@ pub(in crate::adapters::tools) async fn execute_start(
     };
     let (mut spawned, active_lease) = spawned;
     let output = Arc::new(Mutex::new(CapturedOutput::new(
-        plan.output_policy.max_bytes,
+        crate::domain::tools::MAX_CAPTURE_STREAM_BYTES,
     )));
     let (reader_done_sender, reader_done_receiver) = mpsc::channel();
     spawn_reader(

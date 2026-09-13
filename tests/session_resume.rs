@@ -53,6 +53,110 @@ fn session_started(sequence: u64) -> EventEnvelope<Value> {
 }
 
 #[test]
+fn output_capture_receipts_upcast_legacy_and_reject_corrupt_v2_or_unpaired_refs() {
+    let receipt = json!({"execution_id":"execution:capture","plan_fingerprint":"plan","status":"succeeded",
+        "exit_reason":null,"output_artifact_ids":[],"environment_change":null});
+    let capture = json!({"stream":"stdout","child_index":null,"blob_id":"a".repeat(64),
+        "observed_bytes":4,"retained_bytes":4,"eof":true,"complete":true,"read_error":null});
+    let reducer = SessionReducer;
+    let mut legacy = SessionState::default();
+    reducer.apply(&mut legacy, session_started(1)).unwrap();
+    reducer
+        .apply(
+            &mut legacy,
+            event(
+                "legacy",
+                2,
+                "tool.execution_receipt_recorded",
+                json!({"schema_version":1,"receipt":receipt}),
+            ),
+        )
+        .unwrap();
+    assert_eq!(legacy.execution_receipt_count(), 1);
+    for kind in [
+        "valid",
+        "legacy-smuggle",
+        "bad-completeness",
+        "oversized",
+        "duplicate",
+        "future",
+    ] {
+        let mut payload = json!({"schema_version":2,"receipt":receipt});
+        payload["receipt"]["output_captures"] = json!([capture]);
+        match kind {
+            "legacy-smuggle" => payload["schema_version"] = json!(1),
+            "bad-completeness" => payload["receipt"]["output_captures"][0]["eof"] = json!(false),
+            "oversized" => {
+                payload["receipt"]["output_captures"][0]["retained_bytes"] = json!(1048577)
+            }
+            "duplicate" => payload["receipt"]["output_captures"] = json!([capture, capture]),
+            "future" => payload["schema_version"] = json!(3),
+            _ => (),
+        }
+        let mut state = SessionState::default();
+        reducer.apply(&mut state, session_started(1)).unwrap();
+        let before = state.clone();
+        let result = reducer.apply(
+            &mut state,
+            event("capture", 2, "tool.execution_receipt_recorded", payload),
+        );
+        if kind != "valid" {
+            assert!(result.is_err(), "{kind}");
+            assert_eq!(state, before);
+            continue;
+        }
+        result.unwrap();
+        let call = ToolCall::new(
+            ToolCallId::new("capture"),
+            ToolName::new("run_command"),
+            json!({"argv":["true"]}),
+        );
+        let item = ContentItem::ToolCall { call };
+        reducer
+            .apply(
+                &mut state,
+                event(
+                    "call",
+                    3,
+                    "session.history_item_recorded",
+                    json!({"schema_version":1,"item":item}),
+                ),
+            )
+            .unwrap();
+        let base = state.clone();
+        for refs in [None, Some(json!([])), Some(json!([capture]))] {
+            let mut output = json!({});
+            if let Some(refs) = refs {
+                output["output_captures"] = refs;
+            }
+            let valid = output["output_captures"] == json!([capture]);
+            let item = ContentItem::ToolResult {
+                result: ToolResult {
+                    call_id: ToolCallId::new("capture"),
+                    tool_name: ToolName::new("run_command"),
+                    status: ToolResultStatus::Succeeded,
+                    output,
+                },
+            };
+            let mut candidate = base.clone();
+            let result = reducer.apply(
+                &mut candidate,
+                event(
+                    "result",
+                    4,
+                    "session.history_item_recorded",
+                    json!({"schema_version":1,"item":item}),
+                ),
+            );
+            assert_eq!(result.is_ok(), valid);
+            if !valid {
+                assert_eq!(candidate, base);
+            }
+        }
+    }
+}
+
+#[test]
 fn session_reducer_rejects_unknown_schema_and_illegal_transitions_without_mutating_state() {
     let reducer = SessionReducer;
     let mut state = SessionState::default();
@@ -190,7 +294,7 @@ fn session_reducer_rejects_unknown_schema_and_illegal_transitions_without_mutati
                 2,
                 "tool.execution_receipt_recorded",
                 json!({
-                    "schema_version": 2,
+                    "schema_version": 3,
                     "receipt": {
                         "execution_id": "execution-unsupported",
                         "plan_fingerprint": "fingerprint",
@@ -203,7 +307,7 @@ fn session_reducer_rejects_unknown_schema_and_illegal_transitions_without_mutati
             )
         ),
         Err(SessionError::UnsupportedPayloadSchema {
-            schema_version: 2,
+            schema_version: 3,
             ..
         })
     ));

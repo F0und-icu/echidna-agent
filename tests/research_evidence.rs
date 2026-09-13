@@ -193,6 +193,7 @@ fn append_receipt_to_session(project: &Project, session: &str, event_id: &str, e
             status: ToolResultStatus::Succeeded,
             exit_reason: None,
             output_artifact_ids: Vec::new(),
+            output_captures: Vec::new(),
             environment_change: None,
             rerun_reason: None,
             cache_source: None,

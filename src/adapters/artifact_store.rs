@@ -57,6 +57,50 @@ impl ArtifactStore for LocalArtifactStore {
 }
 
 impl LocalArtifactStore {
+    /// Verifies immutable bytes while retaining only a bounded readback range.
+    pub(crate) fn read_output_range(
+        &self,
+        blob_id: &BlobId,
+        offset: u64,
+        limit: usize,
+    ) -> Result<(Vec<u8>, u64), LocalArtifactStoreError> {
+        self.inspect_blob_directory()?;
+        let path = self.blob_directory().join(blob_id.as_str());
+        let file = open_regular_existing_blob(&path)?;
+        let size = file
+            .metadata()
+            .map_err(|source| LocalArtifactStoreError::ExistingBlobInspect {
+                path: path.clone(),
+                source,
+            })?
+            .len();
+        if size > crate::domain::tools::MAX_CAPTURE_STREAM_BYTES as u64 || offset > size {
+            return Err(LocalArtifactStoreError::OutputRange { offset, size });
+        }
+        let mut position = 0u64;
+        let end = offset.saturating_add(limit as u64);
+        let mut bytes = Vec::new();
+        // Also bound reads if a concurrent writer grows the opened file after
+        // metadata inspection. The extra byte makes growth an integrity error.
+        let mut file = file.take(crate::domain::tools::MAX_CAPTURE_STREAM_BYTES as u64 + 1);
+        let (actual_blob_id, actual_size) = hash_open_existing_blob(&path, &mut file, |chunk| {
+            let chunk_end = position.saturating_add(chunk.len() as u64);
+            if offset < chunk_end && end > position {
+                let start = offset.saturating_sub(position) as usize;
+                let stop = end.saturating_sub(position).min(chunk.len() as u64) as usize;
+                bytes.extend_from_slice(&chunk[start..stop]);
+            }
+            position = chunk_end;
+        })?;
+        if actual_blob_id != *blob_id || actual_size != size {
+            return Err(LocalArtifactStoreError::ExistingBlobConflict {
+                path,
+                blob_id: blob_id.clone(),
+            });
+        }
+        Ok((bytes, size))
+    }
+
     /// Reads a previously published Blob only after revalidating its immutable
     /// SHA-256 identity. Memory revision diffs use this narrow local helper;
     /// it does not create a new Artifact or cache entry.
@@ -346,7 +390,7 @@ fn hash_existing_blob(path: &Path) -> Result<(BlobId, u64), LocalArtifactStoreEr
 
 fn hash_open_existing_blob(
     path: &Path,
-    file: &mut File,
+    file: &mut impl Read,
     mut collect: impl FnMut(&[u8]),
 ) -> Result<(BlobId, u64), LocalArtifactStoreError> {
     let mut hasher = Sha256::new();

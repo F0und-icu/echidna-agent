@@ -81,6 +81,7 @@ pub(crate) async fn run(
         provider_session.clone(),
     )?
     .with_fragment_cache(Arc::new(LocalFragmentCache::for_project(&session.project)))
+    .with_output_store(LocalArtifactStore::for_project(&session.project))
     .with_domain_profile(domain);
     agent.queue_agent_model_profile(composition.agent_profile().clone())?;
     if disposition == SessionDisposition::Resumed {

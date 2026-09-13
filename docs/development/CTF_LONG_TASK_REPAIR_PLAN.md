@@ -94,6 +94,8 @@ L1/L2 仍用第 11 节的固定上限与隔离要求。凭据只从显式 Cyber 
 
 ### R3a 原始输出与 Job 身份
 
+R3a1 已由 #73 合并。R3a2 按已接受 ADR-0023/v1.13 完成本地审计/Gate/release/Lean：单流1 MiB、单前台批次8 MiB 静态分配，原始字节与预览分离，App 固定 Receipt 前发布，v2 收据引用/兼容和 read_output 回读。准确交付状态见 STATUS。限制是每执行保留上限，不是项目累计磁盘配额；运行中和未观察到的执行仍不承诺耐久，R3b 必须单独验收。
+
 执行拆分：R3a1 先按 ADR-0022/v1.12 完成 Job/PTY 运行身份隔离，独立验收与交付；R3a2 再落实输出 Blob/完整性/限额及执行后持久化失败边界，契约定稿后编码。这样避免把纯句柄修复、输出 Schema 和跨 Port 失败模型放在一个累计审计 diff 中。R3a1 不关闭输出丢尾或批次部分结果问题。
 
 入口：`src/adapters/tools/command.rs`、`output`、`job`，以及现有 Artifact/ToolResult/CLI 消费路径。

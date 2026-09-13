@@ -113,16 +113,24 @@ pub(in crate::adapters::tools) async fn execute_poll(
             session.completion.clone(),
         )
     };
-    match lock_captured_output(&snapshot.1).slice_after_offset(arguments.offset) {
-        Ok(output) => ToolExecutionOutcome::succeeded(
-            plan,
-            json!({
-                "pty_session_id": arguments.pty_session_id,
-                "status": snapshot.0,
-                "output": output,
-                "completion": snapshot.2,
-            }),
-        ),
+    let output = lock_captured_output(&snapshot.1)
+        .slice_after_offset(arguments.offset, plan.output_policy.max_bytes);
+    match output {
+        Ok(output) => {
+            let mut outcome = ToolExecutionOutcome::succeeded(
+                plan,
+                json!({
+                    "pty_session_id": arguments.pty_session_id,
+                    "status": snapshot.0,
+                    "output": output,
+                    "completion": snapshot.2,
+                }),
+            );
+            if snapshot.2.is_some() {
+                outcome.pending_captures = terminal_captures(sessions, &arguments.pty_session_id);
+            }
+            outcome
+        }
         Err(error) => ToolExecutionOutcome::failed(
             plan,
             "pty_offset_out_of_range",
@@ -132,6 +140,24 @@ pub(in crate::adapters::tools) async fn execute_poll(
             }),
         ),
     }
+}
+
+fn terminal_captures(
+    sessions: &PtySessions,
+    id: &PtySessionId,
+) -> Vec<crate::domain::tools::PendingOutputCapture> {
+    let table = lock_table(&sessions.sessions);
+    let Some(session) = table
+        .entries
+        .get(id)
+        .filter(|session| session.completion.is_some())
+    else {
+        return Vec::new();
+    };
+    vec![
+        lock_captured_output(&session.output)
+            .capture(crate::domain::tools::OutputStream::Pty, None),
+    ]
 }
 
 pub(in crate::adapters::tools) async fn execute_input(
@@ -261,10 +287,13 @@ pub(in crate::adapters::tools) async fn execute_stop(
             return unknown_session(plan, &arguments.pty_session_id);
         };
         if let Some(completion) = session.completion.clone() {
+            let status = session.status;
+            drop(table);
             return terminal_outcome(
+                sessions,
                 plan,
                 &arguments.pty_session_id,
-                session.status,
+                status,
                 completion,
                 true,
             );
@@ -289,7 +318,14 @@ pub(in crate::adapters::tools) async fn execute_stop(
             }),
         );
     };
-    terminal_outcome(plan, &arguments.pty_session_id, status, completion, false)
+    terminal_outcome(
+        sessions,
+        plan,
+        &arguments.pty_session_id,
+        status,
+        completion,
+        false,
+    )
 }
 
 async fn wait_for_terminal(
@@ -312,13 +348,14 @@ async fn wait_for_terminal(
 }
 
 fn terminal_outcome(
+    sessions: &PtySessions,
     plan: ToolExecutionPlan,
     session_id: &PtySessionId,
     status: PtySessionStatus,
     completion: PtySessionCompletion,
     already_terminal: bool,
 ) -> ToolExecutionOutcome {
-    ToolExecutionOutcome::succeeded(
+    let mut outcome = ToolExecutionOutcome::succeeded(
         plan,
         json!({
             "pty_session_id": session_id,
@@ -326,7 +363,9 @@ fn terminal_outcome(
             "completion": completion,
             "already_terminal": already_terminal,
         }),
-    )
+    );
+    outcome.pending_captures = terminal_captures(sessions, session_id);
+    outcome
 }
 
 fn unknown_session(plan: ToolExecutionPlan, session_id: &PtySessionId) -> ToolExecutionOutcome {

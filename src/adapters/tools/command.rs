@@ -11,13 +11,14 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 
 use crate::domain::tools::{
+    MAX_CAPTURE_EXECUTION_BYTES, MAX_CAPTURE_STREAM_BYTES, OutputStream, PendingOutputCapture,
     ResourceKey, ToolEffect, ToolExecutionOutcome, ToolExecutionPlan, ToolParallelism,
     scheduling_conflicts,
 };
 use crate::ports::tool::ToolExecutorError;
 
 use super::filesystem::{display_path, resolve_path};
-use super::output::{BoundedText, bounded_text};
+use super::output::{BoundedText, CapturedOutput, bounded_text};
 use super::resources::ResourceKeyResolver;
 use super::{decode_arguments, invalid_arguments, invalid_plan};
 
@@ -130,10 +131,19 @@ pub(super) async fn execute_one(
     if let Err(error) = validate_command(&arguments, "run_command") {
         return invalid_plan(plan, error);
     }
-    match run(project_root, &arguments, plan.output_policy.max_bytes).await {
+    let output = run(
+        project_root,
+        &arguments,
+        plan.output_policy.max_bytes,
+        MAX_CAPTURE_STREAM_BYTES,
+    )
+    .await;
+    let mut outcome = match output.result {
         Ok(value) => ToolExecutionOutcome::succeeded(plan, value),
         Err(value) => ToolExecutionOutcome::failed(plan, "command_failed", value),
-    }
+    };
+    outcome.pending_captures = output.captures;
+    outcome
 }
 
 pub(super) async fn execute_batch(
@@ -150,25 +160,45 @@ pub(super) async fn execute_batch(
         Err(error) => return invalid_plan(plan, error),
     };
     let max_each = per_item_limit(plan.output_policy.max_bytes, arguments.commands.len());
+    let raw_each =
+        MAX_CAPTURE_STREAM_BYTES.min(MAX_CAPTURE_EXECUTION_BYTES / (2 * arguments.commands.len()));
     let results = match arguments.mode {
-        CommandBatchMode::Serial => run_serial(project_root, &arguments.commands, max_each).await,
+        CommandBatchMode::Serial => {
+            run_serial(project_root, &arguments.commands, max_each, raw_each).await
+        }
         CommandBatchMode::Parallel => {
-            run_parallel(project_root, &arguments.commands, &resource_sets, max_each).await
+            run_parallel(
+                project_root,
+                &arguments.commands,
+                &resource_sets,
+                max_each,
+                raw_each,
+            )
+            .await
         }
     };
-    let partial_failure = results.iter().any(Result::is_err);
+    let partial_failure = results.iter().any(|output| output.result.is_err());
+    let mut captures = Vec::new();
     let commands = results
         .into_iter()
         .enumerate()
-        .map(|(index, result)| match result {
-            Ok(value) => json!({"index": index, "status": "succeeded", "result": value}),
-            Err(value) => json!({"index": index, "status": "failed", "result": value}),
+        .map(|(index, mut output)| {
+            for capture in &mut output.captures {
+                capture.child_index = Some(index as u8);
+            }
+            captures.extend(output.captures);
+            match output.result {
+                Ok(value) => json!({"index": index, "status": "succeeded", "result": value}),
+                Err(value) => json!({"index": index, "status": "failed", "result": value}),
+            }
         })
         .collect::<Vec<_>>();
-    ToolExecutionOutcome::succeeded(
+    let mut outcome = ToolExecutionOutcome::succeeded(
         plan,
         json!({"commands": commands, "partial_failure": partial_failure}),
-    )
+    );
+    outcome.pending_captures = captures;
+    outcome
 }
 
 pub(super) fn validate_command(
@@ -252,10 +282,11 @@ async fn run_serial(
     project_root: &Path,
     commands: &[RunCommandArgs],
     max_bytes: usize,
-) -> Vec<Result<Value, Value>> {
+    raw_bytes: usize,
+) -> Vec<CapturedCommand> {
     let mut results = Vec::with_capacity(commands.len());
     for command in commands {
-        results.push(run(project_root, command, max_bytes).await);
+        results.push(run(project_root, command, max_bytes, raw_bytes).await);
     }
     results
 }
@@ -267,7 +298,8 @@ async fn run_parallel(
     commands: &[RunCommandArgs],
     resource_sets: &[Vec<ResourceKey>],
     max_bytes: usize,
-) -> Vec<Result<Value, Value>> {
+    raw_bytes: usize,
+) -> Vec<CapturedCommand> {
     let mut pending = (0..commands.len()).collect::<VecDeque<_>>();
     let mut results = (0..commands.len()).map(|_| None).collect::<Vec<_>>();
 
@@ -291,7 +323,7 @@ async fn run_parallel(
         }
         let completed = join_all(
             wave.iter()
-                .map(|index| run(project_root, &commands[*index], max_bytes)),
+                .map(|index| run(project_root, &commands[*index], max_bytes, raw_bytes)),
         )
         .await;
         for (index, result) in wave.into_iter().zip(completed) {
@@ -301,9 +333,7 @@ async fn run_parallel(
 
     results
         .into_iter()
-        .map(|result| {
-            result.unwrap_or_else(|| Err(json!({"error": "parallel_batch_scheduler_incomplete"})))
-        })
+        .map(|result| result.expect("each admitted command is assigned to a completed wave"))
         .collect()
 }
 
@@ -311,23 +341,33 @@ async fn run(
     project_root: &Path,
     arguments: &RunCommandArgs,
     max_bytes: usize,
-) -> Result<Value, Value> {
+    raw_bytes: usize,
+) -> CapturedCommand {
     let cwd = resolve_path(project_root, arguments.cwd.as_deref().unwrap_or("."));
     let argv = arguments
         .argv
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>();
-    let output = run_probe_at(cwd.clone(), &argv, max_bytes).await;
-    if let Some(error) = output.error.as_deref() {
-        return Err(json!({"error": error, "cwd": cwd.display().to_string()}));
+    let output = run_probe_at(cwd.clone(), &argv, max_bytes, raw_bytes).await;
+    let mut value = output_value(project_root, &output.cwd, &output);
+    if let Some(error) = &output.error {
+        value["error"] = Value::from(error.clone());
     }
-    let value = output_value(project_root, &output.cwd, &output);
-    if output.exit_code == Some(0) {
+    let result = if output.exit_code == Some(0) && output.error.is_none() {
         Ok(value)
     } else {
         Err(value)
+    };
+    CapturedCommand {
+        result,
+        captures: output.captures,
     }
+}
+
+struct CapturedCommand {
+    result: Result<Value, Value>,
+    captures: Vec<PendingOutputCapture>,
 }
 
 pub(super) struct FixedProbeOutput {
@@ -337,6 +377,7 @@ pub(super) struct FixedProbeOutput {
     pub(super) stderr: BoundedText,
     pub(super) error: Option<String>,
     pub(super) not_found: bool,
+    captures: Vec<PendingOutputCapture>,
 }
 
 /// Executes one adapter-owned fixed probe.  This is deliberately narrower
@@ -348,13 +389,14 @@ pub(super) async fn run_fixed_probe(
     max_bytes: usize,
 ) -> FixedProbeOutput {
     let cwd = resolve_path(project_root, ".");
-    run_probe_at(cwd, argv, max_bytes).await
+    run_probe_at(cwd, argv, max_bytes, max_bytes / 2).await
 }
 
 async fn run_probe_at(
     cwd: std::path::PathBuf,
     argv: &[&str],
     max_bytes: usize,
+    raw_bytes: usize,
 ) -> FixedProbeOutput {
     let Some(program) = argv.first() else {
         return FixedProbeOutput {
@@ -364,6 +406,7 @@ async fn run_probe_at(
             stderr: bounded_text(&[], max_bytes / 2),
             error: Some("fixed probe has no program".to_owned()),
             not_found: false,
+            captures: Vec::new(),
         };
     };
     let mut command = Command::new(program);
@@ -384,6 +427,7 @@ async fn run_probe_at(
                 stderr: bounded_text(&[], max_bytes / 2),
                 not_found: error.kind() == std::io::ErrorKind::NotFound,
                 error: Some(error.to_string()),
+                captures: Vec::new(),
             };
         }
     };
@@ -397,62 +441,55 @@ async fn run_probe_at(
         .expect("fixed probe stderr is configured as piped");
     let max_each = max_bytes / 2;
     let (stdout, stderr, status) = tokio::join!(
-        read_bounded_output(stdout, max_each),
-        read_bounded_output(stderr, max_each),
+        read_bounded_output(stdout, raw_bytes),
+        read_bounded_output(stderr, raw_bytes),
         child.wait(),
     );
-    let error = status
-        .as_ref()
-        .err()
-        .or_else(|| stdout.as_ref().err())
-        .or_else(|| stderr.as_ref().err())
-        .map(ToString::to_string);
-    if let Some(error) = error {
-        return FixedProbeOutput {
-            cwd,
-            exit_code: None,
-            stdout: bounded_text(&[], max_bytes / 2),
-            stderr: bounded_text(&[], max_bytes / 2),
-            error: Some(error),
-            not_found: false,
-        };
-    }
+    let error = status.as_ref().err().map(ToString::to_string);
+    let captures = vec![
+        stdout.capture(OutputStream::Stdout, None),
+        stderr.capture(OutputStream::Stderr, None),
+    ];
+    let error = error.or_else(|| {
+        captures
+            .iter()
+            .find_map(|capture| capture.read_error.clone())
+    });
     FixedProbeOutput {
         cwd,
-        exit_code: status.expect("fixed probe wait result was checked").code(),
-        stdout: stdout.expect("fixed probe stdout result was checked"),
-        stderr: stderr.expect("fixed probe stderr result was checked"),
-        error: None,
+        exit_code: status.ok().and_then(|status| status.code()),
+        stdout: stdout.preview(max_each),
+        stderr: stderr.preview(max_each),
+        error,
         not_found: false,
+        captures,
     }
 }
 
 /// Drains a child pipe so the process cannot block while retaining at most
 /// the caller's byte budget in memory. The final UTF-8 view remains owned by
 /// the existing bounded-text normalizer.
-async fn read_bounded_output<Reader>(
-    mut reader: Reader,
-    maximum_bytes: usize,
-) -> std::io::Result<BoundedText>
+async fn read_bounded_output<Reader>(mut reader: Reader, maximum_bytes: usize) -> CapturedOutput
 where
     Reader: AsyncRead + Unpin,
 {
-    let mut captured = Vec::with_capacity(maximum_bytes.min(8 * 1024));
-    let mut original_bytes = 0_usize;
+    let mut captured = CapturedOutput::new(maximum_bytes);
     let mut buffer = [0_u8; 8 * 1024];
     loop {
-        let read = reader.read(&mut buffer).await?;
+        let read = match reader.read(&mut buffer).await {
+            Ok(read) => read,
+            Err(error) => {
+                captured.set_read_error(error.to_string());
+                break;
+            }
+        };
         if read == 0 {
             break;
         }
-        original_bytes = original_bytes.saturating_add(read);
-        let retained = maximum_bytes.saturating_sub(captured.len()).min(read);
-        captured.extend_from_slice(&buffer[..retained]);
+        captured.append(&buffer[..read]);
     }
-    let mut output = bounded_text(&captured, maximum_bytes);
-    output.original_bytes = original_bytes;
-    output.truncated |= original_bytes > captured.len();
-    Ok(output)
+    captured.seal();
+    captured
 }
 
 fn output_value(project_root: &Path, cwd: &Path, output: &FixedProbeOutput) -> Value {

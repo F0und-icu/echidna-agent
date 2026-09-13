@@ -38,6 +38,7 @@
 | Completed reasoning continuation | `domain/model` 的语义项 + AgentLoop provider delivery state | Conversation History 拒绝 reasoning；opaque encrypted sidecar 与 wire ID 保持 Adapter-local |
 | Tool 类型、Effect 和执行收据 | `domain/tools` | Tool Adapter 只执行并返回结果 |
 | Job/PTY 运行句柄身份 | 私有 `adapters/tools/process_identity` | 两个进程表使用独立 namespace 和 checked sequence；控制仅按原表精确查找，不解析旧序号重连 |
+| 原始进程输出 | `adapters/tools/output` 捕获；`domain/tools/capture` 元数据/一致性；私有 `app/agent_loop/output_capture` 发布 | 复用 ArtifactStore 在 Receipt 前保存，原始 bytes 不缓存/入 History；read_output 复用本地 Blob 校验 owner，引用不升级 Research 证据 |
 | Tool Call/Result 配对和 History 修复 | 一个纯 History Normalizer | AgentLoop、Context Planner、Adapter 不各自修复 |
 | Prompt Fragment、排序和上下文预算 | 一个 Context Compiler/Planner | Provider Adapter 只序列化最终 IR |
 | 稳定人格和 Base Contract | 一个版本化 Base Prompt 资源 | Personal/Project Prompt 不能替换证据纪律或运行时不变量 |

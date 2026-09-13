@@ -243,6 +243,7 @@ fn receipt(status: ToolResultStatus) -> ExecutionReceipt {
         status,
         exit_reason: (status != ToolResultStatus::Succeeded).then(|| "source failure".to_owned()),
         output_artifact_ids: Vec::new(),
+        output_captures: Vec::new(),
         environment_change: None,
         rerun_reason: None,
         cache_source: None,
@@ -454,6 +455,20 @@ fn source_fixture_with_receipt(
     status: ToolResultStatus,
     receipt_fact: ReceiptFact,
 ) -> TraceSourceFixture {
+    source_fixture_with_captures(status, receipt_fact, Vec::new())
+}
+
+fn source_fixture_with_captures(
+    status: ToolResultStatus,
+    receipt_fact: ReceiptFact,
+    captures: Vec<cyber_agent::domain::tools::OutputCapture>,
+) -> TraceSourceFixture {
+    let mut source_receipt = receipt(status);
+    let mut source_result = result(status);
+    if !captures.is_empty() {
+        source_result.output["output_captures"] = serde_json::to_value(&captures).unwrap();
+    }
+    source_receipt.output_captures = captures;
     let blobs = MemoryBlobStore::default();
     let context = run_context();
     let started = envelope(
@@ -497,10 +512,10 @@ fn source_fixture_with_receipt(
     );
     let receipt_event = match receipt_fact {
         ReceiptFact::Recorded => SessionEvent::ExecutionReceiptRecorded {
-            receipt: receipt(status),
+            receipt: source_receipt,
         },
         ReceiptFact::CacheHit => SessionEvent::ToolResultCacheHit {
-            receipt: receipt(status),
+            receipt: source_receipt,
         },
     };
     append(&mut projection, &mut sink, receipt_event, "receipt-one", 4);
@@ -509,7 +524,7 @@ fn source_fixture_with_receipt(
         &mut sink,
         SessionEvent::HistoryItemRecorded {
             item: ContentItem::ToolResult {
-                result: result(status),
+                result: source_result.clone(),
             },
         },
         "tool-result-one",
@@ -521,7 +536,7 @@ fn source_fixture_with_receipt(
             ContentItem::user_text("inspect fixture"),
             ContentItem::ToolCall { call: call() },
             ContentItem::ToolResult {
-                result: result(status),
+                result: source_result,
             },
         ],
         ModelRequestRequirements::default(),
@@ -597,6 +612,60 @@ fn prepare_fixture(fixture: &TraceSourceFixture) -> PreparedTraceReplay {
         )
         .unwrap();
     PreparedTraceReplay::new(plan, capabilities()).unwrap()
+}
+
+#[tokio::test]
+async fn output_capture_replay_retains_source_refs_without_publication_or_evidence() {
+    use cyber_agent::domain::tools::{OutputCapture, OutputStream};
+    let captures = vec![OutputCapture {
+        stream: OutputStream::Stdout,
+        child_index: None,
+        blob_id: BlobId::new(format!("{:x}", Sha256::digest(b"RAW"))).unwrap(),
+        observed_bytes: 3,
+        retained_bytes: 3,
+        eof: true,
+        complete: true,
+        read_error: None,
+    }];
+    for status in [
+        ToolResultStatus::Succeeded,
+        ToolResultStatus::Failed,
+        ToolResultStatus::Cancelled,
+    ] {
+        let fixture = source_fixture_with_captures(status, ReceiptFact::Recorded, captures.clone());
+        let before_session = fixture.session.clone();
+        let before_blobs = fixture.blobs.bytes();
+        let prepared = prepare_fixture(&fixture);
+        // No output publisher is installed and the source raw Blob is absent:
+        // mechanical Replay must only preserve refs, never reread/republish it.
+        let mut agent = AgentLoop::new(prepared.model_provider(), prepared.tool_executor());
+        let replay = prepared
+            .mechanical_replay(&mut agent, ["inspect fixture".to_owned()])
+            .await
+            .unwrap();
+        let replay_use = &replay.replay_tool_uses()[0];
+        assert_eq!(replay_use.source_receipt().output_captures, captures);
+        assert_eq!(replay_use.replay_receipt().output_captures, captures);
+        assert!(replay_use.replay_receipt().output_artifact_ids.is_empty());
+        assert!(replay_use.replay_receipt().file_mutations.is_empty());
+        assert!(replay.evaluation().is_non_evidence());
+        assert_eq!(fixture.session, before_session);
+        assert_eq!(fixture.blobs.bytes(), before_blobs);
+        assert!(agent.history().items().iter().any(|item| matches!(item,
+            ContentItem::ToolResult { result } if result.output["output_captures"] == serde_json::to_value(&captures).unwrap()
+        )));
+        let mut source_receipt = receipt(status);
+        source_receipt.output_captures = captures.clone();
+        assert!(matches!(
+            ReplayToolStep::new(
+                EventId::new("mismatch"),
+                source_receipt,
+                call(),
+                result(status)
+            ),
+            Err(TraceReplayPlanError::SourceOutputCaptureMismatch)
+        ));
+    }
 }
 
 #[tokio::test]

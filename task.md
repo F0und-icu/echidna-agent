@@ -31,7 +31,7 @@
 
 当前状态：
 
-- 当前 CTF-R3a1 按 ADR-0022 / Architecture v1.12 隔离运行实例的 Job/PTY 句柄。R2b 已经 #72 合并并完成一次有界合成 Live；R3a2 原始输出与 R3b 子项检查点仍未完成，不能以句柄修复替代。准确开工、验收与远端状态见 STATUS。
+- CTF-R3a1 的运行实例 Job/PTY 句柄已由 #73 合并。R3a2 原始输出按 ADR-0023 / Architecture v1.13 完成本地审计、完整 Gate、release CLI回归及 Lean，远端状态见 STATUS；R3b 子项检查点仍未完成。R2b 已经 #72 合并并完成一次有界合成 Live；终态输出不能替代部分批次耐久性。
 
 - 当前 CTF-R2b 的增量契约为 ADR-0021 / Architecture v1.11：一个 Config 驱动的 Primary/Vision 每 Turn 请求准入预算；状态完整的 typed stop 可返回 CLI，显式 `/resume` 重建 ProviderSession 后才接受新任务。停止不自动丢 reasoning、重试或重发输入。完整实现/验收状态见 STATUS；下列旧阶段状态是历史记录。冻结 v1 至 v1.10 不修改。
 
@@ -923,6 +923,8 @@ Base Contract 应要求 Agent：
 这些是 Prompt 约定，不是复杂的代码级审批系统。
 
 ## 10. 工具系统
+
+CTF-R3a2 按 ADR-0023/v1.13 增补执行输出契约：原始字节有界保留与模型预览分离，先发布 Blob 再持久 Receipt，ToolResult 与 Receipt 引用严格一致；`read_output` 提供有界精确字节回读。不伪造 Research Artifact 来源，不把运行中数据或被丢弃 Future 当作已完成耐久事实。
 
 ### 10.1 最小接口
 

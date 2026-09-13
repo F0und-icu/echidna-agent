@@ -13,11 +13,14 @@ use crate::domain::tools::{
 };
 use crate::ports::tool::ToolExecutor;
 
-use super::agent_loop::{AgentLoopError, ToolExecutionReceiptStage, ToolExecutionStartStage};
+use super::agent_loop::{AgentLoopError, ToolExecutionStartStage};
 use super::cancellation::AgentCancellation;
 
 type ActiveFuture<'tools> =
     Pin<Box<dyn Future<Output = (usize, ToolExecutionOutcome)> + Send + 'tools>>;
+
+pub(super) type CompletionStage<'a> =
+    dyn FnMut(&mut ToolExecutionOutcome) -> Result<(), AgentLoopError> + 'a;
 
 pub(super) struct ScheduledToolBatch {
     pub(super) outcomes: Vec<ScheduledToolResult>,
@@ -41,7 +44,7 @@ pub(super) async fn execute_batch<Tools: ToolExecutor + ?Sized>(
     cancellation: &AgentCancellation,
     completed_receipts: &mut BTreeMap<IdempotencyKey, ToolExecutionOutcome>,
     start_stage: &mut Option<&mut ToolExecutionStartStage<'_>>,
-    completion_stage: &mut Option<&mut ToolExecutionReceiptStage<'_>>,
+    completion_stage: &mut Option<&mut CompletionStage<'_>>,
 ) -> Result<ScheduledToolBatch, AgentLoopError> {
     let mut outcomes = (0..plans.len()).map(|_| None).collect::<Vec<_>>();
     let mut followers = vec![Vec::new(); plans.len()];
@@ -49,8 +52,8 @@ pub(super) async fn execute_batch<Tools: ToolExecutor + ?Sized>(
     let mut pending = VecDeque::new();
 
     for (index, plan) in plans.iter().enumerate() {
-        if let Some(outcome) = completed_outcome(plan, completed_receipts) {
-            checkpoint_completion(completion_stage, &outcome)?;
+        if let Some(mut outcome) = completed_outcome(plan, completed_receipts) {
+            checkpoint_completion(completion_stage, &mut outcome)?;
             outcomes[index] = Some(ScheduledToolResult::Executed(Box::new(outcome)));
             continue;
         }
@@ -90,18 +93,18 @@ pub(super) async fn execute_batch<Tools: ToolExecutor + ?Sized>(
         let wait_for_cancellation = cancellation.wait_for_cancellation();
         futures_util::pin_mut!(next_completion, wait_for_cancellation);
         match select(next_completion, wait_for_cancellation).await {
-            Either::Left((Some((index, outcome)), _)) => {
+            Either::Left((Some((index, mut outcome)), _)) => {
                 active.remove(&index);
-                checkpoint_completion(completion_stage, &outcome)?;
+                checkpoint_completion(completion_stage, &mut outcome)?;
                 if outcome.receipt.status != ToolResultStatus::Cancelled
                     && let Some(key) = completion_key(&plans[index])
                 {
                     completed_receipts.insert(key, outcome.clone());
                 }
                 for follower in &followers[index] {
-                    let follower_outcome =
+                    let mut follower_outcome =
                         ToolExecutionOutcome::deduplicated_for(&plans[*follower], &outcome);
-                    checkpoint_completion(completion_stage, &follower_outcome)?;
+                    checkpoint_completion(completion_stage, &mut follower_outcome)?;
                     outcomes[*follower] =
                         Some(ScheduledToolResult::Executed(Box::new(follower_outcome)));
                 }
@@ -135,9 +138,9 @@ pub(super) async fn execute_batch<Tools: ToolExecutor + ?Sized>(
                         "every dedupe leader is completed, active, or pending at cancellation",
                     ) {
                         ScheduledToolResult::Executed(source) => {
-                            let outcome =
+                            let mut outcome =
                                 ToolExecutionOutcome::deduplicated_for(&plans[*follower], source);
-                            checkpoint_completion(completion_stage, &outcome)?;
+                            checkpoint_completion(completion_stage, &mut outcome)?;
                             ScheduledToolResult::Executed(Box::new(outcome))
                         }
                         ScheduledToolResult::NotStarted(_) | ScheduledToolResult::Interrupted => {
@@ -164,8 +167,8 @@ pub(super) async fn execute_batch<Tools: ToolExecutor + ?Sized>(
 /// deduplicated outcomes checkpoint when they are created. Unobserved active
 /// cancellation and pending plans never fabricate a Receipt.
 fn checkpoint_completion(
-    completion_stage: &mut Option<&mut ToolExecutionReceiptStage<'_>>,
-    outcome: &ToolExecutionOutcome,
+    completion_stage: &mut Option<&mut CompletionStage<'_>>,
+    outcome: &mut ToolExecutionOutcome,
 ) -> Result<(), AgentLoopError> {
     if let Some(stage) = completion_stage.as_deref_mut() {
         stage(outcome)?;
