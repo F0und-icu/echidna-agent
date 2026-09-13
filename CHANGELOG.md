@@ -7,6 +7,11 @@ milestone history remains in `docs/development/STATUS.md` and Git history.
 
 ### Fixed
 
+- R4a: command process errors retain the requested program, effective cwd,
+  observed failure stage and original OS error, without guessing an ENOENT
+  cause or changing execution/retry semantics. Project-root paths now display
+  as `.` instead of an empty string through the existing shared path owner.
+
 - CTF-R3b2: Tool progress distinguishes unsaved execution, durably saved
   child results and terminal/unknown parent state, with command previews and
   elapsed/deadline labels. A single bounded best-effort presentation worker

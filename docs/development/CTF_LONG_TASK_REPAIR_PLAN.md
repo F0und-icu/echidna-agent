@@ -124,6 +124,8 @@ R3a1 已由 #73 合并。R3a2 按已接受 ADR-0023/v1.13 完成本地审计/Gat
 
 ## 7. R4：让模型基于实际环境选工具
 
+实现拆分：R4a 先修 command 唯一执行 owner 的失败诊断（program/effective cwd/process stage/原始 OS error），并由既有 path-display owner 修正空根路径为 `.`；保留现有结果 Schema/error string、退出码、收据和重试语义。R4b 再处理环境观察和按需工具指导，变化的 Schema 必须先单独说明兼容性。R3b2 已经 #76 合并；R4a Scope Lock 见 STATUS。永久测试以行为命名，不新增 CTF 模式或预定解题工作流。
+
 - 复用现有 `inspect_environment` 和 command execution owner；主机 OS、架构、实际 cwd、程序路径/实现/版本和容器观察要分开。
 - 不新增通用探测 DSL。初期任务特定可用性检查通过现有 run_command(s)；只有重复使用证明收益，才给固定 environment owner 增加有界探测。一次环境观察不能代表容器内全部工具。
 - command 启动错误包含请求 program、有效 cwd、失败阶段和原始 OS 错误；ENOENT 可能是 cwd、可执行文件或解释器，不在证据不足时硬分类。退出非零与 spawn 失败分开。

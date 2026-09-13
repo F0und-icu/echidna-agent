@@ -257,10 +257,12 @@ pub(super) fn resolve_path(project_root: &Path, path: &str) -> PathBuf {
 }
 
 pub(super) fn display_path(project_root: &Path, path: &Path) -> String {
-    path.strip_prefix(project_root)
-        .unwrap_or(path)
-        .display()
-        .to_string()
+    let relative = path.strip_prefix(project_root).unwrap_or(path);
+    if relative.as_os_str().is_empty() {
+        ".".to_owned()
+    } else {
+        relative.display().to_string()
+    }
 }
 
 fn validate_read_files(arguments: &ReadFilesArgs) -> Result<(), ToolExecutorError> {

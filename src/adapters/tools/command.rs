@@ -446,6 +446,27 @@ pub(super) struct FixedProbeOutput {
     captures: Vec<PendingOutputCapture>,
 }
 
+enum ProcessFailureStage {
+    Spawn,
+    Wait,
+    ReadStdout,
+    ReadStderr,
+}
+
+impl ProcessFailureStage {
+    // Diagnostic prose inside the existing error string, not ToolFailure's
+    // execution stage or a new persisted schema. ENOENT has no guessed cause.
+    fn describe(&self, program: &str, cwd: &Path, error: impl std::fmt::Display) -> String {
+        let stage = match self {
+            Self::Spawn => "spawn",
+            Self::Wait => "wait",
+            Self::ReadStdout => "read_stdout",
+            Self::ReadStderr => "read_stderr",
+        };
+        format!("program={program:?}; effective_cwd={cwd:?}; process_stage={stage}; error={error}")
+    }
+}
+
 /// Executes one adapter-owned fixed probe.  This is deliberately narrower
 /// than `run_command`: callers provide a compile-time command list. Process
 /// lifetime, kill-on-drop and output bounds remain owned by this module.
@@ -486,13 +507,14 @@ async fn run_probe_at(
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
+            let message = ProcessFailureStage::Spawn.describe(program, &cwd, &error);
             return FixedProbeOutput {
                 cwd,
                 exit_code: None,
                 stdout: bounded_text(&[], max_bytes / 2),
                 stderr: bounded_text(&[], max_bytes / 2),
                 not_found: error.kind() == std::io::ErrorKind::NotFound,
-                error: Some(error.to_string()),
+                error: Some(message),
                 captures: Vec::new(),
             };
         }
@@ -511,7 +533,10 @@ async fn run_probe_at(
         read_bounded_output(stderr, raw_bytes),
         child.wait(),
     );
-    let error = status.as_ref().err().map(ToString::to_string);
+    let error = status
+        .as_ref()
+        .err()
+        .map(|error| ProcessFailureStage::Wait.describe(program, &cwd, error));
     let captures = vec![
         stdout.capture(OutputStream::Stdout, None),
         stderr.capture(OutputStream::Stderr, None),
@@ -519,7 +544,16 @@ async fn run_probe_at(
     let error = error.or_else(|| {
         captures
             .iter()
-            .find_map(|capture| capture.read_error.clone())
+            .zip([
+                ProcessFailureStage::ReadStdout,
+                ProcessFailureStage::ReadStderr,
+            ])
+            .find_map(|(capture, stage)| {
+                capture
+                    .read_error
+                    .as_ref()
+                    .map(|error| stage.describe(program, &cwd, error))
+            })
     });
     FixedProbeOutput {
         cwd,

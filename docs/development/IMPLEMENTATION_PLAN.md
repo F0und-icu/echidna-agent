@@ -1085,6 +1085,10 @@ F6a delivery addendum: after the acceptance checkpoint above, the operator autho
 
 ### 当前修复队列（2026-09-12）
 
+最新入口：R3b2 已经 PR#76 合并（`07a96de`），R3 离线验收完成。R4 分为两个有限包：当前 R4a 只修通用命令失败诊断与空 cwd 展示，复用现有 error string/path owner，不增加 Schema 或执行流程；R4b 再处理环境观察及使用指导，若改变 Schema 必须先过版本/兼容性设计门。主 Agent 实现，独立 Terra xhigh 限时审计；精确 Scope Lock 见 STATUS。测试按行为命名，CTF 只作为问题来源，不成为产品模式。
+
+R4a 本地验收完成：独立 Terra xhigh APPROVE，完整 Gate472通过/2 Live跳过、release6项和 Lean PASS。普通远端交付后进入 R4b；不以本包宣称已解决 GNU/BSD/LLVM 工具能力选择或完成真实长测。精确交付状态见 STATUS/Git。
+
 后续连续执行授权：操作者已授权完成全部 CTF 修复、独立审计、限额 Live 和远端提交。STATUS 顶部 series authorization 优先于本节历史逐次授权/停止措辞；仍逐包 Scope Lock → 测试 → 独立审计 → 修复 → Gate → Lean，不启用 Actions 或推定 merge。当前先收口 CTF-R1，再顺序推进 R2–R6。
 
 #### CTF-R2a：续接拒绝诊断

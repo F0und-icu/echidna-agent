@@ -43,6 +43,9 @@ use serde_json::{Value, json};
 #[path = "tool_loop_cases/output_retention.rs"]
 mod output_retention;
 
+#[path = "tool_loop_cases/command_diagnostics.rs"]
+mod command_diagnostics;
+
 static NEXT_PROJECT_ID: AtomicU64 = AtomicU64::new(1);
 
 struct TestProject {
