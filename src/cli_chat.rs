@@ -112,6 +112,7 @@ pub(crate) async fn run(
     let mut pending_image: Option<vision::PendingImage> = None;
     let mut recovery_required = false;
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
+    let tool_output = std::cell::RefCell::new(tool_output::ToolOutput::default());
     loop {
         print!("you> ");
         io::stdout().flush()?;
@@ -339,14 +340,17 @@ pub(crate) async fn run(
                 .record_request_audit(attempt)
                 .map_err(ChatError::into_request_audit_agent_loop_error)
         };
-        let tool_output = std::cell::RefCell::new(tool_output::ToolOutput::default());
         let mut tool_start = |plan: &crate::domain::tools::ToolExecutionPlan| {
             tool_output.borrow_mut().started(plan);
         };
         let mut durability = |checkpoint: ChatDurabilityCheckpoint<'_>| match checkpoint {
-            ChatDurabilityCheckpoint::Subcommand(checkpoint) => session
-                .record_subcommand(checkpoint)
-                .map_err(ChatError::into_execution_receipt_agent_loop_error),
+            ChatDurabilityCheckpoint::Subcommand(checkpoint) => {
+                session
+                    .record_subcommand(checkpoint)
+                    .map_err(ChatError::into_execution_receipt_agent_loop_error)?;
+                tool_output.borrow_mut().checkpointed(checkpoint);
+                Ok(())
+            }
             ChatDurabilityCheckpoint::History(items) => session
                 .record_history(items)
                 .map_err(ChatError::into_history_checkpoint_agent_loop_error),
@@ -417,6 +421,7 @@ pub(crate) async fn run(
             }
         };
 
+        tool_output.borrow_mut().finish_turn();
         match outcome {
             Ok(AgentTurnOutcome::Completed { .. }) => {
                 println!();

@@ -1095,7 +1095,7 @@ R2a 本地收口：专项/受影响回归、全新 Terra xhigh 独立审计及 t
 
 #### CTF-R2b：有界请求与显式交互恢复
 
-R3a2 已由 #74 合并（`c80dbd9`）。当前 CTF-R3b1 按 ADR-0024/v1.14 先建立子命令观察→原始 Blob→Session 检查点→确认的真实生产路径，保留未知父执行及统一 Resume/Compaction；R3b2 再实现不阻塞管道的进度展示。不得只加 UI 或 Event 占位就封存，R3b 完整验收仍包括两部分。精确开工 allowlist 和逐步证据见 STATUS。
+R3b1 已由 #75 合并（`538da41`）：ADR-0024/v1.14 的观察→Blob→Session→确认和统一 Resume/Compaction 已验收。R3b2 已完成独立审计、完整 Gate（468通过/2 Live跳过）、release CLI5项及 Lean，待本包远端交付；只消费真实开始/子项检查点/父收据做进度展示，私有单 Chat 写出线程使用有界队列和丢弃提示，不能阻塞执行或改写事实。串行/并行、未知终态和不读取 stderr 的背压回归已通过；不声称整个 CLI 非阻塞。下一包 R4 须单独 Scope Lock；精确状态与证据见 STATUS。
 
 当前 R3a1 已通过 #73 普通合并。R3a2 按 ADR-0023/v1.13 契约先行，现已完成独立审计及覆盖补强复审、完整 Gate（458通过/2 Live跳过）、release CLI2项和 Lean；待授权范围内的远端交付。分离原始捕获与预览，App 在 Receipt 前发布有界 Blob，严格 v1→v2 收据兼容及配对引用，提供精确字节回读；不以终态输出替代 R3b 子项检查点。准确状态见 STATUS 顶部。
 

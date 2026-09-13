@@ -7,6 +7,12 @@ milestone history remains in `docs/development/STATUS.md` and Git history.
 
 ### Fixed
 
+- CTF-R3b2: Tool progress distinguishes unsaved execution, durably saved
+  child results and terminal/unknown parent state, with command previews and
+  elapsed/deadline labels. A single bounded best-effort presentation worker
+  per Chat keeps slow tool-preview writes outside the execution loop; skipped
+  previews are labeled and never change Session facts.
+
 - CTF-R3b1: interactive command batches persist each observed child after raw
   Blob publication and before acknowledgement. Resume and Compaction retain
   known children beside explicit unknown parent state; no batch is rerun.

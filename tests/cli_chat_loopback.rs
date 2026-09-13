@@ -4,6 +4,8 @@ mod ctf_child_checkpoint;
 mod ctf_context;
 #[path = "cli_chat_cases/ctf_output.rs"]
 mod ctf_output;
+#[path = "cli_chat_cases/ctf_progress.rs"]
+mod ctf_progress;
 #[path = "cli_chat_cases/ctf_recovery.rs"]
 mod ctf_recovery;
 #[path = "cli_chat_cases/ctf_resume.rs"]
@@ -3378,6 +3380,7 @@ fn f3_graceful_interrupt_never_fabricates_a_receipt_for_unobserved_external_effe
     assert!(stderr.contains("· run_command · 失败"));
     assert!(!stderr.contains("· 取消"));
     assert!(stderr.contains("external effects are unknown"));
+    assert!(stderr.contains("状态未知（未观察到批次终态）"));
 
     let events = session_events(project.path(), &session_id(project.path()));
     let receipt_statuses = events
