@@ -5,6 +5,13 @@ milestone history remains in `docs/development/STATUS.md` and Git history.
 
 ## Unreleased
 
+### Added
+
+- R5b1: repeatable offline Snapshot measurements and a four-case regression
+  through the existing Tool boundary; reports distinguish cache observations
+  from unavailable internal hash, Context and Provider metrics. No runtime
+  cache strategy or model behavior changes.
+
 ### Fixed
 
 - R5a: separate Assistant sampling replies, explicitly identify omitted debug

@@ -1,3 +1,5 @@
+#[path = "memory_snapshot/measurement.rs"]
+mod measurement;
 mod support;
 
 use std::fs;

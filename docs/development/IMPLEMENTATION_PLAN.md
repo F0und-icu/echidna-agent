@@ -1085,7 +1085,13 @@ F6a delivery addendum: after the acceptance checkpoint above, the operator autho
 
 ### 当前修复队列（2026-09-12）
 
-#### R5a：可读显示收口（当前）
+#### R5b1：离线 Snapshot 测量（当前）
+
+R5a 已通过 PR#79 / `3f880f9` 合并。R5b 先拆出不改生产代码的有限测量包：复用现有 Tool Port 测试入口，对 Git/非 Git 项目分别执行稳定项目、源码单独修改、Memory 单独修改、项目外日志增长四组固定样本。保留普通正确性回归和显式 opt-in 重复计时；只报告真实边界耗时、结果/缓存字节、命中状态与 `hashed_paths`。不把后者当内部 hash 次数，不以未测量数据推断零扫描或 Token 收益。Scope Lock、固定顺序和证据见 STATUS。未证明收益前不增加缓存；Context/真实 wire 计量与 R6 保持未完成，原 Live 额度不得自动续用。
+
+R5b1 本地收口：160条 release 测量、受影响46项、独立 Luna xhigh APPROVE、完整 Gate479项通过/3项跳过及 Lean PASS。无生产代码改动；复现方式和精确边界见 [R5B1_SNAPSHOT_MEASUREMENT.md](R5B1_SNAPSHOT_MEASUREMENT.md)。下一包先固定正式 Chat/Context 的离线测量与内容身份反例范围，不直接增加缓存；远端状态以 STATUS 为准。
+
+#### R5a：可读显示收口（已合并）
 
 R4b 已由 PR#78 / `e71ff4a` 合并。R5a 纳入此前保留的 debug 差异：显式省略 Tool 定义，保持真实请求内容与 Full/incremental 标识；分隔 Assistant 采样回复；区分 UI 预览与原始捕获，显示既有 read_output 引用。ADR-0026/v1.16 只修改显示契约。复用现有 CLI/Adapter/终端 owner，不增加 API/Schema/依赖。专项、受影响（含依赖方向）、全新限时独立审计、修复、完整 Gate、release、Lean 后按既定额度做必要合成 Live。
 
