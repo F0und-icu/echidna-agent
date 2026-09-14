@@ -1085,7 +1085,13 @@ F6a delivery addendum: after the acceptance checkpoint above, the operator autho
 
 ### 当前修复队列（2026-09-12）
 
-#### R5b1：离线 Snapshot 测量（当前）
+#### R5b2：正式 Chat 离线交付测量（验收通过，PR#81 已提交）
+
+R5b1 已由 PR#80 / `5d78171` 合并。本包复用正式 CLI 与既有 bounded loopback/Config/Session 测试入口，不改产品接口。四类固定样本分别使用 Full-only/增量能力配置，正常退出后显式 Resume；等长源码/Memory 修改恢复 mtime 并核对实际 ToolResult/请求里的最新内容。记录收到的 HTTP body、审计组件大小、既有估算和 CLI 耗时，区分廉价 Snapshot 指纹与内容身份。默认正确性回归、显式重复测量、专项/受影响、全新 Terra xhigh 独立审计、Gate、Lean 后交付。未测量的 hash/扫描/Provider usage/TTFT 不填0；无真实模型或新 Live 额度。本包不提前修改缓存策略，精确显式文件哈希的新鲜度另行评估。
+
+R5b2 收口：正式 CLI 正确性回归、48条 release 测量（96次实际请求）、受影响74项、独立 Terra xhigh APPROVE、完整 Gate480项通过/4项跳过、Lean PASS。测试未扩大生产 API，产品逻辑未变。复现与限制见 [R5B2_CHAT_DELIVERY_MEASUREMENT.md](R5B2_CHAT_DELIVERY_MEASUREMENT.md)；远端交付见 STATUS。下一候选先核验显式 `hash_paths` 缓存的新鲜度，再按实测组件成本准入优化；不提前封存 R5/R6，不扩展 Live 额度。
+
+#### R5b1：离线 Snapshot 测量（已合并）
 
 R5a 已通过 PR#79 / `3f880f9` 合并。R5b 先拆出不改生产代码的有限测量包：复用现有 Tool Port 测试入口，对 Git/非 Git 项目分别执行稳定项目、源码单独修改、Memory 单独修改、项目外日志增长四组固定样本。保留普通正确性回归和显式 opt-in 重复计时；只报告真实边界耗时、结果/缓存字节、命中状态与 `hashed_paths`。不把后者当内部 hash 次数，不以未测量数据推断零扫描或 Token 收益。Scope Lock、固定顺序和证据见 STATUS。未证明收益前不增加缓存；Context/真实 wire 计量与 R6 保持未完成，原 Live 额度不得自动续用。
 

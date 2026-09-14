@@ -7,6 +7,10 @@ milestone history remains in `docs/development/STATUS.md` and Git history.
 
 ### Added
 
+- R5b2: offline formal-CLI Full/incremental delivery measurements and a
+  same-size/restored-mtime Resume regression for current source/Memory content;
+  captured HTTP body sizes remain distinct from audit estimates and usage.
+
 - R5b1: repeatable offline Snapshot measurements and a four-case regression
   through the existing Tool boundary; reports distinguish cache observations
   from unavailable internal hash, Context and Provider metrics. No runtime

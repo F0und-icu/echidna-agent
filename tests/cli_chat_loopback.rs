@@ -12,6 +12,8 @@ mod ctf_progress;
 mod ctf_recovery;
 #[path = "cli_chat_cases/ctf_resume.rs"]
 mod ctf_resume;
+#[path = "cli_chat_cases/delivery_measurement.rs"]
+mod delivery_measurement;
 #[path = "cli_chat_cases/environment_guidance.rs"]
 mod environment_guidance;
 #[path = "cli_chat_cases/f4_output.rs"]
