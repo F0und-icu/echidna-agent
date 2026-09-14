@@ -68,10 +68,13 @@ impl RequestOutput {
                         "\n[debug 发送 {} #{} · {mode}]",
                         self.role, self.request_id
                     );
+                    let _ = writeln!(
+                        stderr,
+                        "[内容视图：省略工具定义及传输字段；已脱敏，非逐字 wire 抓包]"
+                    );
                     for (key, label) in [
                         ("instructions", "提示词"),
                         ("input", "输入消息"),
-                        ("tools", "工具定义"),
                         ("text", "响应格式"),
                     ] {
                         if let Some(content) = value.get(key) {

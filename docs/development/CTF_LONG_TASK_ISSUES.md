@@ -93,6 +93,8 @@ live 日志存于扫描 Project，FileManifest 包含它们；写日志时不断
 
 ### CTF-11：debug 与 Assistant 输出可读性（P3）
 
+R5a 本地验收完成：此前保留的 debug 差异纳入独立审计，新增显式省略说明；Assistant 按采样/工具边界分段，保持原始 History；Full/incremental 标识来自真实请求。完整 Gate478项通过/2 Live跳过、release10项、Lean 和一次 DeepSeek 合成 Live 通过，精确交付见 STATUS。它减少终端噪声，不减少实际请求 Token；不声称是逐字抓包。下面保留最初的问题快照。
+
 debug 工具定义段已经按单独授权隐藏，实际 ToolSpecs 和 RequestAudit 保留；只减少终端噪声，不节省模型 token。已有 13 项离线测试结果，仍为未提交本地变更。Assistant 多步输出直接拼接、Full 历史反复显示的辨识问题仍待讨论；显示简化不能伪装成精确完整 wire 抓包。
 
 ### CTF-12：外部材料获取时机与能力边界（P2，方案议题）
@@ -112,6 +114,8 @@ debug 工具定义段已经按单独授权隐藏，实际 ToolSpecs 和 RequestA
 待讨论：保留运行预算，但明确剩余 Step、结束边界与可继续的停止状态；配置与预算策略应有唯一所有者。不要简单删除上限，也不要引入自动无限续跑。此问题未在本次 4/13 Step 的失败轮中触发。
 
 ### CTF-14：命令输出截断丢失原始尾部，不只是 UI 预览（P2）
+
+R5a 显示补齐：仅从既有耐久 Receipt/子项捕获元数据展示有界 read_output 引用、保留/已观察字节与完整性，超限未保留部分仍不可回读；UI 预览不再声称原文完整。离线覆盖单命令、批次和原始保留上限；这不是扩大 R3 的保留额度或宣称所有输出均完整。
 
 `src/adapters/tools/command.rs` 的 read_bounded_output 继续 drain 进程管道，但只保存限额内前缀，超过限额的字节不进入返回值；output_value 返回文本和 truncated，没有该命令完整输出的 Artifact 引用。对这个捕获路径，之后审计只能保存已捕获的内容；不能从 truncated Result 还原原始尾部。
 

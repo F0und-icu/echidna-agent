@@ -139,6 +139,8 @@ R4b 采用最小修复：复用现有 `probe_failed` 而不把 ENOENT 推断成 
 
 ## 8. R5：展示改进和测量驱动的效率优化
 
+当前拆分：R5a 显示路径已通过独立审计、完整 Gate/release/Lean 与 L1-2 合成 Live，交付状态见 STATUS。R5b 四组固定测量和有证据的优化仍未实施，R6 长任务未完成；显示收口不能代表整个 R5 或修复系列结束。
+
 - 收口现有 debug 工具定义隐藏改动：独立审查后走完整 Gate/release 检查，不重写已有实现。
 - Assistant 每个 Step/消息边界可辨，流式正文不黏连；Full 与 incremental 请求标识清楚。默认不重印大段旧历史，但 debug 若采用折叠/省略必须显式说明，不能声称是逐字 wire 抓包。
 - 区分 UI 预览截断与原始捕获截断，显示 R3 的可回读引用；release 排除 debug、保留实际 Provider reasoning。

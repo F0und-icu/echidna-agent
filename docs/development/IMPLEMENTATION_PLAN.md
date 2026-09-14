@@ -1085,6 +1085,14 @@ F6a delivery addendum: after the acceptance checkpoint above, the operator autho
 
 ### 当前修复队列（2026-09-12）
 
+#### R5a：可读显示收口（当前）
+
+R4b 已由 PR#78 / `e71ff4a` 合并。R5a 纳入此前保留的 debug 差异：显式省略 Tool 定义，保持真实请求内容与 Full/incremental 标识；分隔 Assistant 采样回复；区分 UI 预览与原始捕获，显示既有 read_output 引用。ADR-0026/v1.16 只修改显示契约。复用现有 CLI/Adapter/终端 owner，不增加 API/Schema/依赖。专项、受影响（含依赖方向）、全新限时独立审计、修复、完整 Gate、release、Lean 后按既定额度做必要合成 Live。
+
+R5b 单独执行固定四组测量，未证明收益不合入缓存优化；R6 长任务仍未完成。R5a 不是全部 R5 封存。
+
+R5a 本地收口：产品独立审计 APPROVE，外部 Live 脚本两处验收歧义修复并复审 APPROVE；完整 Gate478通过/2 Live跳过，release10项与标准构建/帮助排除检查通过，Lean PASS。L1-2 DeepSeek 合成 Live10.32秒通过：3份请求审计、3段回复、2份收据，原始输出提示与debug省略一致；无 Token/满1M/长任务收益推断。日志、范围与后续交付见 STATUS。
+
 R4a 已通过 PR#77 合并（`f753acf`）。当前 R4b 复用固定探测/命令 owner：ENOENT 不推断程序缺失，ToolSpec 解释 host/container、实际程序身份和路径别名的观察边界；任务特定检查仍用普通命令，不自动增加探测。Binary/Mapping 提示词升至 generation2，ADR-0025/v1.15 明确旧 generation1 选择可读且历史请求不改写。专项/受影响/独立审计/Gate/Lean 与准确交付状态见 STATUS。真实模型遵循度和长任务收益留待 R6，不能由离线夹具推定。
 
 R4b 本地验收完成：独立审计和测试修正复审 APPROVE，最终完整 Gate476通过/2 Live跳过、Release4项及标准构建/无debug帮助检查通过，Lean PASS。先前 Gate 的过紧窗口夹具保留完整失败和修正记录，未改产品预算。普通远端交付后下一包为 R5；现有 debug 差异仍独立保留，R6 Live 未因此完成。

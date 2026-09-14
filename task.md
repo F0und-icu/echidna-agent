@@ -1428,6 +1428,8 @@ Provider Config v1 使用显式 `schema_version`、`active_agent_profile`、命�
 
 ### 15.1 CLI 优先
 
+R5a / ADR-0026 / Architecture v1.16：开发 debug 是脱敏后的内容视图，显式省略工具定义和传输字段，不是逐字 wire 抓包；真实 ToolSpec/请求不变。Assistant 采样回复在 CLI 分隔，History 不加入显示标记。UI 预览与原始捕获的完整性分开说明，read_output 提示只来自既有耐久捕获引用，不承诺可回读未保留的字节。Release 继续显示 Provider 返回的思考并排除 debug。测量优化及 R6 长任务另行验收。
+
 MVP 使用可交互 CLI，提供流式输出、命令历史、多行输入、Ctrl-C 取消和会话恢复。
 
 启动命令：

@@ -77,8 +77,8 @@ fn debug_requests(stderr: &[u8]) -> Vec<String> {
 
 #[cfg(debug_assertions)]
 fn assert_request_content(view: &str, actual: &Value) {
-    // Assert all content-bearing wire strings, including exact multiline Prompt
-    // bytes, against the observed request; transport fields are deliberately absent.
+    // Compare displayed content with the wire; Tool schemas and transport
+    // fields are deliberately omitted from the terminal projection.
     fn strings_visible(view: &str, value: &Value) {
         match value {
             Value::String(text) => assert!(view.contains(text), "missing wire content {text:?}"),
@@ -87,7 +87,7 @@ fn assert_request_content(view: &str, actual: &Value) {
             _ => {}
         }
     }
-    for key in ["instructions", "input", "tools", "text"] {
+    for key in ["instructions", "input", "text"] {
         if let Some(value) = actual.get(key) {
             strings_visible(view, value);
         }
@@ -305,6 +305,24 @@ fn f4_debug_matches_actual_full_and_incremental_wire_and_paired_tool_output() {
     let second = f2a_request_body(&server.requests, "F4 second request");
     assert_request_content(&requests[0], &first);
     assert_request_content(&requests[1], &second);
+    let tools = first["tools"].as_array().unwrap();
+    assert!(
+        !tools.is_empty(),
+        "debug must preserve actual wire ToolSpecs"
+    );
+    for request in &requests {
+        assert!(request.contains("省略工具定义及传输字段"));
+        assert!(request.contains("非逐字 wire 抓包"));
+        assert!(!request.contains("── 工具定义 ──"));
+        for tool in tools {
+            let description = tool["description"].as_str().unwrap();
+            assert!(!description.is_empty());
+            assert!(
+                !request.contains(description),
+                "Tool schema leaked into debug"
+            );
+        }
+    }
     assert_eq!(second["previous_response_id"], "f4-tool");
     assert_ne!(requests[0].lines().next(), requests[1].lines().next());
     let stderr = String::from_utf8_lossy(&output.stderr);

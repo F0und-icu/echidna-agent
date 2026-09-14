@@ -1,10 +1,12 @@
 //! Readable projection of existing execution/durability observations.
 
 use std::collections::BTreeMap;
+use std::fmt::Write;
 use std::time::Instant;
 
 use crate::domain::tools::{
-    SubcommandCheckpoint, ToolCallId, ToolExecutionOutcome, ToolExecutionPlan, ToolResultStatus,
+    OutputCapture, OutputStream, SubcommandCheckpoint, ToolCallId, ToolExecutionOutcome,
+    ToolExecutionPlan, ToolResultStatus,
 };
 use crate::terminal_content::{ContentView, escaped_text};
 
@@ -85,9 +87,10 @@ impl ToolOutput {
             .map(String::as_str)
             .unwrap_or("");
         self.sink.send(format!(
-            "\n├ 工具 #{} · 子命令 {}/{} · 已保存（{status}；非批次终态） · {}\n命令：\n{command}\n{}\n",
+            "\n├ 工具 #{} · 子命令 {}/{} · 已保存（{status}；非批次终态） · {}\n命令：\n{command}\n{}\n{}",
             active.number, checkpoint.index as usize + 1, checkpoint.child_count,
-            active.timing(), ContentView::preview(&checkpoint.result)
+            active.timing(), ContentView::preview(&checkpoint.result),
+            capture_hints(&checkpoint.output_captures)
         ));
     }
 
@@ -131,9 +134,46 @@ impl ToolOutput {
             ""
         };
         self.sink.send(format!(
-            "└ 工具 #{number} · {} · {status}{reuse} · {timing}\n{}\n",
+            "└ 工具 #{number} · {} · {status}{reuse} · {timing}\n{}\n{}",
             escaped_text(outcome.result.tool_name.as_str()),
-            ContentView::preview(&outcome.result.output)
+            ContentView::preview(&outcome.result.output),
+            capture_hints(&outcome.receipt.output_captures)
         ));
     }
+}
+
+// Only typed durable observations supply readback hints. No Blob reads here.
+fn capture_hints(captures: &[OutputCapture]) -> String {
+    let mut view = String::new();
+    for capture in captures.iter().take(4) {
+        let stream = match capture.stream {
+            OutputStream::Stdout => "stdout",
+            OutputStream::Stderr => "stderr",
+            OutputStream::Pty => "pty",
+        };
+        let child = capture
+            .child_index
+            .map(|index| format!(" 子命令 {}", usize::from(index) + 1))
+            .unwrap_or_default();
+        let completeness = if capture.complete {
+            "已完整捕获"
+        } else {
+            "捕获不完整；未保留字节不可回读"
+        };
+        let _ = writeln!(
+            view,
+            "原始输出{child} {stream}：保留 {}/已观察 {} bytes · {completeness}\n  read_output blob_id={} offset=0",
+            capture.retained_bytes,
+            capture.observed_bytes,
+            capture.blob_id.as_str()
+        );
+    }
+    if captures.len() > 4 {
+        let _ = writeln!(
+            view,
+            "[另有 {} 个捕获引用，见 Session 记录]",
+            captures.len() - 4
+        );
+    }
+    view
 }

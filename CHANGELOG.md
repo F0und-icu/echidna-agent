@@ -7,6 +7,11 @@ milestone history remains in `docs/development/STATUS.md` and Git history.
 
 ### Fixed
 
+- R5a: separate Assistant sampling replies, explicitly identify omitted debug
+  Tool definitions, and distinguish UI previews from retained raw output with
+  bounded read_output references. Actual prompts, ToolSpecs and Session facts
+  remain unchanged; release still excludes debug and retains reasoning.
+
 - R4b: fixed environment probes no longer infer program absence from ambiguous
   ENOENT failures. Versioned Binary/Mapping guidance distinguishes host, target,
   container, tool dialect and observed path aliases. Generation-1 selections

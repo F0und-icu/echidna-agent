@@ -12,6 +12,7 @@ mod recovery;
 mod tool_output;
 mod vision;
 
+use std::cell::Cell;
 use std::io::{self, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -322,11 +323,16 @@ pub(crate) async fn run(
             None => None,
         };
         let signal_cancellation = cancellation.clone();
-        let mut answer_started = false;
+        let answer_started = Cell::new(false);
+        let end_answer = || {
+            if answer_started.replace(false) {
+                println!();
+            }
+        };
         let mut text_delta = |text: &str| {
-            if !answer_started && !text.is_empty() {
+            if !answer_started.get() && !text.is_empty() {
                 print!("assistant> ");
-                answer_started = true;
+                answer_started.set(true);
             }
             print!("{text}");
             io::stdout()
@@ -336,11 +342,14 @@ pub(crate) async fn run(
                 })
         };
         let mut record_attempt = |attempt: RequestAuditAttempt| {
+            // Sampling boundaries affect only presentation, never History bytes.
+            end_answer();
             session
                 .record_request_audit(attempt)
                 .map_err(ChatError::into_request_audit_agent_loop_error)
         };
         let mut tool_start = |plan: &crate::domain::tools::ToolExecutionPlan| {
+            end_answer();
             tool_output.borrow_mut().started(plan);
         };
         let mut durability = |checkpoint: ChatDurabilityCheckpoint<'_>| match checkpoint {
