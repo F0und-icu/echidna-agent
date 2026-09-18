@@ -1085,7 +1085,13 @@ F6a delivery addendum: after the acceptance checkpoint above, the operator autho
 
 ### 当前修复队列（2026-09-12）
 
-#### R5b3：显式哈希新鲜度修复（当前）
+#### R5b4：已验证 Blob 命中免临时写入（当前）
+
+R5b3 已通过 PR#82 合并（268fcc0）。本包依据既有正式 Chat 测量，优化重复审计组件在 LocalArtifactStore::publish_bytes 中先临时写入/fsync、再发现已存在的路径。只移动既有精确内容/类型/大小校验到 staging 前，命中免临时写入；缺失仍用原耐久、禁止覆盖发布路径。不得跳过完整性校验、引入元数据缓存或新 API/Port。修改前后复用四场景 release 测量；永久回归由既有真实字节发布消费者覆盖。专项/受影响/独立审计/完整 Gate/Lean 后交付，未测指标保持 unavailable，不扩展 Live 或关闭 R6。
+
+R5b4 本地收口：专项3项、受影响64项/1项跳过、独立 Terra xhigh 产品与报告审计 APPROVE；最终完整 Gate487项通过/4项跳过及 Lean PASS。前后各48条 release 测量、96次 loopback 请求；交付大小/模式/审计组件估算保持相同，命中不再产生临时目录写入，所有完整性读取保留。描述性耗时与限制见 [R5B4_BLOB_PUBLICATION_MEASUREMENT.md](R5B4_BLOB_PUBLICATION_MEASUREMENT.md)，远端交付状态见 STATUS/Git。后续先决定 R5 剩余候选准入/Deferred 与 R6 普通工程长流程的新额度，不启动安全题目或继承已耗尽 L1 额度。
+
+#### R5b3：显式哈希新鲜度修复
 
 R5b2 已合并至 `513c8ca`。离线核验确认同大小/mtime 内容修改在缓存命中和元数据重建路径都可能返回旧 BLAKE3。按 ADR-0027/v1.17，在既有 second-level owner 对显式路径重新验证；空请求保持廉价复用，验证未变不重写缓存。永久回归覆盖两条路径、Git/非 Git、Memory、重新装配和负例。`hashed_paths` 与 cache disposition 分离；历史测量不重写为修复后的结果。专项/受影响/独立审计/修复/Gate/Lean 后停止，Live 与后续优化不自动启动。
 

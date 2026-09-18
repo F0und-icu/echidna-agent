@@ -47,7 +47,26 @@ impl ArtifactStore for LocalArtifactStore {
 
     fn publish_bytes(&self, bytes: &[u8]) -> Result<StoredBlob, Self::Error> {
         let blob_directory = self.ensure_blob_directory()?;
-        let (blob_id, size_bytes, temporary_path) = stage_bytes_once(bytes, &blob_directory)?;
+        let blob_id =
+            BlobId::new(format!("{:x}", Sha256::digest(bytes))).expect("SHA-256 is valid");
+        let size_bytes =
+            u64::try_from(bytes.len()).map_err(|_| LocalArtifactStoreError::SourceRead {
+                path: blob_directory.clone(),
+                source: io::Error::other("Artifact size exceeds u64"),
+            })?;
+        // Already-owned bytes need no staged copy when the destination passes
+        // the same full integrity check as publication. Never cache this check.
+        if matches!(
+            inspect_existing_blob(&blob_directory.join(blob_id.as_str()), &blob_id, size_bytes)?,
+            ExistingBlob::Verified
+        ) {
+            return Ok(StoredBlob {
+                blob_id,
+                size_bytes,
+                already_present: true,
+            });
+        }
+        let temporary_path = stage_bytes_once(bytes, &blob_directory)?;
         self.publish_staged(blob_directory, blob_id, size_bytes, temporary_path)
     }
 
@@ -322,7 +341,7 @@ fn stage_source_once(
 fn stage_bytes_once(
     bytes: &[u8],
     blob_directory: &Path,
-) -> Result<(BlobId, u64, PathBuf), LocalArtifactStoreError> {
+) -> Result<PathBuf, LocalArtifactStoreError> {
     let (mut temporary_file, temporary_path) = create_durable_temporary_file(blob_directory)
         .map_err(|error| LocalArtifactStoreError::Stage {
             path: blob_directory.to_path_buf(),
@@ -340,13 +359,7 @@ fn stage_bytes_once(
         remove_durable_temporary_file_best_effort(&temporary_path);
         return Err(error);
     }
-    let blob_id = BlobId::new(format!("{:x}", Sha256::digest(bytes))).expect("SHA-256 is valid");
-    let size_bytes =
-        u64::try_from(bytes.len()).map_err(|_| LocalArtifactStoreError::SourceRead {
-            path: temporary_path.clone(),
-            source: io::Error::other("Artifact size exceeds u64"),
-        })?;
-    Ok((blob_id, size_bytes, temporary_path))
+    Ok(temporary_path)
 }
 
 fn inspect_existing_blob(

@@ -18,6 +18,11 @@ milestone history remains in `docs/development/STATUS.md` and Git history.
 
 ### Fixed
 
+- R5b4: publishing already-owned bytes reuses an existing Blob only after the
+  original full SHA-256/size/type verification, without staging and syncing a
+  redundant temporary copy. Missing Blobs retain durable no-overwrite
+  publication; provenance and reconstruction checks remain unchanged.
+
 - R5b3: explicit project hash requests verify current bytes on both cache hits
   and rebuilds, including same-size/restored-mtime edits. Unchanged verification
   preserves cache bytes; hashed_paths reports actual work even on a hit.

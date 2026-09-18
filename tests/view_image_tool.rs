@@ -1,3 +1,5 @@
+#[path = "view_image_tool/blob_publication.rs"]
+mod blob_publication;
 mod support;
 
 use std::fs;
