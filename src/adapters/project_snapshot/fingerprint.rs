@@ -310,9 +310,12 @@ pub(super) fn apply_second_level(
         if !metadata_changed {
             entry.blake3 = prior.and_then(|prior| prior.blake3.clone());
         }
-        if requested.remove(&entry.relative_path) && entry.blake3.is_none() {
+        if requested.remove(&entry.relative_path) {
             let path = root.join(&entry.relative_path);
-            entry.blake3 = Some(hash_regular_file(&path)?);
+            let (hash, metadata) = hash_regular_file(&path)?;
+            entry.blake3 = Some(hash);
+            entry.size_bytes = metadata.len();
+            entry.modified_nanos = modified_nanos(&metadata);
             hashed_paths.push(entry.relative_path.clone());
         }
     }
@@ -322,26 +325,6 @@ pub(super) fn apply_second_level(
         });
     }
     Ok((entries, hashed_paths))
-}
-
-pub(super) fn pending_hashes(
-    root: &Path,
-    entries: &[FileManifestEntry],
-    values: &[String],
-) -> Result<Vec<String>, LocalProjectSnapshotError> {
-    let requested = requested_hashes(root, entries, values)?;
-    let entries = entries
-        .iter()
-        .map(|entry| (entry.relative_path.as_str(), entry))
-        .collect::<BTreeMap<_, _>>();
-    Ok(requested
-        .into_iter()
-        .filter(|path| {
-            entries
-                .get(path.as_str())
-                .is_some_and(|entry| entry.blake3.is_none())
-        })
-        .collect())
 }
 
 fn requested_hashes(
@@ -408,7 +391,7 @@ fn normalize_hash_paths(values: &[String]) -> Result<BTreeSet<String>, LocalProj
         .collect()
 }
 
-fn hash_regular_file(path: &Path) -> Result<String, LocalProjectSnapshotError> {
+fn hash_regular_file(path: &Path) -> Result<(String, fs::Metadata), LocalProjectSnapshotError> {
     let metadata =
         fs::symlink_metadata(path).map_err(|source| LocalProjectSnapshotError::Inspect {
             path: path.to_path_buf(),
@@ -433,7 +416,7 @@ fn hash_regular_file(path: &Path) -> Result<String, LocalProjectSnapshotError> {
                 source,
             })?;
         if read == 0 {
-            return Ok(hasher.finalize().to_hex().to_string());
+            return Ok((hasher.finalize().to_hex().to_string(), metadata));
         }
         hasher.update(&buffer[..read]);
     }

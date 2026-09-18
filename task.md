@@ -824,7 +824,7 @@ Git 项目：
 - 关键 Manifest 元数据。
 - 已配置的忽略目录和大文件阈值。
 
-StepSnapshot 只计算这一级指纹。如果它与缓存一致，直接复用 Project Snapshot、File Manifest 和已有文件 Hash。
+StepSnapshot 只计算这一级指纹。如果它与缓存一致且没有显式内容验证请求，直接复用 Project Snapshot、File Manifest 和已有文件 Hash；这些是元数据缓存观察，不是当前内容身份的证明。ADR-0027/v1.17 要求显式 `hash_paths` 在命中和重建路径都重新读取、验证当前内容。
 
 #### 第二级：按需内容验证
 
@@ -839,7 +839,7 @@ StepSnapshot 只计算这一级指纹。如果它与缓存一致，直接复用 
 
 - Project Snapshot 包含 ProjectFingerprint、文件清单摘要、语言/技术栈、关键 Manifest、已选 Target、工具能力和 `last_research_sequence`。
 - 每个缓存文件保存 `cache_schema_version`、Project ID、Source Fingerprint 和 created_at。
-- 快照未变化时，`inspect_project` 直接返回缓存和指纹，不重新遍历文件内容。
+- 无显式 `hash_paths` 且快照未变化时，`inspect_project` 直接返回缓存和指纹，不重新遍历文件内容。显式路径规范化去重后逐一验证；未变不重写缓存，`hashed_paths` 记录实际计算路径，与 Hit/Refresh 状态分离。未请求的缓存哈希不因此升级为已验证内容。
 - 文件系统 Watcher 只能作为运行期失效提示，不是恢复后的事实源。
 - `/snapshot` 必须显示本次是 Hit、Incremental Refresh 还是 Full Rebuild，以及触发原因。
 

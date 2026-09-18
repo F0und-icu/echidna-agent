@@ -23,6 +23,8 @@ If the user explicitly authorizes development sub-agents, every delegated agent 
 
 ## Current Phase
 
+- R5b2 is merged through PR#81. R5b3 explicit Snapshot hash freshness is governed by STATUS and ADR-0027 / additive architecture v1.17. Read the frozen chain through v1.17. Explicit hash_paths reverify current bytes; empty requests retain cheap metadata reuse. No remote architecture hash seal is authorized.
+
 - R4b is merged through PR#78. Current R5a presentation is governed by STATUS and ADR-0026 / additive architecture v1.16: explicit debug omissions, reply boundaries and durable capture hints only. R5b measurement and R6 long-task acceptance remain open. Read the full frozen chain through v1.16; remote architecture hash seal remains unauthorized.
 
 - Immutable architecture v1.15 / ADR-0025 governs compatible Binary/Mapping prompt revision and conservative environment observations; ADR-0024/0023 preserve child checkpoints and raw output. R3a2/R3b1/R3b2/R4a/R4b are merged through #74–#78. No CTF execution mode is introduced. Remote hash seal remains unauthorized.

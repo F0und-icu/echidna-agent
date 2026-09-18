@@ -1085,6 +1085,12 @@ F6a delivery addendum: after the acceptance checkpoint above, the operator autho
 
 ### 当前修复队列（2026-09-12）
 
+#### R5b3：显式哈希新鲜度修复（当前）
+
+R5b2 已合并至 `513c8ca`。离线核验确认同大小/mtime 内容修改在缓存命中和元数据重建路径都可能返回旧 BLAKE3。按 ADR-0027/v1.17，在既有 second-level owner 对显式路径重新验证；空请求保持廉价复用，验证未变不重写缓存。永久回归覆盖两条路径、Git/非 Git、Memory、重新装配和负例。`hashed_paths` 与 cache disposition 分离；历史测量不重写为修复后的结果。专项/受影响/独立审计/修复/Gate/Lean 后停止，Live 与后续优化不自动启动。
+
+R5b3 本地收口：专项4项、受影响93项、独立 Terra xhigh 审计及夹具修正复审 APPROVE；最终完整 Gate484项通过/4项跳过，fmt/Clippy/build及 Lean PASS。当前产物重新编译的外部复现8场景/24独立检查进程全部哈希新鲜。旧压力夹具失败与修正记录保留，未放宽产品预算或断言；源码净减少13行，无新增公共 API/依赖。已按后续明确授权提交 PR#82；最终交付状态见 STATUS/Git，不宣称 R5/R6 整体完成。
+
 #### R5b2：正式 Chat 离线交付测量（验收通过，PR#81 已提交）
 
 R5b1 已由 PR#80 / `5d78171` 合并。本包复用正式 CLI 与既有 bounded loopback/Config/Session 测试入口，不改产品接口。四类固定样本分别使用 Full-only/增量能力配置，正常退出后显式 Resume；等长源码/Memory 修改恢复 mtime 并核对实际 ToolResult/请求里的最新内容。记录收到的 HTTP body、审计组件大小、既有估算和 CLI 耗时，区分廉价 Snapshot 指纹与内容身份。默认正确性回归、显式重复测量、专项/受影响、全新 Terra xhigh 独立审计、Gate、Lean 后交付。未测量的 hash/扫描/Provider usage/TTFT 不填0；无真实模型或新 Live 额度。本包不提前修改缓存策略，精确显式文件哈希的新鲜度另行评估。

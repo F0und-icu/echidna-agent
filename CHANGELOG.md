@@ -18,6 +18,10 @@ milestone history remains in `docs/development/STATUS.md` and Git history.
 
 ### Fixed
 
+- R5b3: explicit project hash requests verify current bytes on both cache hits
+  and rebuilds, including same-size/restored-mtime edits. Unchanged verification
+  preserves cache bytes; hashed_paths reports actual work even on a hit.
+
 - R5a: separate Assistant sampling replies, explicitly identify omitted debug
   Tool definitions, and distinguish UI previews from retained raw output with
   bounded read_output references. Actual prompts, ToolSpecs and Session facts

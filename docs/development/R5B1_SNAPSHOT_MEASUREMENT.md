@@ -1,5 +1,10 @@
 # R5b1 — Offline Snapshot baseline
 
+Historical-result notice (R5b3): numbers below describe the pre-fix baseline.
+Explicit hash_paths now reread every requested file, including warm hits, while
+unchanged cache bytes remain reusable. Current reproduction therefore has
+different hashing work/cost; do not interpret this old report as post-fix data.
+
 ## Scope and decision
 
 This is a derived local test report, not a production metric, Session fact or

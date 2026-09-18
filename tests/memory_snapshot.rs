@@ -1,3 +1,5 @@
+#[path = "memory_snapshot/freshness.rs"]
+mod freshness;
 #[path = "memory_snapshot/measurement.rs"]
 mod measurement;
 mod support;
@@ -658,7 +660,10 @@ async fn inspect_project_reuses_complete_cache_and_rebuilds_changed_deleted_or_c
     )
     .await;
     assert_eq!(reused_hash.result.output["status"], "hit");
-    assert_eq!(reused_hash.result.output["hashed_paths"], json!([]));
+    assert_eq!(
+        reused_hash.result.output["hashed_paths"],
+        json!(["alpha.txt"])
+    );
 
     fs::write(
         project.root().join("alpha.txt"),

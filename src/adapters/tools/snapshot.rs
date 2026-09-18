@@ -108,7 +108,8 @@ pub(super) fn input_schema() -> Value {
         "type": "object",
         "properties": {
             "observed_at": {"type": "string", "minLength": 1},
-            "hash_paths": {"type": "array", "items": {"type": "string"}}
+            "hash_paths": {"type": "array", "items": {"type": "string"},
+                "description": "Project-relative files to read and verify with BLAKE3 now, even on cache hits. Duplicate paths are hashed once. Omit for cheap metadata inspection; unrequested cached hashes are not current-content verification."}
         },
         "required": ["observed_at"],
         "additionalProperties": false
@@ -127,7 +128,8 @@ pub(super) fn output_schema() -> Value {
                 "tool_capability_hash": {"type": "string", "minLength": 1}, "file_count": {"type": "integer", "minimum": 0}
             }, "required": ["cache_schema_version", "project_id", "source_fingerprint", "created_at", "rebuild_reason", "file_manifest_hash", "tool_capability_hash", "file_count"], "additionalProperties": false},
             "file_manifest": file_manifest_schema(), "tool_capabilities": tool_capability_cache_schema(),
-            "hashed_paths": {"type": "array", "items": {"type": "string"}}
+            "hashed_paths": {"type": "array", "items": {"type": "string"},
+                "description": "Normalized paths whose bytes were hashed in this invocation; may be nonempty with status hit when verification found no cache change."}
         }, "required": ["status", "rebuild_reason", "snapshot", "file_manifest", "tool_capabilities", "hashed_paths"], "additionalProperties": false
     })
 }

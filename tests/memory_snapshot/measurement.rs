@@ -17,14 +17,14 @@ const CACHE_FILES: [&str; 3] = [
 const SOURCE: &str = "source-000.txt";
 const MEMORY: &str = ".cyber-agent/memory/core.md";
 
-fn cache_contents(root: &Path) -> Vec<Vec<u8>> {
+pub(super) fn cache_contents(root: &Path) -> Vec<Vec<u8>> {
     CACHE_FILES
         .iter()
         .map(|name| fs::read(root.join(".cyber-agent/cache").join(name)).unwrap())
         .collect()
 }
 
-fn git_fixture(root: &Path, args: &[&str]) {
+pub(super) fn git_fixture(root: &Path, args: &[&str]) {
     let output = Command::new("git")
         .arg("-C")
         .arg(root)
@@ -150,18 +150,9 @@ async fn four_cases(repetitions: usize, file_count: usize, file_bytes: usize, em
                         assert_eq!(entry["size_bytes"], actual.len());
                         assert_eq!(entry["blake3"], blake3::hash(&actual).to_hex().to_string());
                     }
-                    let expected_hashes = if phase == "cold" {
-                        json!([MEMORY, SOURCE])
-                    } else if changes_project {
-                        json!([if case == "source_edit" {
-                            SOURCE
-                        } else {
-                            MEMORY
-                        }])
-                    } else {
-                        json!([])
-                    };
-                    assert_eq!(output["hashed_paths"], expected_hashes);
+                    // R5b3: explicit requests verify both paths, independently
+                    // of whether the persisted metadata cache is reused.
+                    assert_eq!(output["hashed_paths"], json!([MEMORY, SOURCE]));
                     let cache = cache_contents(project.root());
                     if expected_status == "hit" {
                         assert_eq!(cache, prior_cache, "cache hit rewrote bytes");

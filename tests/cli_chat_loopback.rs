@@ -3087,8 +3087,10 @@ fn m5_context_pressure_uses_only_planner_manifest_and_never_auto_compacts() {
         200,
         text_response("warning pressure", "m5-pressure-warning"),
     )]);
+    // Keep this fixture inside the warning band with headroom for canonical
+    // ToolSpec guidance; the separate critical lane still proves truncation.
     let warning_config =
-        write_context_window_config(warning.path(), &warning_server.base_url, 20_000);
+        write_context_window_config(warning.path(), &warning_server.base_url, 22_000);
     let warning_output = run_chat(
         warning.path(),
         &warning_config,
@@ -3139,8 +3141,10 @@ fn m5_context_pressure_uses_only_planner_manifest_and_never_auto_compacts() {
         200,
         text_response("critical pressure", "m5-pressure-critical"),
     )]);
+    // Leave required fragments room while keeping the bounded Research
+    // projection above the input budget; critical must not be a stopped Turn.
     let critical_config =
-        write_context_window_config(critical.path(), &critical_server.base_url, 18_500);
+        write_context_window_config(critical.path(), &critical_server.base_url, 20_000);
     let critical_output = run_chat(
         critical.path(),
         &critical_config,

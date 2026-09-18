@@ -21,7 +21,7 @@ use crate::domain::snapshot::{
 };
 use crate::domain::tools::ToolSpec;
 
-use fingerprint::{apply_second_level, first_level, pending_hashes};
+use fingerprint::{apply_second_level, first_level};
 
 const CACHE_DIRECTORY: &str = ".cyber-agent/cache";
 const SNAPSHOT_FILE: &str = "project-snapshot.json";
@@ -86,31 +86,32 @@ impl<'project> LocalProjectSnapshot<'project> {
                     hashed_paths: Vec::new(),
                 });
             }
-            // The first-level Git fingerprint has already proved that the
-            // cached manifest describes the current worktree. Keep the
-            // explicit second-level request incremental; walking the whole
-            // tree here would turn a cheap cache hit into a full inspection.
-            let pending_hashes =
-                pending_hashes(self.project.root(), &hit.manifest.entries, hash_paths)?;
-            if pending_hashes.is_empty() {
+            // A cheap fingerprint is not content identity. Verify only the
+            // requested paths, without another full tree walk or a second
+            // hashing owner. An unchanged verification needs no cache write.
+            let (entries, hashed_paths) = apply_second_level(
+                self.project.root(),
+                hit.manifest.entries.clone(),
+                Some(&hit.manifest),
+                hash_paths,
+            )?;
+            if entries == hit.manifest.entries {
                 return Ok(InspectionResult {
                     disposition: CacheDisposition::Hit,
                     snapshot: hit.snapshot,
                     manifest: hit.manifest,
                     tool_capabilities: hit.tool_capabilities,
-                    hashed_paths: Vec::new(),
+                    hashed_paths,
                 });
             }
-            let entries = hit.manifest.entries.clone();
-            return self.rebuild_cache(
+            return self.persist_inspection(
                 CacheDisposition::IncrementalRefresh {
                     reason: "explicit_hash_paths".to_owned(),
                 },
                 fingerprint,
                 entries,
                 expected_tool_capabilities,
-                Some(&hit.manifest),
-                &pending_hashes,
+                hashed_paths,
                 created_at,
             );
         }
@@ -124,22 +125,27 @@ impl<'project> LocalProjectSnapshot<'project> {
             Some(entries) => entries,
             None => fingerprint::collect_entries(self.project.root())?,
         };
-        self.rebuild_cache(
+        let (entries, hashed_paths) = apply_second_level(
+            self.project.root(),
+            entries,
+            prior_manifest.as_ref(),
+            hash_paths,
+        )?;
+        self.persist_inspection(
             CacheDisposition::FullRebuild {
                 reason: reason.clone(),
             },
             fingerprint,
             entries,
             expected_tool_capabilities,
-            prior_manifest.as_ref(),
-            hash_paths,
+            hashed_paths,
             created_at,
         )
     }
 
     /// Validates only the current cache and its cheap source fingerprint.
     /// This is the inspection CLI's read-only path: it never calls
-    /// `rebuild_cache`, creates a directory, or replaces a cache file.
+    /// `persist_inspection`, creates a directory, or replaces a cache file.
     pub(crate) fn inspect_read_only(
         &self,
         specs: &[ToolSpec],
@@ -172,15 +178,13 @@ impl<'project> LocalProjectSnapshot<'project> {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn rebuild_cache(
+    fn persist_inspection(
         &self,
         disposition: CacheDisposition,
         fingerprint: ProjectFingerprint,
         entries: Vec<FileManifestEntry>,
         expected_tool_capabilities: Vec<crate::domain::snapshot::ToolCapability>,
-        prior_manifest: Option<&FileManifest>,
-        hash_paths: &[String],
+        hashed_paths: Vec<String>,
         created_at: &str,
     ) -> Result<InspectionResult, LocalProjectSnapshotError> {
         let reason = match &disposition {
@@ -188,8 +192,6 @@ impl<'project> LocalProjectSnapshot<'project> {
             | CacheDisposition::FullRebuild { reason } => reason.clone(),
             CacheDisposition::Hit => unreachable!("a cache hit does not rebuild cache files"),
         };
-        let (entries, hashed_paths) =
-            apply_second_level(self.project.root(), entries, prior_manifest, hash_paths)?;
         let manifest = FileManifest {
             cache_schema_version: SNAPSHOT_CACHE_SCHEMA_VERSION,
             project_id: self.project.project_id().clone(),
