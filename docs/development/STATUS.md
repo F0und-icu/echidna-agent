@@ -2,7 +2,7 @@
 
 ## Current delivery — R5c2 reviewed Memory quota repair
 
-- State: DELIVERY_IN_PROGRESS (2026-09-21). Operator explicitly requested delivery of existing repairs followed by the next bounded development work. The reviewed R5c2 source/test freeze still matches all319 entries; its independent APPROVE, subsequent complete Gate and Lean remain applicable without production edits. Release measurement is separate descriptive evidence, not a new optimization or model-quality claim.
+- State: REMOTE_DRAFT_SUBMITTED (2026-09-21). Operator explicitly requested delivery of existing repairs followed by the next bounded development work. Fix3d81ee9 and measurement/status e378a2d are delivered in Draft [PR #85](https://github.com/F0und-icu/cyber-agent/pull/85), based on the unmerged R6 branch of #84. The reviewed R5c2 source/test freeze still matches all319 entries; its independent APPROVE, subsequent complete Gate and Lean remain applicable without production edits. Release measurement is separate descriptive evidence, not a new optimization or model-quality claim.
 - Remote read-only verification: PR #84 is OPEN/Draft at943cb94, base main, clean merge state with no reported checks. Deliver this follow-up as a separate dependent Draft PR based on codex/r6-reliability-schema-delivery; do not silently merge #84 or claim remote CI. Use explicit file staging and skip-ci commits. No Actions, Live, credential access, Tag/Release or architecture hash seal.
 - After delivery, scope the already proposed per-query normalization reuse as one R6 follow-up implementation. No model-visible retrieval promotion or wider R6 acceptance is implied.
 
