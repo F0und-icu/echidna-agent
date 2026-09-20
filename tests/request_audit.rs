@@ -217,6 +217,75 @@ fn full_request_audit_allows_distinct_provider_delivery_only_for_continuation_re
     .expect("an exact reasoning replay may accompany an otherwise identical Full request");
 }
 
+#[test]
+fn tool_change_diff_audit_requires_exact_current_request_contract() {
+    use cyber_agent::domain::context::BaselineInvalidationReason;
+    use cyber_agent::domain::model::ContentItem;
+    use cyber_agent::ports::tool::ToolExecutor;
+    let tool = cyber_agent::adapters::tools::ToolRegistry::for_project(env!("CARGO_MANIFEST_DIR"))
+        .catalog()
+        .into_iter()
+        .find(|spec| spec.name.as_str() == "read_file")
+        .unwrap();
+    let logical =
+        input("current instructions", "current full projection").with_tool_specs(vec![tool]);
+    let mut delivered = logical.clone();
+    delivered.content_items = vec![
+        ContentItem::user_text("retained full projection"),
+        ContentItem::Reasoning {
+            text: "completed reasoning".into(),
+        },
+        ContentItem::user_text("verified state diff"),
+    ];
+    let check = |candidate: ModelInputIR, reason| {
+        RequestAuditAttempt::new(
+            &run_context("project-left"),
+            cyber_agent::domain::context::ModelIdentity::new("fixture", "model"),
+            cyber_agent::domain::context::ModelProfile::new("fixture-profile", 1),
+            capabilities(),
+            logical.clone(),
+            candidate,
+            RequestAuditDelivery::full(reason),
+        )
+    };
+    check(delivered.clone(), BaselineInvalidationReason::ToolsChanged).unwrap();
+    for change in ["instructions", "tools", "requirements", "reasoning"] {
+        let mut candidate = delivered.clone();
+        match change {
+            "instructions" => candidate.instructions.push_str(" changed"),
+            "tools" => candidate.tool_specs[0].version.push_str("changed"),
+            "requirements" => {
+                candidate.requirements.usage_reporting = !candidate.requirements.usage_reporting
+            }
+            "reasoning" => candidate
+                .content_items
+                .retain(|i| !matches!(i, ContentItem::Reasoning { .. })),
+            _ => unreachable!(),
+        }
+        assert!(
+            matches!(
+                check(candidate, BaselineInvalidationReason::ToolsChanged),
+                Err(RequestAuditError::FullDeliveryInputMismatch)
+            ),
+            "{change}"
+        );
+    }
+    for reason in [
+        BaselineInvalidationReason::PromptChanged,
+        BaselineInvalidationReason::ModelChanged,
+        BaselineInvalidationReason::CapabilityMappingChanged,
+        BaselineInvalidationReason::CompactionReset,
+    ] {
+        assert!(
+            matches!(
+                check(delivered.clone(), reason),
+                Err(RequestAuditError::FullDeliveryInputMismatch)
+            ),
+            "{reason:?}"
+        );
+    }
+}
+
 fn projection() -> SessionProjection {
     SessionProjection::replay([SessionEvent::Started {
         primary_provider_session: ProviderSessionRef {
@@ -255,6 +324,39 @@ fn record(
 
 fn service(blobs: &MemoryBlobStore) -> RequestAuditService<'_, MemoryBlobStore> {
     RequestAuditService::new(blobs, run_context("project-left").binding().clone())
+}
+
+#[test]
+fn base_revision_does_not_replace_recorded_generation_one_bytes() {
+    let blobs = MemoryBlobStore::default();
+    let service = service(&blobs);
+    let mut session = projection();
+    let mut sink = RecordingSink::default();
+    let old = input(
+        include_str!("fixtures/prompts/base-v1.md"),
+        "historical question",
+    );
+    let old_manifest = record(&service, old.clone(), &mut session, &mut sink, "base-v1");
+    let old_event = sink.events[0].clone();
+    let old_blobs = blobs.blobs.lock().unwrap().clone();
+    let current = input(
+        cyber_agent::domain::research_control::BaseContract.prompt(),
+        "current question",
+    );
+    let current_manifest = record(
+        &service,
+        current.clone(),
+        &mut session,
+        &mut sink,
+        "base-v2",
+    );
+    assert_ne!(old_manifest.components(), current_manifest.components());
+    assert_eq!(service.reconstruct(&old_manifest).unwrap(), old);
+    assert_eq!(service.reconstruct(&current_manifest).unwrap(), current);
+    assert_eq!(sink.events[0], old_event);
+    for (id, bytes) in old_blobs {
+        assert_eq!(blobs.read_blob(&id).unwrap(), bytes);
+    }
 }
 
 #[test]

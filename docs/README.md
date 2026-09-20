@@ -16,7 +16,7 @@
 4. `task.md` 中当前产品范围、架构约束和里程碑。
 5. `docs/development/IMPLEMENTATION_PLAN.md`。
 6. `docs/development/LEAN_CODE_GOVERNANCE.md`。
-7. 最新的冻结架构链：`docs/architecture/CYBER_AGENT_ARCHITECTURE_V1.md` 至 `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_16.md`；ADR-0026 约束显式终端投影，ADR-0025 约束环境指导与旧 Prompt 选择兼容，ADR-0024/0023/0022/0021 保留真实子项检查点、原始输出、运行句柄和有界恢复。
+7. 最新的冻结架构链：`docs/architecture/CYBER_AGENT_ARCHITECTURE_V1.md` 至 `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_20.md`；ADR-0030 约束当前事实与回答指导的有限范围，ADR-0029 约束最终文本与精确激活到期，ADR-0028/0027 约束增量激活与显式哈希新鲜度，ADR-0026 约束终端投影，ADR-0025 约束环境指导与旧 Prompt 选择兼容，ADR-0024/0023/0022/0021 保留真实子项检查点、原始输出、运行句柄和有界恢复。
 8. 已接受的 `docs/adr/ADR-*.md`。
 9. `docs/development/GIT_VERSION_RELEASE.md` 和 `docs/development/DEVELOPMENT_ENVIRONMENT.md`。
 10. `Codex架构与漏洞挖掘Agent复用评估.md`。
@@ -24,7 +24,9 @@
 
 冻结架构是某一时点的不可变设计基线，但 `task.md` 可以通过新的 ADR 和新架构版本继续演进。不得直接修改已封存版本来掩盖设计变化。
 
-最新增量：`architecture/CYBER_AGENT_ARCHITECTURE_V1_17.md` / ADR-0027 澄清显式 Snapshot 哈希验证；读取范围扩展为 v1 至 v1.17，旧冻结文件保持不变，远端 hash 封存仍未授权。
+当前读取完整冻结链至v1.20，相关ADR见上述权威顺序。R6-04整理本地回归基线与状态入口；R6-SC1复用既有输入Schema定义，二者不增加架构版本。R6-SC1实验和测量见 [Schema复用报告](development/R6_SC1_SCHEMA_REUSE_MEASUREMENT.md)。准确状态和下一动作见STATUS；历史状态存档不重新授权Live或交付，远端hash封存仍未授权。
+
+随后单独授权的 [R6-SC1 Live](development/R6_SC1_LIVE_2026_09_20.md) 已完成真实Schema调用和重启回读核验；结果待独立复核，措辞/覆盖限制和绝对usage如实保留，不推定token收益。
 
 ## 3. 文档地图
 
@@ -47,6 +49,7 @@
 | `docs/architecture/SEALED_MANIFEST.md` | 封存来源、提交基线和 Hash 清单 | 只追加新封存记录 |
 | `docs/development/IMPLEMENTATION_PLAN.md` | 按 Slice 可执行的开发步骤和验收门 | 可以，不能追溯改写已完成 Slice |
 | `docs/development/STATUS.md` | 当前唯一工作状态和下一动作 | 每个 Slice 开始/结束更新 |
+| `docs/development/STATUS_HISTORY_THROUGH_2026_09_19.md` | 截至2026-09-19的完整状态历史，原字节保留 | 仅历史证据，不作为当前执行入口 |
 | `docs/development/LEAN_CODE_GOVERNANCE.md` | 语义所有权、测试外置、抽象/依赖预算、Codex PORT 和删除 Gate | 可以，治理规则变化时更新 |
 | `docs/development/GIT_VERSION_RELEASE.md` | 分支、提交、PR、版本和发布规则 | 可以，通过 ADR 修改重大规则 |
 | `docs/development/DEVELOPMENT_ENVIRONMENT.md` | 本地和 CI 环境、工具链、配置和诊断 | 可以，环境变化时更新 |

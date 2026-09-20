@@ -1085,7 +1085,57 @@ F6a delivery addendum: after the acceptance checkpoint above, the operator autho
 
 ### 当前修复队列（2026-09-12）
 
-#### R5b4：已验证 Blob 命中免临时写入（当前）
+#### R6-SC1：有界输入 Schema 结构共享（当前）
+
+后续Live（2026-09-20新授权，已执行待独立结果复核）：全新普通工程项目/Session，12次/600秒上限，实际9次HTTP200/26.067秒。正式CLI完成Research更新（源码快照、两条未验证工程假设及显式合并）、重启只读回查，7配对工具/收据、380审计Blob引用及383冻结项通过。真实wire24工具32746bytes；usage只记录绝对值，不推定token收益。text/merge/空links生成通过，texts字段被省略及非空引用未实测；首答“no tools”措辞不准确，未执行代码/未建立证据事实正确。13前置测试和build通过，无生产修改/Git/Actions/自动重试/安全任务。新独立审计授权待回复；本lane关闭，剩余额度不复用。报告见[R6_SC1_LIVE_2026_09_20.md](R6_SC1_LIVE_2026_09_20.md)。
+
+操作者要求发现问题后继续优化。以 R6-04 实际 wire 的24工具/33767字节为基线，只在既有 Research Schema builder 明确共享四种重复输入类型，复用已有 `$defs/$ref`，不增加运行时压缩器。前置离线贪心候选收益有限且构造开销约3倍，实验代码和未审查ADR/架构草案已从候选移除，保留外部测量证据；冻结链仍至v1.20。既有definitions不改，输出和输入语义不变，相同 advertised/dispatch/审计与预算路径，不做 wire-only 重写、自动裁剪或额外发现轮次。完整展开等价性、真实调用、字节收益及catalog CPU成本必须验证；无净价值就删除实验。零新增生产模块/API/Port/依赖/配置/缓存/事件/Prompt，属于既有Schema表达复用而非新架构契约。专项→受影响→限时独立审计→修复→完整Gate→Lean；新Live/Git/Actions不在本包内。
+
+本地完成：专项11PASS，受影响207PASS/2ignored，独立Terra xhigh APPROVE，无修复项；完整Gate45集成套件510 unique PASS/4ignored，fmt/Clippy/build/inline/whitespace和Lean PASS。输入9711→8690字节，原24工具wire离线重编码33767→32746（−3.02%），不是实测token或延迟收益。ABBA开发构建catalog中位8.314810→8.323745ms，仅描述性无显著成本结论。一个生产文件净+7行，无新模块/依赖/API；停在本地交付。新Live验证真实模型参数调用和使用量、远端交付分别确认。详见R6_SC1_SCHEMA_REUSE_MEASUREMENT和STATUS。
+
+#### R6-04：长任务回归基线与交付整理（本地离线完成）
+
+操作者于2026-09-20批准继续。只整理当前STATUS与完整历史存档、明确R6-01～03待交付范围，并在既有CLI测试模块补齐普通工程多步工具→显式生产压缩→退出→新进程Resume→当前Memory/文件交付的组合回归。真实一次性副作用、配对/收据、旧历史前缀及审计重建必须验证；未知执行结局复用既有中断测试，不复制慢进程框架。脚本回复只证明交付和运行时行为，不证明模型遵循或历史归因正确。零生产代码/API/依赖/架构变更；发现缺陷先停止重锁Scope。专项→受影响（含domain_ports_contract）→限时独立只读审计→修复→完整Gate→Lean。本轮仅本地离线，新Live及远端交付另确认，不跑Actions。当前状态和精确证据见STATUS。
+
+本地收口：专项2通过，受影响7套件147通过/2跳过；独立Terra xhigh只读APPROVE，无修复项；完整Gate44集成套件507 unique通过/4跳过，fmt/Clippy/build/inline/whitespace及Lean PASS。新增一条永久组合回归，零生产代码变更；原2388行STATUS按字节完整归档，当前状态独立维护。详见R6_04_LONG_TASK_REGRESSION_BASELINE；仅离线生命周期基线，不宣称真实模型质量或长任务普遍通过。停在本地交付点。
+
+后续操作者单独授权的有界Live已完成：新普通工程项目，12次/600秒上限，实际8次HTTP200/29.239秒；真实一次性执行、当前事实变化、压缩13→7、新进程恢复和302审计Blob引用校验通过。独立脚本审查HARNESS APPROVE及结果复核REPORT APPROVE。三次后续回答均正确区分旧值当时有效与新配置，未伪称重跑；handoff小节282词未达350–450（整答389词），记为格式限制，不宣称普遍准确率提升。全部330冻结输入未改，无新产品代码/Git/Actions；剩余4次不自动重用。结果见R6_04_LIVE_2026_09_20.md，下一候选为重复ToolSpec交付的有界测量，未启动优化实现。
+
+#### R6-03：当前事实与回答纪律（已本地离线验证）
+
+R6-02 原始请求已含新 EUR Memory，旧结论沿用属于已观察到的回答问题，不假定 Context 丢失。只通过原 BaseContract generation2 明确同目标/字段/范围的当前依据与历史回忆关系、Memory非执行证据、元数据证明边界、当前回答格式。保持唯一身份、renderer、排序、事实/审计所有者。ADR-0030/v1.20先于源码；base-v1原字节转为历史测试fixture，不引入运行时选择器。固定回归验证交付/代际/历史字节与预算，离线不宣称遵循率改善。完整流程和有限范围见STATUS；不自动Live/Git。
+
+本地收口：专项/受影响通过，独立Terra xhigh只读审计APPROVE，完整Gate44套件506 unique PASS/4ignored（另有writer-lock子进程重复1项）、fmt/Clippy/build/inline及Lean PASS。Base仅增加386字节/96估算token，原20,000压力窗口未放宽。历史字节与正式CLI新进程Resume交付回归通过；无新Live/远端交付，不外推真实模型服从率。后续仅在新有界Live授权下评估回答质量，具体见STATUS与R6_03报告。
+
+R6-03 后续有界配对Live完成：3组/6次真实请求全部HTTP200，15.671秒，无工具/重试。v1与v2当前事实/证据/格式均3/3，旧值当当前值均0/3，未证明提升；两版仍有不必要或不准确的历史归因。原始响应/正式CLI/History、114审计Blob引用、旧事实和324项冻结校验通过；Terra独立结果审计REPORT APPROVE。无产品热改/Git/Actions，额度已用完。后续可在新授权下测试更长历史/重复配对及历史归因，不自动添加规则、重试、RAG或事实裁判。完整证据见R6_03_PAIRED_LIVE报告。
+
+#### R6-02：已观测可靠性问题收口（已本地验证）
+
+按 STATUS 有限范围修复：协议最终文本与状态核对；含说明词的精确工具名检索；当前暴露与可发现目录、真实来源/时间、仅重复执行时填写 rerun_reason 的工具契约说明；当前 Turn 激活自然到期的精确续接证明。先保留红色回归，复用原所有者，禁止厂商分支、自动续写/重试、猜时间或放宽全部 ToolsChanged。跨 Turn 行为先写窄 ADR；历史截断归因待保留原始 SSE 的新验证，不把猜测改写为历史事实。受影响/独立审计/完整 Gate/Lean 后一次有界普通工程 Live；前置 TargetSnapshot 和货币/Memory 夹具必须一致。实现状态与剩余限制逐项记录，不把提示词更新当作模型普遍服从证明。
+
+R6-02 本地收口：修复及独立复审 APPROVE、完整 Gate（502 unique PASS/4ignored、fmt/Clippy/build/inline）和 Lean 通过。包含首次 Live 暴露的 reasoning_text content_part.done 兼容回归；旧失败记录不覆写。后续明确授权的新 Live 已6次HTTP200/60.07秒，工程链路（真实工具、激活到期、压缩/进程恢复、原始文本一致、审计/原事实保留）通过，有限独立结果报告审计 APPROVE。状态 COMPLETE_LOCAL_ENGINEERING_LIVE_PASS_WITH_CONTENT_LIMITS。仍记录首答偏长/过期货币不确定表述及交接495词未满要求；不宣称普遍模型准确。无新公共API/依赖/配置/schema、无产品热改或Git/Actions；准确证据及最终状态见 STATUS 与 R6_02_LIVE_REVALIDATION_2026_09_19.md。
+
+#### R6-01：增量Tool激活与推理/state-diff续接（已本地核验）
+
+依据首轮普通工程Live阻断，按ADR-0028/v1.18由主Agent实现；仅复用原Baseline比较器、原Context差量构造和RequestAudit关系owner，对同Turn新增Tool做旧定义/非Tool语义/完整历史前缀验证。借用旧Tool hash进行额外比较，不复制长History或更改实际请求。零新增生产模块/API/依赖/Schema，R6-02至05不混修。正式CLI红→绿、App负例、审计契约测试后，受影响测试（含domain_ports_contract）→全新限时Terra xhigh只读审计→修复→完整Gate→Lean。跨Turn清除激活后的差量推理仍可能显式要求Resume；本包不宣称全长任务通过。不继承上轮未用额度重跑Live，不提交远端。
+
+本地收口：COMPLETE_LOCAL_VERIFIED。专项4项、受影响172项通过；全新Terra xhigh独立只读APPROVE，仅澄清一处注释；其后完整Gate（491 unique PASS/4 ignored、fmt/Clippy/build）、inline扫描和Lean PASS。生产4文件净增57行，无新模块/API/依赖。新Live与远端交付尚未执行；具体证据和未解除的跨Turn限制见STATUS。
+
+#### R6：普通工程长任务可靠性验收（当前）
+
+2026-09-19压缩专项获明确授权：最多8次实际请求/600秒，沿用真实长Session并先完整备份。以现有Domain/Writer追加真实工程TargetSnapshot，正式CLI离线压缩成功且零模型请求后，再验证同进程CompactionReset采样与新进程Resume。固定源码/二进制、原始历史前缀、Receipt/Blob及一次性counter；有损信息只能声明不可用，不能编造。不修改产品规则、不重跑已通过长链或默认扩额，日志 `/tmp/cyber-agent-r6-compact.jSdtQW/`。准确状态以STATUS顶部为准。
+
+专项收口：工程压缩/恢复路径通过，2次HTTP200、revision1保留40/80项History、原事实/Blob不变、无工具重执行。首次回答末尾不完整且CLI/History一致，原始上游响应体未留存，原因待专项诊断；另有夹具旧USD Memory备注与EUR文件观察冲突，不能算货币精确复述PASS。状态ENGINEERING_PATH_PASS_ANSWER_LIMITED，不扩大到全R6/回答完整性通过。报告 [R6_COMPACTION_ACCEPTANCE_2026_09_19.md](R6_COMPACTION_ACCEPTANCE_2026_09_19.md)。后续先有界抓取上游SSE并逐层定位，不能盲加截断修补或自动续写；本轮无代码修复/远端交付。
+
+2026-09-18 R6-01离线收口后，操作者再次明确授权长测：新lane沿用1800秒/48实际请求上限，新Project/Session，冻结当前未提交候选与脚本。运行时随机输出marker及后置chain夹具避免提前答案泄漏；真实read_output/Blob、counter、停止/恢复及手动Compaction为验收依据。日志 `/tmp/cyber-agent-r6-retest.9NyLBf/`，不热改代码、不启动安全任务/Actions/远端交付，当前进度以STATUS顶部为准。
+
+本lane收口：28次HTTP200/307.56秒。R6-01组合真实路径、输出回读、一次性counter、当前文件/Memory和预算恢复通过；`/compact`因验收夹具缺少Research TargetSnapshot而拒绝，符合既有前置契约，无半成品Event。R6整体未完成，不能当作产品新缺陷或全部PASS。后续优先单独补充带真实工程TargetSnapshot前置验证的有界压缩/恢复专项；不修改本次结果，不默认复用剩余20请求。报告 [R6_REACCEPTANCE_2026_09_18.md](R6_REACCEPTANCE_2026_09_18.md)。
+
+2026-09-18 操作者授权进入新验收 lane：固定已合并 main `5c07308`，一个全新普通工程 Project/Session，最多30分钟、累计48次实际远端请求（含恢复）。不继承已耗尽 L1，不运行安全题目/Actions。不改产品代码；外部脚本驱动正式交互 CLI，分别核对任务结果、工具耐久事实、进程 Resume、当前文件/Memory 新鲜度、原始输出回读、预算停止与显式恢复/压缩。凭据、配置副本和日志在仓库外；版本、预算、输入、失败和未覆盖项必须记录。R5 未证明收益的优化/检索提升保持 Deferred。准确状态、配置与证据见 STATUS；任何新修复需另锁 Scope，不边测边改后宣称单轮通过。
+
+本轮STOPPED_BLOCKER_FOUND：12次HTTP200后，本地拒绝`ToolsChanged + completed reasoning + project state diff`候选；未发第13次请求。普通工程修复/外部oracle、第一次预算停止与显式进程Resume、当前文件/Memory新鲜度通过观察；大输出/一次性副作用/Compaction未到达。下一修复候选先锁R6-01交付准入交叉与RequestAudit一致性，必要时窄ADR；不得简单放宽所有变化、丢推理或以静态暴露绕过原验收。证据与非阻断效率问题见 [R6_ENGINEERING_ACCEPTANCE_2026_09_18.md](R6_ENGINEERING_ACCEPTANCE_2026_09_18.md)。本轮不实施修复或继续Live。
+
+#### R5b4：已验证 Blob 命中免临时写入
 
 R5b3 已通过 PR#82 合并（268fcc0）。本包依据既有正式 Chat 测量，优化重复审计组件在 LocalArtifactStore::publish_bytes 中先临时写入/fsync、再发现已存在的路径。只移动既有精确内容/类型/大小校验到 staging 前，命中免临时写入；缺失仍用原耐久、禁止覆盖发布路径。不得跳过完整性校验、引入元数据缓存或新 API/Port。修改前后复用四场景 release 测量；永久回归由既有真实字节发布消费者覆盖。专项/受影响/独立审计/完整 Gate/Lean 后交付，未测指标保持 unavailable，不扩展 Live 或关闭 R6。
 

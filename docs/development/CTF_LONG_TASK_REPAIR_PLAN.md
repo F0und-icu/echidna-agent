@@ -190,6 +190,10 @@ R5b3 已由 PR#82 合并。当前 R5b4 仅评估并优化既有 Blob 字节发�
 
 ## 11. R6：分级 Live 与停止条件
 
+2026-09-18 新普通工程lane已获授权（1800秒/累计48请求，含恢复），与旧L1/L2分别计账。当前结果STOPPED_BLOCKER_FOUND：12次请求均HTTP200，下一采样在本地被ToolsChanged与已保留reasoning/state-diff组合拒绝。先锁R6-01最小复现/兼容交付及RequestAudit边界；未运行的输出回读、副作用与Compaction验收不得标为通过。完整记录见 [R6_ENGINEERING_ACCEPTANCE_2026_09_18.md](R6_ENGINEERING_ACCEPTANCE_2026_09_18.md)。本轮没有新产品修复或后续模型请求；不扩大到安全测试。
+
+后续 R6-01 修复另锁 ADR-0028 / v1.18：只准入同 Turn 经过原 Baseline 完整验证的新增 Tool，复用原差量/推理交付与审计关系。不修改前述 Live 结果，不重置其额度。该包原本不含跨 Turn 到期；后续 R6-02 按 ADR-0029/v1.19 独立增加精确证明，同时收口 R6-02–05 工具检索/可见性/来源/时间指引与最终文本核对。不是放开任意 ToolsChanged，不将新测试回写为旧 Live 根因。当前进度与新验收限额见 STATUS。
+
 每级开始前单独确认 Provider 配置、请求数/时间预算、项目/输入范围及日志位置；全部走正式 Chat 和唯一配置装配，不访问 Codex 登录，不加厂商分支。
 
 **L1 合成协议/恢复 Live**：R0–R2 离线封存后即可申请，不必等所有性能优化。建议最多 3 个合成 Session，每个最多 6 次实际模型请求、5 分钟，无自动重试。覆盖 Full-only Tool loop、中断后显式 Resume、兼容性/额度停止后的人工继续；未知工具结果路径先用确定性离线 Fixture 证明。不得把一次通过当成全窗口容量证明。

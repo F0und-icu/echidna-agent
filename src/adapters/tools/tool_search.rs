@@ -43,23 +43,19 @@ pub(super) fn execute(plan: ToolExecutionPlan, specs: &[ToolSpec]) -> ToolExecut
 
     let normalized_query = normalize_query(&arguments.query);
     let terms = normalized_query.split(' ').collect::<Vec<_>>();
-    let matches = specs
+    let candidates = specs
         .iter()
         .filter(|spec| spec.exposure != ToolExposure::Hidden)
-        .filter(|spec| {
-            let searchable = format!(
-                "{} {}",
-                spec.name.as_str().to_ascii_lowercase(),
-                spec.description.to_ascii_lowercase()
-            );
-            terms.iter().all(|term| searchable.contains(term))
-        })
-        .take(arguments.max_results)
         .collect::<Vec<_>>();
-    let truncated = specs
-        .iter()
-        .filter(|spec| spec.exposure != ToolExposure::Hidden)
+    let exact_name =
+        |spec: &&ToolSpec| terms.contains(&spec.name.as_str().to_ascii_lowercase().as_str());
+    let has_exact_name = candidates.iter().any(exact_name);
+    let mut matches = candidates
+        .into_iter()
         .filter(|spec| {
+            if has_exact_name {
+                return exact_name(spec);
+            }
             let searchable = format!(
                 "{} {}",
                 spec.name.as_str().to_ascii_lowercase(),
@@ -67,8 +63,10 @@ pub(super) fn execute(plan: ToolExecutionPlan, specs: &[ToolSpec]) -> ToolExecut
             );
             terms.iter().all(|term| searchable.contains(term))
         })
-        .count()
-        > matches.len();
+        .collect::<Vec<_>>();
+    matches.sort_by(|left, right| left.name.cmp(&right.name));
+    let truncated = matches.len() > arguments.max_results;
+    matches.truncate(arguments.max_results);
     ToolExecutionOutcome::succeeded(
         plan,
         json!({
@@ -89,7 +87,8 @@ pub(super) fn input_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "query": {"type": "string", "minLength": 1},
+            "query": {"type": "string", "minLength": 1,
+                "description": "Prefer an exact tool-name token, optionally with descriptive words. Exact eligible names take precedence; otherwise every whitespace-separated term must match the name or description."},
             "max_results": {"type": "integer", "minimum": 1, "maximum": MAX_RESULTS}
         },
         "required": ["query"],

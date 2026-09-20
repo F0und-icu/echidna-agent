@@ -15,11 +15,15 @@ pub(super) fn update_input_schema() -> Value {
         "type": "object",
         "$defs": {
             "evidence_ref": evidence_ref_schema(),
-            "evidence_link": evidence_link_schema()
+            "evidence_link": evidence_link_schema(),
+            "text": string_schema(),
+            "texts": string_array_schema(),
+            "links": evidence_links_schema(),
+            "merge": merge_ref_schema()
         },
         "properties": {
-            "event_id": {"type": "string", "minLength": 1},
-            "occurred_at": {"type": "string", "minLength": 1},
+            "event_id": input_ref("text"),
+            "occurred_at": input_ref("text"),
             "operation": {
                 "oneOf": [
                     target_snapshot_operation_schema(),
@@ -297,18 +301,24 @@ fn nullable_merge_ref_schema() -> Value {
     json!({"oneOf": [merge_ref_schema(), {"type": "null"}]})
 }
 
+// Input-only references reuse the original type builders in the root $defs.
+// Outputs retain their original representation; no runtime schema optimizer.
+fn input_ref(name: &str) -> Value {
+    json!({"$ref": format!("#/$defs/{name}")})
+}
+
 fn target_snapshot_operation_schema() -> Value {
     tagged_operation(
         "record_target_snapshot",
         json!({
             "type": "object",
             "properties": {
-                "id": string_schema(), "target_id": string_schema(),
+                "id": input_ref("text"), "target_id": input_ref("text"),
                 "kind": {"type": "string", "enum": ["source", "web", "mobile", "binary", "firmware"]},
-                "locator": string_schema(), "version": string_schema(), "build_id": string_schema(),
-                "target_artifact_ids": string_array_schema(),
-                "environment_fingerprint": string_schema(), "device_fingerprint": string_schema(),
-                "captured_at": string_schema(), "notes": {"type": "string"}
+                "locator": input_ref("text"), "version": input_ref("text"), "build_id": input_ref("text"),
+                "target_artifact_ids": input_ref("texts"),
+                "environment_fingerprint": input_ref("text"), "device_fingerprint": input_ref("text"),
+                "captured_at": input_ref("text"), "notes": {"type": "string"}
             },
             "required": ["id", "target_id", "kind", "locator", "version", "build_id", "environment_fingerprint", "device_fingerprint", "captured_at"],
             "additionalProperties": false
@@ -322,14 +332,14 @@ fn hypothesis_operation_schema() -> Value {
         json!({
             "type": "object",
             "properties": {
-                "id": string_schema(), "title": string_schema(), "target_id": string_schema(),
-                "attack_surface": string_schema(), "vulnerability_class": string_schema(),
-                "entry_point": string_schema(), "sensitive_sink": string_schema(),
-                "rationale": string_schema(),
+                "id": input_ref("text"), "title": input_ref("text"), "target_id": input_ref("text"),
+                "attack_surface": input_ref("text"), "vulnerability_class": input_ref("text"),
+                "entry_point": input_ref("text"), "sensitive_sink": input_ref("text"),
+                "rationale": input_ref("text"),
                 "status": {"type": "string", "enum": ["active", "testing", "supported", "rejected", "blocked"]},
-                "priority": {"type": "integer"}, "evidence_links": evidence_links_schema(),
-                "last_action": {"type": "string", "minLength": 1},
-                "next_action": {"type": "string", "minLength": 1}
+                "priority": {"type": "integer"}, "evidence_links": input_ref("links"),
+                "last_action": input_ref("text"),
+                "next_action": input_ref("text")
             },
             "required": ["id", "title", "target_id", "attack_surface", "vulnerability_class", "entry_point", "sensitive_sink", "rationale", "status", "priority"],
             "additionalProperties": false
@@ -344,11 +354,11 @@ fn hypothesis_update_operation_schema() -> Value {
         json!({
             "type": "object",
             "properties": {
-                "id": string_schema(),
+                "id": input_ref("text"),
                 "status": {"type": "string", "enum": ["active", "testing", "supported", "rejected", "blocked"]},
-                "evidence_links_add": evidence_links_schema(),
-                "last_action": {"type": "string", "minLength": 1},
-                "next_action": {"type": "string", "minLength": 1}
+                "evidence_links_add": input_ref("links"),
+                "last_action": input_ref("text"),
+                "next_action": input_ref("text")
             },
             "required": ["id"],
             "additionalProperties": false
@@ -362,11 +372,11 @@ fn experiment_operation_schema() -> Value {
     properties.insert("experiment".to_owned(), json!({
         "type": "object",
         "properties": {
-            "id": string_schema(), "hypothesis_id": string_schema(),
-            "target_snapshot_id": string_schema(), "capsule_id": string_schema(),
-            "goal": string_schema(),
+            "id": input_ref("text"), "hypothesis_id": input_ref("text"),
+            "target_snapshot_id": input_ref("text"), "capsule_id": input_ref("text"),
+            "goal": input_ref("text"),
             "result": {"type": "string", "enum": ["pending", "positive", "negative", "inconclusive"]},
-            "artifact_refs": string_array_schema(), "notes": {"type": "string"}
+            "artifact_refs": input_ref("texts"), "notes": {"type": "string"}
         },
         "required": ["id", "hypothesis_id", "target_snapshot_id", "capsule_id", "goal", "result"],
         "additionalProperties": false
@@ -374,20 +384,17 @@ fn experiment_operation_schema() -> Value {
     properties.insert("capsule".to_owned(), json!({
         "type": "object",
         "properties": {
-            "id": string_schema(), "experiment_id": string_schema(), "target_snapshot_id": string_schema(),
-            "action": string_schema(), "arguments": {}, "tool_version": string_schema(),
-            "execution_ids": string_array_schema(), "input_artifact_ids": string_array_schema(),
-            "environment_delta": {"type": "string"}, "account_prerequisites": string_array_schema(),
-            "toolchain_fingerprint": string_schema(), "execution_receipt_ids": string_array_schema(),
-            "output_artifact_ids": string_array_schema()
+            "id": input_ref("text"), "experiment_id": input_ref("text"), "target_snapshot_id": input_ref("text"),
+            "action": input_ref("text"), "arguments": {}, "tool_version": input_ref("text"),
+            "execution_ids": input_ref("texts"), "input_artifact_ids": input_ref("texts"),
+            "environment_delta": {"type": "string"}, "account_prerequisites": input_ref("texts"),
+            "toolchain_fingerprint": input_ref("text"), "execution_receipt_ids": input_ref("texts"),
+            "output_artifact_ids": input_ref("texts")
         },
         "required": ["id", "experiment_id", "target_snapshot_id", "action", "tool_version", "toolchain_fingerprint"],
         "additionalProperties": false
     }));
-    properties.insert(
-        "rerun_reason".to_owned(),
-        json!({"type": "string", "minLength": 1}),
-    );
+    properties.insert("rerun_reason".to_owned(), input_ref("text"));
     json!({
         "type": "object",
         "properties": properties,
@@ -402,10 +409,10 @@ fn experiment_update_operation_schema() -> Value {
         json!({
             "type": "object",
             "properties": {
-                "id": string_schema(),
+                "id": input_ref("text"),
                 "result": {"type": "string", "enum": ["pending", "positive", "negative", "inconclusive"]},
-                "artifact_refs_add": string_array_schema(),
-                "notes_append": {"type": "string", "minLength": 1}
+                "artifact_refs_add": input_ref("texts"),
+                "notes_append": input_ref("text")
             },
             "required": ["id"],
             "additionalProperties": false
@@ -419,12 +426,12 @@ fn finding_operation_schema() -> Value {
         json!({
             "type": "object",
             "properties": {
-                "id": string_schema(), "title": string_schema(),
+                "id": input_ref("text"), "title": input_ref("text"),
                 "status": {"type": "string", "enum": ["candidate", "reproduced", "confirmed", "discarded"]},
-                "target_id": string_schema(), "target_version": string_schema(),
-                "vulnerability_class": string_schema(), "entry_point": string_schema(), "sensitive_sink": string_schema(),
-                "target_snapshot_ids": string_array_schema(), "prerequisites": string_array_schema(),
-                "impact": string_schema(), "evidence_links": evidence_links_schema()
+                "target_id": input_ref("text"), "target_version": input_ref("text"),
+                "vulnerability_class": input_ref("text"), "entry_point": input_ref("text"), "sensitive_sink": input_ref("text"),
+                "target_snapshot_ids": input_ref("texts"), "prerequisites": input_ref("texts"),
+                "impact": input_ref("text"), "evidence_links": input_ref("links")
             },
             "required": ["id", "title", "status", "target_id", "target_version", "vulnerability_class", "entry_point", "sensitive_sink", "impact"],
             "additionalProperties": false
@@ -439,12 +446,12 @@ fn finding_update_operation_schema() -> Value {
         json!({
             "type": "object",
             "properties": {
-                "id": string_schema(),
+                "id": input_ref("text"),
                 "status": {"type": "string", "enum": ["candidate", "reproduced", "confirmed", "discarded"]},
-                "target_snapshot_ids_add": string_array_schema(),
-                "prerequisites_add": string_array_schema(),
-                "evidence_links_add": evidence_links_schema(),
-                "impact": {"type": "string", "minLength": 1}
+                "target_snapshot_ids_add": input_ref("texts"),
+                "prerequisites_add": input_ref("texts"),
+                "evidence_links_add": input_ref("links"),
+                "impact": input_ref("text")
             },
             "required": ["id"],
             "additionalProperties": false
@@ -458,8 +465,8 @@ fn next_action_operation_schema() -> Value {
         json!({
             "type": "object",
             "properties": {
-                "id": string_schema(), "research_id": research_ref_schema(), "priority": {"type": "integer"},
-                "action": string_schema(),
+                "id": input_ref("text"), "research_id": research_ref_schema(), "priority": {"type": "integer"},
+                "action": input_ref("text"),
                 "status": {"type": "string", "enum": ["pending", "running", "done", "blocked"]}
             },
             "required": ["id", "research_id", "priority", "action", "status"],
@@ -474,8 +481,8 @@ fn next_action_update_operation_schema() -> Value {
         json!({
             "type": "object",
             "properties": {
-                "id": string_schema(), "priority": {"type": "integer"},
-                "action": {"type": "string", "minLength": 1},
+                "id": input_ref("text"), "priority": {"type": "integer"},
+                "action": input_ref("text"),
                 "status": {"type": "string", "enum": ["pending", "running", "done", "blocked"]}
             },
             "required": ["id"],
@@ -488,8 +495,8 @@ fn merge_operation_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "kind": {"const": "merge_records"}, "from": merge_ref_schema(),
-            "into": merge_ref_schema(), "reason": string_schema()
+            "kind": {"const": "merge_records"}, "from": input_ref("merge"),
+            "into": input_ref("merge"), "reason": input_ref("text")
         },
         "required": ["kind", "from", "into", "reason"],
         "additionalProperties": false

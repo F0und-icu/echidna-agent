@@ -5,6 +5,8 @@ mod request_audit;
 #[path = "m3_world_state_mode/session_compaction.rs"]
 mod session_compaction;
 mod support;
+#[path = "m3_world_state_mode/tool_activation.rs"]
+mod tool_activation;
 
 use std::collections::VecDeque;
 use std::fs;

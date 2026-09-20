@@ -176,10 +176,7 @@ impl RequestAuditDelivery {
             let RequestAuditDeliveryReason::Full(reason) = self.reason else {
                 return Err(RequestAuditError::FullDeliveryInputMismatch);
             };
-            if !reason.permits_distinct_full_delivery()
-                || (!reason.permits_state_diff_full_delivery()
-                    && !delivered_input.is_reasoning_replay_of(full_logical_input))
-            {
+            if !reason.permits_full_input_relationship(full_logical_input, delivered_input) {
                 return Err(RequestAuditError::FullDeliveryInputMismatch);
             }
         }

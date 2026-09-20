@@ -9,7 +9,7 @@
 - Codex 本地源码：`codex/`
 - Codex 最新设计复核提交：`868c9edb0da913a5fc699a71664e65f44f6058b0`
 - 分析文档：`Codex架构与漏洞挖掘Agent复用评估.md`
-- 冻结架构：`docs/architecture/CYBER_AGENT_ARCHITECTURE_V1.md` 至 `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_15.md` 的完整 additive chain
+- 冻结架构：`docs/architecture/CYBER_AGENT_ARCHITECTURE_V1.md` 至 `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_20.md` 的完整 additive chain
 - 模型组合决策：`docs/adr/ADR-0002-capability-driven-primary-vision-models.md`
 - 研究控制决策：`docs/adr/ADR-0009-stable-research-persona-domain-profile-and-phase.md`
 - 不可变 Step/Tool Plan 决策：`docs/adr/ADR-0010-immutable-sampling-step-and-tool-plan.md`
@@ -30,6 +30,12 @@
 - GitHub 私有仓库：`F0und-icu/cyber-agent`
 
 当前状态：
+
+- R6-03 按 ADR-0030 / Architecture v1.20 更新唯一 Base Contract 为 generation2：限定同一目标/字段/范围核对当前事实与历史模型表述，遵循当前回答格式，不把 Memory/元数据提升为新鲜执行证据。沿用 Context/审计所有者，旧记录不改写，无自动复读/重试/输出重写。离线测试只证明交付与兼容，不证明模型遵循程度；完整进度见 STATUS。
+
+- R6-02 按 ADR-0029 / Architecture v1.19 修复最终文本核对、精确工具名检索、工具契约说明和可证明的上轮临时激活到期。文本冲突/错序拒绝，无自动续写；新 Turn 仍撤下工具，历史推理/差量只在原 Baseline 严格证明下保留。真实时间复用现有 date 命令观察，不猜时间、不自动造证据。准确测试/Live范围和结果见 STATUS；历史截断原因不凭新测试追认。
+
+- R6-01 当前修复按 ADR-0028 / Architecture v1.18：仅经原Baseline验证的同Turn增量Tool激活可保留既有完整reasoning与state-diff交付；旧Tool定义、其他请求语义和历史前缀不得变化。App与RequestAudit复用一个关系准入规则，不新增协议/事实源/API/依赖。R6真实验收阻断与当前Gate以STATUS为准，不由本条宣称通过。
 
 - R3a1 至 R4a 已由 #73 至 #77 合并。当前 R4b 按 ADR-0025 / Architecture v1.15 修正环境探测误判并更新 Binary/Mapping 指导：保留旧选择读取，新请求使用新版提示词；不增加探测框架、CTF 模式或解题流程。R2b 已完成一次有界合成 Live；准确验收和剩余限额见 STATUS。
 

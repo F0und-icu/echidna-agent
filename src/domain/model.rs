@@ -154,24 +154,25 @@ impl ModelInputIR {
     /// more completed reasoning items retained for Provider continuation.
     /// All non-reasoning semantics must remain byte-for-byte identical.
     pub(crate) fn is_reasoning_replay_of(&self, logical_input: &Self) -> bool {
-        if self.schema_version != logical_input.schema_version
-            || self.instructions != logical_input.instructions
-            || self.tool_specs != logical_input.tool_specs
-            || self.requirements != logical_input.requirements
-        {
-            return false;
-        }
-
-        let retained_reasoning = self
-            .content_items
-            .iter()
-            .any(|item| matches!(item, ContentItem::Reasoning { .. }));
-        retained_reasoning
+        self.has_same_reasoning_contract(logical_input)
             && self
                 .content_items
                 .iter()
                 .filter(|item| !matches!(item, ContentItem::Reasoning { .. }))
                 .eq(logical_input.content_items.iter())
+    }
+
+    /// Current request contract for a retained reasoning delivery. This does
+    /// not prove a prior prefix or a state Diff; those remain Context-owned.
+    pub(crate) fn has_same_reasoning_contract(&self, logical_input: &Self) -> bool {
+        self.schema_version == logical_input.schema_version
+            && self.instructions == logical_input.instructions
+            && self.tool_specs == logical_input.tool_specs
+            && self.requirements == logical_input.requirements
+            && self
+                .content_items
+                .iter()
+                .any(|item| matches!(item, ContentItem::Reasoning { .. }))
     }
 }
 

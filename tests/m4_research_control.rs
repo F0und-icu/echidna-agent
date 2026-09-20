@@ -31,6 +31,81 @@ const FIXTURE_DIRECTORY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixt
 const MANIFEST_SHA256: &str = "7bee1a2304ecb0a1100bc5b5183b51a0f384fac03b695d0cda8cd00fbfefa6c8";
 
 #[test]
+fn base_contract_scopes_current_facts_and_requested_answer_format() {
+    assert_eq!(BaseContract::GENERATION, 2);
+    for boundary in [
+        "same target, field and scope",
+        "historical assistant prose or summaries",
+        "Memory is not fresh tool evidence",
+        "Metadata alone does not prove unchanged bytes or absence of side effects",
+        "current requested format and length",
+    ] {
+        assert!(BaseContract.prompt().contains(boundary), "{boundary}");
+    }
+}
+
+#[test]
+fn base_revision_changes_only_its_fragment_and_preserves_historical_bytes() {
+    use cyber_agent::domain::context::{
+        ContextFragment, ContextFragmentContent, ContextFragmentId, ContextFragmentPriority,
+        FragmentCachePolicy,
+    };
+    let old = include_str!("fixtures/prompts/base-v1.md");
+    assert_eq!(
+        format!("{:x}", Sha256::digest(old.as_bytes())),
+        "508e17cfbd0566c32f5a0a1d168b936d0065922700be2685eddbb5cba0335d4d"
+    );
+    assert!(BaseContract.prompt().starts_with(old));
+    let current = PromptComposition::current().fragments().unwrap();
+    let mut historical = current.clone();
+    historical[0] = ContextFragment::new(
+        ContextFragmentId::new("prompt:base:pragmatic-vulnerability-researcher:1").unwrap(),
+        ContextFragmentSource::BasePrompt,
+        ContextFragmentPriority::Required,
+        FragmentCachePolicy::ContentAddressed,
+        ContextFragmentContent::Instructions {
+            text: old.to_owned(),
+        },
+    )
+    .unwrap();
+    assert_ne!(current[0].id(), historical[0].id());
+    assert_ne!(current[0].content_hash(), historical[0].content_hash());
+    // Existing byte-based estimator, not Provider tokenizer usage.
+    assert_eq!(historical[0].token_estimate(), 176);
+    assert_eq!(current[0].token_estimate(), 272);
+    assert_eq!(current[1..], historical[1..]);
+    let compile = |fragments| {
+        ContextPlanner::current()
+            .compile(
+                fragments,
+                ContextBudget::new(32_768, 0, 0).unwrap(),
+                &capabilities(),
+                Vec::new(),
+                Default::default(),
+                None,
+            )
+            .unwrap()
+    };
+    let old_plan = compile(historical);
+    let current_plan = compile(current);
+    assert_ne!(
+        old_plan.context_fingerprint(),
+        current_plan.context_fingerprint()
+    );
+    assert!(old_plan.base_instructions().contains(old));
+    assert!(
+        !old_plan
+            .base_instructions()
+            .contains("Memory is not fresh tool evidence")
+    );
+    assert!(
+        current_plan
+            .base_instructions()
+            .contains(BaseContract.prompt())
+    );
+}
+
+#[test]
 fn revised_environment_prompts_preserve_only_known_legacy_selections() {
     use cyber_agent::domain::domain_profile::DomainProfileSelection;
     for generation in [1, 2] {
@@ -193,7 +268,7 @@ fn stable_base_domain_and_phase_compile_into_one_orthogonal_contract() {
                 .map(|fragment| fragment.id().as_str().to_owned())
                 .collect::<Vec<_>>(),
             vec![
-                "prompt:base:pragmatic-vulnerability-researcher:1".to_owned(),
+                "prompt:base:pragmatic-vulnerability-researcher:2".to_owned(),
                 format!("prompt:domain:{id}:{}", profile.generation()),
                 "prompt:phase:mapping:2".to_owned(),
             ]

@@ -12,6 +12,8 @@ mod ctf_progress;
 mod ctf_recovery;
 #[path = "cli_chat_cases/ctf_resume.rs"]
 mod ctf_resume;
+#[path = "cli_chat_cases/current_fact_guidance.rs"]
+mod current_fact_guidance;
 #[path = "cli_chat_cases/delivery_measurement.rs"]
 mod delivery_measurement;
 #[path = "cli_chat_cases/environment_guidance.rs"]
@@ -25,6 +27,75 @@ mod f6a_geometry;
 #[path = "support/provider_config.rs"]
 mod provider_config;
 mod support;
+#[path = "cli_chat_cases/tool_activation_continuation.rs"]
+mod tool_activation_continuation;
+
+#[test]
+fn final_text_integrity_reaches_cli_and_history_without_committing_conflicts() {
+    for suffix in ["prefix complete", "conflict"] {
+        let root = TemporaryDirectory::new("final-text-integrity");
+        initialize_project(root.path());
+        let mut events = vec![
+            json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"prefix"}),
+            json!({"type":"response.output_text.done","output_index":0,"content_index":0,"text":suffix}),
+            json!({"type":"response.completed","response":{"id":"final-text-response"}}),
+        ];
+        if suffix == "conflict" {
+            events.insert(
+                1,
+                json!({"type":"response.output_item.done","output_index":1,
+                "item":{"type":"function_call","call_id":"must-not-execute","name":"run_command",
+                    "arguments":"{\"argv\":[\"/usr/bin/printf\",\"must-not-execute\"]}"}}),
+            );
+        }
+        let body = events
+            .iter()
+            .map(|event| format!("data: {event}\n\n"))
+            .collect();
+        let server = spawn_responses_server(vec![(200, body)]);
+        let config = write_config(root.path(), &server.base_url);
+        let output = run_chat(root.path(), &config, "reply once\n/exit\n", &[]);
+        server
+            .requests
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap();
+        assert!(server.requests.try_recv().is_err());
+        server.join();
+        let project = Project::discover(root.path()).unwrap();
+        let state = reduced_session(&project, &session_id(root.path()));
+        let successful = suffix == "prefix complete";
+        assert_eq!(
+            output.status.success(),
+            successful,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            state
+                .history()
+                .items()
+                .iter()
+                .filter(|item| matches!(
+                    item,
+                    cyber_agent::domain::model::ContentItem::Text {
+                        role: cyber_agent::domain::model::MessageRole::Assistant,
+                        ..
+                    }
+                ))
+                .count(),
+            usize::from(successful)
+        );
+        if successful {
+            assert!(String::from_utf8_lossy(&output.stdout).contains("prefix complete"));
+            assert_eq!(
+                state.history().items().last().unwrap(),
+                &cyber_agent::domain::model::ContentItem::assistant_text(suffix)
+            );
+        }
+        assert_eq!(state.request_audits().len(), 1);
+        assert_eq!(state.execution_receipt_count(), 0);
+    }
+}
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -1627,7 +1698,9 @@ fn synthetic_long_flow_preserves_authoritative_evidence_across_compaction_and_re
             ),
         ),
     ]);
-    let config = write_config(root.path(), &server.base_url);
+    // This is an evidence/continuation fixture, not a pressure threshold.
+    // Leave schema headroom; m5_context_pressure independently proves trimming.
+    let config = write_context_window_config(root.path(), &server.base_url, 65_536);
     let run = run_chat(
         root.path(),
         &config,
@@ -1882,7 +1955,16 @@ fn synthetic_long_flow_preserves_authoritative_evidence_across_compaction_and_re
                 == cyber_agent::domain::request_audit::RequestAuditDeliveryMode::Full
         })
         .count();
-    assert_eq!(full_requests, 2);
+    assert_eq!(
+        full_requests,
+        2,
+        "delivery decisions: {:?}",
+        final_state
+            .request_audits()
+            .iter()
+            .map(|audit| audit.delivery())
+            .collect::<Vec<_>>()
+    );
     assert_eq!(final_state.request_audits().len() - full_requests, 5);
     assert_eq!(
         final_state
