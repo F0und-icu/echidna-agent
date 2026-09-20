@@ -119,5 +119,7 @@ It confirms actual32746byte/24-tool delivery and successful Research argument
 generation/mutation/readback/Resume in9 HTTP200 requests. `texts` was advertised
 but its optional argument omitted; nonempty-reference behavior and comparative
 token/latency benefits remain unverified. One initial “no tools” wording error
-is retained as a model limitation. Independent result review is pending fresh
-authorization; the earlier offline completion record is not rewritten.
+is retained as a model limitation. Subsequently authorized fresh Terra xhigh
+post-run result review returned RESULT APPROVE; this is not pre-run harness
+approval. Reviewed code was delivered to private Draft PR #84 (`3ec73ad`),
+without merge or Actions; the earlier offline completion record is not rewritten.

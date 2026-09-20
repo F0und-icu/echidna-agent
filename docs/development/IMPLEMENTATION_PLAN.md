@@ -1085,7 +1085,9 @@ F6a delivery addendum: after the acceptance checkpoint above, the operator autho
 
 ### 当前修复队列（2026-09-12）
 
-#### R6-SC1：有界输入 Schema 结构共享（当前）
+#### R6-SC1：有界输入 Schema 结构共享（已交付 Draft）
+
+2026-09-20交付更新：独立事后Live结果复核由新Terra xhigh完成，RESULT APPROVE，无阻塞项；不是事前脚本审批。已审查R6-01～04/SC1代码以`3ec73ad`推送私有Draft PR #84，完整刷新Gate510 unique PASS/4ignored，未合并/未跑Actions。下段“待授权/待复核”为执行当时记录，现已被本更新替代，覆盖及模型措辞限制不变。
 
 后续Live（2026-09-20新授权，已执行待独立结果复核）：全新普通工程项目/Session，12次/600秒上限，实际9次HTTP200/26.067秒。正式CLI完成Research更新（源码快照、两条未验证工程假设及显式合并）、重启只读回查，7配对工具/收据、380审计Blob引用及383冻结项通过。真实wire24工具32746bytes；usage只记录绝对值，不推定token收益。text/merge/空links生成通过，texts字段被省略及非空引用未实测；首答“no tools”措辞不准确，未执行代码/未建立证据事实正确。13前置测试和build通过，无生产修改/Git/Actions/自动重试/安全任务。新独立审计授权待回复；本lane关闭，剩余额度不复用。报告见[R6_SC1_LIVE_2026_09_20.md](R6_SC1_LIVE_2026_09_20.md)。
 
