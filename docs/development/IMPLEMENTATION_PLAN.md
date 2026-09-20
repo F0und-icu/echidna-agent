@@ -1085,6 +1085,41 @@ F6a delivery addendum: after the acceptance checkpoint above, the operator autho
 
 ### 当前修复队列（2026-09-12）
 
+#### 当前主线：R6后续优化／回补R5检索遗留项
+
+R5c1/R5c2保留为历史工作编号，不表示主线从R6退回R5。已完成项不重编号，
+不覆盖历史验收记录；检索优化不是整个R6验收的默认前置条件，只有实测阻塞才升级。
+本轮继续既定release测量：保持已审计R5c2生产代码不变，正式release构建后复用
+24次本地Shadow矩阵，必要时增加一次有界长查询的本机采样。只调查，不改算法/
+缓存/API/架构，不调用模型、不跑Actions、不提交Git；历史debug与本轮release
+不是成对优化实验。观察到成本后再决定是否值得在原ranker内做单次查询归一化复用。
+
+测量已完成：release build、原检索回归9项、24次观测通过；与先前8组报告除新
+Project参与的query fingerprint外一致。最大组64×4096/+16词中位593.582ms。
+额外一次有界长查询采样窗口638/642主线程栈含normalized_terms，支持将原ranker
+的单次查询归一化复用作为下一候选；不是全任务占比或已实现收益。源码冻结不变，
+不新增算法/缓存/API。具体报告R6_RETRIEVAL_RELEASE_MEASUREMENT；本轮停在测量
+交付，后续实现仍需独立Scope、成对release验证、专项/受影响/独立审计/Gate/Lean。
+
+#### R5c2：Memory已存在文档配额修复（本地离线完成）
+
+操作者批准按R5c1计划继续。只在原Memory loader把64文档上限应用到成功读取的
+已存在文档；缺失不占位、存在但空文件仍占位，按路径稳定排序，错误不跳过，
+达到配额即停止后续正文读取。保持原路径检查、64KiB文档限制、App的64节限制、
+检索算法和Shadow语义。先保留正式CLI红色回归，覆盖0/1/2固定文件、空与缺失、
+边界命中/排除、错误及只读；专项→受影响（含domain_ports_contract）→限时独立
+审计→修复→完整Gate→Lean。零新增生产模块/API/依赖/缓存/配置/架构，无Live或
+远端交付；下一轮release/profile测量不与本修复混为算法优化。
+
+当前修复已完成红→绿：专项3PASS、受影响4套件29PASS/1ignored（含依赖方向），
+fmt/whitespace通过。原loader仅将truncate换到存在性过滤之后的lazy take，
+生产净+2行（含注释），保留3条永久表驱动回归。操作者随后明确授权全新独立Terra
+xhigh只读审计，14:19UTC开始，10分钟内APPROVE，无阻塞项或修复要求。其后完整
+Gate45集成套件513 unique PASS/4ignored（raw514含既有写锁子进程重复1项）、fmt/
+Clippy/build/inline/whitespace及Lean PASS，全部319源码/测试冻结项仍一致。
+停在本地交付：无新模块/API/依赖/缓存/架构、无Git/Live/Actions；未开始ranker
+优化或新release测量，后续测量与交付单独处理。详见R5C2_MEMORY_DOCUMENT_QUOTA。
+
 #### R5c1：本地检索 Shadow 成本基线（当前离线调查）
 
 R6代码交付Draft PR #84后，按继续开发授权先测量原有检索，不新增实现。
