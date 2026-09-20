@@ -1085,6 +1085,25 @@ F6a delivery addendum: after the acceptance checkpoint above, the operator autho
 
 ### 当前修复队列（2026-09-12）
 
+#### R5c1：本地检索 Shadow 成本基线（当前离线调查）
+
+R6代码交付Draft PR #84后，按继续开发授权先测量原有检索，不新增实现。
+复用正式`inspect retrieval`和既有Writer/Reducer夹具助手，在4组全新普通工程
+Memory夹具（8/64节、512/4096字节正文）、2种查询长度、每组3次，共24次进程
+测量中记录开发构建端到端CLI成本；每进程30秒、总360秒。报告确定性、标识符
+命中、候选数量、只读事实和零Shadow副作用必须成立。成本含启动/加载/投影/排序/
+JSON，不宣称内部归因或release性能。保持原算法、Shadow边界与全部现有测试，
+零生产代码/API/依赖/配置/缓存/架构变更，无Provider/Live/Actions；不得用该简单
+命中夹具替代真实语料质量评估。发现瓶颈后再锁定实现范围并走专项→受影响→独立
+审计→修复→完整Gate→Lean，不提前承诺新算法、持久索引或模型可见检索。
+
+离线调查已记录：24次最终测量确定性/只读通过、原检索测试6通过；最大组开发构建
+CLI中位5.453秒，尚非release/内部归因。准备阶段保留两次失败：可选Memory父目录
+未创建为夹具错误；64notes却仅62被选中源于两个不存在的固定文件先占文档名额。
+下一候选优先补齐该配额边界回归并在原Memory loader处理，再测release/profile，
+有依据才考虑原ranker的单次查询字段归一化复用。详见R5C1_RETRIEVAL_SHADOW_MEASUREMENT；
+没有生产修改、独立审计或新的完整Gate声明，未开始优化实现。
+
 #### R6-SC1：有界输入 Schema 结构共享（已交付 Draft）
 
 2026-09-20交付更新：独立事后Live结果复核由新Terra xhigh完成，RESULT APPROVE，无阻塞项；不是事前脚本审批。已审查R6-01～04/SC1代码以`3ec73ad`推送私有Draft PR #84，完整刷新Gate510 unique PASS/4ignored，未合并/未跑Actions。下段“待授权/待复核”为执行当时记录，现已被本更新替代，覆盖及模型措辞限制不变。
