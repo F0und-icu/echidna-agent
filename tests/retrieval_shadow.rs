@@ -926,6 +926,85 @@ fn memory_document_quota_preserves_path_rejections() {
 }
 
 #[test]
+fn lexical_ranking_preserves_per_field_deduplication_weights_and_stable_ties() {
+    let directory = TemporaryDirectory::new("r6-query-field-terms");
+    let project = Project::initialize(directory.path()).unwrap();
+    target(&project, "terms-target", "fixture", "1", TargetKind::Source);
+    let notes = project.root().join(".cyber-agent/memory/notes");
+    fs::create_dir_all(&notes).unwrap();
+    for (name, body) in [
+        ("a.md", "# amber\nquartz quartz quartz\n"),
+        ("b.md", "# amber\nquartz\n"),
+        ("c.md", "# quartz\nquartz amber\n"),
+    ] {
+        fs::write(notes.join(name), body).unwrap();
+    }
+    let before = tree_bytes(&project.root().join(".cyber-agent"));
+    let args = command("quartz", "terms-target");
+    let report = run(&directory, &args);
+    let results = report["report"]["results"].as_array().unwrap();
+    for (name, bm25, fields) in [
+        ("c.md", 1, json!(["title", "body"])),
+        ("a.md", 2, json!(["body"])),
+        ("b.md", 3, json!(["body"])),
+    ] {
+        let id = format!("memory:notes/{name}:0");
+        let result = results.iter().find(|result| result["id"] == id).unwrap();
+        assert_eq!(result["component_ranks"]["fielded_bm25"], bm25);
+        assert_eq!(result["matched_fields"], fields);
+        assert_eq!(result["component_ranks"]["exact_identifier"], Value::Null);
+    }
+    assert_eq!(report, run(&directory, &args));
+    assert_eq!(tree_bytes(&project.root().join(".cyber-agent")), before);
+}
+
+#[test]
+fn lexical_field_term_limit_and_later_query_refresh_remain_independent() {
+    let directory = TemporaryDirectory::new("r6-query-term-boundary");
+    let project = Project::initialize(directory.path()).unwrap();
+    target(&project, "terms-target", "fixture", "1", TargetKind::Source);
+    let notes = project.root().join(".cyber-agent/memory/notes");
+    fs::create_dir_all(&notes).unwrap();
+    let terms = (0..256).map(|i| format!("word{i:04} ")).collect::<String>();
+    let path = notes.join("boundary.md");
+    // Each field has its own limit: the title remains eligible even when the
+    // same term is past the body limit and beyond the n-gram character window.
+    fs::write(&path, format!("# quartz\n{terms}quartz\n")).unwrap();
+    let args = command("quartz", "terms-target");
+    let first = run(&directory, &args);
+    let hit = &first["report"]["results"][0];
+    assert_eq!(hit["id"], "memory:notes/boundary.md:0");
+    assert_eq!(hit["matched_fields"], json!(["title"]));
+    assert_eq!(hit["component_ranks"]["fielded_bm25"], 1);
+    let last = run(&directory, &command("word0255", "terms-target"));
+    assert_eq!(
+        last["report"]["results"][0]["component_ranks"]["fielded_bm25"],
+        1
+    );
+
+    // A later invocation observes current bytes, not persisted query data.
+    fs::write(&path, "# amber\nquartz\n").unwrap();
+    let before = tree_bytes(&project.root().join(".cyber-agent"));
+    let second = run(&directory, &args);
+    assert_eq!(
+        second["report"]["results"][0]["matched_fields"],
+        json!(["body"])
+    );
+    assert_eq!(
+        first["report"]["query_fingerprint"],
+        second["report"]["query_fingerprint"]
+    );
+    assert!(
+        run(&directory, &command("word0255", "terms-target"))["report"]["results"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(second, run(&directory, &args));
+    assert_eq!(tree_bytes(&project.root().join(".cyber-agent")), before);
+}
+
+#[test]
 fn explicitly_selected_historical_summaries_are_order_invariant_and_default_to_current_target() {
     let (directory, project) = fixture_project("m4-s3f-historical");
     append_historical_summary(

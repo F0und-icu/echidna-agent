@@ -27,7 +27,12 @@ pub(super) fn rank(
 
     for candidate in candidates {
         match eligibility(&query, &candidate) {
-            Ok((reason, tier)) => eligible.push(RankedCandidate::new(candidate, reason, tier)),
+            Ok((reason, tier)) => eligible.push(RankedCandidate::new(
+                candidate,
+                reason,
+                tier,
+                !query_terms.is_empty(),
+            )),
             Err(reason) => exclusions.push(RetrievalExclusion {
                 id: candidate.id,
                 source: candidate.source,
@@ -58,12 +63,8 @@ pub(super) fn rank(
         .sum();
         candidate.matched_identifiers =
             matched_identifiers(&candidate.candidate, &query_exact_identifiers);
-        candidate.matched_fields = matched_fields(
-            &candidate.candidate,
-            &query_terms,
-            &query_identifiers,
-            &query_ngrams,
-        );
+        candidate.matched_fields =
+            matched_fields(candidate, &query_terms, &query_identifiers, &query_ngrams);
     }
 
     eligible.retain(|candidate| candidate.rrf > 0.0);
@@ -125,6 +126,7 @@ pub(super) fn rank(
 
 struct RankedCandidate {
     candidate: RetrievalCandidate,
+    field_terms: Vec<Vec<String>>,
     eligibility: EligibilityReason,
     tier: AuthorityFreshnessTier,
     exact_rank: Option<usize>,
@@ -141,9 +143,24 @@ impl RankedCandidate {
         candidate: RetrievalCandidate,
         eligibility: EligibilityReason,
         tier: AuthorityFreshnessTier,
+        has_lexical_query: bool,
     ) -> Self {
+        // Query-local and built only after eligibility. Preserve each field's
+        // independent normalization limit and deduplication semantics.
+        let field_terms = candidate
+            .fields
+            .iter()
+            .map(|(_, value)| {
+                if has_lexical_query {
+                    normalized_terms(value)
+                } else {
+                    Vec::new()
+                }
+            })
+            .collect();
         Self {
             candidate,
+            field_terms,
             eligibility,
             tier,
             exact_rank: None,
@@ -274,7 +291,7 @@ fn bm25_ranks(candidates: &[RankedCandidate], query_terms: &[String]) -> BTreeMa
     }
     let average_length = candidates
         .iter()
-        .map(|candidate| candidate_length(&candidate.candidate) as f64)
+        .map(|candidate| candidate_length(candidate) as f64)
         .sum::<f64>()
         / candidates.len() as f64;
     let document_frequency = query_terms
@@ -282,17 +299,17 @@ fn bm25_ranks(candidates: &[RankedCandidate], query_terms: &[String]) -> BTreeMa
         .map(|term| {
             let count = candidates
                 .iter()
-                .filter(|candidate| candidate_term_frequency(&candidate.candidate, term) > 0.0)
+                .filter(|candidate| candidate_term_frequency(candidate, term) > 0.0)
                 .count();
             (term, count)
         })
         .collect::<BTreeMap<_, _>>();
     ranked_ids(candidates, |candidate| {
-        let length = candidate_length(&candidate.candidate) as f64;
+        let length = candidate_length(candidate) as f64;
         query_terms
             .iter()
             .map(|term| {
-                let frequency = candidate_term_frequency(&candidate.candidate, term);
+                let frequency = candidate_term_frequency(candidate, term);
                 if frequency == 0.0 {
                     return 0.0;
                 }
@@ -301,10 +318,7 @@ fn bm25_ranks(candidates: &[RankedCandidate], query_terms: &[String]) -> BTreeMa
                     ((candidates.len() as f64 - documents + 0.5) / (documents + 0.5) + 1.0).ln();
                 let denominator = frequency
                     + BM25_K1 * (1.0 - BM25_B + BM25_B * length / average_length.max(1.0));
-                field_weight_sum(&candidate.candidate, term)
-                    * inverse_frequency
-                    * frequency
-                    * (BM25_K1 + 1.0)
+                field_weight_sum(candidate, term) * inverse_frequency * frequency * (BM25_K1 + 1.0)
                     / denominator
             })
             .sum()
@@ -354,30 +368,32 @@ fn candidate_identifiers(candidate: &RetrievalCandidate) -> BTreeSet<String> {
         .collect()
 }
 
-fn candidate_length(candidate: &RetrievalCandidate) -> usize {
+fn candidate_length(candidate: &RankedCandidate) -> usize {
     candidate
-        .fields
+        .field_terms
         .iter()
-        .flat_map(|(_, value)| normalized_terms(value))
-        .count()
+        .map(Vec::len)
+        .sum::<usize>()
         .max(1)
 }
 
-fn candidate_term_frequency(candidate: &RetrievalCandidate, term: &str) -> f64 {
+fn candidate_term_frequency(candidate: &RankedCandidate, term: &str) -> f64 {
     candidate
-        .fields
+        .field_terms
         .iter()
-        .flat_map(|(_, value)| normalized_terms(value))
-        .filter(|candidate_term| candidate_term == term)
+        .flatten()
+        .filter(|candidate_term| candidate_term.as_str() == term)
         .count() as f64
 }
 
-fn field_weight_sum(candidate: &RetrievalCandidate, term: &str) -> f64 {
+fn field_weight_sum(candidate: &RankedCandidate, term: &str) -> f64 {
     candidate
+        .candidate
         .fields
         .iter()
-        .filter(|(_, value)| normalized_terms(value).iter().any(|value| value == term))
-        .map(|(field, _)| match field {
+        .zip(&candidate.field_terms)
+        .filter(|(_, terms)| terms.iter().any(|value| value == term))
+        .map(|((field, _), _)| match field {
             RetrievalField::Title => 3.0,
             RetrievalField::Identifiers => 5.0,
             RetrievalField::Target => 2.0,
@@ -400,16 +416,17 @@ fn matched_identifiers(
 }
 
 fn matched_fields(
-    candidate: &RetrievalCandidate,
+    candidate: &RankedCandidate,
     query_terms: &[String],
     query_identifiers: &[String],
     query_ngrams: &BTreeSet<String>,
 ) -> Vec<RetrievalField> {
     candidate
+        .candidate
         .fields
         .iter()
-        .filter_map(|(field, value)| {
-            let terms = normalized_terms(value);
+        .zip(&candidate.field_terms)
+        .filter_map(|((field, value), terms)| {
             let field_identifiers = identifiers(value);
             (query_terms.iter().any(|term| terms.contains(term))
                 || query_identifiers
