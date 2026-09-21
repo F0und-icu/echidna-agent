@@ -1100,7 +1100,8 @@ F6a delivery addendum: after the acceptance checkpoint above, the operator autho
 短查询无明显退化。第一候选的短查询回退与编译错误证据保留，不宣称模型质量或
 token收益。操作者随后授权全新Terra xhigh独立只读审计，限时内APPROVE，无阻塞或
 修复要求；完整Gate45套件515 unique PASS/4ignored、fmt/Clippy/build/inline/whitespace
-及Lean PASS。源码/测试319项冻结前后相同，无审计后生产改动。授权独立Draft交付，
+及Lean PASS。源码/测试319项冻结前后相同，无审计后生产改动。实现21cc71d已交付
+独立Draft PR #86（base为#85），
 不合并基础PR，不开始下一Slice，不运行Live/Actions，不宣称整个R6完成。
 具体范围、结果与限制见R6_RETRIEVAL_QUERY_REUSE。
 

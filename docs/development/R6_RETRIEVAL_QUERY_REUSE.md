@@ -150,3 +150,13 @@ Lean Review PASS:
 - Required focused → affected → distinct authorized finite audit → no requested
   fixes → full Gate → Lean sequence complete. No unresolved Slice governance
   debt. Remote delivery is separate and must preserve these exact source/tests.
+
+## Remote delivery
+
+After independent APPROVE, full Gate and Lean, implementation21cc71d was
+submitted to [Draft PR #86](https://github.com/F0und-icu/cyber-agent/pull/86),
+base codex/r5c1-retrieval-shadow-measurement (#85). Five allowlisted files only;
+no raw evidence, credentials, target/Session data or workflow changes staged.
+Skip-ci commits preserve the no-Actions boundary. No merge, Tag/Release or
+architecture hash seal, no next Slice or Live. Completion records do not modify
+reviewed code or tests. Delivery does not establish whole-R6 acceptance.
