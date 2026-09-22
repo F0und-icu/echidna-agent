@@ -55,9 +55,11 @@
             "type": "string"
           },
           "execution": {
+            "description": "Omit on first execution. Only for deliberate reruns of completed actions.",
             "type": "object",
             "properties": {
               "rerun_reason": {
+                "description": "Why repeat a completed action; never an automatic retry.",
                 "type": "string",
                 "minLength": 1
               }

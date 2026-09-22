@@ -30,12 +30,14 @@
 | Primary/Vision 每 Turn 请求准入 | 私有 `app/model_request_budget` | Config 唯一路径验证额度；CLI 在初始 Vision 前创建并透传同一预算，显示 admission 而非 Provider usage；不新建 retry/计费/持久日志 |
 | 可恢复停止与显式恢复 | App AgentLoop 的有限 typed classifier + 原 Session Resume | CLI 验证耐久/运行时 History 一致后提示；`/resume` 前禁止新任务，无自动 reasoning 丢弃或工具重试，未知和持久化错误仍 fatal |
 | Responses 请求、响应和 SSE DTO | `adapters/responses` | 不得进入 Domain 或 App 契约；Provider 配置不得复制协议类型 |
+| 最终文本核对 | 私有 `adapters/responses/response/text` | 单响应内按 wire 位置/身份核对；相同终值去重、合法前缀仅补后缀，冲突/错序拒绝，无自动续写或第二 History |
 | CLI reasoning 展示与开发构建 wire debug | `adapters/responses/cli_output` | 既有 Composition Root 选择 CLI 呈现；不重建请求、不写第二份事实；release 保留 reasoning 但排除完整 debug |
 | 终端内容转义与有界预览 | 私有 `terminal_content` | Tool/debug 仅复用派生视图；不修改事实、Tool 输出或 Context 预算 |
 | Tool 执行展示 | 私有 `cli_chat/tool_output` | 使用已有 start/durable receipt 回调；长 ID 保留在原审计源；未知结果不得展示完成 |
 | Vision 图像坐标系与范围 | `domain/vision/geometry` | 图片 Adapter 提供字节尺寸；Analysis、Observation 校验和 Replay 消费同一契约，不静默缩放/夹取区域 |
 | 图片字节检查与 Artifact 解析 | `adapters/image` | CLI geometry 与 Responses 复用同一不可变 Blob/Artifact 解析；App 不解码图片或读路径 |
 | Completed reasoning continuation | `domain/model` 的语义项 + AgentLoop provider delivery state | Conversation History 拒绝 reasoning；opaque encrypted sidecar 与 wire ID 保持 Adapter-local |
+| Full 交付输入关系与增量 Tool 续接 | `domain/context/baseline` 的共享关系谓词和原 Baseline 比较器 | App 验证同 Turn 新增/旧 Tool 定义及完整前缀；RequestAudit 复用当前契约关系，不复制先前 ProviderSession；差量、预算和 provenance 仍由原 Context owner 产生 |
 | Tool 类型、Effect 和执行收据 | `domain/tools` | Tool Adapter 只执行并返回结果 |
 | Job/PTY 运行句柄身份 | 私有 `adapters/tools/process_identity` | 两个进程表使用独立 namespace 和 checked sequence；控制仅按原表精确查找，不解析旧序号重连 |
 | 原始进程输出 | `adapters/tools/output` 捕获；`domain/tools/capture` 元数据/一致性；私有 `app/agent_loop/output_capture` 发布 | 复用 ArtifactStore 在 Receipt 前保存，原始 bytes 不缓存/入 History；read_output 复用本地 Blob 校验 owner，引用不升级 Research 证据 |

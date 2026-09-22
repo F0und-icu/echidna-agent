@@ -230,6 +230,7 @@ impl ModelProvider for ResponsesHttpAdapter {
                 })?;
                 unreachable!("an HTTP failure is returned through the stream")
             };
+            let mut decoder = response::ResponseDecoder::default();
             loop {
                 let event = response_events
                     .next()
@@ -250,7 +251,7 @@ impl ModelProvider for ResponsesHttpAdapter {
                     diagnostics.response(&event.data);
                 }
 
-                let decoded = response::decode_stream_event(
+                let decoded = decoder.decode_stream_event(
                     &event.data,
                     usage_required,
                     continuation_required,

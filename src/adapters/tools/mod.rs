@@ -1351,7 +1351,7 @@ fn canonical_description(name: &str) -> String {
         ),
         "artifact_store" => (
             "text is transient or lacks source provenance.",
-            "reproducible raw output.",
+            "an existing real TargetSnapshot and root source or complete derived lineage. Read retained command bytes with read_output first; raw capture Blob refs are not Research Artifact provenance. Do not create placeholder evidence just to retain output.",
             "Blob and Artifact.",
         ),
         "view_image" => (
@@ -1371,7 +1371,7 @@ fn canonical_description(name: &str) -> String {
         ),
         "memory_read" => (
             "a mutation or verified Research fact is needed.",
-            "smallest document.",
+            "the smallest missing document; reuse current delivered Core Memory instead of rereading it routinely.",
             "path, content and hash.",
         ),
         "memory_write" => (
@@ -1381,23 +1381,23 @@ fn canonical_description(name: &str) -> String {
         ),
         "inspect_project" => (
             "file content or evidence is needed.",
-            "changed paths.",
-            "Snapshot metadata.",
+            "reuse delivered Project facts; inspect only missing or stale metadata. tool_capabilities lists this Step's advertised tools, not all discoverable tools. Use tool_search for a missing capability before declaring it unavailable.",
+            "Snapshot metadata, current advertised Tool capabilities and explicitly verified hash_paths.",
         ),
         "research_get" => (
             "a mutation or transition is needed.",
-            "the narrowest query.",
+            "reuse current delivered Research facts; fetch only to fill a concrete state/reference gap.",
             "typed Research state.",
         ),
         "research_update" => (
             "the source is unbacked.",
-            "typed facts with references.",
+            "typed facts with real references. Establish the actual TargetSnapshot before dependent records; keep tentative analysis out of verified facts. Do not manufacture research records for routine progress narration.",
             "record status.",
         ),
         "tool_search" => (
             "a Tool is Hidden or already Direct.",
-            "a narrow query.",
-            "matching schemas.",
+            "an exact tool-name token when known, otherwise a few precise keywords. A tool absent from inspect_project.tool_capabilities may still be Deferred and discoverable.",
+            "eligible matching schemas; activation lasts only for the rest of the current Turn.",
         ),
         _ => (
             "Do not use when a more specific Tool contract applies.",
@@ -1411,8 +1411,22 @@ fn canonical_description(name: &str) -> String {
             .trim_start()
             .to_owned()
     };
+    let time_guidance = if matches!(
+        name,
+        "inspect_project"
+            | "research_update"
+            | "memory_read"
+            | "memory_write"
+            | "artifact_store"
+            | "http_request"
+            | "view_image"
+    ) {
+        " Use observed timestamps, never guessed dates. For current UTC time use run_command argv [\"date\",\"-u\",\"+%Y-%m-%dT%H:%M:%SZ\"] when needed; preserve source timestamps for historical facts."
+    } else {
+        ""
+    };
     format!(
-        "Use when: {use_when}\nDo not use when: {}\nPrefer: {}\nProduces: {}",
+        "Use when: {use_when}\nDo not use when: {}\nPrefer: {}{time_guidance}\nProduces: {}",
         strip_heading(do_not_use, "Do not use when:"),
         strip_heading(prefer, "Prefer:"),
         strip_heading(produces, "Produces:"),
@@ -1431,8 +1445,10 @@ fn with_execution_control(mut schema: Value) -> Value {
         "execution".to_owned(),
         json!({
             "type": "object",
+            "description": "Omit on first execution. Only for deliberate reruns of completed actions.",
             "properties": {
-                "rerun_reason": {"type": "string", "minLength": 1}
+                "rerun_reason": {"type": "string", "minLength": 1,
+                    "description": "Why repeat a completed action; never an automatic retry."}
             },
             "required": ["rerun_reason"],
             "additionalProperties": false

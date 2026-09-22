@@ -176,6 +176,7 @@ fn file_manifest_schema() -> Value {
 
 fn tool_capability_cache_schema() -> Value {
     json!({
+        "description": "Only this Sampling Step's advertised ToolSpecs. Absence does not mean unavailable: Deferred tools can be discovered through tool_search. Not a complete catalog or authorization list.",
         "type": "object",
         "properties": {
             "cache_schema_version": {"type": "integer", "const": 1},

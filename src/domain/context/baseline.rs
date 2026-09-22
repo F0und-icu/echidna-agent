@@ -2,10 +2,12 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::model::ContentItem;
+use crate::domain::model::{ContentItem, ModelInputIR};
+use crate::domain::tools::{ResolvedToolPlan, ToolExposure};
 
 use super::canonical::{
-    ContextError, ProviderSessionId, ProviderSessionRef, ProviderSessionRole, StepSnapshot,
+    ContextError, ProviderSessionId, ProviderSessionRef, ProviderSessionRole, RequestHash,
+    StepSnapshot,
 };
 
 /// Stable reason codes for requiring a complete Provider request.
@@ -31,9 +33,9 @@ pub enum BaselineInvalidationReason {
 }
 
 impl BaselineInvalidationReason {
-    /// Full delivery may differ from the current logical input only for the
-    /// two existing state-diff fallbacks or for an exact Provider reasoning
-    /// replay across a Prompt/Tool-plan change.
+    /// Coarse reason whitelist for distinct Full delivery in manifests.
+    /// Actual input pairs also require permits_full_input_relationship;
+    /// Tool activation/expiry continuation additionally needs the live Baseline proof.
     pub(crate) const fn permits_distinct_full_delivery(self) -> bool {
         matches!(
             self,
@@ -51,6 +53,19 @@ impl BaselineInvalidationReason {
             self,
             Self::IncrementalInputUnsupported | Self::ProviderRejected
         )
+    }
+
+    /// Shared current-input relationship for runtime admission and audit.
+    /// ToolsChanged additionally needs the live prior-prefix/activation proof;
+    /// an audit records that admitted delivery, not a second ProviderSession.
+    pub(crate) fn permits_full_input_relationship(
+        self,
+        logical: &ModelInputIR,
+        delivered: &ModelInputIR,
+    ) -> bool {
+        self.permits_state_diff_full_delivery()
+            || (self == Self::ToolsChanged && delivered.has_same_reasoning_contract(logical))
+            || (self.permits_distinct_full_delivery() && delivered.is_reasoning_replay_of(logical))
     }
 }
 
@@ -79,7 +94,11 @@ impl IncrementalBaseline {
         }
     }
 
-    fn assess(&self, snapshot: &StepSnapshot) -> BaselineAssessment {
+    fn assess(
+        &self,
+        snapshot: &StepSnapshot,
+        tool_schema_hash: &RequestHash,
+    ) -> BaselineAssessment {
         let candidate = &snapshot.request;
         let baseline = &self.request;
 
@@ -97,7 +116,7 @@ impl IncrementalBaseline {
             Some(BaselineInvalidationReason::PromptChanged)
         } else if baseline.prompt_renderer_hash != candidate.prompt_renderer_hash {
             Some(BaselineInvalidationReason::PromptRendererChanged)
-        } else if baseline.tool_schema_hash != candidate.tool_schema_hash {
+        } else if &baseline.tool_schema_hash != tool_schema_hash {
             Some(BaselineInvalidationReason::ToolsChanged)
         } else if baseline.output_contract_hash != candidate.output_contract_hash {
             Some(BaselineInvalidationReason::OutputContractChanged)
@@ -140,6 +159,51 @@ pub struct ProviderSession {
 }
 
 impl ProviderSession {
+    /// Reuse the complete comparator with only a borrowed Tool-hash override.
+    /// The sent/audited snapshot is not rewritten or its long History cloned.
+    pub(crate) fn tool_change_preserves_delivery(
+        &self,
+        snapshot: &StepSnapshot,
+        previous: &ModelInputIR,
+        candidate: &ModelInputIR,
+        expired_plan: Option<&ResolvedToolPlan>,
+    ) -> bool {
+        let Some(baseline) = &self.baseline else {
+            return false;
+        };
+        let additive = candidate.tool_specs.len() > previous.tool_specs.len()
+            && previous
+                .tool_specs
+                .iter()
+                .all(|spec| candidate.tool_specs.contains(spec));
+        let expiry = expired_plan.is_some_and(|plan| {
+            candidate.tool_specs == plan.advertised_specs()
+                && candidate.tool_specs.len() < previous.tool_specs.len()
+                && candidate
+                    .tool_specs
+                    .iter()
+                    .all(|spec| previous.tool_specs.contains(spec))
+                && previous.tool_specs.iter().all(|spec| {
+                    candidate.tool_specs.contains(spec)
+                        || plan.deferred_specs().iter().any(|base| {
+                            let mut activated = base.clone();
+                            activated.exposure = ToolExposure::Direct;
+                            &activated == spec
+                        })
+                })
+        });
+        if self.pending_reset.is_some()
+            || self.reference != snapshot.provider_session
+            || !(additive || expiry)
+        {
+            return false;
+        }
+        matches!(
+            baseline.assess(snapshot, &baseline.request.tool_schema_hash),
+            BaselineAssessment::AppendOnlyCandidate { .. }
+        )
+    }
+
     pub fn new(id: ProviderSessionId, role: ProviderSessionRole, generation: u64) -> Self {
         Self {
             reference: ProviderSessionRef {
@@ -189,7 +253,7 @@ impl ProviderSession {
             BaselineAssessment::FullRequest {
                 reason: BaselineInvalidationReason::NoBaseline,
             },
-            |baseline| baseline.assess(snapshot),
+            |baseline| baseline.assess(snapshot, &snapshot.request.tool_schema_hash),
         );
         match assessment {
             BaselineAssessment::AppendOnlyCandidate { .. } if !incremental_input_supported => {

@@ -23,6 +23,16 @@ If the user explicitly authorizes development sub-agents, every delegated agent 
 
 ## Current Phase
 
+- R6-SC1 is the measured Research input Schema reuse candidate governed by STATUS. Reuse explicit definitions in the existing builder; the runtime optimizer experiment was rejected. No new architecture/module/API/dependency/cache, tool pruning, Live or Git publication in this Slice; frozen chain remains through v1.20.
+
+- R6-04 is the local test/documentation-only long-task regression baseline, governed by STATUS. No production/architecture change, new Live or Git publication in this Slice. The byte-preserved STATUS_HISTORY_THROUGH_2026_09_19.md is historical evidence, not the active execution entrypoint. Frozen chain remains through v1.20.
+
+- R6-03 is governed by STATUS and ADR-0030 / additive architecture v1.20. Read the frozen chain through v1.20. Base generation2 adds bounded same-scope current-fact and answer guidance; it does not enforce factuality, rewrite history or promote Memory/metadata into evidence. Historical base bytes remain a test fixture and recorded audits remain immutable. No inherited Live allowance or remote hash seal.
+
+- R6-02 is governed by STATUS and ADR-0029 / additive architecture v1.19. Read the frozen chain through v1.19. Response finalization is Adapter-local; only exactly proven prior-Turn activation expiry extends ADR-0028. No blanket Tool removal exception, invented text/time/evidence, automatic retry or remote hash seal.
+
+- R6-01 is governed by STATUS and ADR-0028 / additive architecture v1.18. Read the frozen chain through v1.18. Only proven additive current-Turn Tool activation may retain verified reasoning/state-diff delivery; no blanket ToolsChanged exception or remote architecture hash seal.
+
 - R5b2 is merged through PR#81. R5b3 explicit Snapshot hash freshness is governed by STATUS and ADR-0027 / additive architecture v1.17. Read the frozen chain through v1.17. Explicit hash_paths reverify current bytes; empty requests retain cheap metadata reuse. No remote architecture hash seal is authorized.
 
 - R4b is merged through PR#78. Current R5a presentation is governed by STATUS and ADR-0026 / additive architecture v1.16: explicit debug omissions, reply boundaries and durable capture hints only. R5b measurement and R6 long-task acceptance remain open. Read the full frozen chain through v1.16; remote architecture hash seal remains unauthorized.

@@ -5,7 +5,31 @@ milestone history remains in `docs/development/STATUS.md` and Git history.
 
 ## Unreleased
 
+### Changed
+
+- R6-SC1: reuse four existing Research input types through local Schema
+  definitions, preserving expanded argument contracts and tool availability.
+  The measured24-tool wire array is1021bytes smaller (3.02%); this is not a
+  measured model-token/latency improvement. No runtime optimizer or dependency.
+
+### Fixed
+
+- R6-02: reconcile finalized Responses text with streamed output and reject
+  contradictory terminal status; discover exact Tool names despite explanatory
+  words; clarify current Tool visibility, provenance, observed time and rerun
+  controls. Preserve delivery across proven temporary activation expiry without
+  keeping expired Tools callable. Verification and Live limits are in STATUS.
+
+- R6-01: preserve verified reasoning/state-diff continuation across proven
+  additive Tool activation, using the existing Baseline and audit owners.
+  Incompatible changes still stop explicitly; this does not establish general
+  cross-Turn continuity or completed long-task acceptance.
+
 ### Added
+
+- R6-03: bounded Base Contract v2 guidance for same-scope current facts and
+  requested answer format. Historical audit bytes remain unchanged; offline
+  delivery coverage does not establish improved real-model adherence.
 
 - R5b2: offline formal-CLI Full/incremental delivery measurements and a
   same-size/restored-mtime Resume regression for current source/Memory content;

@@ -1,5 +1,7 @@
 //! Shared Responses streaming-event wire decoding.
 
+mod text;
+
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -25,69 +27,171 @@ struct ResponsesStreamEvent {
     item: Option<Value>,
     #[serde(default)]
     response: Option<Value>,
+    #[serde(default)]
+    output_index: Option<usize>,
+    #[serde(default)]
+    content_index: Option<usize>,
+    #[serde(default)]
+    item_id: Option<String>,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    part: Option<Value>,
 }
 
-pub(super) fn decode_stream_event(
-    data: &str,
-    usage_required: bool,
-    continuation_required: bool,
-    continuation_requested: bool,
-) -> Result<DecodedResponsesEvent, ModelProviderError> {
-    let event: ResponsesStreamEvent = serde_json::from_str(data).map_err(|error| {
-        protocol_error(format!(
-            "invalid Responses event JSON at line {}, column {}",
-            error.line(),
-            error.column()
-        ))
-    })?;
+#[derive(Default)]
+pub(super) struct ResponseDecoder {
+    text: text::TextOutput,
+    completed_items: Vec<(Option<usize>, Vec<ModelEvent>)>,
+}
 
-    match event.kind.as_str() {
-        "response.output_text.delta" => {
-            let text = event
-                .delta
-                .ok_or_else(|| protocol_error("text delta event omitted `delta`"))?;
-            Ok(decoded(vec![ModelEvent::TextDelta { text }]))
+impl ResponseDecoder {
+    pub(super) fn decode_stream_event(
+        &mut self,
+        data: &str,
+        usage_required: bool,
+        continuation_required: bool,
+        continuation_requested: bool,
+    ) -> Result<DecodedResponsesEvent, ModelProviderError> {
+        let event: ResponsesStreamEvent = serde_json::from_str(data).map_err(|error| {
+            protocol_error(format!(
+                "invalid Responses event JSON at line {}, column {}",
+                error.line(),
+                error.column()
+            ))
+        })?;
+
+        match event.kind.as_str() {
+            "response.output_text.delta" => {
+                let text = event
+                    .delta
+                    .ok_or_else(|| protocol_error("text delta event omitted `delta`"))?;
+                Ok(decoded(self.text.text(
+                    event.output_index,
+                    event.content_index,
+                    event.item_id.as_deref(),
+                    &text,
+                    false,
+                )?))
+            }
+            "response.output_text.done" => {
+                let text = event
+                    .text
+                    .ok_or_else(|| protocol_error("final text event omitted `text`"))?;
+                Ok(decoded(self.text.text(
+                    event.output_index,
+                    event.content_index,
+                    event.item_id.as_deref(),
+                    &text,
+                    true,
+                )?))
+            }
+            "response.content_part.done" => {
+                let part = event
+                    .part
+                    .ok_or_else(|| protocol_error("content part event omitted `part`"))?;
+                if part.get("type").and_then(Value::as_str) == Some("reasoning_text") {
+                    // Like reasoning_text.done, this is a lifecycle marker.
+                    // The completed reasoning output-item owner validates and
+                    // emits its plaintext once; it is never Assistant text.
+                    return Ok(decoded(Vec::new()));
+                }
+                Ok(decoded(self.text.part(
+                    event.output_index,
+                    event.content_index,
+                    event.item_id.as_deref(),
+                    &part,
+                )?))
+            }
+            "response.reasoning_text.delta" => {
+                let text = event
+                    .delta
+                    .ok_or_else(|| protocol_error("reasoning text delta event omitted `delta`"))?;
+                Ok(decoded(vec![ModelEvent::ReasoningDelta { text }]))
+            }
+            "response.output_item.done" => {
+                let item = event
+                    .item
+                    .ok_or_else(|| protocol_error("output item event omitted `item`"))?;
+                if item.get("type").and_then(Value::as_str) == Some("message") {
+                    Ok(decoded(self.text.message(event.output_index, &item)?))
+                } else {
+                    let decoded = decode_output_item(item)?;
+                    if !decoded.events.is_empty() {
+                        self.text.barrier(event.output_index);
+                    }
+                    self.completed_items
+                        .push((event.output_index, decoded.events.clone()));
+                    Ok(decoded)
+                }
+            }
+            "response.completed" => {
+                let mut decoded = decode_completed(
+                    event.response.as_ref(),
+                    usage_required,
+                    continuation_required,
+                )?;
+                if let Some(output) = event.response.as_ref().and_then(|r| r.get("output")) {
+                    let output = output
+                        .as_array()
+                        .ok_or_else(|| protocol_error("completed output is not an array"))?;
+                    let mut text_events = Vec::new();
+                    let mut completed_items = self.completed_items.iter();
+                    for (index, item) in output.iter().enumerate() {
+                        if item.get("type").and_then(Value::as_str) == Some("message") {
+                            text_events.extend(self.text.message(Some(index), item)?);
+                        } else {
+                            let decoded = decode_output_item(item.clone())?;
+                            if !completed_items.next().is_some_and(|(prior_index, prior)| {
+                                prior_index.is_none_or(|prior| prior == index)
+                                    && prior == &decoded.events
+                            }) {
+                                return Err(protocol_error(
+                                    "completed output disagrees with completed non-text items",
+                                ));
+                            }
+                        }
+                    }
+                    if completed_items.next().is_some() {
+                        return Err(protocol_error(
+                            "completed output omitted completed non-text items",
+                        ));
+                    }
+                    self.text.validate_snapshot(output)?;
+                    text_events.append(&mut decoded.events);
+                    decoded.events = text_events;
+                }
+                Ok(decoded)
+            }
+            "response.failed" => Err(decode_provider_failure(
+                event.response,
+                continuation_requested,
+            )),
+            "response.incomplete" => Err(decode_incomplete(event.response)),
+            "response.created"
+            | "response.in_progress"
+            | "response.output_item.added"
+            | "response.content_part.added"
+            | "response.function_call_arguments.delta"
+            | "response.function_call_arguments.done"
+            | "response.reasoning_summary_part.added"
+            | "response.reasoning_summary_part.done"
+            | "response.reasoning_summary_text.delta"
+            | "response.reasoning_summary_text.done"
+            | "response.reasoning_text.done" => Ok(decoded(Vec::new())),
+            unknown => Err(protocol_error(format!(
+                "unsupported Responses event `{unknown}`"
+            ))),
         }
-        "response.reasoning_text.delta" => {
-            let text = event
-                .delta
-                .ok_or_else(|| protocol_error("reasoning text delta event omitted `delta`"))?;
-            Ok(decoded(vec![ModelEvent::ReasoningDelta { text }]))
-        }
-        "response.output_item.done" => {
-            let item = event
-                .item
-                .ok_or_else(|| protocol_error("output item event omitted `item`"))?;
-            decode_output_item(item)
-        }
-        "response.completed" => {
-            decode_completed(event.response, usage_required, continuation_required)
-        }
-        "response.failed" => Err(decode_provider_failure(
-            event.response,
-            continuation_requested,
-        )),
-        "response.incomplete" => Err(decode_incomplete(event.response)),
-        "response.created"
-        | "response.in_progress"
-        | "response.output_item.added"
-        | "response.content_part.added"
-        | "response.content_part.done"
-        | "response.output_text.done"
-        | "response.function_call_arguments.delta"
-        | "response.function_call_arguments.done"
-        | "response.reasoning_summary_part.added"
-        | "response.reasoning_summary_part.done"
-        | "response.reasoning_summary_text.delta"
-        | "response.reasoning_summary_text.done"
-        | "response.reasoning_text.done" => Ok(decoded(Vec::new())),
-        unknown => Err(protocol_error(format!(
-            "unsupported Responses event `{unknown}`"
-        ))),
     }
 }
 
 fn decode_output_item(item: Value) -> Result<DecodedResponsesEvent, ModelProviderError> {
+    if item.get("status").is_some_and(|s| s != "completed") {
+        return Err(protocol_error(
+            "completed output item has non-completed status",
+        ));
+    }
     let item_kind = item
         .get("type")
         .and_then(Value::as_str)
@@ -118,7 +222,6 @@ fn decode_output_item(item: Value) -> Result<DecodedResponsesEvent, ModelProvide
                 ),
             }]))
         }
-        "message" => Ok(decoded(Vec::new())),
         "reasoning" => decode_reasoning_item(item),
         unknown => Err(protocol_error(format!(
             "unsupported completed output item `{unknown}`"
@@ -180,16 +283,25 @@ fn has_non_empty_wire_content(value: &Value) -> bool {
 }
 
 fn decode_completed(
-    response: Option<Value>,
+    response: Option<&Value>,
     usage_required: bool,
     continuation_required: bool,
 ) -> Result<DecodedResponsesEvent, ModelProviderError> {
-    let response: CompletedResponse = serde_json::from_value(
+    let response = CompletedResponse::deserialize(
         response.ok_or_else(|| protocol_error("completed event omitted `response`"))?,
     )
     .map_err(|error| protocol_error(format!("invalid completed response: {error}")))?;
 
     let mut events = Vec::with_capacity(2);
+    if response
+        .status
+        .as_deref()
+        .is_some_and(|status| status != "completed")
+    {
+        return Err(protocol_error(
+            "completed response has non-completed status",
+        ));
+    }
     match response.usage {
         Some(usage) => events.push(ModelEvent::Usage {
             usage: ModelUsage {
@@ -300,6 +412,8 @@ struct ReasoningItem {
 
 #[derive(Debug, Deserialize)]
 struct CompletedResponse {
+    #[serde(default)]
+    status: Option<String>,
     #[serde(rename = "id")]
     #[serde(default)]
     id: String,

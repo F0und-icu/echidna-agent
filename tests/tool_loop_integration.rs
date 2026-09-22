@@ -46,7 +46,121 @@ mod output_retention;
 #[path = "tool_loop_cases/command_diagnostics.rs"]
 mod command_diagnostics;
 
+#[tokio::test]
+async fn exact_tool_name_discovery_ignores_extra_prose_but_preserves_eligibility_and_limits() {
+    let project = TestProject::new("exact-tool-discovery");
+    let tools = ToolRegistry::for_project(&project.root);
+    let visible = tools
+        .resolve_tool_plan(&ToolExposurePlan::default(), &Default::default())
+        .unwrap();
+    let search_plan = |id: &str, args| {
+        tools
+            .plan_model_call(
+                &visible,
+                ExecutionId::new(id),
+                tool_call(id, "tool_search", args),
+            )
+            .unwrap()
+    };
+    for (query, expected) in [
+        ("READ_OUTPUT durable blob stdout", vec!["read_output"]),
+        ("read_output_suffix nonexistent", vec![]),
+        ("atomic file", vec!["write_file"]),
+        ("no_matching_tool_xyz", vec![]),
+    ] {
+        let outcome = tools
+            .execute(search_plan("discover", json!({"query":query})))
+            .await;
+        let names: Vec<_> = outcome.result.output["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, expected, "{query}");
+    }
+    let exposure = ToolExposurePlan::new([(ToolName::new("read_output"), ToolExposure::Hidden)]);
+    let resolved = tools
+        .resolve_tool_plan(&exposure, &Default::default())
+        .unwrap();
+    let call = tool_call(
+        "hidden",
+        "tool_search",
+        json!({"query":"read_output durable blob stdout"}),
+    );
+    let execution_plan = tools
+        .plan_model_call(&resolved, ExecutionId::new("hidden"), call)
+        .unwrap();
+    let outcome = tools.execute(execution_plan).await;
+    assert_eq!(outcome.result.output["matches"], json!([]));
+    let outcome = tools
+        .execute(search_plan(
+            "limit",
+            json!({"query":"read_output write_file", "max_results":1}),
+        ))
+        .await;
+    assert_eq!(
+        outcome.result.output["matches"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(outcome.result.output["matches"][0]["name"], "read_output");
+    assert_eq!(outcome.result.output["truncated"], true);
+}
+
 static NEXT_PROJECT_ID: AtomicU64 = AtomicU64::new(1);
+
+#[test]
+fn tool_guidance_keeps_time_provenance_visibility_and_rerun_boundaries_explicit() {
+    let project = TestProject::new("tool-guidance");
+    let tools = ToolRegistry::for_project(&project.root);
+    let catalog = tools.catalog();
+    let spec = |name: &str| catalog.iter().find(|s| s.name.as_str() == name).unwrap();
+    for name in [
+        "inspect_project",
+        "research_update",
+        "memory_read",
+        "memory_write",
+        "artifact_store",
+        "http_request",
+        "view_image",
+    ] {
+        assert!(spec(name).description.contains("observed timestamps"));
+        assert!(
+            spec(name)
+                .description
+                .contains("preserve source timestamps")
+        );
+    }
+    assert!(
+        spec("inspect_project")
+            .description
+            .contains("not all discoverable tools")
+    );
+    assert!(
+        spec("artifact_store")
+            .description
+            .contains("real TargetSnapshot")
+    );
+    assert!(
+        spec("memory_read")
+            .description
+            .contains("reuse current delivered Core Memory")
+    );
+    for spec in catalog {
+        let execution = &spec.input_schema["properties"]["execution"];
+        assert!(
+            execution["description"]
+                .as_str()
+                .unwrap()
+                .contains("Omit on first execution")
+        );
+        assert!(
+            !spec.input_schema["required"]
+                .as_array()
+                .is_some_and(|r| r.contains(&json!("execution")))
+        );
+    }
+}
 
 struct TestProject {
     root: PathBuf,
@@ -1289,7 +1403,7 @@ async fn context_planner_and_cache_feed_the_baseline_without_owning_delivery() {
             .map(|entry| entry.fragment_id().as_str())
             .collect::<Vec<_>>(),
         vec![
-            "prompt:base:pragmatic-vulnerability-researcher:1",
+            "prompt:base:pragmatic-vulnerability-researcher:2",
             "prompt:domain:source:1",
             "prompt:phase:mapping:2",
         ]

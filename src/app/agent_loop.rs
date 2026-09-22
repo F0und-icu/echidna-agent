@@ -298,6 +298,9 @@ pub struct AgentLoop<'provider, 'tools, Provider: ?Sized, Tools: ?Sized> {
     active_tool_exposure_plan: ToolExposurePlan,
     committed_delivery_input: Option<ModelInputIR>,
     committed_delivery_map: Option<ContextDeliveryMap>,
+    // Immutable pre-activation plan from the Turn of the committed sample.
+    // Used only to prove normal expiry; never advertises or dispatches Tools.
+    committed_unactivated_tool_plan: Option<ResolvedToolPlan>,
     committed_history_len: usize,
     committed_world_state: Option<ResearchWorldState>,
     committed_project_snapshot: Option<ProjectSnapshotContext>,
@@ -395,6 +398,7 @@ where
             active_tool_exposure_plan,
             committed_delivery_input: None,
             committed_delivery_map: None,
+            committed_unactivated_tool_plan: None,
             committed_history_len: 0,
             committed_world_state: None,
             committed_project_snapshot: None,
@@ -805,15 +809,25 @@ where
         self.next_turn_sequence += 1;
         let turn_id = TurnId::new(format!("turn:{}", self.next_turn_sequence));
         let mut deferred_activations = DeferredActivationSet::default();
+        let unactivated_tool_plan = self
+            .tools
+            .resolve_tool_plan(&self.active_tool_exposure_plan, &deferred_activations)?;
         let mut executions = Vec::new();
         for request_index in 0..request_budget.limit() {
             if let Some(refresh) = context_refresh.as_deref_mut() {
                 self.refresh_current_context(refresh()?)?;
             }
             self.history.ensure_all_tool_calls_paired()?;
-            let resolved_tool_plan = self
-                .tools
-                .resolve_tool_plan(&self.active_tool_exposure_plan, &deferred_activations)?;
+            let resolved_tool_plan = if request_index == 0 {
+                unactivated_tool_plan.clone()
+            } else {
+                self.tools
+                    .resolve_tool_plan(&self.active_tool_exposure_plan, &deferred_activations)?
+            };
+            let expired_plan = (request_index == 0)
+                .then_some(())
+                .and(self.committed_unactivated_tool_plan.as_ref())
+                .filter(|prior| *prior == &resolved_tool_plan);
             let tool_specs = resolved_tool_plan.advertised_specs();
             let turn = TurnContext::new(
                 turn_id.clone(),
@@ -927,10 +941,26 @@ where
                                     candidate_assessment,
                                 ),
                                 BaselineAssessment::FullRequest { reason }
-                                    if reason.permits_state_diff_full_delivery()
-                                        || (reason.permits_distinct_full_delivery()
-                                            && candidate_input
-                                                .is_reasoning_replay_of(&full_input)) =>
+                                    if reason.permits_full_input_relationship(
+                                        &full_input,
+                                        &candidate_input,
+                                    ) && (reason
+                                        != BaselineInvalidationReason::ToolsChanged
+                                        || candidate_input.is_reasoning_replay_of(&full_input)
+                                        || ((!deferred_activations.names().is_empty()
+                                            || expired_plan.is_some())
+                                            && self
+                                                .committed_delivery_input
+                                                .as_ref()
+                                                .is_some_and(|previous| {
+                                                    self.provider_session
+                                                        .tool_change_preserves_delivery(
+                                                            &candidate_snapshot,
+                                                            previous,
+                                                            &candidate_input,
+                                                            expired_plan,
+                                                        )
+                                                }))) =>
                                 {
                                     (
                                         candidate_input,
@@ -1109,6 +1139,7 @@ where
             delivery_map.validate_against(&delivery_input)?;
             self.committed_delivery_input = Some(delivery_input);
             self.committed_delivery_map = Some(delivery_map);
+            self.committed_unactivated_tool_plan = Some(unactivated_tool_plan.clone());
             self.committed_history_len = self.history.items().len();
             self.committed_world_state = self.world_state.clone();
             self.committed_project_snapshot = self.project_snapshot.clone();
@@ -1274,6 +1305,7 @@ where
         self.committed_context_manifest = None;
         self.committed_delivery_input = None;
         self.committed_delivery_map = None;
+        self.committed_unactivated_tool_plan = None;
         self.committed_history_len = self.history.items().len();
         self.committed_world_state = None;
         self.committed_project_snapshot = None;

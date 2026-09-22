@@ -839,7 +839,11 @@ fn research_tool_schemas_are_fixed_and_execution_metadata_is_exact() {
         &operation[5]["properties"]["record"]["properties"]["evidence_links"],
         &operation[6]["properties"]["update"]["properties"]["evidence_links_add"],
     ] {
-        assert_eq!(reference["items"]["$ref"], "#/$defs/evidence_link");
+        assert_eq!(reference["$ref"], "#/$defs/links");
+        assert_eq!(
+            update.input_schema["$defs"]["links"]["items"]["$ref"],
+            "#/$defs/evidence_link"
+        );
     }
     assert_eq!(
         get.output_schema["required"],

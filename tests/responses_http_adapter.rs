@@ -43,6 +43,9 @@ mod live_provider;
 mod support;
 
 const FIXTURE_SECRET: &str = "fixture-secret";
+
+#[path = "responses_cases/text_finalization.rs"]
+mod text_finalization;
 const FIXTURE_CREDENTIAL_REFERENCE: &str = "CYBER_AGENT_FIXTURE_API_KEY";
 
 #[derive(Clone)]
@@ -792,6 +795,40 @@ async fn tool_schema_call_and_result_encode_in_full_history_order() {
     let expected: Value =
         serde_json::from_str(include_str!("fixtures/responses/tool_request.json")).unwrap();
     assert_eq!(actual, expected);
+}
+
+#[tokio::test]
+async fn shared_input_definitions_reach_wire_from_the_resolved_tool_plan_unchanged() {
+    let (base_url, request_receiver, server) = spawn_sse_server(
+        200,
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"shared-schema-fixture\"}}\n\n",
+    )
+    .await;
+    let provider = adapter(base_url, FakeCredentialSource::value(Some(FIXTURE_SECRET)));
+    let tools = ToolRegistry::for_project(env!("CARGO_MANIFEST_DIR"));
+    let resolved = tools
+        .resolve_tool_plan(&Default::default(), &Default::default())
+        .unwrap();
+    let specs = resolved.advertised_specs();
+    let research = resolved
+        .advertised_spec(&ToolName::new("research_update"))
+        .unwrap();
+    assert_eq!(research.input_schema["$defs"]["text"]["minLength"], 1);
+    let input = fixture_input(ModelRequestRequirements::default()).with_tool_specs(specs.to_vec());
+    ModelStreamingService::new(&provider)
+        .consume(full(input), ModelStreamCancellation::new())
+        .await
+        .unwrap();
+    let request = request_receiver.await.unwrap();
+    server.await.unwrap();
+    let actual: Value = serde_json::from_str(&request.body).unwrap();
+    let wire = actual["tools"].as_array().unwrap();
+    assert_eq!(wire.len(), specs.len());
+    for (entry, spec) in wire.iter().zip(specs) {
+        assert_eq!(entry["name"], spec.name.as_str());
+        assert_eq!(entry["parameters"], spec.input_schema);
+        assert!(entry.get("output_schema").is_none());
+    }
 }
 
 #[tokio::test]
