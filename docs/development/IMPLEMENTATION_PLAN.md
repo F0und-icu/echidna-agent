@@ -1087,6 +1087,24 @@ F6a delivery addendum: after the acceptance checkpoint above, the operator autho
 
 #### 当前主线：R6后续优化／回补R5检索遗留项
 
+2026-09-21：操作者授权先交付已完成修复，再继续开发。R5c2以独立Draft PR #85
+交付，依赖未合并的#84，不混入下一优化。当前Slice为R6 query-local term reuse：
+仅在原ranker复用每个合格候选字段的normalized_terms，保留原normalizer与完整排序
+语义。新增永久CLI回归，固定相同Project/query做交替release基线/候选对照，完整
+报告相同且有实测收益才保留；无短查询明显退化。零新生产模块/API/依赖/持久缓存/
+架构，Shadow不进入模型输入。专项→受影响→单独授权限时独立审计→修复→Gate→Lean。
+无Live/Actions；不因优化完成宣称整个R6验收完成。下文保留原调查/修复历史。
+
+当前实现已完成本地验收：最终专项11PASS、受影响24PASS/1既有ignored，release
+编译与96次交替对照通过，完整JSON相同；最大长查询中位577.310→92.985ms，
+短查询无明显退化。第一候选的短查询回退与编译错误证据保留，不宣称模型质量或
+token收益。操作者随后授权全新Terra xhigh独立只读审计，限时内APPROVE，无阻塞或
+修复要求；完整Gate45套件515 unique PASS/4ignored、fmt/Clippy/build/inline/whitespace
+及Lean PASS。源码/测试319项冻结前后相同，无审计后生产改动。实现21cc71d已交付
+独立Draft PR #86（base为#85），
+不合并基础PR，不开始下一Slice，不运行Live/Actions，不宣称整个R6完成。
+具体范围、结果与限制见R6_RETRIEVAL_QUERY_REUSE。
+
 R5c1/R5c2保留为历史工作编号，不表示主线从R6退回R5。已完成项不重编号，
 不覆盖历史验收记录；检索优化不是整个R6验收的默认前置条件，只有实测阻塞才升级。
 本轮继续既定release测量：保持已审计R5c2生产代码不变，正式release构建后复用
