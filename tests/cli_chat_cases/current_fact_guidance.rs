@@ -3,7 +3,7 @@ use super::*;
 use cyber_agent::domain::model::ContentItem;
 
 #[test]
-fn explicit_compaction_then_process_resume_refreshes_facts_without_reexecuting_completed_tools() {
+fn repeated_compaction_then_process_resume_refreshes_facts_without_reexecuting_completed_tools() {
     let root = TemporaryDirectory::new("engineering-compact-resume");
     let harness = TemporaryDirectory::new("engineering-provider");
     initialize_project(root.path());
@@ -50,10 +50,20 @@ fn explicit_compaction_then_process_resume_refreshes_facts_without_reexecuting_c
         (
             200,
             text_response(
-                "scripted current currency: EUR",
+                &"Scripted current currency: EUR; earlier USD was observed before the operator update. ".repeat(256),
                 "engineering-current-answer",
             ),
         ),
+        (
+            200,
+            m4_long_flow_tool_response(
+                "engineering-latest-read",
+                "read_file",
+                json!({"path":"src/report-settings"}),
+                "engineering-latest-result",
+            ),
+        ),
+        (200, text_response("scripted current currency: JPY", "engineering-latest-answer")),
     ]);
     let config = write_config(harness.path(), &server.base_url);
     // Full-only delivery exercises the wire history used by strict backends.
@@ -90,7 +100,6 @@ fn explicit_compaction_then_process_resume_refreshes_facts_without_reexecuting_c
                 && item["output"].as_str().unwrap().contains("currency=USD"))
     );
     let id = session_id(root.path());
-    let before_events = session_events(root.path(), &id);
     let before = reduced_session(&project, &id);
     assert_eq!(before.execution_receipt_count(), 2);
     assert_eq!(
@@ -99,143 +108,160 @@ fn explicit_compaction_then_process_resume_refreshes_facts_without_reexecuting_c
     );
     assert_audits_reconstruct(root.path(), &before);
 
-    let compact = f2a_wait_child(
-        spawn_f2a_chat(
-            root.path(),
-            &config,
-            "/compact\n/exit\n",
-            &["--resume", &id],
-        ),
-        "engineering explicit compaction",
-    );
-    assert!(
-        compact.status.success(),
-        "{}",
-        String::from_utf8_lossy(&compact.stderr)
-    );
-    assert!(String::from_utf8_lossy(&compact.stdout).contains("Compaction revision 1 applied"));
-    assert!(
-        server.requests.try_recv().is_err(),
-        "compaction must not sample a model"
-    );
-    let compact_events = session_events(root.path(), &id);
-    assert_eq!(
-        &compact_events[..before_events.len()],
-        before_events.as_slice()
-    );
-    let compact_state = reduced_session(&project, &id);
-    let compaction = compact_state.latest_compaction().unwrap();
-    assert!(compaction.retained_history().len() < compaction.source_history_item_count());
-    assert_eq!(compact_state.history().items(), before.history().items());
-    let summary = serde_json::to_value(compaction.summary()).unwrap();
-    assert_eq!(
-        summary["evidence_spine"]["target_snapshot_refs"],
-        json!([snapshot.as_str()])
-    );
-    assert_eq!(compact_state.request_audits(), before.request_audits());
+    for (cycle, currency, old_currency, call_id) in [
+        (1, "EUR", "USD", "engineering-new-read"),
+        (2, "JPY", "EUR", "engineering-latest-read"),
+    ] {
+        let before_events = session_events(root.path(), &id);
+        let before = reduced_session(&project, &id);
+        let compact = f2a_wait_child(
+            spawn_f2a_chat(
+                root.path(),
+                &config,
+                "/compact\n/exit\n",
+                &["--resume", &id],
+            ),
+            "engineering explicit compaction",
+        );
+        assert!(
+            compact.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compact.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&compact.stdout)
+                .contains(&format!("Compaction revision {cycle} applied"))
+        );
+        assert!(
+            server.requests.try_recv().is_err(),
+            "compaction must not sample a model"
+        );
+        let compact_events = session_events(root.path(), &id);
+        assert_eq!(
+            &compact_events[..before_events.len()],
+            before_events.as_slice()
+        );
+        let compact_state = reduced_session(&project, &id);
+        let compaction = compact_state.latest_compaction().unwrap();
+        assert!(compaction.retained_history().len() < compaction.source_history_item_count());
+        assert_eq!(compact_state.history().items(), before.history().items());
+        let summary = serde_json::to_value(compaction.summary()).unwrap();
+        assert_eq!(
+            summary["evidence_spine"]["target_snapshot_refs"],
+            json!([snapshot.as_str()])
+        );
+        assert_eq!(compact_state.request_audits(), before.request_audits());
 
-    // Operator-boundary changes after exit, not an unsupported mid-turn
-    // replacement underneath completed reasoning. Same-size current values.
-    fs::write(&settings, "currency=EUR\n").unwrap();
-    fs::write(&memory, "report.currency=EUR\n").unwrap();
-    let question = "Read current settings; report only current currency. Do not rerun the marker.";
-    let resumed = f2a_wait_child(
-        spawn_f2a_chat(
-            root.path(),
-            &config,
-            &format!("{question}\n/exit\n"),
-            &["--resume", &id],
-        ),
-        "engineering compacted resume",
-    );
-    assert!(
-        resumed.status.success(),
-        "{}",
-        String::from_utf8_lossy(&resumed.stderr)
-    );
-    let resumed_wire = f2a_request_body(&server.requests, "engineering resumed wire");
-    let result_wire = f2a_request_body(&server.requests, "engineering fresh result");
-    assert!(server.requests.try_recv().is_err());
-    f2a_join_server(server, "engineering completion");
-    for wire in [&resumed_wire, &result_wire] {
-        assert!(wire.get("previous_response_id").is_none());
-        let input = wire["input"].as_array().unwrap();
-        assert!(
-            input
-                .iter()
-                .any(|item| item["role"] == "user"
-                    && item.to_string().contains("report.currency=EUR"))
+        // Operator-boundary changes after exit, not an unsupported mid-turn
+        // replacement underneath completed reasoning. Same-size current values.
+        fs::write(&settings, format!("currency={currency}\n")).unwrap();
+        fs::write(&memory, format!("report.currency={currency}\n")).unwrap();
+        let question =
+            "Read current settings; report only current currency. Do not rerun the marker.";
+        let resumed = f2a_wait_child(
+            spawn_f2a_chat(
+                root.path(),
+                &config,
+                &format!("{question}\n/exit\n"),
+                &["--resume", &id],
+            ),
+            "engineering compacted resume",
         );
         assert!(
-            !input
-                .iter()
-                .any(|item| item["role"] == "user"
-                    && item.to_string().contains("report.currency=USD"))
+            resumed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&resumed.stderr)
         );
-        assert!(
-            wire["input"]
-                .to_string()
-                .contains("derived_session_summary_v2")
+        let resumed_wire = f2a_request_body(&server.requests, "engineering resumed wire");
+        let result_wire = f2a_request_body(&server.requests, "engineering fresh result");
+        assert!(server.requests.try_recv().is_err());
+        for wire in [&resumed_wire, &result_wire] {
+            assert!(wire.get("previous_response_id").is_none());
+            let input = wire["input"].as_array().unwrap();
+            assert!(input.iter().any(|item| {
+                item["role"] == "user"
+                    && item
+                        .to_string()
+                        .contains(&format!("report.currency={currency}"))
+            }));
+            assert!(!input.iter().any(|item| {
+                item["role"] == "user"
+                    && item
+                        .to_string()
+                        .contains(&format!("report.currency={old_currency}"))
+            }));
+            assert!(
+                wire["input"]
+                    .to_string()
+                    .contains("derived_session_summary_v2")
+            );
+            assert!(wire["input"].to_string().contains(snapshot.as_str()));
+            assert!(
+                input
+                    .iter()
+                    .any(|item| item["role"] == "user" && item.to_string().contains(question))
+            );
+        }
+        assert!(result_wire["input"].as_array().unwrap().iter().any(|item| {
+            item["type"] == "function_call_output"
+                && item["call_id"] == call_id
+                && item["output"]
+                    .as_str()
+                    .unwrap()
+                    .contains(&format!("currency={currency}"))
+        }));
+        let after_events = session_events(root.path(), &id);
+        assert_eq!(
+            &after_events[..compact_events.len()],
+            compact_events.as_slice()
         );
-        assert!(wire["input"].to_string().contains(snapshot.as_str()));
-        assert!(
-            input
+        assert_eq!(
+            after_events
                 .iter()
-                .any(|item| item["role"] == "user" && item.to_string().contains(question))
+                .filter(|event| event["event_type"] == "session.compaction_created")
+                .count(),
+            cycle
+        );
+        let after = reduced_session(&project, &id);
+        assert_eq!(
+            &after.history().items()[..before.history().items().len()],
+            before.history().items()
+        );
+        assert_eq!(after.history().ensure_all_tool_calls_paired(), Ok(()));
+        assert_eq!(
+            after.execution_receipt_count(),
+            u64::try_from(2 + cycle).unwrap()
+        );
+        assert_eq!(after.request_audits().len(), 3 + 2 * cycle);
+        assert_eq!(
+            &after.request_audits()[..before.request_audits().len()],
+            before.request_audits()
+        );
+        assert_audits_reconstruct(root.path(), &after);
+        assert_eq!(
+            fs::read_to_string(root.path().join("once.txt")).unwrap(),
+            "executed\n"
+        );
+        let calls: Vec<_> = after
+            .history()
+            .items()
+            .iter()
+            .filter_map(|item| match item {
+                ContentItem::ToolCall { call } => Some((call.call_id.as_str(), call.name.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            calls,
+            &[
+                ("engineering-once", "run_command"),
+                ("engineering-old-read", "read_file"),
+                ("engineering-new-read", "read_file"),
+                ("engineering-latest-read", "read_file"),
+            ][..2 + cycle]
         );
     }
-    assert!(
-        result_wire["input"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|item| item["type"] == "function_call_output"
-                && item["call_id"] == "engineering-new-read"
-                && item["output"].as_str().unwrap().contains("currency=EUR"))
-    );
-    let after_events = session_events(root.path(), &id);
-    assert_eq!(
-        &after_events[..compact_events.len()],
-        compact_events.as_slice()
-    );
-    assert_eq!(
-        after_events
-            .iter()
-            .filter(|event| event["event_type"] == "session.compaction_created")
-            .count(),
-        1
-    );
-    let after = reduced_session(&project, &id);
-    assert_eq!(
-        &after.history().items()[..before.history().items().len()],
-        before.history().items()
-    );
-    assert_eq!(after.history().ensure_all_tool_calls_paired(), Ok(()));
-    assert_eq!(after.execution_receipt_count(), 3);
-    assert_eq!(after.request_audits().len(), 5);
-    assert_eq!(&after.request_audits()[..3], before.request_audits());
-    assert_audits_reconstruct(root.path(), &after);
-    assert_eq!(
-        fs::read_to_string(root.path().join("once.txt")).unwrap(),
-        "executed\n"
-    );
-    let calls: Vec<_> = after
-        .history()
-        .items()
-        .iter()
-        .filter_map(|item| match item {
-            ContentItem::ToolCall { call } => Some((call.call_id.as_str(), call.name.as_str())),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        calls,
-        vec![
-            ("engineering-once", "run_command"),
-            ("engineering-old-read", "read_file"),
-            ("engineering-new-read", "read_file")
-        ]
-    );
+    f2a_join_server(server, "engineering completion");
 }
 
 #[test]

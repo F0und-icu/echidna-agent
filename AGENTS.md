@@ -23,6 +23,8 @@ If the user explicitly authorizes development sub-agents, every delegated agent 
 
 ## Current Phase
 
+- R6 acceptance closure is reviewed/Gate/Lean/Live verified with explicit content limits and published in PR #87, governed by STATUS and `docs/development/R6_ACCEPTANCE_CLOSURE.md`; exact remote merge state is verified from PR/Git. #84/#85/#86 are merged. Engineering integrity passes the repeated ordinary-engineering compaction/Resume fixture, but model prose is FAIL/LIMITED, not security success or full-window capacity. Stop after verified closure delivery; earlier Slice-only stop language below is historical. No Actions, Codex login access, remote architecture hash seal or automatic continuation of a closed Live allowance.
+
 - R6-SC1 is the measured Research input Schema reuse candidate governed by STATUS. Reuse explicit definitions in the existing builder; the runtime optimizer experiment was rejected. No new architecture/module/API/dependency/cache, tool pruning, Live or Git publication in this Slice; frozen chain remains through v1.20.
 
 - R6-04 is the local test/documentation-only long-task regression baseline, governed by STATUS. No production/architecture change, new Live or Git publication in this Slice. The byte-preserved STATUS_HISTORY_THROUGH_2026_09_19.md is historical evidence, not the active execution entrypoint. Frozen chain remains through v1.20.

@@ -26,7 +26,7 @@
 
 当前读取完整冻结链至v1.20，相关ADR见上述权威顺序。R6-04整理本地回归基线与状态入口；R6-SC1复用既有输入Schema定义，二者不增加架构版本。R6-SC1实验和测量见 [Schema复用报告](development/R6_SC1_SCHEMA_REUSE_MEASUREMENT.md)。准确状态和下一动作见STATUS；历史状态存档不重新授权Live或交付，远端hash封存仍未授权。
 
-随后单独授权的 [R6-SC1 Live](development/R6_SC1_LIVE_2026_09_20.md) 已完成真实Schema调用和重启回读核验，并获独立事后结果复核 RESULT APPROVE（不是事前脚本审查）；措辞/覆盖限制和绝对usage如实保留，不推定token收益。已审查代码交付私有Draft PR #84，未合并、未跑Actions。
+随后单独授权的 [R6-SC1 Live](development/R6_SC1_LIVE_2026_09_20.md) 已完成真实Schema调用和重启回读核验，并获独立事后结果复核 RESULT APPROVE（不是事前脚本审查）；措辞/覆盖限制和绝对usage如实保留，不推定token收益。已审查代码与后续小修通过 #84/#85/#86 合并；未跑Actions。当前 [R6验收收口](development/R6_ACCEPTANCE_CLOSURE.md) 汇总已覆盖项、连续压缩/恢复缺口、原问题分类与非目标；准确执行状态以STATUS为准。
 
 ## 3. 文档地图
 
@@ -102,7 +102,7 @@ Codex Luna xhigh 或其他高推理 Codex 执行开发任务时，必须按顺�
 
 ## 6. 当前状态
 
-M0 至 M5-S2 以及 F1a-F1e/F2a 已远端封存。当前 F3 修复交互式运行连续性，具体审计和 Gate 进展以 STATUS 为准；本轮不增加非交互执行或 benchmark 适配，不触发 Git/Actions/Live。
+M0 至 M5-S2、F 系列和后续已完成修复保留历史记录。当前为 R6 有界工程可靠性收口：#84–#86 已合并，连续两次压缩/恢复回归与 Live、独立结果及报告复核已完成，远端交付以 STATUS 和对应 PR 为准。不增加非交互执行或 benchmark 适配，不运行 Actions，不把模型措辞问题记为通过。
 
 Architecture v1.5/v1.6 已在本地冻结：completed reasoning 仅属于 Provider delivery，明文存在时冗余 opaque encrypted sidecar 不进入 Core；encrypted-only 与未知 content 继续显式失败。
 
