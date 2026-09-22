@@ -125,7 +125,6 @@ impl<'project> LocalProjectMemory<'project> {
             })?;
         paths.extend(self.retrieval_note_paths()?);
         paths.sort_by(|left, right| left.as_str().cmp(right.as_str()));
-        paths.truncate(MAX_RETRIEVAL_MEMORY_DOCUMENTS);
         paths
             .into_iter()
             .map(|path| {
@@ -141,6 +140,9 @@ impl<'project> LocalProjectMemory<'project> {
                     Err(error) => Some(Err(error)),
                 },
             )
+            // Missing optional paths do not consume quota; present empty files do.
+            // Stay lazy so no later document body is read once the quota is full.
+            .take(MAX_RETRIEVAL_MEMORY_DOCUMENTS)
             .collect()
     }
 

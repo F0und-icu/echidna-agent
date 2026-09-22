@@ -760,6 +760,171 @@ fn oversized_facts_and_many_observation_sessions_remain_bounded_and_read_only() 
     assert_eq!(bounded["effects"]["event_writes"], 0);
 }
 
+fn memory_quota_project(label: &str) -> (TemporaryDirectory, Project) {
+    let directory = TemporaryDirectory::new(label);
+    let project = Project::initialize(directory.path()).unwrap();
+    target(
+        &project,
+        "quota-target",
+        "ordinary-project",
+        "1",
+        TargetKind::Source,
+    );
+    let notes = project.root().join(".cyber-agent/memory/notes");
+    fs::create_dir_all(&notes).unwrap();
+    // Reverse creation order proves selection uses sorted names, not directory order.
+    for index in (0..65).rev() {
+        fs::write(
+            notes.join(format!("note-{index:04}.md")),
+            format!("# Note\nsymbol_{index:04}\n"),
+        )
+        .unwrap();
+    }
+    (directory, project)
+}
+
+#[test]
+fn memory_document_quota_counts_present_files_including_empty_but_not_missing() {
+    for fixed in [
+        [None, None],
+        [Some("# Decision\nfixed_decision\n"), None],
+        [None, Some("# Failed\nfixed_failed\n")],
+        [
+            Some("# Decision\nfixed_decision\n"),
+            Some("# Failed\nfixed_failed\n"),
+        ],
+        [Some(""), Some("")],
+    ] {
+        let (directory, project) = memory_quota_project("r5c2-present-documents");
+        let memory = project.root().join(".cyber-agent/memory");
+        for (name, content) in ["decisions.md", "failed-paths.md"].into_iter().zip(fixed) {
+            if let Some(content) = content {
+                fs::write(memory.join(name), content).unwrap();
+            }
+        }
+        let present = fixed.iter().flatten().count();
+        let empty = fixed
+            .iter()
+            .flatten()
+            .filter(|text| text.is_empty())
+            .count();
+        let last_note = 63 - present;
+        // The first excluded body must not even be read/validated after quota is full.
+        fs::write(
+            memory.join(format!("notes/note-{:04}.md", last_note + 1)),
+            vec![0xff; 65 * 1024],
+        )
+        .unwrap();
+        let before = tree_bytes(&project.root().join(".cyber-agent"));
+        let args = command(&format!("symbol_{last_note:04}"), "quota-target");
+        let report = run(&directory, &args);
+        assert_eq!(report["report"]["queried_candidate_count"], 65 - empty);
+        assert_eq!(
+            report["report"]["results"][0]["id"],
+            format!("memory:notes/note-{last_note:04}.md:0")
+        );
+        assert_eq!(
+            report["report"]["results"][0]["component_ranks"]["exact_identifier"],
+            1
+        );
+        assert_eq!(report["report"], run(&directory, &args)["report"]);
+        assert_eq!(report["shadow"], true);
+        assert_eq!(report["model_context_changed"], false);
+        assert!(
+            report["effects"]
+                .as_object()
+                .unwrap()
+                .values()
+                .all(|value| value == 0)
+        );
+        assert_eq!(tree_bytes(&project.root().join(".cyber-agent")), before);
+    }
+}
+
+#[test]
+fn memory_document_quota_preserves_selected_content_and_fixed_path_errors() {
+    for (relative, content, expected) in [
+        (
+            "notes/note-0063.md",
+            vec![b'x'; 65 * 1024],
+            "above the 65536-byte limit",
+        ),
+        ("notes/note-0063.md", vec![0xff], "not UTF-8 Markdown"),
+        ("decisions.md", vec![0xff], "not UTF-8 Markdown"),
+        (
+            "failed-paths.md",
+            vec![b'x'; 65 * 1024],
+            "above the 65536-byte limit",
+        ),
+    ] {
+        let (directory, project) = memory_quota_project("r5c2-invalid-selected-document");
+        fs::write(
+            project.root().join(".cyber-agent/memory").join(relative),
+            content,
+        )
+        .unwrap();
+        let before = tree_bytes(&project.root().join(".cyber-agent"));
+        let output = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+            .current_dir(directory.path())
+            .args(command("symbol_0063", "quota-target"))
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success(),
+            "invalid selected file {relative} must fail"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(expected),
+            "{:?}",
+            output.stderr
+        );
+        assert_eq!(tree_bytes(&project.root().join(".cyber-agent")), before);
+    }
+}
+
+#[test]
+fn memory_document_quota_preserves_path_rejections() {
+    for (name, kind, expected) in [
+        (
+            "notes/zzzz.txt",
+            "file",
+            "outside the supported project Memory vocabulary",
+        ),
+        ("notes/zzzz.md", "directory", "must be a regular file"),
+        ("decisions.md", "directory", "must be a regular file"),
+        #[cfg(unix)]
+        ("notes/zzzz.md", "symlink", "must not be a symlink"),
+        #[cfg(unix)]
+        ("failed-paths.md", "symlink", "must not be a symlink"),
+    ] {
+        let (directory, project) = memory_quota_project("r5c2-invalid-note-entry");
+        let memory = project.root().join(".cyber-agent/memory");
+        let path = memory.join(name);
+        match kind {
+            "directory" => fs::create_dir(path).unwrap(),
+            "file" => fs::write(path, "invalid note name").unwrap(),
+            #[cfg(unix)]
+            "symlink" => {
+                std::os::unix::fs::symlink(memory.join("notes/note-0000.md"), path).unwrap()
+            }
+            _ => unreachable!("fixed fixture entry kind"),
+        }
+        let before = tree_bytes(&project.root().join(".cyber-agent"));
+        let output = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+            .current_dir(directory.path())
+            .args(command("symbol_0000", "quota-target"))
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(expected),
+            "{:?}",
+            output.stderr
+        );
+        assert_eq!(tree_bytes(&project.root().join(".cyber-agent")), before);
+    }
+}
+
 #[test]
 fn explicitly_selected_historical_summaries_are_order_invariant_and_default_to_current_target() {
     let (directory, project) = fixture_project("m4-s3f-historical");

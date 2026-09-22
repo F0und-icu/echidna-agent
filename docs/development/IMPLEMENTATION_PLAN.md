@@ -1085,6 +1085,60 @@ F6a delivery addendum: after the acceptance checkpoint above, the operator autho
 
 ### 当前修复队列（2026-09-12）
 
+#### 当前主线：R6后续优化／回补R5检索遗留项
+
+R5c1/R5c2保留为历史工作编号，不表示主线从R6退回R5。已完成项不重编号，
+不覆盖历史验收记录；检索优化不是整个R6验收的默认前置条件，只有实测阻塞才升级。
+本轮继续既定release测量：保持已审计R5c2生产代码不变，正式release构建后复用
+24次本地Shadow矩阵，必要时增加一次有界长查询的本机采样。只调查，不改算法/
+缓存/API/架构，不调用模型、不跑Actions、不提交Git；历史debug与本轮release
+不是成对优化实验。观察到成本后再决定是否值得在原ranker内做单次查询归一化复用。
+
+测量已完成：release build、原检索回归9项、24次观测通过；与先前8组报告除新
+Project参与的query fingerprint外一致。最大组64×4096/+16词中位593.582ms。
+额外一次有界长查询采样窗口638/642主线程栈含normalized_terms，支持将原ranker
+的单次查询归一化复用作为下一候选；不是全任务占比或已实现收益。源码冻结不变，
+不新增算法/缓存/API。具体报告R6_RETRIEVAL_RELEASE_MEASUREMENT；本轮停在测量
+交付，后续实现仍需独立Scope、成对release验证、专项/受影响/独立审计/Gate/Lean。
+
+#### R5c2：Memory已存在文档配额修复（本地离线完成）
+
+操作者批准按R5c1计划继续。只在原Memory loader把64文档上限应用到成功读取的
+已存在文档；缺失不占位、存在但空文件仍占位，按路径稳定排序，错误不跳过，
+达到配额即停止后续正文读取。保持原路径检查、64KiB文档限制、App的64节限制、
+检索算法和Shadow语义。先保留正式CLI红色回归，覆盖0/1/2固定文件、空与缺失、
+边界命中/排除、错误及只读；专项→受影响（含domain_ports_contract）→限时独立
+审计→修复→完整Gate→Lean。零新增生产模块/API/依赖/缓存/配置/架构，无Live或
+远端交付；下一轮release/profile测量不与本修复混为算法优化。
+
+当前修复已完成红→绿：专项3PASS、受影响4套件29PASS/1ignored（含依赖方向），
+fmt/whitespace通过。原loader仅将truncate换到存在性过滤之后的lazy take，
+生产净+2行（含注释），保留3条永久表驱动回归。操作者随后明确授权全新独立Terra
+xhigh只读审计，14:19UTC开始，10分钟内APPROVE，无阻塞项或修复要求。其后完整
+Gate45集成套件513 unique PASS/4ignored（raw514含既有写锁子进程重复1项）、fmt/
+Clippy/build/inline/whitespace及Lean PASS，全部319源码/测试冻结项仍一致。
+停在本地交付：无新模块/API/依赖/缓存/架构、无Git/Live/Actions；未开始ranker
+优化或新release测量，后续测量与交付单独处理。详见R5C2_MEMORY_DOCUMENT_QUOTA。
+
+#### R5c1：本地检索 Shadow 成本基线（当前离线调查）
+
+R6代码交付Draft PR #84后，按继续开发授权先测量原有检索，不新增实现。
+复用正式`inspect retrieval`和既有Writer/Reducer夹具助手，在4组全新普通工程
+Memory夹具（8/64节、512/4096字节正文）、2种查询长度、每组3次，共24次进程
+测量中记录开发构建端到端CLI成本；每进程30秒、总360秒。报告确定性、标识符
+命中、候选数量、只读事实和零Shadow副作用必须成立。成本含启动/加载/投影/排序/
+JSON，不宣称内部归因或release性能。保持原算法、Shadow边界与全部现有测试，
+零生产代码/API/依赖/配置/缓存/架构变更，无Provider/Live/Actions；不得用该简单
+命中夹具替代真实语料质量评估。发现瓶颈后再锁定实现范围并走专项→受影响→独立
+审计→修复→完整Gate→Lean，不提前承诺新算法、持久索引或模型可见检索。
+
+离线调查已记录：24次最终测量确定性/只读通过、原检索测试6通过；最大组开发构建
+CLI中位5.453秒，尚非release/内部归因。准备阶段保留两次失败：可选Memory父目录
+未创建为夹具错误；64notes却仅62被选中源于两个不存在的固定文件先占文档名额。
+下一候选优先补齐该配额边界回归并在原Memory loader处理，再测release/profile，
+有依据才考虑原ranker的单次查询字段归一化复用。详见R5C1_RETRIEVAL_SHADOW_MEASUREMENT；
+没有生产修改、独立审计或新的完整Gate声明，未开始优化实现。
+
 #### R6-SC1：有界输入 Schema 结构共享（已交付 Draft）
 
 2026-09-20交付更新：独立事后Live结果复核由新Terra xhigh完成，RESULT APPROVE，无阻塞项；不是事前脚本审批。已审查R6-01～04/SC1代码以`3ec73ad`推送私有Draft PR #84，完整刷新Gate510 unique PASS/4ignored，未合并/未跑Actions。下段“待授权/待复核”为执行当时记录，现已被本更新替代，覆盖及模型措辞限制不变。
