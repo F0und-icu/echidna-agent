@@ -12,6 +12,10 @@ pub struct AgentProfileDoctorReport {
     pub vision_profile_id: Option<String>,
     pub vision_mode: crate::domain::profile::VisionMode,
     pub status: AgentProfileDoctorStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary_max_output_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vision_max_output_tokens: Option<u32>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -38,5 +42,9 @@ pub fn inspect_agent_model_profile(profile: &AgentModelProfile) -> AgentProfileD
             .map(|vision| vision.profile().id.to_string()),
         vision_mode: profile.vision_mode(),
         status,
+        primary_max_output_tokens: profile.primary().capabilities().max_output_tokens,
+        vision_max_output_tokens: profile
+            .vision()
+            .and_then(|vision| vision.capabilities().max_output_tokens),
     }
 }

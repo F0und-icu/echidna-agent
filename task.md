@@ -878,6 +878,16 @@ Compaction Event 只证明本次压缩已发生。Evidence Spine 是有界导航
 
 固定 Base/Domain/Phase Prompt 保存为独立 Markdown 资源并以 `include_str!` 进入单一二进制；Personal/Project Prompt 由 Config v1 的可选 `[prompts] personal_file/project_file` 显式选择，路径相对配置文件解析。正式 Chat 在采样前读取配置的 UTF-8 普通文件；缺失的显式文件报错。没有目录搜索、自动发现、Persona/Prompt Registry；doctor 不读取 Prompt 内容。Project Core Memory 使用现有 Memory owner 读取并通过 ContextPlanner 接入，缺失与空文件区分。
 
+R7-F1 / ADR-0031（v1.21 本地已审/验证，未远端封存）：显式 Project Prompt 为 Required，预算不足则
+在采样前拒绝，不能截断或省略。长任务的稳定规则应通过 `prompts.project_file` 显式选择
+简短规则文件；历史中偶然读过的 README 不因此自动获得永久保留。Base generation3 区分
+原始基线、修改后及当前结果；Summary 仍是有损非证据，不保证模型事实或成本改善。
+
+同轮授权的输出预算增量：Capability Mapping 可声明 `max_output_tokens`，经唯一
+ContextPlanner 写入 RequestRequirements 并预留输出空间；RequestAudit/OutputContract
+哈希包含该值，Responses Adapter 仅编码、不偷偷注入。省略保持兼容，Primary/Vision
+各用各自 Mapping。总输出含推理；不自动调低 effort、不自动重试、不宣称累计费用硬限额。
+
 F3 固定处理点在每个采样 Step 前更新 Research/Project/Memory/Prompt 候选，随后捕获 immutable SamplingStepPlan。Domain/Phase 操作者选择仍只在 Turn 边界生效。History 在 user/model/result 检查点持久化：模型 ToolCalls 必须先落盘才执行依赖工具，真实 Receipt/Result 必须先落盘才重采样；中断未知状态不得被伪造为成功或自动重试。
 
 Prompt renderer 与 Prompt 内容分离：当前只有固定 `generic-v1`，只拥有 fragment separator、instruction/content channel 渲染和 ContextDeliveryMap emission，不拥有人格、Domain/Phase、Tool Schema 或 Provider wire。

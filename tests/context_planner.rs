@@ -26,9 +26,51 @@ fn capabilities() -> ModelCapabilities {
         structured_output: true,
         incremental_input: true,
         usage_reporting: true,
+        max_output_tokens: None,
         context_window: 128,
         capability_mapping_version: CapabilityMappingVersion::new(1),
     }
+}
+
+#[test]
+fn configured_output_limit_is_reserved_and_captured_before_audit_not_injected_by_transport() {
+    let mut caps = capabilities();
+    caps.context_window = 65_536;
+    caps.max_output_tokens = Some(16_384);
+    let planner = ContextPlanner::current();
+    let budget = planner.default_budget(&caps).unwrap();
+    assert_eq!(budget.reserved_output_tokens(), 16_384);
+    assert_eq!(budget.reserved_tool_loop_tokens(), 8192);
+    assert_eq!(budget.input_token_limit(), 40_960);
+    let compile = |budget| {
+        planner.compile(
+            vec![fragment(
+                "user",
+                ContextFragmentSource::UserInput,
+                ContextFragmentPriority::Required,
+            )],
+            budget,
+            &caps,
+            Vec::new(),
+            Default::default(),
+            None,
+        )
+    };
+    assert_eq!(
+        compile(budget)
+            .unwrap()
+            .model_input()
+            .requirements
+            .max_output_tokens,
+        Some(16_384)
+    );
+    assert!(matches!(
+        compile(ContextBudget::new(65_536, 8192, 8192).unwrap()),
+        Err(ContextPlannerError::OutputReserveBelowLimit {
+            requested: 16_384,
+            reserved: 8192
+        })
+    ));
 }
 
 #[test]

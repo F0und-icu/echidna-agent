@@ -256,7 +256,11 @@ impl ModelProvider for ResponsesHttpAdapter {
                     usage_required,
                     continuation_required,
                     continuation_requested,
-                )?;
+                ).inspect_err(|error| {
+                    if let Some(diagnostics) = &mut diagnostics {
+                        diagnostics.rejected(error);
+                    }
+                })?;
                 for model_event in decoded.events {
                     if let Some(diagnostics) = &mut diagnostics {
                         diagnostics.model_event(&model_event);

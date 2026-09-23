@@ -42,6 +42,93 @@ fn hash(bytes: &[u8]) -> String {
 }
 
 #[tokio::test]
+async fn patch_rejects_multibyte_prefixes_and_inconsistent_new_offsets_without_mutation() {
+    let (_root, project) = initialized_project("patch-line-contract");
+    fs::write(project.root().join("note.txt"), "one\ntwo\nthree\n").unwrap();
+    let tools = ToolRegistry::for_project(project.root());
+    for prefix in ["中文", "😀", "é"] {
+        let result = tools.plan(
+            ExecutionId::new("bad-prefix"),
+            call(
+                "bad-prefix",
+                "apply_patch",
+                json!({
+                    "patch":format!("--- a/note.txt\n+++ b/note.txt\n@@ -1,1 +1,1 @@\n{prefix}\n"),
+                    "preimages":[{"path":"note.txt","expected_hash":hash(b"one\ntwo\nthree\n")}]
+                }),
+            ),
+        );
+        assert!(
+            result.is_err(),
+            "invalid UTF-8 boundary prefix must be rejected, not panic"
+        );
+    }
+    let before = hash(b"one\ntwo\nthree\n");
+    let invalid = execute(
+        &tools,
+        "bad-offset",
+        "apply_patch",
+        json!({
+            "patch":"--- a/note.txt\n+++ b/note.txt\n@@ -1,1 +8,1 @@\n-one\n+new\n",
+            "preimages":[{"path":"note.txt","expected_hash":before}]
+        }),
+    )
+    .await;
+    assert_eq!(invalid.result.status, ToolResultStatus::Failed);
+    assert_eq!(
+        fs::read(project.root().join("note.txt")).unwrap(),
+        b"one\ntwo\nthree\n"
+    );
+    // The second new offset must account for the first hunk's insertion.
+    let valid = execute(&tools, "valid-offset", "apply_patch", json!({
+        "patch":"--- a/note.txt\n+++ b/note.txt\n@@ -1,1 +1,2 @@\n one\n+inserted\n@@ -3,1 +4,1 @@\n-three\n+THREE\n",
+        "preimages":[{"path":"note.txt","expected_hash":before}]
+    })).await;
+    assert_eq!(valid.result.status, ToolResultStatus::Succeeded);
+    assert_eq!(
+        fs::read(project.root().join("note.txt")).unwrap(),
+        b"one\ninserted\ntwo\nTHREE\n"
+    );
+}
+
+#[tokio::test]
+async fn write_file_null_is_absence_not_unchecked_overwrite_and_after_hash_is_reusable() {
+    let (_root, project) = initialized_project("file-null-contract");
+    let tools = ToolRegistry::for_project(project.root());
+    fs::write(project.root().join("empty.txt"), "").unwrap();
+    let rejected = execute(
+        &tools,
+        "reject-null",
+        "write_file",
+        json!({"path":"empty.txt","content":"must not overwrite","expected_hash":null}),
+    )
+    .await;
+    assert_eq!(rejected.result.status, ToolResultStatus::Failed);
+    assert_eq!(fs::read(project.root().join("empty.txt")).unwrap(), b"");
+    let first = execute(
+        &tools,
+        "empty-write",
+        "write_file",
+        json!({"path":"empty.txt","content":"first\n","expected_hash":hash(b"")}),
+    )
+    .await;
+    assert_eq!(first.result.status, ToolResultStatus::Succeeded);
+    let next_hash = first.result.output["changes"][0]["after_hash"].clone();
+    let second = execute(
+        &tools,
+        "second-write",
+        "write_file",
+        json!({"path":"empty.txt","content":"second\n","expected_hash":next_hash}),
+    )
+    .await;
+    assert_eq!(second.result.status, ToolResultStatus::Succeeded);
+    assert_eq!(
+        fs::read(project.root().join("empty.txt")).unwrap(),
+        b"second\n"
+    );
+}
+
+#[tokio::test]
 async fn write_file_is_atomic_auditable_and_rejects_a_stale_preimage() {
     let (_root, project) = initialized_project("file-write-audit");
     let tools = ToolRegistry::for_project(project.root());

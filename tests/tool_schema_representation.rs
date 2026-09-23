@@ -55,7 +55,7 @@ fn expanded(schema: &Value, root: &Value, depth: usize) -> Value {
 }
 
 #[test]
-fn complete_builtin_input_catalog_preserves_expanded_contracts_and_reduces_bytes() {
+fn complete_catalog_preserves_baseline_outside_explicit_file_contract_additions() {
     let before: Value = serde_json::from_str(include_str!(
         "fixtures/tools/input_schema_before_sharing.json"
     ))
@@ -64,26 +64,77 @@ fn complete_builtin_input_catalog_preserves_expanded_contracts_and_reduces_bytes
     let catalog = tools.catalog();
     assert_eq!(catalog, tools.catalog(), "deterministic construction");
     assert_eq!(catalog.len(), before.as_object().unwrap().len());
-    let mut saved = 0;
+    let mut baseline_saved = 0;
     for spec in catalog {
         let original = &before[spec.name.as_str()];
-        let expanded = expanded(&spec.input_schema, &spec.input_schema, 0);
+        // The frozen R6 sharing baseline must not be regenerated for R7's
+        // intentional file-contract additions. Validate and remove only those
+        // additions, then compare every remaining Schema byte/constraint.
+        let schema = without_r7_file_contract_additions(spec.name.as_str(), &spec.input_schema);
+        let expanded = expanded(&schema, &schema, 0);
         let hash = format!(
             "{:x}",
             Sha256::digest(serde_json::to_vec(&expanded).unwrap())
         );
         assert_eq!(hash, original["expanded_sha256"], "{}", spec.name);
         let old_size = original["input_bytes"].as_u64().unwrap() as usize;
-        let size = serde_json::to_vec(&spec.input_schema).unwrap().len();
+        let size = serde_json::to_vec(&schema).unwrap().len();
         if spec.name.as_str() == "research_update" {
             assert_eq!(old_size, 9711);
             assert_eq!(size, 8690);
         } else {
             assert_eq!(size, old_size, "unchanged other input: {}", spec.name);
         }
-        saved += old_size - size;
+        baseline_saved += old_size - size;
     }
-    assert_eq!(saved, 1021);
+    // Historical sharing benefit only; not the net size of today's catalog.
+    assert_eq!(baseline_saved, 1021);
+}
+
+fn without_r7_file_contract_additions(name: &str, schema: &Value) -> Value {
+    let mut baseline = schema.clone();
+    let (descriptions, hash_path): (&[(&str, &str)], &str) = match name {
+        "write_file" => (
+            &[
+                ("/properties/path", "Project-relative UTF-8 file"),
+                (
+                    "/properties/content",
+                    "heredoc still requires JSON escaping",
+                ),
+            ],
+            "/properties/expected_hash",
+        ),
+        "apply_patch" => (
+            &[(
+                "/properties/patch",
+                "@@ -old_start,old_count +new_start,new_count @@",
+            )],
+            "/properties/preimages/items/properties/expected_hash",
+        ),
+        _ => return baseline,
+    };
+    for (path, required_text) in descriptions {
+        let field = baseline.pointer_mut(path).unwrap().as_object_mut().unwrap();
+        let description = field.remove("description").unwrap();
+        assert!(description.as_str().unwrap().contains(required_text));
+    }
+    let hash = baseline
+        .pointer_mut(hash_path)
+        .unwrap()
+        .as_object_mut()
+        .unwrap();
+    assert_eq!(hash.remove("pattern"), Some(json!("^[0-9a-f]{64}$")));
+    let description = hash.remove("description").unwrap();
+    let text = description.as_str().unwrap();
+    for required in [
+        "BLAKE3",
+        "including an empty file",
+        "does NOT exist",
+        "after_hash",
+    ] {
+        assert!(text.contains(required));
+    }
+    baseline
 }
 
 #[test]

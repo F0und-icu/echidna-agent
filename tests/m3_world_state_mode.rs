@@ -67,6 +67,7 @@ fn capabilities(image_input: bool) -> ModelCapabilities {
         structured_output: true,
         incremental_input: false,
         usage_reporting: true,
+        max_output_tokens: None,
         context_window: 32_768,
         capability_mapping_version: CapabilityMappingVersion::new(7),
     }

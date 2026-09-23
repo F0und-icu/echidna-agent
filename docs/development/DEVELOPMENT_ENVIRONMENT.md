@@ -115,6 +115,27 @@ F3 为每个 `[providers.<id>]` 增加可选 `connect_timeout_ms`（默认 `3000
 
 可选顶层 `[prompts]` 使用 `personal_file = "personal.md"`、`project_file = "project.md"`；相对路径以配置文件所在目录为基准，不读取 Codex 文件。正式 Chat 每次采样前读取这些显式 UTF-8 普通文件，未配置即不添加，已配置但不存在/无效即报错。`doctor` 只验证配置，不读取 Prompt 内容。项目 `core.md` 通过现有 Project Memory 路径进入 ContextPlanner，受统一预算约束，不能变成第二个证据源。
 
+R7-F1 待审实现：长任务的稳定约束使用上述 `project_file` 指向一个简短规则文件（例如
+`project-rules.md`），明确允许的命令、可修改范围和验收标准。该片段完整交付，超出
+预算则在请求前报错，不静默截断。配置路径以配置文件所在目录为基准，不是目标 cwd。
+README 仅被工具读过一次并不保证压缩后保留；不要把整份代码库塞进规则文件。
+压缩/Resume 不保证模型遵守规则，原始基线和修改后结果仍需分别引用真实观察。
+
+工具参数包含文档时仍必须是合法 JSON：`write_file` 接收完整文本，`apply_patch`
+接收其 schema 声明的最小 unified diff。Shell heredoc 不能免除外层 JSON 转义。
+已有文件（包括空文件）必须使用当前 BLAKE3 hash；`expected_hash = null` 仅代表
+文件不存在。新写入返回的 `after_hash` 在没有后续修改时可用于下次编辑，不必重复
+全项目哈希。非法 JSON 的 debug 只显示类别/行列/字节数，不输出不能结构化脱敏的片段。
+
+单次输出预算（R7-F1 待审）：在对应的 `[capability_mappings.<name>]` 中可显式增加
+`max_output_tokens = 16384`。这是示例值，不是按模型名推断的默认值；仅在确认所选
+后端支持该 Responses 字段时启用。Primary 与 Vision 可分别引用不同 Mapping。
+省略保持原请求不带该字段；修改声明时同步递增 Mapping version。`doctor` 显示各角色
+的限制而不读取凭据。ContextPlanner 会预留至少该数量的输出空间，非法/放不下的
+配置在请求前拒绝，审计记录实际交付的限制。它包含推理及最终答案，设得太小可能
+思考尚未结束即返回 `response_incomplete`；此时必须显式 `/resume`，不会自动重试、
+续写或提高额度。它不是累计 token/金额硬上限，后端是否执行此限制仍需单独 Live。
+
 可选顶层 `[runtime]` 使用 `model_request_limit_per_turn = 32`（允许 1..=10000）。额度由 Primary 与 Vision 共享，在每个操作者 Turn、初始 Vision 之前创建；旧配置默认32，不按模型品牌选择额度。CLI 显示 admitted Primary/Vision/total 与 remaining，这是保守的本地准入计数，不代表 Provider usage 或费用。失败准入不退款、Full fallback 也占一个槽，最后一次 Tool 结果仍按原规则保存。上下文/模型/额度停止后使用 `/resume` 显式重建 ProviderSession，再输入新任务或 `/compact`；不会自动重发旧任务或重试工具。纯 CLI 指令不调用模型，跨 Turn Live 总额度仍由外部测试 harness 限制。旧严格 Config v1 版本不认识此新增表，回退旧二进制前需移除它。
 
 F3 Live 已验证的限制：对 `incremental_input = false` 且存在活跃 completed reasoning 的会话，Core Memory 替换或当前预算无法完整保留续传时，CLI 可能以 `completed Provider reasoning continuation cannot be retained by the current Context plan` 显式退出，而不是丢弃推理或自动重试。可使用原配置 `chat --resume <id>` 恢复；上下文压力较高且具备 TargetSnapshot 时，在新的模型请求前显式 `/compact`。恢复会重新验证事实，不保证任意输入均可容纳，也不能凭空补回缺失的 ToolResult。

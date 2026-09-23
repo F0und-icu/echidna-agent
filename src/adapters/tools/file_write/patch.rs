@@ -9,6 +9,7 @@ pub(super) struct ParsedPatch {
 #[derive(Clone)]
 struct ParsedHunk {
     old_start: usize,
+    new_start: usize,
     old_count: usize,
     new_count: usize,
     lines: Vec<PatchLine>,
@@ -57,7 +58,7 @@ pub(super) fn parse_patch(patch: &str) -> Result<Vec<ParsedPatch>, String> {
         while index < lines.len() && lines[index].starts_with("@@ ") {
             let header = lines[index];
             index += 1;
-            let (old_start, old_count, new_count) = parse_hunk_header(header)?;
+            let (old_start, old_count, new_start, new_count) = parse_hunk_header(header)?;
             let mut hunk_lines = Vec::new();
             let mut old_seen = 0_usize;
             let mut new_seen = 0_usize;
@@ -66,10 +67,9 @@ pub(super) fn parse_patch(patch: &str) -> Result<Vec<ParsedPatch>, String> {
                     .get(index)
                     .ok_or_else(|| "hunk ended before its declared line counts".to_owned())?;
                 index += 1;
-                if line.is_empty() {
-                    return Err("hunk lines must begin with space, `+`, or `-`".to_owned());
-                }
-                let (prefix, content) = line.split_at(1);
+                let (prefix, content) = line
+                    .split_at_checked(1)
+                    .ok_or_else(|| "hunk lines must begin with space, `+`, or `-`".to_owned())?;
                 let parsed = match prefix {
                     " " => {
                         old_seen += 1;
@@ -93,6 +93,7 @@ pub(super) fn parse_patch(patch: &str) -> Result<Vec<ParsedPatch>, String> {
             }
             hunks.push(ParsedHunk {
                 old_start,
+                new_start,
                 old_count,
                 new_count,
                 lines: hunk_lines,
@@ -112,7 +113,7 @@ pub(super) fn parse_patch(patch: &str) -> Result<Vec<ParsedPatch>, String> {
     Ok(files)
 }
 
-fn parse_hunk_header(value: &str) -> Result<(usize, usize, usize), String> {
+fn parse_hunk_header(value: &str) -> Result<(usize, usize, usize, usize), String> {
     let rest = value
         .strip_prefix("@@ -")
         .and_then(|value| value.split_once(" +"))
@@ -129,7 +130,7 @@ fn parse_hunk_header(value: &str) -> Result<(usize, usize, usize), String> {
     if old.0 == 0 || old.1 == 0 || new.0 == 0 || new.1 == 0 {
         return Err("this minimal Patch subset does not support added or deleted files".to_owned());
     }
-    Ok((old.0, old.1, new.1))
+    Ok((old.0, old.1, new.0, new.1))
 }
 
 fn parse_range(value: &str) -> Result<(usize, usize), String> {
@@ -171,6 +172,9 @@ pub(super) fn apply_hunks(
                 .iter()
                 .map(|line| (*line).to_owned()),
         );
+        if hunk.new_start - 1 != output.len() {
+            return Err("hunk new start does not match the resulting line position".to_owned());
+        }
         let mut old_seen = 0_usize;
         let mut new_seen = 0_usize;
         for line in &hunk.lines {

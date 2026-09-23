@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::tools::{ToolExposure, ToolExposurePlan, ToolName};
 
-const BASE_PROMPT: &str = include_str!("prompts/base-v2.md");
+const BASE_PROMPT: &str = include_str!("prompts/base-v3.md");
 
 /// The only production Agent identity. Presentation preferences compose after
 /// it and cannot replace its evidence discipline.
@@ -11,7 +11,7 @@ pub struct BaseContract;
 
 impl BaseContract {
     pub const ID: &'static str = "pragmatic-vulnerability-researcher";
-    pub const GENERATION: u64 = 2;
+    pub const GENERATION: u64 = 3;
 
     pub const fn prompt(self) -> &'static str {
         BASE_PROMPT

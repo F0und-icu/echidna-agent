@@ -590,6 +590,7 @@ fn capabilities() -> ModelCapabilities {
         structured_output: false,
         incremental_input: false,
         usage_reporting: false,
+        max_output_tokens: None,
         context_window: 128_000,
         capability_mapping_version: CapabilityMappingVersion::new(1),
     }
@@ -1403,7 +1404,7 @@ async fn context_planner_and_cache_feed_the_baseline_without_owning_delivery() {
             .map(|entry| entry.fragment_id().as_str())
             .collect::<Vec<_>>(),
         vec![
-            "prompt:base:pragmatic-vulnerability-researcher:2",
+            "prompt:base:pragmatic-vulnerability-researcher:3",
             "prompt:domain:source:1",
             "prompt:phase:mapping:2",
         ]

@@ -24,6 +24,7 @@ fn capabilities() -> ModelCapabilities {
         structured_output: true,
         incremental_input: true,
         usage_reporting: true,
+        max_output_tokens: None,
         context_window: 128_000,
         capability_mapping_version: CapabilityMappingVersion::new(1),
     }
@@ -148,6 +149,35 @@ fn append_input(baseline: &ModelInputIR, server_output: &[ContentItem]) -> Model
         baseline.tool_specs.clone(),
         baseline.requirements,
     )
+}
+
+#[test]
+fn output_limit_changes_invalidate_the_output_contract_without_rewriting_history() {
+    let mut caps = capabilities();
+    caps.max_output_tokens = Some(8192);
+    let (mut input, output) = baseline_input();
+    input.requirements.max_output_tokens = Some(4096);
+    let capture = |input: &ModelInputIR| {
+        snapshot(
+            ModelIdentity::new("primary", "fixture"),
+            ModelProfile::new("configured", 1),
+            "primary-1",
+            ProviderSessionRole::Primary,
+            input,
+            &caps,
+            InternalRequestMetadata::default(),
+        )
+    };
+    let mut session = primary_session();
+    establish(&mut session, &capture(&input), output.clone());
+    let mut next = append_input(&input, &output);
+    next.requirements.max_output_tokens = Some(2048);
+    assert_eq!(
+        session.assess_delivery(&capture(&next), true),
+        BaselineAssessment::FullRequest {
+            reason: BaselineInvalidationReason::OutputContractChanged,
+        }
+    );
 }
 
 #[test]

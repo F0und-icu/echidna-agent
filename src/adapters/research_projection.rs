@@ -364,6 +364,7 @@ impl CompactionValidationFacts {
             })
             .collect::<Vec<_>>();
         next_steps.push("This lossy summary retains a bounded reference subset; consult current Research facts before continuing.".to_owned());
+        next_steps.push("Original Tool outputs and task constraints may be omitted. The latest assistant continuation is not the original baseline; consult the original observation and explicit Project instructions, or state that the historical value is unavailable. Do not rerun a completed mutation to recreate history.".to_owned());
         let evidence_spine = EvidenceSpine::new(
             self.research_stream.clone(),
             vec![current_target_id],

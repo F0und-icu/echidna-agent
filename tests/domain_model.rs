@@ -15,6 +15,7 @@ fn capabilities() -> ModelCapabilities {
         structured_output: true,
         incremental_input: true,
         usage_reporting: true,
+        max_output_tokens: None,
         context_window: 128_000,
         capability_mapping_version: CapabilityMappingVersion::new(1),
     }
@@ -26,6 +27,57 @@ fn text_input(requirements: ModelRequestRequirements) -> ModelInputIR {
         vec![ContentItem::user_text("test input")],
         requirements,
     )
+}
+
+#[test]
+fn declared_output_limits_preserve_legacy_shapes_and_reject_missing_or_unsupported_limits() {
+    let legacy = capabilities();
+    assert!(
+        serde_json::to_value(&legacy)
+            .unwrap()
+            .get("max_output_tokens")
+            .is_none()
+    );
+    assert!(
+        serde_json::to_value(ModelRequestRequirements::default())
+            .unwrap()
+            .get("max_output_tokens")
+            .is_none()
+    );
+    let mut caps = legacy.clone();
+    caps.max_output_tokens = Some(8192);
+    assert_ne!(caps.semantic_hash(), legacy.semantic_hash());
+    assert_eq!(
+        caps.validate_input(&text_input(Default::default())),
+        Err(ModelCapabilityError::OutputTokenLimitRequired)
+    );
+    for value in [1, 4096, 8192] {
+        let input = text_input(ModelRequestRequirements {
+            max_output_tokens: Some(value),
+            ..Default::default()
+        });
+        assert_eq!(caps.validate_input(&input), Ok(()));
+        assert_eq!(
+            legacy.validate_input(&input),
+            Err(ModelCapabilityError::OutputTokenLimitUnsupported)
+        );
+    }
+    for value in [0, 8193] {
+        assert!(
+            caps.validate_input(&text_input(ModelRequestRequirements {
+                max_output_tokens: Some(value),
+                ..Default::default()
+            }))
+            .is_err()
+        );
+    }
+    for value in [0, caps.context_window, u32::MAX] {
+        caps.max_output_tokens = Some(value);
+        assert_eq!(
+            caps.validate_input(&text_input(Default::default())),
+            Err(ModelCapabilityError::InvalidOutputTokenLimit)
+        );
+    }
 }
 
 #[test]
@@ -53,6 +105,7 @@ fn capabilities_deserialize_from_a_complete_versioned_fixture() {
             structured_output: true,
             incremental_input: false,
             usage_reporting: true,
+            max_output_tokens: None,
             context_window: 65_536,
             capability_mapping_version: CapabilityMappingVersion::new(17),
         }
@@ -78,6 +131,7 @@ fn model_input_ir_json_has_a_stable_current_version_and_content_shape() {
             structured_output: true,
             incremental_input: false,
             usage_reporting: true,
+            max_output_tokens: None,
         },
     );
 
@@ -199,6 +253,7 @@ fn capability_validation_rejects_each_requested_feature() {
             "usage_reporting",
             ModelRequestRequirements {
                 usage_reporting: true,
+                max_output_tokens: None,
                 ..ModelRequestRequirements::default()
             },
             ModelCapabilityError::UsageReportingUnsupported,

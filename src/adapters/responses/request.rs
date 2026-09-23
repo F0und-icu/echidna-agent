@@ -25,6 +25,8 @@ pub(super) struct ResponsesRequest {
     text: Option<ResponsesTextConfiguration>,
     store: bool,
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_output_tokens: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -176,6 +178,7 @@ pub(super) fn encode_request(
             }),
         store: false,
         stream: true,
+        max_output_tokens: input.requirements.max_output_tokens,
     })
 }
 

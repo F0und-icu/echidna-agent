@@ -36,6 +36,7 @@ fn capabilities() -> ModelCapabilities {
         structured_output: true,
         incremental_input: true,
         usage_reporting: true,
+        max_output_tokens: None,
         context_window: 256,
         capability_mapping_version: CapabilityMappingVersion::new(1),
     }

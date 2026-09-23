@@ -128,6 +128,12 @@ impl AgentModelProfile {
     }
 
     pub fn validate(&self) -> Result<(), AgentModelProfileError> {
+        for provider in std::iter::once(&self.primary).chain(self.vision.iter()) {
+            provider
+                .capabilities
+                .resolve_output_token_limit(None)
+                .map_err(|_| AgentModelProfileError::InvalidOutputTokenLimit)?;
+        }
         if !self.primary.capabilities().text_input {
             return Err(AgentModelProfileError::PrimaryTextInputRequired);
         }
@@ -251,6 +257,8 @@ fn supports_secondary_vision(capabilities: &ModelCapabilities) -> bool {
 
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
 pub enum AgentModelProfileError {
+    #[error("a Provider profile declares an invalid output token limit")]
+    InvalidOutputTokenLimit,
     #[error("the primary Provider profile must declare text input")]
     PrimaryTextInputRequired,
     #[error("the primary Provider profile must declare streaming")]

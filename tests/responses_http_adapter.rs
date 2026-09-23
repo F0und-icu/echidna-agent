@@ -119,6 +119,7 @@ fn capabilities() -> ModelCapabilities {
         structured_output: true,
         incremental_input: true,
         usage_reporting: true,
+        max_output_tokens: None,
         context_window: 128_000,
         capability_mapping_version: CapabilityMappingVersion::new(1),
     }
@@ -539,6 +540,7 @@ async fn full_request_and_chunked_sse_decode_to_ordered_model_events() {
         .consume(
             full(fixture_input(ModelRequestRequirements {
                 usage_reporting: true,
+                max_output_tokens: None,
                 ..ModelRequestRequirements::default()
             })),
             ModelStreamCancellation::new(),
@@ -611,6 +613,7 @@ async fn reasoning_extension_tool_usage_and_full_only_completion_share_one_decod
         .consume(
             full(fixture_input(ModelRequestRequirements {
                 usage_reporting: true,
+                max_output_tokens: None,
                 ..ModelRequestRequirements::default()
             })),
             ModelStreamCancellation::new(),
@@ -1117,6 +1120,80 @@ async fn loopback_rejection_fallback_sends_full_history_and_never_commits_partia
 }
 
 #[tokio::test]
+async fn long_escaped_arguments_decode_from_chunked_sse_without_delta_reassembly() {
+    let arguments = json!({"content":"汉字😀 \"quote\" \\escape\n\t".repeat(600)});
+    let item = json!({"type":"function_call","call_id":"long-call",
+        "name":"write_file","arguments":arguments.to_string()});
+    let events = [
+        json!({"type":"response.function_call_arguments.delta","delta":"incomplete fragment"}),
+        json!({"type":"response.function_call_arguments.done","arguments":"unused lifecycle field"}),
+        json!({"type":"response.output_item.done","output_index":0,"item":item}),
+        json!({"type":"response.completed","response":{"id":"long-response","output":[item]}}),
+    ];
+    let body = events
+        .iter()
+        .map(|e| format!("data: {e}\n\n"))
+        .collect::<String>();
+    let (url, request, server) = spawn_sse_server(200, &body).await;
+    let provider = adapter(url, FakeCredentialSource::value(Some(FIXTURE_SECRET)));
+    let result = ModelStreamingService::new(&provider)
+        .consume(
+            full(fixture_input(ModelRequestRequirements::default())),
+            ModelStreamCancellation::new(),
+        )
+        .await
+        .unwrap();
+    let ModelStreamOutcome::Completed { events, .. } = result else {
+        panic!("expected completion")
+    };
+    assert_eq!(
+        events,
+        vec![ModelEvent::ToolCall {
+            call: ToolCall::new(
+                ToolCallId::new("long-call"),
+                ToolName::new("write_file"),
+                arguments,
+            )
+        }]
+    );
+    request.await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn malformed_inner_arguments_have_safe_metadata_in_items_and_terminal_snapshots() {
+    for final_snapshot in [false, true] {
+        let arguments = "{\n\"content\":\"private-canary\\q\"}";
+        let item = json!({"type":"function_call","call_id":"private-call",
+            "name":"private-name","arguments":arguments});
+        let event = if final_snapshot {
+            json!({"type":"response.completed","response":{"id":"failure",
+                "output":[item]}})
+        } else {
+            json!({"type":"response.output_item.done","item":item})
+        };
+        let (url, request, server) = spawn_sse_server(200, &format!("data: {event}\n\n")).await;
+        let provider = adapter(url, FakeCredentialSource::value(Some(FIXTURE_SECRET)));
+        let error = ModelStreamingService::new(&provider)
+            .consume(
+                full(fixture_input(ModelRequestRequirements::default())),
+                ModelStreamCancellation::new(),
+            )
+            .await
+            .unwrap_err();
+        let ModelStreamingError::Provider(ModelProviderError::ProtocolFailure { message }) = error
+        else {
+            panic!("expected strict protocol rejection")
+        };
+        assert!(message.contains("category=Syntax, line=2"), "{message}");
+        assert!(message.contains(&format!("arguments_bytes={}", arguments.len())));
+        assert!(!message.contains("private"));
+        request.await.unwrap();
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn malformed_unknown_and_uncompleted_streams_are_protocol_errors() {
     let cases = [
         ("data: {not-json}\n\n", "invalid Responses event JSON"),
@@ -1212,6 +1289,10 @@ async fn synthetic_primary_live_smoke_uses_provider_composition() {
                 )],
                 ModelRequestRequirements {
                     usage_reporting: true,
+                    max_output_tokens: composition
+                        .primary_provider()
+                        .capabilities()
+                        .max_output_tokens,
                     ..ModelRequestRequirements::default()
                 },
             )),

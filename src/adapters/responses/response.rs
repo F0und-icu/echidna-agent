@@ -209,8 +209,12 @@ fn decode_output_item(item: Value) -> Result<DecodedResponsesEvent, ModelProvide
                 ));
             }
             let arguments = serde_json::from_str(&function_call.arguments).map_err(|error| {
+                // Invalid inner JSON cannot be structurally redacted. Report
+                // coordinates and size only, never a payload snippet or serde's
+                // token-bearing error text. Strict decoding remains the owner.
                 protocol_error(format!(
-                    "function call arguments are not valid JSON: {error}"
+                    "function call arguments are not valid JSON: category={:?}, line={}, column={}, arguments_bytes={}; rejected before dispatch; malformed payload omitted",
+                    error.classify(), error.line(), error.column(), function_call.arguments.len()
                 ))
             })?;
 

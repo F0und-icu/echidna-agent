@@ -6,6 +6,12 @@ use super::fragment::{ContextFragmentId, ContextFragmentSource};
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum ContextPlannerError {
+    #[error(transparent)]
+    ModelCapability(#[from] crate::domain::model::ModelCapabilityError),
+    #[error(
+        "Context output reserve {reserved} is smaller than the requested output limit {requested}"
+    )]
+    OutputReserveBelowLimit { reserved: u32, requested: u32 },
     #[error("Context Fragment ID must not be empty")]
     EmptyFragmentId,
     #[error("Context content hash must be a lowercase 64-character BLAKE3 digest")]

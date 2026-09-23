@@ -32,6 +32,7 @@ fn all_capabilities() -> ModelCapabilities {
         structured_output: true,
         incremental_input: true,
         usage_reporting: true,
+        max_output_tokens: None,
         context_window: 128_000,
         capability_mapping_version: CapabilityMappingVersion::new(7),
     }
@@ -98,6 +99,7 @@ fn mock_fixture_preserves_text_tool_usage_and_completion_order() {
         full_request(ModelRequestRequirements {
             tool_call: true,
             usage_reporting: true,
+            max_output_tokens: None,
             ..ModelRequestRequirements::default()
         }),
         ModelStreamCancellation::new(),
@@ -135,6 +137,7 @@ fn fixed_event_stage_observes_each_provider_event_in_wire_order_before_atomic_co
     let outcome = poll_to_completion(service.consume_with_event_stage(
         full_request(ModelRequestRequirements {
             usage_reporting: true,
+            max_output_tokens: None,
             ..ModelRequestRequirements::default()
         }),
         ModelStreamCancellation::new(),
@@ -303,6 +306,7 @@ fn service_surfaces_typed_capability_errors_from_the_port() {
     let result = poll_to_completion(service.consume(
         full_request(ModelRequestRequirements {
             usage_reporting: true,
+            max_output_tokens: None,
             ..ModelRequestRequirements::default()
         }),
         ModelStreamCancellation::new(),

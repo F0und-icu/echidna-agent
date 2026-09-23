@@ -95,13 +95,22 @@ impl ContextPlanner {
         capabilities: &ModelCapabilities,
     ) -> Result<ContextBudget, ContextPlannerError> {
         let reserve = capabilities.context_window / 8;
+        let output_limit = capabilities.resolve_output_token_limit(None)?.unwrap_or(0);
         // Headroom grows with small windows, not indefinitely with model capacity.
         // Chat, Compaction and scoped Vision all resolve this same policy.
-        ContextBudget::new(
+        let budget = ContextBudget::new(
             capabilities.context_window,
-            reserve.min(8_192),
+            reserve.min(8_192).max(output_limit),
             reserve.min(16_384),
-        )
+        )?;
+        if output_limit > 0 && budget.input_token_limit() == 0 {
+            return Err(ContextPlannerError::InvalidBudget {
+                context_window_tokens: budget.context_window_tokens(),
+                reserved_output_tokens: budget.reserved_output_tokens(),
+                reserved_tool_loop_tokens: budget.reserved_tool_loop_tokens(),
+            });
+        }
+        Ok(budget)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -150,8 +159,18 @@ impl ContextPlanner {
             }
         })?;
         let fixed_input_tokens = fixed_input_tokens(&canonical_tools);
-        let requirements =
+        let mut requirements =
             requirements.normalized_for_tool_specs(!canonical_tools.ordered_specs.is_empty());
+        requirements.max_output_tokens =
+            capabilities.resolve_output_token_limit(requirements.max_output_tokens)?;
+        if let Some(requested) = requirements.max_output_tokens
+            && requested > budget.reserved_output_tokens()
+        {
+            return Err(ContextPlannerError::OutputReserveBelowLimit {
+                requested,
+                reserved: budget.reserved_output_tokens(),
+            });
+        }
         ensure_unique_ids(&fragments)?;
         sort_full_order(&mut fragments);
         let decisions = select_decisions(&fragments, budget, fixed_input_tokens)?;

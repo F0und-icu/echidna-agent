@@ -44,6 +44,12 @@ impl ProviderConfigV1 {
                     mapping: name.clone(),
                 });
             }
+            crate::domain::context::ContextPlanner::current()
+                .default_budget(&mapping.to_domain())
+                .map_err(|source| ProviderCompositionError::InvalidContextBudget {
+                    mapping: name.clone(),
+                    source,
+                })?;
         }
         for (name, provider) in &self.providers {
             validate_identifier("provider", name)?;
@@ -200,6 +206,12 @@ fn validate_credential_reference(
 
 #[derive(Debug, Error)]
 pub enum ProviderCompositionError {
+    #[error("capability mapping `{mapping}` has an invalid Context/output budget: {source}")]
+    InvalidContextBudget {
+        mapping: String,
+        #[source]
+        source: crate::domain::context::ContextPlannerError,
+    },
     #[error("runtime.model_request_limit_per_turn must be between 1 and 10000")]
     InvalidModelRequestLimit,
     #[error("configuration field `{field}` must name a non-empty prompt file path")]

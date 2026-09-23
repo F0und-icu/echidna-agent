@@ -163,7 +163,7 @@ fn domain_phase_prompt_fragments_and_tool_exposure_are_stable() {
                 || id.starts_with("prompt:phase:"))
             .collect::<Vec<_>>(),
         vec![
-            "prompt:base:pragmatic-vulnerability-researcher:2",
+            "prompt:base:pragmatic-vulnerability-researcher:3",
             "prompt:domain:mobile:1",
             "prompt:phase:hypothesis:1",
         ]

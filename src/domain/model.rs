@@ -104,6 +104,9 @@ pub struct ModelRequestRequirements {
     pub structured_output: bool,
     pub incremental_input: bool,
     pub usage_reporting: bool,
+    /// Total generated tokens, including reasoning; not a billing limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
 }
 
 impl ModelRequestRequirements {
@@ -188,10 +191,40 @@ pub struct ModelCapabilities {
     pub incremental_input: bool,
     pub usage_reporting: bool,
     pub context_window: u32,
+    /// Explicitly declared supported per-response ceiling. None preserves
+    /// legacy requests without output controls; no model-name inference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
     pub capability_mapping_version: CapabilityMappingVersion,
 }
 
 impl ModelCapabilities {
+    /// Resolve the declared ceiling before Context/audit capture. A smaller
+    /// explicit request is allowed; adapters must never inject a missing cap.
+    pub(crate) fn resolve_output_token_limit(
+        &self,
+        requested: Option<u32>,
+    ) -> Result<Option<u32>, ModelCapabilityError> {
+        if self
+            .max_output_tokens
+            .is_some_and(|limit| limit == 0 || limit >= self.context_window)
+        {
+            return Err(ModelCapabilityError::InvalidOutputTokenLimit);
+        }
+        if let Some(requested) = requested {
+            if requested == 0 {
+                return Err(ModelCapabilityError::InvalidOutputTokenLimit);
+            }
+            if self
+                .max_output_tokens
+                .is_none_or(|ceiling| requested > ceiling)
+            {
+                return Err(ModelCapabilityError::OutputTokenLimitUnsupported);
+            }
+        }
+        Ok(requested.or(self.max_output_tokens))
+    }
+
     /// Returns the canonical, versioned capability-map identity used by
     /// profile routing and durable request facts. The complete mapping,
     /// including its explicit version, remains the sole hash input.
@@ -202,6 +235,11 @@ impl ModelCapabilities {
 
     /// Validates every semantic requirement without inferring from model names.
     pub fn validate_input(&self, input: &ModelInputIR) -> Result<(), ModelCapabilityError> {
+        if self.resolve_output_token_limit(input.requirements.max_output_tokens)?
+            != input.requirements.max_output_tokens
+        {
+            return Err(ModelCapabilityError::OutputTokenLimitRequired);
+        }
         if !self.streaming {
             return Err(ModelCapabilityError::StreamingUnsupported);
         }
@@ -261,6 +299,14 @@ impl ModelCapabilities {
 #[allow(clippy::enum_variant_names)]
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum ModelCapabilityError {
+    #[error("output token limit must be positive and smaller than the declared context window")]
+    InvalidOutputTokenLimit,
+    #[error("output token limit is not supported by the explicit capability mapping")]
+    OutputTokenLimitUnsupported,
+    #[error(
+        "request omitted the configured output token limit; resolve it before Context and audit capture"
+    )]
+    OutputTokenLimitRequired,
     #[error("text model input is not supported")]
     TextInputUnsupported,
     #[error("image artifact `{artifact_id}` is not supported")]

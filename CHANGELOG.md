@@ -7,12 +7,24 @@ milestone history remains in `docs/development/STATUS.md` and Git history.
 
 ### Changed
 
+- R7-F1: explicitly configured Project instructions are delivered completely or
+  planning fails before sampling. Base generation3 and lossy-summary guidance
+  distinguish original, repaired and current results without inventing evidence.
+- R7-F1: optional role-scoped `max_output_tokens` flows through the existing
+  capability mapping, Context reserve, RequestAudit and Responses encoder.
+  Omission preserves legacy behavior; real-backend enforcement is not yet verified.
+
 - R6-SC1: reuse four existing Research input types through local Schema
   definitions, preserving expanded argument contracts and tool availability.
   The measured24-tool wire array is1021bytes smaller (3.02%); this is not a
   measured model-token/latency improvement. No runtime optimizer or dependency.
 
 ### Fixed
+
+- R7-F1: reject invalid Unicode patch prefixes without panic and validate new
+  hunk offsets before writing. File schemas explain preimage hashes and supported
+  patch syntax. Malformed argument diagnostics omit payloads and distinguish
+  decoding rejection from network interruption; no automatic repair or retry.
 
 - R6-02: reconcile finalized Responses text with streamed output and reject
   contradictory terminal status; discover exact Tool names despite explanatory

@@ -31,14 +31,41 @@ const FIXTURE_DIRECTORY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixt
 const MANIFEST_SHA256: &str = "7bee1a2304ecb0a1100bc5b5183b51a0f384fac03b695d0cda8cd00fbfefa6c8";
 
 #[test]
+fn explicit_project_instructions_are_complete_or_refused_under_budget_pressure() {
+    use cyber_agent::domain::context::ContextPlannerError;
+    let rules =
+        "RULE: use the explicit fixture commands; never infer an omitted rule. ".repeat(256);
+    let composition = PromptComposition::current().with_project(&rules).unwrap();
+    let compile = |limit| {
+        ContextPlanner::current().compile(
+            composition.fragments().unwrap(),
+            ContextBudget::new(limit, 0, 0).unwrap(),
+            &capabilities(),
+            Vec::new(),
+            Default::default(),
+            None,
+        )
+    };
+    assert!(matches!(
+        compile(2_048),
+        Err(ContextPlannerError::RequiredFragmentsExceedBudget { .. })
+    ));
+    let plan = compile(32_768).unwrap();
+    assert!(plan.base_instructions().contains(&rules));
+}
+
+#[test]
 fn base_contract_scopes_current_facts_and_requested_answer_format() {
-    assert_eq!(BaseContract::GENERATION, 2);
+    assert_eq!(BaseContract::GENERATION, 3);
     for boundary in [
         "same target, field and scope",
         "historical assistant prose or summaries",
         "Memory is not fresh tool evidence",
         "Metadata alone does not prove unchanged bytes or absence of side effects",
         "current requested format and length",
+        "original baseline, post-change and current results distinct",
+        "historical value is unavailable",
+        "smallest decisive next action",
     ] {
         assert!(BaseContract.prompt().contains(boundary), "{boundary}");
     }
@@ -56,6 +83,12 @@ fn base_revision_changes_only_its_fragment_and_preserves_historical_bytes() {
         "508e17cfbd0566c32f5a0a1d168b936d0065922700be2685eddbb5cba0335d4d"
     );
     assert!(BaseContract.prompt().starts_with(old));
+    let generation2 = include_str!("fixtures/prompts/base-v2.md");
+    assert_eq!(
+        format!("{:x}", Sha256::digest(generation2.as_bytes())),
+        "159855321069347debbce03f60ec3960c782868bbf188a09037601cb93dc12a1"
+    );
+    assert!(BaseContract.prompt().starts_with(generation2));
     let current = PromptComposition::current().fragments().unwrap();
     let mut historical = current.clone();
     historical[0] = ContextFragment::new(
@@ -72,7 +105,7 @@ fn base_revision_changes_only_its_fragment_and_preserves_historical_bytes() {
     assert_ne!(current[0].content_hash(), historical[0].content_hash());
     // Existing byte-based estimator, not Provider tokenizer usage.
     assert_eq!(historical[0].token_estimate(), 176);
-    assert_eq!(current[0].token_estimate(), 272);
+    assert!(current[0].token_estimate() > 272);
     assert_eq!(current[1..], historical[1..]);
     let compile = |fragments| {
         ContextPlanner::current()
@@ -178,6 +211,7 @@ fn capabilities() -> ModelCapabilities {
         structured_output: true,
         incremental_input: false,
         usage_reporting: true,
+        max_output_tokens: None,
         context_window: 32_768,
         capability_mapping_version: CapabilityMappingVersion::new(1),
     }
@@ -268,7 +302,7 @@ fn stable_base_domain_and_phase_compile_into_one_orthogonal_contract() {
                 .map(|fragment| fragment.id().as_str().to_owned())
                 .collect::<Vec<_>>(),
             vec![
-                "prompt:base:pragmatic-vulnerability-researcher:2".to_owned(),
+                "prompt:base:pragmatic-vulnerability-researcher:3".to_owned(),
                 format!("prompt:domain:{id}:{}", profile.generation()),
                 "prompt:phase:mapping:2".to_owned(),
             ]

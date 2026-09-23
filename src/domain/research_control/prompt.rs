@@ -129,7 +129,7 @@ impl PromptComposition {
             fragments.push(content_identified_instruction_fragment(
                 "prompt:project",
                 ContextFragmentSource::ProjectPrompt,
-                ContextFragmentPriority::High,
+                ContextFragmentPriority::Required,
                 project,
             )?);
         }

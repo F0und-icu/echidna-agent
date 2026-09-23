@@ -47,6 +47,66 @@ fn valid_config() -> String {
 }
 
 #[test]
+fn output_limit_config_is_explicit_role_scoped_and_offline_validated() {
+    for value in [0, 32_768, 32_769, 30_000, 28_672] {
+        let credentials = Arc::new(RecordingCredentialSource::default());
+        let config = valid_config().replacen(
+            "[capability_mappings.text-v1]",
+            &format!("[capability_mappings.text-v1]\nmax_output_tokens = {value}"),
+            1,
+        );
+        assert!(matches!(
+            load("invalid-output-budget", &config, credentials.clone()),
+            Err(ProviderCompositionError::InvalidContextBudget { .. })
+        ));
+        assert!(credentials.references().is_empty());
+    }
+    let credentials = Arc::new(RecordingCredentialSource::default());
+    let config = valid_config()
+        .replacen(
+            "[capability_mappings.text-v1]",
+            "[capability_mappings.text-v1]\nmax_output_tokens = 8192",
+            1,
+        )
+        .replacen(
+            "[capability_mappings.vision-v1]",
+            "[capability_mappings.vision-v1]\nmax_output_tokens = 2048",
+            1,
+        );
+    let composed = load("configured-output-budget", &config, credentials.clone()).unwrap();
+    assert_eq!(
+        composed.primary_provider().capabilities().max_output_tokens,
+        Some(8192)
+    );
+    assert_eq!(
+        composed
+            .vision_provider()
+            .unwrap()
+            .capabilities()
+            .max_output_tokens,
+        Some(2048)
+    );
+    let report = inspect_agent_model_profile(composed.agent_profile());
+    assert_eq!(report.primary_max_output_tokens, Some(8192));
+    assert_eq!(report.vision_max_output_tokens, Some(2048));
+    let missing_limit =
+        composed
+            .primary_provider()
+            .stream(ModelRequest::full(ModelInputIR::current(
+                "fixture",
+                vec![ContentItem::user_text("fixture")],
+                ModelRequestRequirements::default(),
+            )));
+    assert!(matches!(
+        missing_limit,
+        Err(ModelProviderError::Capability(
+            ModelCapabilityError::OutputTokenLimitRequired
+        ))
+    ));
+    assert!(credentials.references().is_empty());
+}
+
+#[test]
 fn empty_prompt_path_is_rejected_before_relative_path_resolution() {
     let credentials = Arc::new(RecordingCredentialSource::default());
     let config = format!("{}\n[prompts]\npersonal_file = \"\"\n", valid_config());

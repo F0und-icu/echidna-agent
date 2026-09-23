@@ -239,10 +239,12 @@ pub(super) struct CapabilityMappingDefinition {
     incremental_input: bool,
     usage_reporting: bool,
     pub(super) context_window: u32,
+    #[serde(default)]
+    max_output_tokens: Option<u32>,
 }
 
 impl CapabilityMappingDefinition {
-    fn to_domain(&self) -> ModelCapabilities {
+    pub(super) fn to_domain(&self) -> ModelCapabilities {
         ModelCapabilities {
             text_input: self.text_input,
             image_input: self.image_input,
@@ -252,6 +254,7 @@ impl CapabilityMappingDefinition {
             incremental_input: self.incremental_input,
             usage_reporting: self.usage_reporting,
             context_window: self.context_window,
+            max_output_tokens: self.max_output_tokens,
             capability_mapping_version: CapabilityMappingVersion::new(self.version),
         }
     }

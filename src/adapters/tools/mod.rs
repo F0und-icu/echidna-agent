@@ -1280,13 +1280,13 @@ fn canonical_description(name: &str) -> String {
             "matches, bytes and truncation.",
         ),
         "write_file" => (
-            "a patch or multi-file edit is needed.",
-            "apply_patch for hunks.",
+            "a small patch or multi-file edit is needed.",
+            "apply_patch for small edits; write_file for new files or complete replacements. Prefer file tools over shell heredocs. Keep long edits bounded; reuse the returned after_hash for the next edit only if no intervening mutation occurred. See input schema for null/hash semantics.",
             "a hashed file mutation.",
         ),
         "apply_patch" => (
             "the patch is invalid or spans files.",
-            "a verified preimage.",
+            "a small exact unified diff and verified preimage; see input schema for the supported format. Use write_file to create files or replace non-LF text, not shell heredocs to bypass JSON escaping.",
             "a file mutation.",
         ),
         "read_output" => (

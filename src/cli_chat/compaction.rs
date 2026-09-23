@@ -30,7 +30,7 @@ pub(super) struct AppliedCompactionSummary {
 impl AppliedCompactionSummary {
     pub(super) fn message(&self) -> String {
         format!(
-            "Compaction revision {} applied: retained {} of {} source History items; the next Primary request will be CompactionReset Full.",
+            "Compaction revision {} applied: retained {} of {} source History items; the next Primary request will be CompactionReset Full. Historical outputs/constraints may be omitted; use prompts.project_file for stable rules, not a lossy Summary.",
             self.revision, self.retained_history_items, self.source_history_items
         )
     }

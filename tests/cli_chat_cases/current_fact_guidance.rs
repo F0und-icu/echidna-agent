@@ -66,11 +66,17 @@ fn repeated_compaction_then_process_resume_refreshes_facts_without_reexecuting_c
         (200, text_response("scripted current currency: JPY", "engineering-latest-answer")),
     ]);
     let config = write_config(harness.path(), &server.base_url);
+    // Explicit rules are not dependent on historical README reads or Summary.
+    let rules = "Only use the configured report/test commands. Never rerun the once-only marker.";
+    fs::write(harness.path().join("rules.md"), rules).unwrap();
     // Full-only delivery exercises the wire history used by strict backends.
     let configured = fs::read_to_string(&config).unwrap();
     fs::write(
         &config,
-        configured.replace("incremental_input = true", "incremental_input = false"),
+        format!(
+            "{}\n[prompts]\nproject_file = \"rules.md\"\n",
+            configured.replace("incremental_input = true", "incremental_input = false")
+        ),
     )
     .unwrap();
     let first = f2a_wait_child(
@@ -146,6 +152,11 @@ fn repeated_compaction_then_process_resume_refreshes_facts_without_reexecuting_c
         assert!(compaction.retained_history().len() < compaction.source_history_item_count());
         assert_eq!(compact_state.history().items(), before.history().items());
         let summary = serde_json::to_value(compaction.summary()).unwrap();
+        assert!(
+            summary["narrative"]["next_step_notes"]
+                .to_string()
+                .contains("latest assistant continuation is not the original baseline")
+        );
         assert_eq!(
             summary["evidence_spine"]["target_snapshot_refs"],
             json!([snapshot.as_str()])
@@ -176,6 +187,7 @@ fn repeated_compaction_then_process_resume_refreshes_facts_without_reexecuting_c
         let result_wire = f2a_request_body(&server.requests, "engineering fresh result");
         assert!(server.requests.try_recv().is_err());
         for wire in [&resumed_wire, &result_wire] {
+            assert!(wire["instructions"].as_str().unwrap().contains(rules));
             assert!(wire.get("previous_response_id").is_none());
             let input = wire["input"].as_array().unwrap();
             assert!(input.iter().any(|item| {
@@ -363,7 +375,7 @@ fn resume_delivers_current_memory_alongside_old_prose_without_rewriting_history(
         assert!(
             serde_json::to_string(audit)
                 .unwrap()
-                .contains("prompt:base:pragmatic-vulnerability-researcher:2")
+                .contains("prompt:base:pragmatic-vulnerability-researcher:3")
         );
     }
     assert_audits_reconstruct(root.path(), &after_state);

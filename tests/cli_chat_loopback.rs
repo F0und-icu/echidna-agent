@@ -24,11 +24,15 @@ mod f4_output;
 mod f5_output;
 #[path = "cli_chat_cases/f6a_geometry.rs"]
 mod f6a_geometry;
+#[path = "cli_chat_cases/output_budget.rs"]
+mod output_budget;
 #[path = "support/provider_config.rs"]
 mod provider_config;
 mod support;
 #[path = "cli_chat_cases/tool_activation_continuation.rs"]
 mod tool_activation_continuation;
+#[path = "cli_chat_cases/tool_argument_integrity.rs"]
+mod tool_argument_integrity;
 
 #[test]
 fn final_text_integrity_reaches_cli_and_history_without_committing_conflicts() {
@@ -955,6 +959,23 @@ fn f2a_secondary_cli_image_is_observed_before_primary_tool_loop_and_remains_audi
     ]);
     let config = write_dual_config(root.path(), &primary.base_url, &vision.base_url);
 
+    fs::write(
+        &config,
+        fs::read_to_string(&config)
+            .unwrap()
+            .replacen(
+                "[capability_mappings.text-v1]",
+                "[capability_mappings.text-v1]\nmax_output_tokens = 4096",
+                1,
+            )
+            .replacen(
+                "[capability_mappings.vision-v1]",
+                "[capability_mappings.vision-v1]\nmax_output_tokens = 1024",
+                1,
+            ),
+    )
+    .unwrap();
+
     let output = run_chat(
         root.path(),
         &config,
@@ -974,6 +995,7 @@ fn f2a_secondary_cli_image_is_observed_before_primary_tool_loop_and_remains_audi
     let vision_request = f2a_request_body(&vision.requests, "secondary Vision");
     f2a_join_server(vision, "secondary Vision");
     assert_eq!(vision_request["model"], "fixture-vision-model");
+    assert_eq!(vision_request["max_output_tokens"], 1024);
     assert!(json_contains_type(&vision_request["input"], "input_image"));
     assert!(json_contains_text(
         &vision_request["input"],
@@ -984,6 +1006,8 @@ fn f2a_secondary_cli_image_is_observed_before_primary_tool_loop_and_remains_audi
     let second_primary = f2a_request_body(&primary.requests, "secondary Primary second");
     f2a_join_server(primary, "secondary Primary");
     assert_eq!(first_primary["model"], "fixture-text-model");
+    assert_eq!(first_primary["max_output_tokens"], 4096);
+    assert_eq!(second_primary["max_output_tokens"], 4096);
     assert!(!json_contains_type(&first_primary["input"], "input_image"));
     assert!(json_contains_text(
         &first_primary["input"],
@@ -1008,6 +1032,18 @@ fn f2a_secondary_cli_image_is_observed_before_primary_tool_loop_and_remains_audi
     );
     assert_eq!(state.request_audits().len(), 3);
     assert_audits_reconstruct(root.path(), &state);
+    for (manifest, expected) in state.request_audits().iter().zip([1024, 4096, 4096]) {
+        let input = manifest
+            .reconstruct(|blob| {
+                fs::read(
+                    root.path()
+                        .join(".cyber-agent/artifacts/blobs/sha256")
+                        .join(blob.as_str()),
+                )
+            })
+            .unwrap();
+        assert_eq!(input.requirements.max_output_tokens, Some(expected));
+    }
     let events = session_events(root.path(), &session);
     assert_eq!(
         events

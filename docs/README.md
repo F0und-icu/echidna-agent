@@ -26,6 +26,10 @@
 
 当前读取完整冻结链至v1.20，相关ADR见上述权威顺序。R6-04整理本地回归基线与状态入口；R6-SC1复用既有输入Schema定义，二者不增加架构版本。R6-SC1实验和测量见 [Schema复用报告](development/R6_SC1_SCHEMA_REUSE_MEASUREMENT.md)。准确状态和下一动作见STATUS；历史状态存档不重新授权Live或交付，远端hash封存仍未授权。
 
+R7-F1 当前本地修复另读 [修复计划](development/R7_REPAIR_PLAN.md)、ADR-0031 和
+Architecture v1.21 本地已审/验证版本。独立审计、完整本地 Gate/Lean 已通过，尚未远端
+hash封存或Live验收；不把历史冻结链及 R7-L1 未完成结果改写为新验收。
+
 随后单独授权的 [R6-SC1 Live](development/R6_SC1_LIVE_2026_09_20.md) 已完成真实Schema调用和重启回读核验，并获独立事后结果复核 RESULT APPROVE（不是事前脚本审查）；措辞/覆盖限制和绝对usage如实保留，不推定token收益。已审查代码与后续小修通过 #84/#85/#86 合并；未跑Actions。当前 [R6验收收口](development/R6_ACCEPTANCE_CLOSURE.md) 汇总已覆盖项、连续压缩/恢复缺口、原问题分类与非目标；准确执行状态以STATUS为准。
 
 ## 3. 文档地图

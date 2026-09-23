@@ -123,6 +123,7 @@ fn capabilities() -> ModelCapabilities {
         structured_output: true,
         incremental_input: true,
         usage_reporting: true,
+        max_output_tokens: None,
         context_window: 32_768,
         capability_mapping_version: cyber_agent::domain::model::CapabilityMappingVersion::new(7),
     }
@@ -327,7 +328,7 @@ fn service(blobs: &MemoryBlobStore) -> RequestAuditService<'_, MemoryBlobStore> 
 }
 
 #[test]
-fn base_revision_does_not_replace_recorded_generation_one_bytes() {
+fn base_revision_does_not_replace_recorded_historical_bytes() {
     let blobs = MemoryBlobStore::default();
     let service = service(&blobs);
     let mut session = projection();
@@ -337,6 +338,11 @@ fn base_revision_does_not_replace_recorded_generation_one_bytes() {
         "historical question",
     );
     let old_manifest = record(&service, old.clone(), &mut session, &mut sink, "base-v1");
+    let old2 = input(
+        include_str!("fixtures/prompts/base-v2.md"),
+        "generation two question",
+    );
+    let old2_manifest = record(&service, old2.clone(), &mut session, &mut sink, "base-v2");
     let old_event = sink.events[0].clone();
     let old_blobs = blobs.blobs.lock().unwrap().clone();
     let current = input(
@@ -348,10 +354,11 @@ fn base_revision_does_not_replace_recorded_generation_one_bytes() {
         current.clone(),
         &mut session,
         &mut sink,
-        "base-v2",
+        "base-v3",
     );
     assert_ne!(old_manifest.components(), current_manifest.components());
     assert_eq!(service.reconstruct(&old_manifest).unwrap(), old);
+    assert_eq!(service.reconstruct(&old2_manifest).unwrap(), old2);
     assert_eq!(service.reconstruct(&current_manifest).unwrap(), current);
     assert_eq!(sink.events[0], old_event);
     for (id, bytes) in old_blobs {

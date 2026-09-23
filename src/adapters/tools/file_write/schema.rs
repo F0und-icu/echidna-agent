@@ -39,9 +39,9 @@ pub(in super::super) fn write_file_input_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "path": {"type": "string", "minLength": 1},
-            "content": {"type": "string"},
-            "expected_hash": {"type": ["string", "null"]}
+            "path": {"type": "string", "minLength": 1, "description": "Project-relative UTF-8 file; parent directory must already exist. No symlinks or parent traversal."},
+            "content": {"type": "string", "description": "Complete replacement text, not a shell command. Encode quotes, backslashes and newlines as a valid JSON string; a shell heredoc still requires JSON escaping."},
+            "expected_hash": expected_hash_schema()
         },
         "required": ["path", "content", "expected_hash"],
         "additionalProperties": false
@@ -52,7 +52,7 @@ pub(in super::super) fn apply_patch_input_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "patch": {"type": "string", "minLength": 1},
+            "patch": {"type": "string", "minLength": 1, "description": "One existing UTF-8 LF-terminated file only. LF-only newline-terminated unified diff: --- a/<path> then +++ b/<same-path>, then @@ -old_start,old_count +new_start,new_count @@ and space/+/- prefixed lines with exact counts. All starts/counts must be positive. No Begin Patch markers, diff --git preamble, /dev/null, create/delete/rename, CRLF or no-newline markers. Example: --- a/note.txt\n+++ b/note.txt\n@@ -1,1 +1,1 @@\n-old\n+new\n"},
             "preimages": {
                 "type": "array",
                 "minItems": 1,
@@ -61,7 +61,7 @@ pub(in super::super) fn apply_patch_input_schema() -> Value {
                     "type": "object",
                     "properties": {
                         "path": {"type": "string", "minLength": 1},
-                        "expected_hash": {"type": ["string", "null"]}
+                        "expected_hash": expected_hash_schema()
                     },
                     "required": ["path", "expected_hash"],
                     "additionalProperties": false
@@ -70,6 +70,14 @@ pub(in super::super) fn apply_patch_input_schema() -> Value {
         },
         "required": ["patch", "preimages"],
         "additionalProperties": false
+    })
+}
+
+fn expected_hash_schema() -> Value {
+    json!({
+        "type": ["string", "null"],
+        "pattern": "^[0-9a-f]{64}$",
+        "description": "Exact current BLAKE3 content hash (64 lowercase hex) for an existing file, including an empty file. null asserts the file does NOT exist; it never means unchecked overwrite. Obtain a current hash via inspect_project(hash_paths=[path]) or reuse a just-observed mutation after_hash when no intervening edit occurred."
     })
 }
 

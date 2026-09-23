@@ -133,12 +133,15 @@ pub struct InternalRequestMetadata {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 struct OutputContract {
     structured_output: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_output_tokens: Option<u32>,
 }
 
 impl OutputContract {
     fn from_input(input: &ModelInputIR) -> Self {
         Self {
             structured_output: input.requirements.structured_output,
+            max_output_tokens: input.requirements.max_output_tokens,
         }
     }
 }

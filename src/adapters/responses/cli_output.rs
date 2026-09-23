@@ -23,6 +23,7 @@ pub(super) struct RequestOutput {
     pending_reasoning_deltas: String,
     reasoning_line_open: bool,
     completed: bool,
+    rejected: bool,
     #[cfg(debug_assertions)]
     vision_text_open: bool,
     #[cfg(debug_assertions)]
@@ -43,6 +44,7 @@ impl RequestOutput {
             pending_reasoning_deltas: String::new(),
             reasoning_line_open: false,
             completed: false,
+            rejected: false,
             #[cfg(debug_assertions)]
             vision_text_open: false,
             #[cfg(debug_assertions)]
@@ -209,6 +211,38 @@ impl RequestOutput {
         }
     }
 
+    pub(super) fn rejected(&mut self, error: &crate::ports::model::ModelProviderError) {
+        self.rejected = true;
+        self.end_reasoning_line();
+        let protocol_error = matches!(
+            error,
+            crate::ports::model::ModelProviderError::ProtocolFailure { .. }
+        );
+        #[cfg(debug_assertions)]
+        if self.full {
+            self.emit(
+                if protocol_error {
+                    "协议解码失败：响应未提交（不代表网络中断）"
+                } else {
+                    "Provider 返回停止状态：响应未提交"
+                },
+                json!("失败内容未展示；无法保证结构化脱敏。不自动修复或重试。"),
+            );
+            return;
+        }
+        if self.saw_reasoning {
+            let _ = writeln!(
+                io::stderr().lock(),
+                "[思考响应未提交：{}]",
+                if protocol_error {
+                    "协议解码失败"
+                } else {
+                    "Provider 返回停止状态"
+                }
+            );
+        }
+    }
+
     fn reasoning_text(&mut self, text: &str) {
         if text.is_empty() {
             return;
@@ -266,7 +300,7 @@ impl RequestOutput {
 
 impl Drop for RequestOutput {
     fn drop(&mut self) {
-        if self.completed {
+        if self.completed || self.rejected {
             return;
         }
         if self.full_debug() {
