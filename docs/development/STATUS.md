@@ -10,7 +10,12 @@
 - Source/test328-entry manifest matches the F3 independent review and full Gate.
   Publication changes only delivery documentation/Changelog beyond that freeze.
   Use `[skip ci]`; no merge, Actions, Live, tag/release, required-check bypass,
-  architecture hash seal or Codex authentication access. Remote result pending.
+  architecture hash seal or Codex authentication access.
+- Remote repair delivery verified: commit889e2a02b952ad17c849edb7bb33f04bb8c2811c
+  pushed normally and remote branch hash matched. Existing [Draft PR#88](https://github.com/F0und-icu/cyber-agent/pull/88)
+  now covers F1/F2/F3. This delivery record follows as documentation only; no
+  implementation changes after audit/Gate. Local acceptance below stays valid,
+  but publication is not remote CI, Live, merge or a new testing allowance.
 
 ## Current Slice — R7-F3 bounded malformed-argument regeneration
 
