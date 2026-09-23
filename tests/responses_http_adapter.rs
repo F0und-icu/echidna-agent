@@ -1181,10 +1181,12 @@ async fn malformed_inner_arguments_have_safe_metadata_in_items_and_terminal_snap
             )
             .await
             .unwrap_err();
-        let ModelStreamingError::Provider(ModelProviderError::ProtocolFailure { message }) = error
+        let ModelStreamingError::Provider(ModelProviderError::InvalidToolArguments { diagnostic }) =
+            error
         else {
             panic!("expected strict protocol rejection")
         };
+        let message = diagnostic.to_string();
         assert!(message.contains("category=Syntax, line=2"), "{message}");
         assert!(message.contains(&format!("arguments_bytes={}", arguments.len())));
         assert!(!message.contains("private"));

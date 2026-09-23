@@ -1,3 +1,5 @@
+#[path = "cli_chat_cases/argument_regeneration.rs"]
+mod argument_regeneration;
 #[path = "cli_chat_cases/command_diagnostics.rs"]
 mod command_diagnostics;
 #[path = "cli_chat_cases/ctf_child_checkpoint.rs"]
@@ -24,6 +26,8 @@ mod f4_output;
 mod f5_output;
 #[path = "cli_chat_cases/f6a_geometry.rs"]
 mod f6a_geometry;
+#[path = "cli_chat_cases/operator_steering.rs"]
+mod operator_steering;
 #[path = "cli_chat_cases/output_budget.rs"]
 mod output_budget;
 #[path = "support/provider_config.rs"]

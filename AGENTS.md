@@ -23,6 +23,10 @@ If the user explicitly authorizes development sub-agents, every delegated agent 
 
 ## Current Phase
 
+- R7-F3 bounded argument regeneration is locally complete under STATUS, ADR-0033 and additive v1.23: fresh Terra xhigh independent APPROVE, full Gate540unique PASS/4ignored and Lean PASS. Only typed malformed Tool JSON before whole-sample commit may regenerate, at most2 corrections total per Turn through the existing budget/Context/audit owners. No Tool replay, guessed JSON, implicit Resume, completed-reasoning discard, Live or Git publication. Stop at local handoff; preserve incoming R7-F2, old pinned test binary and historical evidence. Old binaries cannot Resume Sessions containing the new rejection event.
+
+- R7-F2 operator steering/background control is authorized for local implementation, governed by STATUS and ADR-0032 / additive v1.22. Read the full earlier chain plus v1.21/v1.22. Current operator separately authorized fresh Terra xhigh read-only audit after focused/affected tests; no Live or Git publication. Preserve execution resource conflicts, immutable sampling plans, explicit Resume and fatal unknown-effect boundaries. Model scope compliance remains unverified until separately tested.
+
 - R6 acceptance closure is reviewed/Gate/Lean/Live verified with explicit content limits and published in PR #87, governed by STATUS and `docs/development/R6_ACCEPTANCE_CLOSURE.md`; exact remote merge state is verified from PR/Git. #84/#85/#86 are merged. Engineering integrity passes the repeated ordinary-engineering compaction/Resume fixture, but model prose is FAIL/LIMITED, not security success or full-window capacity. Stop after verified closure delivery; earlier Slice-only stop language below is historical. No Actions, Codex login access, remote architecture hash seal or automatic continuation of a closed Live allowance.
 
 - R6-SC1 is the measured Research input Schema reuse candidate governed by STATUS. Reuse explicit definitions in the existing builder; the runtime optimizer experiment was rejected. No new architecture/module/API/dependency/cache, tool pruning, Live or Git publication in this Slice; frozen chain remains through v1.20.

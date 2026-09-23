@@ -1,5 +1,6 @@
 //! Bounded single-Agent Tool Call -> Tool Result -> full-resample loop.
 
+mod argument_correction;
 mod compaction;
 mod context_state;
 mod output_capture;
@@ -193,6 +194,10 @@ pub type ToolExecutionReceiptStage<'a> =
 /// checkpointed at scheduler completion; and ordered paired Tool Results are
 /// checkpointed before a later model sample.
 pub(crate) enum ChatDurabilityCheckpoint<'a> {
+    ModelSampleRejected {
+        diagnostic: &'a crate::domain::model::ToolArgumentDiagnostic,
+        corrections_used: u8,
+    },
     History(&'a [ContentItem]),
     ExecutionReceipt(&'a ToolExecutionOutcome),
     Subcommand(&'a crate::domain::tools::SubcommandCheckpoint),
@@ -813,7 +818,16 @@ where
             .tools
             .resolve_tool_plan(&self.active_tool_exposure_plan, &deferred_activations)?;
         let mut executions = Vec::new();
+        let mut corrections_used = 0;
+        let mut correction_feedback = Vec::new();
+        let mut turn_has_committed_sample = false;
         for request_index in 0..request_budget.limit() {
+            if cancellation.is_cancelled() {
+                return Ok(AgentTurnOutcome::Cancelled {
+                    model_requests: request_budget.counts().primary,
+                    executions,
+                });
+            }
             if let Some(refresh) = context_refresh.as_deref_mut() {
                 self.refresh_current_context(refresh()?)?;
             }
@@ -824,7 +838,7 @@ where
                 self.tools
                     .resolve_tool_plan(&self.active_tool_exposure_plan, &deferred_activations)?
             };
-            let expired_plan = (request_index == 0)
+            let expired_plan = (!turn_has_committed_sample)
                 .then_some(())
                 .and(self.committed_unactivated_tool_plan.as_ref())
                 .filter(|prior| *prior == &resolved_tool_plan);
@@ -853,6 +867,7 @@ where
                     capabilities: &capabilities,
                     tool_specs,
                     prior_manifest: self.committed_context_manifest.as_ref(),
+                    correction_feedback: &correction_feedback,
                 })?;
             let sampling_step = SamplingStepPlan::new(
                 format!("{}:step:{request_index}", turn_id),
@@ -897,6 +912,7 @@ where
                 {
                     match context_state::state_diff_delivery_input(
                         context_state::StateDiffDeliveryInput {
+                            correction_feedback: &correction_feedback,
                             step_id: sampling_step.step_id(),
                             full_input: &full_input,
                             full_delivery_map: &full_delivery_map,
@@ -1103,7 +1119,36 @@ where
                         &mut forward_text_delta,
                     )
                     .await
-            }?;
+            };
+            let stream = match stream {
+                Err(ModelStreamingError::Provider(ModelProviderError::InvalidToolArguments {
+                    diagnostic,
+                })) => {
+                    // No model sample has committed and no sibling ToolCall
+                    // has dispatched. Persist rejection before any correction.
+                    if let Some(stage) = durability.as_deref_mut() {
+                        stage(ChatDurabilityCheckpoint::ModelSampleRejected {
+                            diagnostic: &diagnostic,
+                            corrections_used,
+                        })?;
+                    }
+                    if corrections_used
+                        >= crate::domain::model::MAX_TOOL_ARGUMENT_CORRECTIONS_PER_TURN
+                    {
+                        return Err(ModelStreamingError::Provider(
+                            ModelProviderError::InvalidToolArguments { diagnostic },
+                        )
+                        .into());
+                    }
+                    corrections_used += 1;
+                    correction_feedback.push(argument_correction::feedback(
+                        sampling_step.step_id(),
+                        &diagnostic,
+                    )?);
+                    continue;
+                }
+                other => other?,
+            };
             let (events, completion) = match stream {
                 ModelStreamOutcome::Completed { events, completion } => (events, completion),
                 ModelStreamOutcome::Cancelled { .. } => {
@@ -1131,6 +1176,7 @@ where
             self.provider_session
                 .record_completed_sample(&snapshot, server_output_items.clone())?;
             self.commit_continuation(&completion);
+            turn_has_committed_sample = true;
             delivery_input
                 .content_items
                 .extend(server_output_items.clone());
@@ -1677,6 +1723,8 @@ pub enum AgentLoopError {
     ToolOutputPublication { message: String },
     #[error(transparent)]
     Model(#[from] ModelStreamingError),
+    #[error("model rejection checkpoint failed: {message}")]
+    ModelRejectionCommit { message: String },
     #[error(transparent)]
     History(#[from] HistoryError),
     #[error(transparent)]

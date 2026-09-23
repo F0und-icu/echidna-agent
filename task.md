@@ -253,6 +253,11 @@ Cyber Agent 是一个由单人使用和维护的、本地优先的漏洞挖掘�
 
 ### 5.1 TurnContext
 
+R7-F2 交互增量见 ADR-0032 / Architecture v1.22：真实终端运行中接收
+`/stop` 或纠偏行，先走既有取消/持久化边界，再处理新 Turn；不修改正在
+运行的 SamplingStepPlan。管道输入保持逐轮顺序。新指令可暂停/替换旧目标，
+Resume 不自动续做。后台资源锁不能阻断纯 tool_search，实际执行冲突仍保留。
+
 一次用户输入开始时创建，在该 Turn 的多次模型采样中保持稳定：
 
 - Turn ID。
@@ -281,6 +286,13 @@ StepSnapshot 不做全项目重扫描。它先比较便宜的 mtime、size、Git
 `tool_search` 匹配只更新 typed DeferredActivationSet，使当前 Turn 的下一 Step 重算 Plan。Activation 在 Turn 结束和 Resume 后清空；Hidden/Unavailable Tool 永不进入集合。
 
 ### 5.3 固定处理点
+
+R7-F3按ADR-0033/v1.23为非法工具参数JSON增加有界模型纠正：整个失败采样
+不提交、不执行任何兄弟调用；原AgentLoop每Turn合计最多2次重新生成，计入
+原共享请求预算。Session先记录拒绝事实，再经ContextPlanner/审计送入有来源
+的运行时反馈，不伪造用户History或ToolResult。旧成功结果/推理仍保留；普通
+断流、取消、持久化和未知执行不自动重试。只有这一typed执行前失败豁免旧的
+模型错误一律停止规则，不改变工具never_auto_retry。具体实现/验收见STATUS。
 
 不实现通用 Hook Runtime，但主循环保留固定内部处理点：
 

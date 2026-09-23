@@ -56,7 +56,7 @@ fn explicit_project_instructions_are_complete_or_refused_under_budget_pressure()
 
 #[test]
 fn base_contract_scopes_current_facts_and_requested_answer_format() {
-    assert_eq!(BaseContract::GENERATION, 3);
+    assert_eq!(BaseContract::GENERATION, 4);
     for boundary in [
         "same target, field and scope",
         "historical assistant prose or summaries",
@@ -66,6 +66,9 @@ fn base_contract_scopes_current_facts_and_requested_answer_format() {
         "original baseline, post-change and current results distinct",
         "historical value is unavailable",
         "smallest decisive next action",
+        "Latest operator instructions override old goals and summaries",
+        "Checks/diagnosis: gather enough evidence, report and stop",
+        "Resume restores state, not permission to continue",
     ] {
         assert!(BaseContract.prompt().contains(boundary), "{boundary}");
     }
@@ -89,6 +92,12 @@ fn base_revision_changes_only_its_fragment_and_preserves_historical_bytes() {
         "159855321069347debbce03f60ec3960c782868bbf188a09037601cb93dc12a1"
     );
     assert!(BaseContract.prompt().starts_with(generation2));
+    let generation3 = include_str!("fixtures/prompts/base-v3.md");
+    assert_eq!(
+        format!("{:x}", Sha256::digest(generation3.as_bytes())),
+        "cc865337f9c30a27bea9e8d8b17653b7b1dd4a2582c9577c785b868637cfb17a"
+    );
+    assert!(BaseContract.prompt().starts_with(generation3));
     let current = PromptComposition::current().fragments().unwrap();
     let mut historical = current.clone();
     historical[0] = ContextFragment::new(
@@ -302,7 +311,7 @@ fn stable_base_domain_and_phase_compile_into_one_orthogonal_contract() {
                 .map(|fragment| fragment.id().as_str().to_owned())
                 .collect::<Vec<_>>(),
             vec![
-                "prompt:base:pragmatic-vulnerability-researcher:3".to_owned(),
+                "prompt:base:pragmatic-vulnerability-researcher:4".to_owned(),
                 format!("prompt:domain:{id}:{}", profile.generation()),
                 "prompt:phase:mapping:2".to_owned(),
             ]

@@ -144,6 +144,9 @@ impl ToolRegistry {
                 | BuiltinTool::StopJob
                 | BuiltinTool::PollPty
                 | BuiltinTool::StopPty
+                | BuiltinTool::StartJob
+                | BuiltinTool::StartPty
+                | BuiltinTool::ToolSearch
         ) {
             builtin_spec.version = "2".to_owned();
         }
@@ -280,16 +283,19 @@ impl ToolRegistry {
                     json!({"error": "execution plan names an unregistered Tool"}),
                 );
             };
+            // Catalog-only discovery does not touch the leased environment.
+            // Keep deferred lifecycle controls reachable, without exempting
+            // arbitrary read-only filesystem/process tools from resource locks.
+            if tool == BuiltinTool::ToolSearch {
+                let deferred = plan.deferred_tool_specs().to_vec();
+                return tool_search::execute(plan, &deferred);
+            }
             if !is_process_lifecycle_tool(plan.call.name.as_str())
                 && let Some(conflict) = self.active_leases.conflicting(&plan)
             {
                 return active_resource_busy(plan, conflict);
             }
             let timeout_plan = plan.clone();
-            if tool == BuiltinTool::ToolSearch {
-                let deferred = plan.deferred_tool_specs().to_vec();
-                return tool_search::execute(plan, &deferred);
-            }
             let specs = if tool == BuiltinTool::InspectProject {
                 if plan.resolved_tool_plan_fingerprint().is_some() {
                     plan.resolved_tool_specs().to_vec()
@@ -1306,7 +1312,7 @@ fn canonical_description(name: &str) -> String {
         ),
         "start_job" => (
             "the command is short or terminal-interactive.",
-            "long non-PTY work.",
+            "long non-PTY work with an explicit lifetime (timeout_ms defaults to 300000). Declare actual resources: omitted/empty resources hold a global execution lease until termination. Retain the Job ID; discover poll_job/stop_job through tool_search for status or early stop. Discovery remains available while the Job runs; stopping a Turn is not stopping a Job.",
             "Job ID and status.",
         ),
         "poll_job" => (
@@ -1326,7 +1332,7 @@ fn canonical_description(name: &str) -> String {
         ),
         "start_pty" => (
             "non-terminal work is sufficient.",
-            "run_command or start_job.",
+            "run_command or start_job for non-terminal work. Declare actual resources; omitted/empty resources retain a global execution lease. Retain the PTY ID; tool_search can discover poll_pty/stop_pty while it runs. Stopping a Turn is not stopping a PTY.",
             "PTY ID and status.",
         ),
         "poll_pty" => (

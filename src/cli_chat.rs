@@ -8,12 +8,13 @@
 
 mod compaction;
 mod context;
+mod input;
 mod recovery;
 mod tool_output;
 mod vision;
 
 use std::cell::Cell;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -100,7 +101,7 @@ pub(crate) async fn run(
     );
 
     println!(
-        "{} session `{}` with domain `{}` and phase `{}`. Enter a line, or use /paste, /image, /domain, /phase, /context, /compact, /resume, /exit or EOF.",
+        "{} session `{}` with domain `{}` and phase `{}`. Enter a line, or use /paste, /image, /domain, /phase, /context, /compact, /resume, /stop, /exit or EOF. While running in a terminal, /stop or a new instruction interrupts the current Turn before further input is handled.",
         disposition.message(),
         session_id.as_str(),
         domain.id(),
@@ -112,17 +113,26 @@ pub(crate) async fn run(
     let mut pending_phase = requested_phase.map(ResearchPhaseSelection::operator);
     let mut pending_image: Option<vision::PendingImage> = None;
     let mut recovery_required = false;
+    let terminal_input = io::stdin().is_terminal();
+    let mut input_closed = false;
+    let mut pending_input = None;
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let tool_output = std::cell::RefCell::new(tool_output::ToolOutput::default());
     loop {
         print!("you> ");
         io::stdout().flush()?;
-        let line = tokio::select! {
-            line = lines.next_line() => line?,
-            signal = tokio::signal::ctrl_c() => {
-                signal?;
-                println!("\nInterrupted while waiting for input; Session `{}` remains active.", session_id.as_str());
-                return recovery::exit_status(recovery_required);
+        let line = if pending_input.is_some() {
+            pending_input.take()
+        } else if input_closed {
+            None
+        } else {
+            tokio::select! {
+                line = lines.next_line() => line?,
+                signal = tokio::signal::ctrl_c() => {
+                    signal?;
+                    println!("\nInterrupted while waiting for input; Session `{}` remains active.", session_id.as_str());
+                    return recovery::exit_status(recovery_required);
+                }
             }
         };
         let Some(line) = line else {
@@ -175,6 +185,10 @@ pub(crate) async fn run(
                 session_id.as_str()
             );
             return recovery::exit_status(recovery_required);
+        }
+        if line == "/stop" {
+            println!("No Turn is running. Background Jobs/PTYs, if any, are not stopped by /stop.");
+            continue;
         }
         if line == "/context" {
             match agent.last_context_plan() {
@@ -288,21 +302,29 @@ pub(crate) async fn run(
                     cancellation.clone(),
                     Arc::clone(&request_budget),
                 );
-                tokio::pin!(preparation);
-                let prepared = tokio::select! {
-                    result = &mut preparation => result,
-                    signal = tokio::signal::ctrl_c() => {
-                        signal?;
-                        cancellation.cancel();
-                        match preparation.as_mut().await {
-                            Ok(_) | Err(ChatError::VisionCancelled) => {
-                                println!("\n[vision request cancelled; no Primary request was started]");
-                                continue;
-                            }
-                            Err(error) => return Err(error),
+                let prepared = input::interruptible(
+                    preparation,
+                    &cancellation,
+                    &mut lines,
+                    terminal_input,
+                    &mut input_closed,
+                    &mut pending_input,
+                )
+                .await?;
+                if cancellation.is_cancelled() {
+                    match prepared {
+                        Ok(_) | Err(ChatError::VisionCancelled) => {
+                            println!(
+                                "\n[vision request cancelled; no Primary request was started]"
+                            );
+                            continue;
+                        }
+                        Err(error) => {
+                            input::reject_pending(&mut pending_input);
+                            return Err(error);
                         }
                     }
-                };
+                }
                 match prepared {
                     Ok(prepared) => Some(prepared),
                     Err(error) => {
@@ -311,6 +333,7 @@ pub(crate) async fn run(
                             session.validate_stopped_runtime(&agent)?;
                             recovery_required = true;
                             recovery::report_stop(&error, &request_budget);
+                            input::reject_pending(&mut pending_input);
                             println!(
                                 "Initial image/task was not submitted to Primary; reattach the image explicitly after /resume if needed."
                             );
@@ -353,6 +376,32 @@ pub(crate) async fn run(
             tool_output.borrow_mut().started(plan);
         };
         let mut durability = |checkpoint: ChatDurabilityCheckpoint<'_>| match checkpoint {
+            ChatDurabilityCheckpoint::ModelSampleRejected {
+                diagnostic,
+                corrections_used,
+            } => {
+                end_answer();
+                session
+                    .record_model_rejection(*diagnostic, corrections_used)
+                    .map_err(|error| AgentLoopError::ModelRejectionCommit {
+                        message: error.to_string(),
+                    })?;
+                let limit = crate::domain::model::MAX_TOOL_ARGUMENT_CORRECTIONS_PER_TURN;
+                eprintln!(
+                    "\n[model sample rejected] {diagnostic}; streamed prose was not committed and no Tool from this sample ran."
+                );
+                if corrections_used < limit {
+                    eprintln!(
+                        "[argument correction {}/{limit}] Regenerating the failed sample if budget permits; completed tools will not be replayed.",
+                        corrections_used + 1
+                    );
+                } else {
+                    eprintln!(
+                        "[argument corrections exhausted] Returning control without another request."
+                    );
+                }
+                Ok(())
+            }
             ChatDurabilityCheckpoint::Subcommand(checkpoint) => {
                 session
                     .record_subcommand(checkpoint)
@@ -419,15 +468,15 @@ pub(crate) async fn run(
                     Arc::clone(&request_budget),
                 ),
             );
-            tokio::pin!(turn);
-            tokio::select! {
-                outcome = &mut turn => outcome,
-                signal = tokio::signal::ctrl_c() => {
-                    signal?;
-                    signal_cancellation.cancel();
-                    turn.as_mut().await
-                }
-            }
+            input::interruptible(
+                turn,
+                &signal_cancellation,
+                &mut lines,
+                terminal_input,
+                &mut input_closed,
+                &mut pending_input,
+            )
+            .await?
         };
 
         tool_output.borrow_mut().finish_turn();
@@ -440,6 +489,7 @@ pub(crate) async fn run(
             }
             Err(error) => {
                 println!();
+                input::reject_pending(&mut pending_input);
                 if !agent.permits_explicit_recovery(&error) {
                     return Err(ChatError::Agent(error));
                 }
@@ -823,6 +873,46 @@ impl DurableChatSession {
             .append(store, event)
             .map_err(ChatError::from_session_append)?;
         Ok(ReceiptRecordDisposition::Recorded)
+    }
+
+    fn record_model_rejection(
+        &self,
+        diagnostic: crate::domain::model::ToolArgumentDiagnostic,
+        corrections_used: u8,
+    ) -> Result<(), ChatError> {
+        let mut writer = self.project.open_writer()?;
+        let mut store = writer.open_session(self.session_id.clone(), None)?;
+        let stream_id = ProjectEventStream::Session(self.session_id.clone()).stream_id();
+        let mut projection =
+            SessionProjection::replay(EventSource::read_events(&store, &stream_id)?)?;
+        let request_audit_event_id = projection
+            .state()
+            .request_audits()
+            .last()
+            .ok_or(crate::domain::session::SessionError::InvalidModelSampleRejection)?
+            .audit_event_id()
+            .clone();
+        let sequence = store.next_sequence()?;
+        let event = SessionEvent::ModelSampleRejected {
+            request_audit_event_id,
+            diagnostic,
+            corrections_used,
+        }
+        .into_envelope(
+            event_id(
+                self.project.project_id(),
+                &self.session_id,
+                sequence.get(),
+                "model-rejected",
+            ),
+            stream_id,
+            sequence,
+            occurred_at(),
+        )?;
+        projection
+            .append(&mut store, event)
+            .map_err(ChatError::from_session_append)?;
+        Ok(())
     }
 
     fn record_history(&self, items: &[crate::domain::model::ContentItem]) -> Result<(), ChatError> {

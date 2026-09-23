@@ -29,11 +29,13 @@
 | Streaming 完成、断流和应用级取消 | `app/model_streaming` 或后续唯一 AgentLoop 服务 | Transport 只提供流、释放和协议错误 |
 | Primary/Vision 每 Turn 请求准入 | 私有 `app/model_request_budget` | Config 唯一路径验证额度；CLI 在初始 Vision 前创建并透传同一预算，显示 admission 而非 Provider usage；不新建 retry/计费/持久日志 |
 | 可恢复停止与显式恢复 | App AgentLoop 的有限 typed classifier + 原 Session Resume | CLI 验证耐久/运行时 History 一致后提示；`/resume` 前禁止新任务，无自动 reasoning 丢弃或工具重试，未知和持久化错误仍 fatal |
+| 非法工具JSON的模型纠正 | App AgentLoop + 私有 argument_correction | ADR-0033仅允许执行前typed失败每Turn合计2次重新生成；原共享预算/Context/RequestAudit与Session拒绝事实负责准入、来源和持久化；不猜修JSON、不重跑工具、不加Adapter重试 |
 | Responses 请求、响应和 SSE DTO | `adapters/responses` | 不得进入 Domain 或 App 契约；Provider 配置不得复制协议类型 |
 | 最终文本核对 | 私有 `adapters/responses/response/text` | 单响应内按 wire 位置/身份核对；相同终值去重、合法前缀仅补后缀，冲突/错序拒绝，无自动续写或第二 History |
 | CLI reasoning 展示与开发构建 wire debug | `adapters/responses/cli_output` | 既有 Composition Root 选择 CLI 呈现；不重建请求、不写第二份事实；release 保留 reasoning 但排除完整 debug |
 | 终端内容转义与有界预览 | 私有 `terminal_content` | Tool/debug 仅复用派生视图；不修改事实、Tool 输出或 Context 预算 |
 | Tool 执行展示 | 私有 `cli_chat/tool_output` | 使用已有 start/durable receipt 回调；长 ID 保留在原审计源；未知结果不得展示完成 |
+| 终端运行中纠偏 | 私有 `cli_chat/input` | Primary/initial Vision 共用输入观察；只请求原 AgentCancellation，等待原执行/持久化结果，再由正常 CLI Turn 边界处理输入；不另建取消、恢复或任务状态机 |
 | Vision 图像坐标系与范围 | `domain/vision/geometry` | 图片 Adapter 提供字节尺寸；Analysis、Observation 校验和 Replay 消费同一契约，不静默缩放/夹取区域 |
 | 图片字节检查与 Artifact 解析 | `adapters/image` | CLI geometry 与 Responses 复用同一不可变 Blob/Artifact 解析；App 不解码图片或读路径 |
 | Completed reasoning continuation | `domain/model` 的语义项 + AgentLoop provider delivery state | Conversation History 拒绝 reasoning；opaque encrypted sidecar 与 wire ID 保持 Adapter-local |

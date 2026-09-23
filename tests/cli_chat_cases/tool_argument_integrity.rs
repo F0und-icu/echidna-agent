@@ -20,11 +20,11 @@ fn malformed_arguments_reject_the_whole_sample_without_writes_or_payload_disclos
                 "arguments":arguments}}),
             json!({"type":"response.completed","response":{"id":"must-not-commit"}}),
         ];
-        let body = events
+        let body: String = events
             .iter()
             .map(|event| format!("data: {event}\n\n"))
             .collect();
-        let server = spawn_responses_server(vec![(200, body)]);
+        let server = spawn_responses_server(vec![(200, body); 3]);
         let config = write_config(root.path(), &server.base_url);
         let extra = if cfg!(debug_assertions) {
             vec!["--debug"]
@@ -65,7 +65,20 @@ fn malformed_arguments_reject_the_whole_sample_without_writes_or_payload_disclos
         let project = Project::discover(root.path()).unwrap();
         let state = reduced_session(&project, &session_id(root.path()));
         assert_eq!(state.execution_receipt_count(), 0);
-        assert_eq!(state.request_audits().len(), 1);
+        assert_eq!(state.request_audits().len(), 3);
+        let rejections: Vec<_> = session_events(root.path(), &session_id(root.path()))
+            .into_iter()
+            .filter(|event| event["event_type"] == "model.sample_rejected")
+            .collect();
+        assert_eq!(rejections.len(), 3);
+        for (index, rejection) in rejections.iter().enumerate() {
+            assert_eq!(rejection["payload"]["corrections_used"], index);
+            assert_eq!(
+                rejection["payload"]["request_audit_event_id"],
+                state.request_audits()[index].audit_event_id().as_str()
+            );
+        }
+        assert!(stderr.contains("argument corrections exhausted"));
         assert_eq!(
             state.history().items(),
             &[cyber_agent::domain::model::ContentItem::user_text(
@@ -73,11 +86,14 @@ fn malformed_arguments_reject_the_whole_sample_without_writes_or_payload_disclos
             )]
         );
         assert!(!root.path().join("must-not-exist.txt").exists());
-        server
-            .requests
-            .recv_timeout(Duration::from_secs(10))
-            .unwrap();
-        assert!(server.requests.try_recv().is_err(), "no retry");
+        for _ in 0..3 {
+            server
+                .requests
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap();
+        }
+        assert!(server.requests.try_recv().is_err(), "no unbounded retry");
+        assert_audits_reconstruct(root.path(), &state);
         server.join();
     }
 }

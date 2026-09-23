@@ -149,6 +149,12 @@ pub enum ModelProviderError {
     HttpFailure { status: u16 },
     #[error("model stream protocol failed: {message}")]
     ProtocolFailure { message: String },
+    #[error(
+        "model stream protocol failed: function call arguments are not valid JSON: {diagnostic}; rejected before dispatch; malformed payload omitted"
+    )]
+    InvalidToolArguments {
+        diagnostic: crate::domain::model::ToolArgumentDiagnostic,
+    },
     #[error("model Provider failed ({code:?}): {message}")]
     ProviderFailure {
         code: Option<String>,

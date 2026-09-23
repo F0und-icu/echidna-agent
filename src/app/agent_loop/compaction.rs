@@ -60,6 +60,7 @@ where
             let mut history = items.to_vec();
             history.push(ContentItem::user_text("Continue."));
             context_state::compile_context(context_state::ContextCompilationInput {
+                correction_feedback: &[],
                 prompt_composition: &self.prompt_composition,
                 world_state: self.world_state.as_ref(),
                 project_snapshot: self.project_snapshot.as_ref(),

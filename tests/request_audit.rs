@@ -343,6 +343,11 @@ fn base_revision_does_not_replace_recorded_historical_bytes() {
         "generation two question",
     );
     let old2_manifest = record(&service, old2.clone(), &mut session, &mut sink, "base-v2");
+    let old3 = input(
+        include_str!("fixtures/prompts/base-v3.md"),
+        "generation three question",
+    );
+    let old3_manifest = record(&service, old3.clone(), &mut session, &mut sink, "base-v3");
     let old_event = sink.events[0].clone();
     let old_blobs = blobs.blobs.lock().unwrap().clone();
     let current = input(
@@ -354,11 +359,12 @@ fn base_revision_does_not_replace_recorded_historical_bytes() {
         current.clone(),
         &mut session,
         &mut sink,
-        "base-v3",
+        "base-v4",
     );
     assert_ne!(old_manifest.components(), current_manifest.components());
     assert_eq!(service.reconstruct(&old_manifest).unwrap(), old);
     assert_eq!(service.reconstruct(&old2_manifest).unwrap(), old2);
+    assert_eq!(service.reconstruct(&old3_manifest).unwrap(), old3);
     assert_eq!(service.reconstruct(&current_manifest).unwrap(), current);
     assert_eq!(sink.events[0], old_event);
     for (id, bytes) in old_blobs {

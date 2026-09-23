@@ -43,6 +43,8 @@ use serde_json::{Value, json};
 #[path = "tool_loop_cases/output_retention.rs"]
 mod output_retention;
 
+#[path = "tool_loop_cases/argument_correction.rs"]
+mod argument_correction;
 #[path = "tool_loop_cases/command_diagnostics.rs"]
 mod command_diagnostics;
 
@@ -1404,7 +1406,7 @@ async fn context_planner_and_cache_feed_the_baseline_without_owning_delivery() {
             .map(|entry| entry.fragment_id().as_str())
             .collect::<Vec<_>>(),
         vec![
-            "prompt:base:pragmatic-vulnerability-researcher:3",
+            "prompt:base:pragmatic-vulnerability-researcher:4",
             "prompt:domain:source:1",
             "prompt:phase:mapping:2",
         ]

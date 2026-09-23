@@ -375,7 +375,7 @@ fn resume_delivers_current_memory_alongside_old_prose_without_rewriting_history(
         assert!(
             serde_json::to_string(audit)
                 .unwrap()
-                .contains("prompt:base:pragmatic-vulnerability-researcher:3")
+                .contains("prompt:base:pragmatic-vulnerability-researcher:4")
         );
     }
     assert_audits_reconstruct(root.path(), &after_state);

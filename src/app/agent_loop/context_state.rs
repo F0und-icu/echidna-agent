@@ -41,6 +41,7 @@ pub(super) struct ContextCompilationInput<'a> {
     pub(super) capabilities: &'a ModelCapabilities,
     pub(super) tool_specs: &'a [ToolSpec],
     pub(super) prior_manifest: Option<&'a FullLogicalManifest>,
+    pub(super) correction_feedback: &'a [ContextFragment],
 }
 
 /// One fixed, typed replacement for volatile facts before a later sampling
@@ -102,6 +103,7 @@ impl CurrentContextState {
 /// The committed and current local facts needed to prove one state-diff
 /// replacement is safe for incremental delivery.
 pub(super) struct StateDiffDeliveryInput<'a> {
+    pub(super) correction_feedback: &'a [ContextFragment],
     pub(super) step_id: &'a str,
     pub(super) full_input: &'a ModelInputIR,
     pub(super) full_delivery_map: &'a ContextDeliveryMap,
@@ -141,6 +143,7 @@ pub(super) fn compile_context(
         capabilities,
         tool_specs,
         prior_manifest,
+        correction_feedback,
     } = input;
     if history.len() <= turn_history_start {
         return Err(AgentLoopError::ContextStateMismatch);
@@ -238,6 +241,7 @@ pub(super) fn compile_context(
         },
     )?;
 
+    fragments.extend_from_slice(correction_feedback);
     let plan = planner.compile(
         fragments,
         budget,
@@ -253,6 +257,7 @@ pub(super) fn state_diff_delivery_input(
     input: StateDiffDeliveryInput<'_>,
 ) -> Result<Option<(ModelInputIR, ContextDeliveryMap)>, AgentLoopError> {
     let StateDiffDeliveryInput {
+        correction_feedback,
         step_id,
         full_input,
         full_delivery_map,
@@ -419,6 +424,15 @@ pub(super) fn state_diff_delivery_input(
                     "delivery:{step_id}:state-diff:{index}"
                 ))?),
             )?;
+        }
+    }
+    for fragment in correction_feedback {
+        if !delivery_map
+            .content_items()
+            .iter()
+            .any(|item| item.fragment_id() == fragment.id())
+        {
+            append_delivery_fragment(&mut candidate, &mut delivery_map, planner, fragment.clone())?;
         }
     }
     candidate.instructions = full_input.instructions.clone();

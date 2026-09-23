@@ -30,6 +30,14 @@ R7-F1 当前本地修复另读 [修复计划](development/R7_REPAIR_PLAN.md)、A
 Architecture v1.21 本地已审/验证版本。独立审计、完整本地 Gate/Lean 已通过，尚未远端
 hash封存或Live验收；不把历史冻结链及 R7-L1 未完成结果改写为新验收。
 
+当前 R7-F2 另读 [操作控制修复](development/R7_OPERATOR_CONTROL_REPAIR.md)、
+ADR-0032 和 Architecture v1.22。新交互行为和后台控制须经独立审计/离线验收，
+不能把设计文档当作已通过测试或真实模型服从性证明。
+
+当前 R7-F3 另读 [参数纠正修复](development/R7_ARGUMENT_REGENERATION.md)、
+ADR-0033 和 Architecture v1.23：只对执行前非法工具JSON做有界模型重新生成。
+本地候选不代表独立审计/Gate或Live已完成；不继承上一轮交付授权。
+
 随后单独授权的 [R6-SC1 Live](development/R6_SC1_LIVE_2026_09_20.md) 已完成真实Schema调用和重启回读核验，并获独立事后结果复核 RESULT APPROVE（不是事前脚本审查）；措辞/覆盖限制和绝对usage如实保留，不推定token收益。已审查代码与后续小修通过 #84/#85/#86 合并；未跑Actions。当前 [R6验收收口](development/R6_ACCEPTANCE_CLOSURE.md) 汇总已覆盖项、连续压缩/恢复缺口、原问题分类与非目标；准确执行状态以STATUS为准。
 
 ## 3. 文档地图

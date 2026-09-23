@@ -14,6 +14,99 @@ use serde_json::{Value, json};
 
 static NEXT_PROJECT_ID: AtomicU64 = AtomicU64::new(1);
 
+#[tokio::test]
+async fn global_background_lease_preserves_discovery_and_model_bound_stop() {
+    use cyber_agent::domain::research_control::ResearchPhase;
+    use cyber_agent::domain::tools::DeferredActivationSet;
+    for (start_name, stop_name, id_field) in [
+        ("start_job", "stop_job", "job_id"),
+        ("start_pty", "stop_pty", "pty_session_id"),
+    ] {
+        let project = TestProject::new(start_name);
+        let tools = ToolRegistry::for_project(&project.root);
+        let mut arguments = json!({"argv":["sh","-c","read line"]});
+        if start_name == "start_job" {
+            arguments["timeout_ms"] = json!(10000);
+        }
+        let started = tools
+            .execute(plan(&tools, "start", start_name, arguments))
+            .await;
+        assert_eq!(started.result.status, ToolResultStatus::Succeeded);
+        let handle = started.result.output[id_field].as_str().unwrap();
+        let blocked = tools
+            .execute(plan(
+                &tools,
+                "blocked",
+                "run_command",
+                json!({"argv":["sh","-c","printf forbidden > forbidden"]}),
+            ))
+            .await;
+        assert_eq!(blocked.result.status, ToolResultStatus::Failed);
+        assert!(!project.root.join("forbidden").exists());
+
+        let exposure = ResearchPhase::Mapping.tool_exposure();
+        let mut activation = DeferredActivationSet::default();
+        let before = tools.resolve_tool_plan(&exposure, &activation).unwrap();
+        assert!(before.advertised_spec(&ToolName::new(stop_name)).is_none());
+        let call = ToolCall::new(
+            ToolCallId::new("discover"),
+            ToolName::new("tool_search"),
+            json!({"query":stop_name}),
+        );
+        let search = tools
+            .execute(
+                tools
+                    .plan_model_call(&before, ExecutionId::new("search"), call)
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(search.result.status, ToolResultStatus::Succeeded);
+        activation
+            .apply_search_result(&search.result, &before)
+            .unwrap();
+        let after = tools.resolve_tool_plan(&exposure, &activation).unwrap();
+        let stop_call = ToolCall::new(
+            ToolCallId::new("stop"),
+            ToolName::new(stop_name),
+            json!({(id_field):handle}),
+        );
+        assert!(
+            tools
+                .plan_model_call(&before, ExecutionId::new("early"), stop_call.clone())
+                .is_err()
+        );
+        let stopped = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            tools.execute(
+                tools
+                    .plan_model_call(&after, ExecutionId::new("stop"), stop_call)
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("stop must not wait for the Job deadline");
+        assert_eq!(stopped.result.status, ToolResultStatus::Succeeded);
+        assert_eq!(stopped.result.output["status"], "cancelled");
+        let recovered = tools
+            .execute(plan(
+                &tools,
+                "after-stop",
+                "run_command",
+                json!({"argv":["sh","-c","printf recovered"]}),
+            ))
+            .await;
+        assert_eq!(recovered.result.status, ToolResultStatus::Succeeded);
+        let next_turn = tools
+            .resolve_tool_plan(&exposure, &DeferredActivationSet::default())
+            .unwrap();
+        assert!(
+            next_turn
+                .advertised_spec(&ToolName::new(stop_name))
+                .is_none()
+        );
+    }
+}
+
 #[test]
 fn ctf_r3a_fresh_processes_have_distinct_job_and_pty_handles() {
     let probe = || {

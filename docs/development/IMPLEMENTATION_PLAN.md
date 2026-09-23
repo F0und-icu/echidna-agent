@@ -1085,7 +1085,23 @@ F6a delivery addendum: after the acceptance checkpoint above, the operator autho
 
 ### 当前修复队列（2026-09-12）
 
+#### 当前授权修复：R7-F3 有界参数重新生成（2026-09-23）
+
+按ADR-0033/v1.23实现仅执行前非法JSON的typed诊断、Session拒绝事实、
+现有Context反馈和每Turn最多2次模型纠正；保持原共享预算与成功续接。
+无工具自动重跑、JSON猜修、Live或Git；专项/受影响测试后已获本轮独立审计授权。
+全新Terra xhigh限时只读审计APPROVE，无P1/P2；完整Gate540独立PASS/4ignored、
+Lean PASS，本地离线收口；不自动开始Live、Git交付或下一Slice。
+保留未提交R7-F2及其已审证据。完整进度以STATUS为准。
+
 #### 当前修复：R7-F1 工具参数与长任务优化（2026-09-23）
+
+后续当前授权修复为 R7-F2：终端中途停止/纠偏、Base 当前任务范围、后台
+Job/PTY 运行期间工具发现与收尾可达。按 ADR-0032 / v1.22 和
+R7_OPERATOR_CONTROL_REPAIR.md 实施；不自动运行 Live 或远端交付。
+R7-F2 本地收口：独立Terra xhigh APPROVE、完整Gate复跑532独立PASS/4ignored、
+Lean PASS。首次旧用例15秒超时与根因未定位限制保留；无源码/测试审计后改动。
+后续真实模型范围服从性、旧测试超时诊断增强另列范围，不自动开始。
 
 操作者授权本地修复并纳入先前优化项；由主 Agent 直接实现，专项及受影响离线测试后
 在独立审计前停止。不运行 Live、不提交 Git、不使用子 Agent。范围、限制、后续

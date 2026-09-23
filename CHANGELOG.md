@@ -7,6 +7,17 @@ milestone history remains in `docs/development/STATUS.md` and Git history.
 
 ### Changed
 
+- R7-F2: interactive terminal input can stop or redirect the active Turn through
+  existing cancellation; background Tool discovery remains available while
+  Job/PTY resource leases are held. Base generation4 clarifies current operator
+  scope without introducing a second task controller.
+- R7-F3: malformed Tool argument JSON may trigger at most two model corrections
+  per Turn within the existing shared request budget. The rejected sample never
+  dispatches Tools; earlier successful results and reasoning remain retained.
+  Ordinary transport/integrity failures and Tool execution are not retried.
+  New version1 `model.sample_rejected` Session events are readable by the new
+  binary, but old binaries cannot Resume Sessions containing these events.
+
 - R7-F1: explicitly configured Project instructions are delivered completely or
   planning fails before sampling. Base generation3 and lossy-summary guidance
   distinguish original, repaired and current results without inventing evidence.

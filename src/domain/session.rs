@@ -20,6 +20,7 @@ use super::events::{
 };
 use super::history::{ConversationHistory, HistoryError, normalize_with_subcommands};
 use super::model::ContentItem;
+use super::model::{MAX_TOOL_ARGUMENT_CORRECTIONS_PER_TURN, ToolArgumentDiagnostic};
 use super::request_audit::{RequestAuditError, RequestAuditManifest};
 use super::research_control::{ResearchPhase, ResearchPhaseSelection};
 use super::tools::SubcommandCheckpoint;
@@ -38,6 +39,7 @@ const SUBCOMMAND_CHECKPOINT_EVENT_TYPE: &str = "tool.subcommand_checkpointed";
 const CACHE_HIT_EVENT_TYPE: &str = "tool.result_cache_hit";
 const STREAM_RECOVERED_EVENT_TYPE: &str = "StreamRecovered";
 const HISTORY_ITEM_RECORDED_EVENT_TYPE: &str = "session.history_item_recorded";
+const MODEL_SAMPLE_REJECTED_EVENT_TYPE: &str = "model.sample_rejected";
 pub(super) const COMPACTION_CREATED_EVENT_TYPE: &str = "session.compaction_created";
 pub(super) const REQUEST_AUDIT_RECORDED_EVENT_TYPE: &str = "session.request_audit_recorded";
 const VISION_ROUTE_DECIDED_EVENT_TYPE: &str = "vision.route_decided";
@@ -75,6 +77,11 @@ pub enum SessionLifecycle {
 /// the Tool domain's `ExecutionReceipt` rather than defining a Session copy.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionEvent {
+    ModelSampleRejected {
+        request_audit_event_id: EventId,
+        diagnostic: ToolArgumentDiagnostic,
+        corrections_used: u8,
+    },
     SubcommandCheckpointed {
         checkpoint: SubcommandCheckpoint,
     },
@@ -146,6 +153,7 @@ impl SessionEvent {
 
     fn event_type(&self) -> EventType {
         match self {
+            Self::ModelSampleRejected { .. } => EventType::new(MODEL_SAMPLE_REJECTED_EVENT_TYPE),
             Self::SubcommandCheckpointed { .. } => EventType::new(SUBCOMMAND_CHECKPOINT_EVENT_TYPE),
             Self::Started { .. } => EventType::new(SESSION_STARTED_EVENT_TYPE),
             Self::Resumed { .. } => EventType::new(SESSION_RESUMED_EVENT_TYPE),
@@ -172,6 +180,16 @@ impl SessionEvent {
 
     fn encode_payload(&self, event_type: &EventType) -> Result<Value, SessionError> {
         let payload = match self {
+            Self::ModelSampleRejected {
+                request_audit_event_id,
+                diagnostic,
+                corrections_used,
+            } => serde_json::to_value(ModelSampleRejectedPayload {
+                schema_version: CURRENT_SESSION_PAYLOAD_SCHEMA_VERSION,
+                request_audit_event_id: request_audit_event_id.clone(),
+                diagnostic: *diagnostic,
+                corrections_used: *corrections_used,
+            }),
             Self::SubcommandCheckpointed { checkpoint } => serde_json::to_value(checkpoint),
             Self::Started {
                 primary_provider_session,
@@ -217,6 +235,16 @@ impl SessionEvent {
 
     fn decode(event_type: &EventType, payload: Value) -> Result<Self, SessionError> {
         match event_type.as_str() {
+            MODEL_SAMPLE_REJECTED_EVENT_TYPE => {
+                let payload: ModelSampleRejectedPayload =
+                    decode_strict_payload(event_type, payload)?;
+                require_current_payload_schema(event_type, payload.schema_version)?;
+                Ok(Self::ModelSampleRejected {
+                    request_audit_event_id: payload.request_audit_event_id,
+                    diagnostic: payload.diagnostic,
+                    corrections_used: payload.corrections_used,
+                })
+            }
             SUBCOMMAND_CHECKPOINT_EVENT_TYPE => {
                 let checkpoint: SubcommandCheckpoint = decode_strict_payload(event_type, payload)?;
                 checkpoint
@@ -351,6 +379,7 @@ pub struct SessionState {
     recovery_count: u64,
     latest_compaction: Option<SessionCompaction>,
     request_audits: Vec<RequestAuditManifest>,
+    last_rejected_request: Option<EventId>,
     vision_routes: Vec<VisionRouteRecord>,
     vision_observations: Vec<VisionObservation>,
     vision_failures: Vec<VisionAnalysisFailure>,
@@ -376,6 +405,7 @@ impl Default for SessionState {
             recovery_count: 0,
             latest_compaction: None,
             request_audits: Vec::new(),
+            last_rejected_request: None,
             vision_routes: Vec::new(),
             vision_observations: Vec::new(),
             vision_failures: Vec::new(),
@@ -864,6 +894,28 @@ fn apply_session_event(
             }
             state.latest_compaction = Some(compaction);
         }
+        SessionEvent::ModelSampleRejected {
+            request_audit_event_id,
+            corrections_used,
+            ..
+        } => {
+            require_transition(
+                state.lifecycle,
+                MODEL_SAMPLE_REJECTED_EVENT_TYPE,
+                SessionLifecycle::Active,
+            )?;
+            state.history.ensure_all_tool_calls_paired()?;
+            if corrections_used > MAX_TOOL_ARGUMENT_CORRECTIONS_PER_TURN
+                || state.last_rejected_request.as_ref() == Some(&request_audit_event_id)
+                || state
+                    .request_audits
+                    .last()
+                    .is_none_or(|audit| audit.audit_event_id() != &request_audit_event_id)
+            {
+                return Err(SessionError::InvalidModelSampleRejection);
+            }
+            state.last_rejected_request = Some(request_audit_event_id);
+        }
         SessionEvent::RequestAuditRecorded { manifest } => {
             require_transition(
                 state.lifecycle,
@@ -997,6 +1049,15 @@ fn apply_session_event(
         }
     }
     Ok(())
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ModelSampleRejectedPayload {
+    schema_version: u16,
+    request_audit_event_id: EventId,
+    diagnostic: ToolArgumentDiagnostic,
+    corrections_used: u8,
 }
 
 struct VisionTerminalReferences<'fact> {
@@ -1299,6 +1360,10 @@ impl ResearchPhaseSelectedPayload {
 /// Explicit Session schema, stream, payload and transition failures.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum SessionError {
+    #[error(
+        "model sample rejection does not reference one unrejected latest request audit or exceeds the correction bound"
+    )]
+    InvalidModelSampleRejection,
     #[error("subcommand checkpoint does not agree with parent execution or prior child facts")]
     SubcommandCheckpointMismatch,
     #[error("Session Tool output captures lack a matching prior Receipt or disagree with it")]

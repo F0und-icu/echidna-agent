@@ -9,6 +9,7 @@ use super::tools::{ToolCall, ToolResult, ToolSpec};
 /// The current version of the semantic model input representation.
 pub const MODEL_INPUT_IR_SCHEMA_VERSION: u16 = 3;
 pub(crate) const MODEL_INPUT_IR_V2_SCHEMA_VERSION: u16 = 2;
+pub(crate) const MAX_TOOL_ARGUMENT_CORRECTIONS_PER_TURN: u8 = 2;
 
 /// A version for the provider-neutral input representation.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -94,6 +95,24 @@ impl ContentItem {
 pub enum MessageRole {
     User,
     Assistant,
+}
+
+/// Bounded, payload-free diagnostics for a rejected Tool argument document.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Error)]
+#[serde(deny_unknown_fields)]
+#[error("category={category:?}, line={line}, column={column}, arguments_bytes={arguments_bytes}")]
+pub struct ToolArgumentDiagnostic {
+    pub category: ToolArgumentErrorCategory,
+    pub line: usize,
+    pub column: usize,
+    pub arguments_bytes: usize,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum ToolArgumentErrorCategory {
+    Syntax,
+    Data,
+    Eof,
 }
 
 /// Explicit request requirements that later Slices can derive from tools and

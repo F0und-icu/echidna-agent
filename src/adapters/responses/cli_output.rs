@@ -217,6 +217,7 @@ impl RequestOutput {
         let protocol_error = matches!(
             error,
             crate::ports::model::ModelProviderError::ProtocolFailure { .. }
+                | crate::ports::model::ModelProviderError::InvalidToolArguments { .. }
         );
         #[cfg(debug_assertions)]
         if self.full {
@@ -226,7 +227,7 @@ impl RequestOutput {
                 } else {
                     "Provider 返回停止状态：响应未提交"
                 },
-                json!("失败内容未展示；无法保证结构化脱敏。不自动修复或重试。"),
+                json!("失败内容未展示；无法保证结构化脱敏。Adapter 不修复或重试；是否重新生成由 AgentLoop 决定。"),
             );
             return;
         }

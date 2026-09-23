@@ -5,7 +5,9 @@ mod text;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::domain::model::{ModelEvent, ModelUsage};
+use crate::domain::model::{
+    ModelEvent, ModelUsage, ToolArgumentDiagnostic, ToolArgumentErrorCategory,
+};
 use crate::domain::tools::{ToolCall, ToolCallId, ToolName};
 use crate::ports::model::{ModelProviderError, ModelResponseCompletion, ProviderResponseId};
 
@@ -212,10 +214,22 @@ fn decode_output_item(item: Value) -> Result<DecodedResponsesEvent, ModelProvide
                 // Invalid inner JSON cannot be structurally redacted. Report
                 // coordinates and size only, never a payload snippet or serde's
                 // token-bearing error text. Strict decoding remains the owner.
-                protocol_error(format!(
-                    "function call arguments are not valid JSON: category={:?}, line={}, column={}, arguments_bytes={}; rejected before dispatch; malformed payload omitted",
-                    error.classify(), error.line(), error.column(), function_call.arguments.len()
-                ))
+                let category = match error.classify() {
+                    serde_json::error::Category::Syntax => ToolArgumentErrorCategory::Syntax,
+                    serde_json::error::Category::Data => ToolArgumentErrorCategory::Data,
+                    serde_json::error::Category::Eof => ToolArgumentErrorCategory::Eof,
+                    serde_json::error::Category::Io => {
+                        return protocol_error("unexpected argument reader failure");
+                    }
+                };
+                ModelProviderError::InvalidToolArguments {
+                    diagnostic: ToolArgumentDiagnostic {
+                        category,
+                        line: error.line(),
+                        column: error.column(),
+                        arguments_bytes: function_call.arguments.len(),
+                    },
+                }
             })?;
 
             Ok(decoded(vec![ModelEvent::ToolCall {
