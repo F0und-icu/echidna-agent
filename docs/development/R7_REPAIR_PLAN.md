@@ -238,3 +238,9 @@ does not include merge, Actions, Live or an architecture hash seal.
 
 These are proposed verification/development stages, not new Live allowances or
 instructions to continue automatically after remote handoff.
+
+Remote handoff: Draft PR [#88](https://github.com/F0und-icu/cyber-agent/pull/88)
+on `codex/r7-f1-long-task-repair` against `main`. The stopped-result report is
+commit `007a3ec`; reviewed repair is `a664c71`. Remote branch identity matched
+the local repair before PR creation. Subsequent delivery-record changes are
+documentation only. No merge, Actions or Live result is implied by publication.
