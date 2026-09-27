@@ -3,20 +3,20 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use cyber_agent::app::agent_loop::{AgentLoop, AgentLoopError, AgentTurnOutcome};
-use cyber_agent::app::cancellation::AgentCancellation;
-use cyber_agent::domain::model::ContentItem;
-use cyber_agent::domain::model::{CapabilityMappingVersion, ModelCapabilities, ModelEvent};
-use cyber_agent::domain::tools::{
+use echidna::app::agent_loop::{AgentLoop, AgentLoopError, AgentTurnOutcome};
+use echidna::app::cancellation::AgentCancellation;
+use echidna::domain::model::ContentItem;
+use echidna::domain::model::{CapabilityMappingVersion, ModelCapabilities, ModelEvent};
+use echidna::domain::tools::{
     ExecutionId, ResourceKey, ToolCachePolicy, ToolCall, ToolCallId, ToolDeterminism, ToolEffect,
     ToolExecutionOutcome, ToolExecutionPlan, ToolExposure, ToolName, ToolOutputPolicy,
     ToolParallelism, ToolResultStatus, ToolRetryPolicy, ToolSpec,
 };
-use cyber_agent::ports::model::{
+use echidna::ports::model::{
     ModelEventStream, ModelProvider, ModelProviderError, ModelRequest, ModelResponseCompletion,
     ModelStreamEvent,
 };
-use cyber_agent::ports::tool::{ToolExecutionFuture, ToolExecutor, ToolExecutorError};
+use echidna::ports::tool::{ToolExecutionFuture, ToolExecutor, ToolExecutorError};
 use futures_util::stream;
 use serde_json::{Value, json};
 

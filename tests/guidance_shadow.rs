@@ -4,16 +4,16 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use cyber_agent::adapters::project_event_store::{Project, ProjectEventStream};
-use cyber_agent::domain::events::{EventEnvelope, EventId, EventType, OccurredAt};
-use cyber_agent::domain::research::{
+use echidna::adapters::project_event_store::{Project, ProjectEventStream};
+use echidna::domain::events::{EventEnvelope, EventId, EventType, OccurredAt};
+use echidna::domain::research::{
     CapsuleId, ExperimentCapsuleDraft, ExperimentDraft, ExperimentId, ExperimentRecord,
     ExperimentResult, FindingDraft, FindingId, FindingRecord, FindingStatus, HypothesisDraft,
     HypothesisId, HypothesisRecord, HypothesisStatus, NextActionDraft, NextActionId,
     NextActionRecord, NextActionStatus, ResearchEvent, ResearchRecordRef, TargetKind,
     TargetSnapshotDraft, TargetSnapshotId, TargetSnapshotRecord,
 };
-use cyber_agent::ports::EventSink;
+use echidna::ports::EventSink;
 use serde_json::{Value, json};
 
 use support::TemporaryDirectory;
@@ -276,7 +276,7 @@ fn command_without_candidates() -> Vec<String> {
 }
 
 fn run(root: &TemporaryDirectory, args: &[String]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+    Command::new(env!("CARGO_BIN_EXE_echidna"))
         .current_dir(root.path())
         .args(args)
         .output()

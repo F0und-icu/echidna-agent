@@ -78,9 +78,9 @@ jobs:
       - name: Upload verified macOS arm64 package
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: cyber-agent-macos-arm64
+          name: echidna-macos-arm64
           path: |
-            dist/cyber-agent-*-aarch64-apple-darwin.tar.gz
+            dist/echidna-*-aarch64-apple-darwin.tar.gz
             dist/SHA256SUMS
           if-no-files-found: error
           retention-days: 7

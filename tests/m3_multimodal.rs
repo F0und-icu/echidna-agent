@@ -1,19 +1,15 @@
 use std::io::Cursor;
 
-use cyber_agent::adapters::image::prepare_local_image;
-use cyber_agent::domain::artifacts::ArtifactId;
-use cyber_agent::domain::context::{
+use echidna::adapters::image::prepare_local_image;
+use echidna::domain::artifacts::ArtifactId;
+use echidna::domain::context::{
     ModelProfile, ProviderSessionId, ProviderSessionRef, ProviderSessionRole,
 };
-use cyber_agent::domain::events::EventId;
-use cyber_agent::domain::image::{ImageDeliveryBudget, ImageInputLimits};
-use cyber_agent::domain::model::{CapabilityMappingVersion, ModelCapabilities};
-use cyber_agent::domain::profile::{
-    VisionMode, VisionRoute, VisionRouteReason, resolve_vision_route,
-};
-use cyber_agent::domain::vision::{
-    VISION_FACT_SCHEMA_VERSION, VisionObservation, VisionObservationId,
-};
+use echidna::domain::events::EventId;
+use echidna::domain::image::{ImageDeliveryBudget, ImageInputLimits};
+use echidna::domain::model::{CapabilityMappingVersion, ModelCapabilities};
+use echidna::domain::profile::{VisionMode, VisionRoute, VisionRouteReason, resolve_vision_route};
+use echidna::domain::vision::{VISION_FACT_SCHEMA_VERSION, VisionObservation, VisionObservationId};
 use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
 
 mod support;
@@ -198,7 +194,7 @@ fn route_matrix_and_secondary_context_are_deterministic() {
     let vision = capabilities(true, true);
     assert_eq!(
         resolve_vision_route(VisionMode::Auto, &primary, Some(&vision), true),
-        cyber_agent::domain::profile::VisionRouteDecision {
+        echidna::domain::profile::VisionRouteDecision {
             route: VisionRoute::PrimaryDirect,
             reason: Some(VisionRouteReason::PrimaryImageCapable),
         }
@@ -234,8 +230,7 @@ fn route_matrix_and_secondary_context_are_deterministic() {
         },
         request_audit_event_id: EventId::new("event:audit"),
         request_input_hash: "request-input-hash".to_owned(),
-        raw_observation_blob_id: cyber_agent::domain::artifacts::BlobId::new("a".repeat(64))
-            .unwrap(),
+        raw_observation_blob_id: echidna::domain::artifacts::BlobId::new("a".repeat(64)).unwrap(),
     };
     let first = observation.primary_context_text().unwrap();
     assert_eq!(first, observation.primary_context_text().unwrap());

@@ -2,10 +2,8 @@ use super::*;
 
 #[test]
 fn environment_prompt_revision_resumes_known_generations_without_rewriting_selection_events() {
-    use cyber_agent::domain::context::{
-        ProviderSessionId, ProviderSessionRef, ProviderSessionRole,
-    };
-    use cyber_agent::domain::research_control::ResearchPhase;
+    use echidna::domain::context::{ProviderSessionId, ProviderSessionRef, ProviderSessionRole};
+    use echidna::domain::research_control::ResearchPhase;
     for (phase, generation) in [
         (ResearchPhase::Mapping, 1),
         (ResearchPhase::Mapping, 2),
@@ -222,7 +220,7 @@ fn environment_guidance_delivers_actual_dialect_observations_and_versioned_promp
     }
     f2a_join_server(server, "environment guidance");
     let events = session_events(root.path(), &session_id(root.path()));
-    let projection = cyber_agent::app::session::SessionProjection::replay(
+    let projection = echidna::app::session::SessionProjection::replay(
         events
             .into_iter()
             .map(|event| serde_json::from_value(event).unwrap()),

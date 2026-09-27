@@ -1,5 +1,5 @@
-use cyber_agent::adapters::tools::ToolRegistry;
-use cyber_agent::ports::tool::ToolExecutor;
+use echidna::adapters::tools::ToolRegistry;
+use echidna::ports::tool::ToolExecutor;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 

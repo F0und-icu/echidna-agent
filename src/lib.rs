@@ -27,12 +27,13 @@ mod terminal_content;
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "cyber-agent",
+    name = "echidna",
     version,
-    about = "Local-first vulnerability research agent"
+    long_version = concat!(env!("CARGO_PKG_VERSION"), "\nsource base: ", env!("ECHIDNA_SOURCE_REVISION")),
+    about = "Echidna — Local Vulnerability Research Agent"
 )]
 pub struct Cli {
-    /// Load the explicit Cyber Agent Provider configuration from this path.
+    /// Load the explicit Echidna Provider configuration from this path.
     #[arg(long, global = true, value_name = "PATH")]
     config: Option<PathBuf>,
     #[command(subcommand)]
@@ -41,7 +42,7 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum CliCommand {
-    /// Initialize the current directory as a Cyber Agent project.
+    /// Initialize the current directory as an Echidna project.
     Init,
     /// Start an interactive research session.
     Chat {

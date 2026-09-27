@@ -1,21 +1,21 @@
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
-use cyber_agent::app::request_audit::{RequestAuditService, RequestAuditServiceError};
-use cyber_agent::app::session::{AppendAfterDurableError, SessionProjection};
-use cyber_agent::domain::artifacts::BlobId;
-use cyber_agent::domain::context::{ProviderSessionId, ProviderSessionRef, ProviderSessionRole};
-use cyber_agent::domain::events::{EventEnvelope, EventId, EventSequence, OccurredAt, StreamId};
-use cyber_agent::domain::model::{ModelCapabilities, ModelInputIR, ModelRequestRequirements};
-use cyber_agent::domain::project::ProjectId;
-use cyber_agent::domain::request_audit::{
+use echidna::app::request_audit::{RequestAuditService, RequestAuditServiceError};
+use echidna::app::session::{AppendAfterDurableError, SessionProjection};
+use echidna::domain::artifacts::BlobId;
+use echidna::domain::context::{ProviderSessionId, ProviderSessionRef, ProviderSessionRole};
+use echidna::domain::events::{EventEnvelope, EventId, EventSequence, OccurredAt, StreamId};
+use echidna::domain::model::{ModelCapabilities, ModelInputIR, ModelRequestRequirements};
+use echidna::domain::project::ProjectId;
+use echidna::domain::request_audit::{
     RequestAdapterVersion, RequestAuditAttempt, RequestAuditBinding, RequestAuditDelivery,
     RequestAuditError, RequestAuditManifest, RequestAuditReconstructionError,
     RequestAuditRunContext,
 };
-use cyber_agent::domain::session::SessionEvent;
-use cyber_agent::ports::EventSink;
-use cyber_agent::ports::artifact::{ArtifactStore, StoredBlob};
+use echidna::domain::session::SessionEvent;
+use echidna::ports::EventSink;
+use echidna::ports::artifact::{ArtifactStore, StoredBlob};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -125,7 +125,7 @@ fn capabilities() -> ModelCapabilities {
         usage_reporting: true,
         max_output_tokens: None,
         context_window: 32_768,
-        capability_mapping_version: cyber_agent::domain::model::CapabilityMappingVersion::new(7),
+        capability_mapping_version: echidna::domain::model::CapabilityMappingVersion::new(7),
     }
 }
 
@@ -139,9 +139,7 @@ fn run_context(project: &str) -> RequestAuditRunContext {
 fn input(instructions: &str, user_text: &str) -> ModelInputIR {
     ModelInputIR::current(
         instructions,
-        vec![cyber_agent::domain::model::ContentItem::user_text(
-            user_text,
-        )],
+        vec![echidna::domain::model::ContentItem::user_text(user_text)],
         ModelRequestRequirements::default(),
     )
 }
@@ -149,13 +147,13 @@ fn input(instructions: &str, user_text: &str) -> ModelInputIR {
 fn attempt(context: &RequestAuditRunContext, input: ModelInputIR) -> RequestAuditAttempt {
     RequestAuditAttempt::new(
         context,
-        cyber_agent::domain::context::ModelIdentity::new("fixture", "model"),
-        cyber_agent::domain::context::ModelProfile::new("fixture-profile", 1),
+        echidna::domain::context::ModelIdentity::new("fixture", "model"),
+        echidna::domain::context::ModelProfile::new("fixture-profile", 1),
         capabilities(),
         input.clone(),
         input,
         RequestAuditDelivery::full(
-            cyber_agent::domain::context::BaselineInvalidationReason::NoBaseline,
+            echidna::domain::context::BaselineInvalidationReason::NoBaseline,
         ),
     )
     .unwrap()
@@ -168,7 +166,7 @@ fn full_request_audit_allows_distinct_provider_delivery_only_for_continuation_re
     let mut reasoning_replay = logical_input.clone();
     reasoning_replay.content_items.insert(
         0,
-        cyber_agent::domain::model::ContentItem::Reasoning {
+        echidna::domain::model::ContentItem::Reasoning {
             text: "completed reasoning".to_owned(),
         },
     );
@@ -176,26 +174,26 @@ fn full_request_audit_allows_distinct_provider_delivery_only_for_continuation_re
     assert!(matches!(
         RequestAuditAttempt::new(
             &run_context("project-left"),
-            cyber_agent::domain::context::ModelIdentity::new("fixture", "model"),
-            cyber_agent::domain::context::ModelProfile::new("fixture-profile", 1),
+            echidna::domain::context::ModelIdentity::new("fixture", "model"),
+            echidna::domain::context::ModelProfile::new("fixture-profile", 1),
             capabilities(),
             logical_input.clone(),
             delivered_input.clone(),
             RequestAuditDelivery::full(
-                cyber_agent::domain::context::BaselineInvalidationReason::NoBaseline,
+                echidna::domain::context::BaselineInvalidationReason::NoBaseline,
             ),
         ),
         Err(RequestAuditError::FullDeliveryInputMismatch)
     ));
 
     for reason in [
-        cyber_agent::domain::context::BaselineInvalidationReason::IncrementalInputUnsupported,
-        cyber_agent::domain::context::BaselineInvalidationReason::ProviderRejected,
+        echidna::domain::context::BaselineInvalidationReason::IncrementalInputUnsupported,
+        echidna::domain::context::BaselineInvalidationReason::ProviderRejected,
     ] {
         RequestAuditAttempt::new(
             &run_context("project-left"),
-            cyber_agent::domain::context::ModelIdentity::new("fixture", "model"),
-            cyber_agent::domain::context::ModelProfile::new("fixture-profile", 1),
+            echidna::domain::context::ModelIdentity::new("fixture", "model"),
+            echidna::domain::context::ModelProfile::new("fixture-profile", 1),
             capabilities(),
             logical_input.clone(),
             delivered_input.clone(),
@@ -206,13 +204,13 @@ fn full_request_audit_allows_distinct_provider_delivery_only_for_continuation_re
 
     RequestAuditAttempt::new(
         &run_context("project-left"),
-        cyber_agent::domain::context::ModelIdentity::new("fixture", "model"),
-        cyber_agent::domain::context::ModelProfile::new("fixture-profile", 1),
+        echidna::domain::context::ModelIdentity::new("fixture", "model"),
+        echidna::domain::context::ModelProfile::new("fixture-profile", 1),
         capabilities(),
         logical_input,
         reasoning_replay,
         RequestAuditDelivery::full(
-            cyber_agent::domain::context::BaselineInvalidationReason::ToolsChanged,
+            echidna::domain::context::BaselineInvalidationReason::ToolsChanged,
         ),
     )
     .expect("an exact reasoning replay may accompany an otherwise identical Full request");
@@ -220,10 +218,10 @@ fn full_request_audit_allows_distinct_provider_delivery_only_for_continuation_re
 
 #[test]
 fn tool_change_diff_audit_requires_exact_current_request_contract() {
-    use cyber_agent::domain::context::BaselineInvalidationReason;
-    use cyber_agent::domain::model::ContentItem;
-    use cyber_agent::ports::tool::ToolExecutor;
-    let tool = cyber_agent::adapters::tools::ToolRegistry::for_project(env!("CARGO_MANIFEST_DIR"))
+    use echidna::domain::context::BaselineInvalidationReason;
+    use echidna::domain::model::ContentItem;
+    use echidna::ports::tool::ToolExecutor;
+    let tool = echidna::adapters::tools::ToolRegistry::for_project(env!("CARGO_MANIFEST_DIR"))
         .catalog()
         .into_iter()
         .find(|spec| spec.name.as_str() == "read_file")
@@ -241,8 +239,8 @@ fn tool_change_diff_audit_requires_exact_current_request_contract() {
     let check = |candidate: ModelInputIR, reason| {
         RequestAuditAttempt::new(
             &run_context("project-left"),
-            cyber_agent::domain::context::ModelIdentity::new("fixture", "model"),
-            cyber_agent::domain::context::ModelProfile::new("fixture-profile", 1),
+            echidna::domain::context::ModelIdentity::new("fixture", "model"),
+            echidna::domain::context::ModelProfile::new("fixture-profile", 1),
             capabilities(),
             logical.clone(),
             candidate,
@@ -311,7 +309,7 @@ fn record(
     projection: &mut SessionProjection,
     sink: &mut RecordingSink,
     event_id: &str,
-) -> cyber_agent::domain::request_audit::RequestAuditManifest {
+) -> echidna::domain::request_audit::RequestAuditManifest {
     service
         .record(
             attempt(&run_context("project-left"), input),
@@ -360,7 +358,7 @@ fn base_revision_does_not_replace_recorded_historical_bytes() {
     let old_event = sink.events[0].clone();
     let old_blobs = blobs.blobs.lock().unwrap().clone();
     let current = input(
-        cyber_agent::domain::research_control::BaseContract.prompt(),
+        echidna::domain::research_control::BaseContract.prompt(),
         "current question",
     );
     let current_manifest = record(
@@ -425,8 +423,8 @@ fn request_audit_reconstructs_exact_rendered_input_after_source_mutation_and_ded
     let repeated = ModelInputIR::current(
         "repeated instructions",
         vec![
-            cyber_agent::domain::model::ContentItem::user_text("same exact item"),
-            cyber_agent::domain::model::ContentItem::user_text("same exact item"),
+            echidna::domain::model::ContentItem::user_text("same exact item"),
+            echidna::domain::model::ContentItem::user_text("same exact item"),
         ],
         ModelRequestRequirements::default(),
     );
@@ -511,7 +509,7 @@ fn request_audit_rejects_unknown_schema_reordered_duplicate_and_mismatched_conte
     assert!(matches!(
         session.append(&mut sink, duplicate_event),
         Err(AppendAfterDurableError::Session(
-            cyber_agent::domain::session::SessionError::RequestAuditDuplicateEventConflict { .. }
+            echidna::domain::session::SessionError::RequestAuditDuplicateEventConflict { .. }
         ))
     ));
     assert_eq!(sink.events.len(), 1);
@@ -693,7 +691,7 @@ fn request_audit_is_project_and_session_isolated_and_never_serializes_transport_
             &mut sink,
         ),
         Err(RequestAuditServiceError::Session(
-            cyber_agent::domain::session::SessionError::RequestAuditSessionStreamMismatch { .. }
+            echidna::domain::session::SessionError::RequestAuditSessionStreamMismatch { .. }
         ))
     ));
     assert_eq!(left_blobs.blob_count(), blob_count_before_mismatch);

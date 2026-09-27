@@ -1,5 +1,5 @@
-use cyber_agent::domain::artifacts::ArtifactId;
-use cyber_agent::domain::context::{
+use echidna::domain::artifacts::ArtifactId;
+use echidna::domain::context::{
     AppendOnlyCandidate, AuthorityLevel, ContextBudget, ContextContentHash, ContextDecision,
     ContextDeliveryMap, ContextFragment, ContextFragmentContent, ContextFragmentId,
     ContextFragmentPriority, ContextFragmentSource, ContextOrigin, ContextPlanner,
@@ -7,11 +7,11 @@ use cyber_agent::domain::context::{
     ContextReferences, ContextSlot, ContextTransform, FragmentCachePolicy, FreshnessIdentity,
     LogicalAppendOnlyRejection, LogicalBaselineRelation, RetentionClass, SemanticClass,
 };
-use cyber_agent::domain::model::{
+use echidna::domain::model::{
     CapabilityMappingVersion, ContentItem, MessageRole, ModelCapabilities, ModelRequestRequirements,
 };
-use cyber_agent::domain::research::{HypothesisId, ResearchFactRef, TargetSnapshotId};
-use cyber_agent::domain::tools::{
+use echidna::domain::research::{HypothesisId, ResearchFactRef, TargetSnapshotId};
+use echidna::domain::tools::{
     ToolCachePolicy, ToolCall, ToolCallId, ToolDeterminism, ToolEffect, ToolExposure, ToolName,
     ToolOutputPolicy, ToolParallelism, ToolResult, ToolResultStatus, ToolRetryPolicy, ToolSpec,
 };
@@ -188,7 +188,7 @@ fn fragment(
 fn compile(
     fragments: Vec<ContextFragment>,
     budget: ContextBudget,
-) -> cyber_agent::domain::context::ContextPlan {
+) -> echidna::domain::context::ContextPlan {
     planner()
         .compile(
             fragments,
@@ -201,7 +201,7 @@ fn compile(
         .unwrap()
 }
 
-fn rendered_channel_tokens(plan: &cyber_agent::domain::context::ContextPlan) -> u32 {
+fn rendered_channel_tokens(plan: &echidna::domain::context::ContextPlan) -> u32 {
     let input = plan.model_input();
     let instruction_tokens = (input.instructions.len().saturating_add(3) / 4) as u32;
     let content_tokens = (!input.content_items.is_empty())

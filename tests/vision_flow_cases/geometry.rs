@@ -1,8 +1,8 @@
 //! Coordinate regressions through the real scoped service, facts and Replay.
 
 use super::*;
-use cyber_agent::app::vision::VisionSessionOutcome;
-use cyber_agent::domain::vision::{VISION_OBSERVATION_SCHEMA_VERSION, VisionObservation};
+use echidna::app::vision::VisionSessionOutcome;
+use echidna::domain::vision::{VISION_OBSERVATION_SCHEMA_VERSION, VisionObservation};
 use serde_json::{Value, json};
 
 struct Run {

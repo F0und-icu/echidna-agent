@@ -10,6 +10,7 @@ mod compaction;
 mod context;
 mod input;
 mod recovery;
+mod theme;
 mod tool_output;
 mod vision;
 
@@ -100,6 +101,8 @@ pub(crate) async fn run(
         composition.primary_request_adapter_version().clone(),
     );
 
+    let theme = theme::Theme::detect();
+    theme.welcome();
     println!(
         "{} session `{}` with domain `{}` and phase `{}`. Enter a line, or use /paste, /image, /domain, /phase, /context, /compact, /resume, /stop, /exit or EOF. While running in a terminal, /stop or a new instruction interrupts the current Turn before further input is handled.",
         disposition.message(),
@@ -354,7 +357,7 @@ pub(crate) async fn run(
         };
         let mut text_delta = |text: &str| {
             if !answer_started.get() && !text.is_empty() {
-                print!("assistant> ");
+                print!("{}", theme.answer_prefix());
                 answer_started.set(true);
             }
             print!("{text}");

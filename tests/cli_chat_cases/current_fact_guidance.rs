@@ -1,6 +1,6 @@
 //! Scripted responses prove delivery, not a model's adherence to guidance.
 use super::*;
-use cyber_agent::domain::model::ContentItem;
+use echidna::domain::model::ContentItem;
 
 #[test]
 fn task_scope_is_delivered_in_a_fresh_session_and_on_resume_with_old_project_facts() {
@@ -119,7 +119,7 @@ fn task_scope_is_delivered_in_a_fresh_session_and_on_resume_with_old_project_fac
         .iter()
         .filter_map(|item| match item {
             ContentItem::Text {
-                role: cyber_agent::domain::model::MessageRole::User,
+                role: echidna::domain::model::MessageRole::User,
                 text,
             } => Some(text.as_str()),
             _ => None,
@@ -468,7 +468,7 @@ fn resume_delivers_current_memory_alongside_old_prose_without_rewriting_history(
         request["instructions"]
             .as_str()
             .unwrap()
-            .contains(cyber_agent::domain::research_control::BaseContract.prompt())
+            .contains(echidna::domain::research_control::BaseContract.prompt())
     );
     let input = request["input"].as_array().unwrap();
     assert!(

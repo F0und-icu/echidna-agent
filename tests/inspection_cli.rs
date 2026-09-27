@@ -4,16 +4,16 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use cyber_agent::adapters::project_event_store::Project;
-use cyber_agent::adapters::tools::ToolRegistry;
-use cyber_agent::domain::tools::{ExecutionId, ToolCall, ToolCallId, ToolName, ToolResultStatus};
-use cyber_agent::ports::tool::ToolExecutor;
+use echidna::adapters::project_event_store::Project;
+use echidna::adapters::tools::ToolRegistry;
+use echidna::domain::tools::{ExecutionId, ToolCall, ToolCallId, ToolName, ToolResultStatus};
+use echidna::ports::tool::ToolExecutor;
 use serde_json::{Value, json};
 
 use support::TemporaryDirectory;
 
 fn run(directory: &TemporaryDirectory, args: &[&str]) -> Value {
-    let output = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+    let output = Command::new(env!("CARGO_BIN_EXE_echidna"))
         .current_dir(directory.path())
         .args(args)
         .output()
@@ -61,7 +61,7 @@ fn inspection_commands_report_uninitialized_projects_without_secrets_or_side_eff
 #[test]
 fn inspection_commands_read_initialized_project_without_building_snapshot_or_session() {
     let directory = TemporaryDirectory::new("inspection-empty-project");
-    let initialized = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+    let initialized = Command::new(env!("CARGO_BIN_EXE_echidna"))
         .current_dir(directory.path())
         .arg("init")
         .output()

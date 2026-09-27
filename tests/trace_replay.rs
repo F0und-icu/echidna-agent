@@ -7,53 +7,53 @@ use std::sync::Mutex;
 mod live_provider;
 
 use base64::Engine;
-use cyber_agent::adapters::replay::{
+use echidna::adapters::replay::{
     ReplayAdapterError, ReplayModelProvider, ReplayModelStep, ReplayToolExecutor, ReplayToolStep,
 };
-use cyber_agent::app::agent_loop::{AgentLoop, AgentLoopError};
-use cyber_agent::app::cancellation::AgentCancellation;
-use cyber_agent::app::request_audit::RequestAuditService;
-use cyber_agent::app::session::SessionProjection;
-use cyber_agent::app::trace_eval::{ContextRecompileInput, TraceEvalService};
-use cyber_agent::domain::artifacts::{ArtifactEvent, ArtifactId, ArtifactRecord, BlobId};
-use cyber_agent::domain::context::{
+use echidna::app::agent_loop::{AgentLoop, AgentLoopError};
+use echidna::app::cancellation::AgentCancellation;
+use echidna::app::request_audit::RequestAuditService;
+use echidna::app::session::SessionProjection;
+use echidna::app::trace_eval::{ContextRecompileInput, TraceEvalService};
+use echidna::domain::artifacts::{ArtifactEvent, ArtifactId, ArtifactRecord, BlobId};
+use echidna::domain::context::{
     BaselineInvalidationReason, ContextBudget, ContextFragmentContent, ModelIdentity, ModelProfile,
     ProviderSessionId, ProviderSessionRef, ProviderSessionRole,
 };
-use cyber_agent::domain::events::{EventEnvelope, EventId, EventSequence, OccurredAt, StreamId};
-use cyber_agent::domain::model::{
+use echidna::domain::events::{EventEnvelope, EventId, EventSequence, OccurredAt, StreamId};
+use echidna::domain::model::{
     CapabilityMappingVersion, ContentItem, ModelCapabilities, ModelEvent, ModelInputIR,
     ModelRequestRequirements,
 };
-use cyber_agent::domain::project::ProjectId;
-use cyber_agent::domain::request_audit::{
+use echidna::domain::project::ProjectId;
+use echidna::domain::request_audit::{
     RequestAdapterVersion, RequestAuditAttempt, RequestAuditBinding, RequestAuditDelivery,
     RequestAuditRunContext,
 };
-use cyber_agent::domain::research::{
+use echidna::domain::research::{
     ResearchEvent, ResearchReducer, ResearchState, TargetKind, TargetSnapshotDraft,
     TargetSnapshotId, TargetSnapshotRecord,
 };
-use cyber_agent::domain::research_control::PromptComposition;
-use cyber_agent::domain::session::{SessionEvent, SessionReducer, SessionState};
-use cyber_agent::domain::tools::{
+use echidna::domain::research_control::PromptComposition;
+use echidna::domain::session::{SessionEvent, SessionReducer, SessionState};
+use echidna::domain::tools::{
     DeferredActivationSet, ExecutionId, ExecutionReceipt, FileMutationAudit, RerunReason,
     ResolvedToolPlan, ToolCachePolicy, ToolCacheSource, ToolCacheValidation, ToolCall, ToolCallId,
     ToolDeterminism, ToolEffect, ToolExecutionOutcome, ToolExposure, ToolExposurePlan, ToolName,
     ToolOutputPolicy, ToolParallelism, ToolResult, ToolResultCacheKey, ToolResultStatus,
     ToolRetryPolicy, ToolSpec,
 };
-use cyber_agent::domain::trace_eval::{
+use echidna::domain::trace_eval::{
     EvalEvidence, EvalSource, TraceEventRange, TraceExpectedInvariant, TraceFixtureError,
     TraceFixtureManifest, TraceProviderEventReference, TraceReplayModelStep, TraceReplayPlanError,
 };
-use cyber_agent::ports::artifact::{ArtifactStore, StoredBlob};
-use cyber_agent::ports::model::{
+use echidna::ports::artifact::{ArtifactStore, StoredBlob};
+use echidna::ports::model::{
     ModelEventStream, ModelProvider, ModelProviderError, ModelRequest, ModelResponseCompletion,
     ModelStreamEvent, ProviderResponseId,
 };
-use cyber_agent::ports::tool::ToolExecutor;
-use cyber_agent::trace_eval_runtime::PreparedTraceReplay;
+use echidna::ports::tool::ToolExecutor;
+use echidna::trace_eval_runtime::PreparedTraceReplay;
 use futures_util::stream;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -143,7 +143,7 @@ struct RecordingSink {
     events: Vec<EventEnvelope<Value>>,
 }
 
-impl cyber_agent::ports::EventSink<Value> for RecordingSink {
+impl echidna::ports::EventSink<Value> for RecordingSink {
     type Error = &'static str;
 
     fn append_event(&mut self, event: &EventEnvelope<Value>) -> Result<(), Self::Error> {
@@ -462,7 +462,7 @@ fn source_fixture_with_receipt(
 fn source_fixture_with_captures(
     status: ToolResultStatus,
     receipt_fact: ReceiptFact,
-    captures: Vec<cyber_agent::domain::tools::OutputCapture>,
+    captures: Vec<echidna::domain::tools::OutputCapture>,
 ) -> TraceSourceFixture {
     let mut source_receipt = receipt(status);
     let mut source_result = result(status);
@@ -617,7 +617,7 @@ fn prepare_fixture(fixture: &TraceSourceFixture) -> PreparedTraceReplay {
 
 #[tokio::test]
 async fn output_capture_replay_retains_source_refs_without_publication_or_evidence() {
-    use cyber_agent::domain::tools::{OutputCapture, OutputStream};
+    use echidna::domain::tools::{OutputCapture, OutputStream};
     let captures = vec![OutputCapture {
         stream: OutputStream::Stdout,
         child_index: None,
@@ -783,7 +783,7 @@ fn replay_tool_dispatch_rejects_a_non_fixture_plan_without_consuming_a_recorded_
     assert!(foreign.advertised_specs().is_empty());
     assert!(matches!(
         tools.plan_model_call(&foreign, ExecutionId::new("foreign-plan"), call()),
-        Err(cyber_agent::ports::tool::ToolExecutorError::ResolvedPlanMismatch)
+        Err(echidna::ports::tool::ToolExecutorError::ResolvedPlanMismatch)
     ));
     assert_eq!(tools.remaining_steps(), 1);
 }
@@ -821,7 +821,7 @@ async fn replay_narrows_an_incremental_source_mapping_to_full_delivery() {
         .unwrap();
     assert!(matches!(
         outcome,
-        cyber_agent::app::agent_loop::AgentTurnOutcome::Completed {
+        echidna::app::agent_loop::AgentTurnOutcome::Completed {
             model_requests: 1,
             ..
         }
@@ -840,7 +840,7 @@ async fn replay_narrows_an_incremental_source_mapping_to_full_delivery() {
 #[tokio::test]
 async fn replay_upcasts_historical_v2_input_before_matching_a_current_request() {
     let mut historical_input = current_prompt_input("inspect fixture", Vec::new());
-    historical_input.schema_version = cyber_agent::domain::model::ModelInputIrSchemaVersion::new(2);
+    historical_input.schema_version = echidna::domain::model::ModelInputIrSchemaVersion::new(2);
     let provider = ReplayModelProvider::new(
         capabilities(),
         [ReplayModelStep::new(
@@ -944,7 +944,7 @@ fn mechanical_replay_verifies_required_artifact_blob_identity_and_size() {
             &fixture.session,
             &research,
         ),
-        Err(cyber_agent::app::trace_eval::TraceEvalServiceError::RequiredArtifactBlobUnreadable {
+        Err(echidna::app::trace_eval::TraceEvalServiceError::RequiredArtifactBlobUnreadable {
             artifact_id: received_artifact_id,
             blob_id: received_blob_id,
         }) if received_artifact_id == artifact_id && received_blob_id == blob_id
@@ -972,7 +972,7 @@ fn mechanical_replay_verifies_required_artifact_blob_identity_and_size() {
             &fixture.session,
             &research,
         ),
-        Err(cyber_agent::app::trace_eval::TraceEvalServiceError::RequiredArtifactBlobHashMismatch {
+        Err(echidna::app::trace_eval::TraceEvalServiceError::RequiredArtifactBlobHashMismatch {
             artifact_id: received_artifact_id,
             expected_blob_id,
             ..
@@ -989,7 +989,7 @@ fn mechanical_replay_verifies_required_artifact_blob_identity_and_size() {
             &fixture.session,
             &research,
         ),
-        Err(cyber_agent::app::trace_eval::TraceEvalServiceError::RequiredArtifactBlobSizeMismatch {
+        Err(echidna::app::trace_eval::TraceEvalServiceError::RequiredArtifactBlobSizeMismatch {
             artifact_id: received_artifact_id,
             blob_id: received_blob_id,
             ..
@@ -1058,7 +1058,7 @@ fn mechanical_replay_rejects_a_tool_result_outside_the_declared_event_range() {
             &fixture.session,
             &fixture.research,
         ),
-        Err(cyber_agent::app::trace_eval::TraceEvalServiceError::ToolResultOutsideRange {
+        Err(echidna::app::trace_eval::TraceEvalServiceError::ToolResultOutsideRange {
             call_id,
             event_id,
         }) if call_id == "call-read" && event_id == EventId::new("tool-result-one")
@@ -1098,7 +1098,7 @@ fn mechanical_replay_rejects_tool_facts_out_of_source_order() {
             &session,
             &fixture.research,
         ),
-        Err(cyber_agent::app::trace_eval::TraceEvalServiceError::ToolFactOrderInvalid { .. })
+        Err(echidna::app::trace_eval::TraceEvalServiceError::ToolFactOrderInvalid { .. })
     ));
 }
 
@@ -1180,7 +1180,7 @@ fn mechanical_replay_requires_receipt_references_in_source_call_order() {
             &fixture.research,
         ),
         Err(
-            cyber_agent::app::trace_eval::TraceEvalServiceError::ToolReceiptReferenceOrderInvalid {
+            echidna::app::trace_eval::TraceEvalServiceError::ToolReceiptReferenceOrderInvalid {
                 call_event_id,
                 expected_receipt_event_id,
                 declared_receipt_event_id,
@@ -1255,7 +1255,7 @@ fn context_recompile_reads_historical_bytes_without_mutating_audit_blobs() {
             &fixture.research,
             ContextRecompileInput {
                 request_audit_event_id: &EventId::new("audit-one"),
-                planner: &cyber_agent::domain::context::ContextPlanner::current(),
+                planner: &echidna::domain::context::ContextPlanner::current(),
                 fragments: composition.fragments().unwrap(),
                 budget: ContextBudget::new(32_768, 0, 0).unwrap(),
                 capabilities: &capabilities(),
@@ -1297,7 +1297,7 @@ fn context_recompile_rejects_an_audit_outside_the_trace_source_scope() {
             &fixture.research,
             ContextRecompileInput {
                 request_audit_event_id: &unreferenced,
-                planner: &cyber_agent::domain::context::ContextPlanner::current(),
+                planner: &echidna::domain::context::ContextPlanner::current(),
                 fragments: composition.fragments().unwrap(),
                 budget: ContextBudget::new(32_768, 0, 0).unwrap(),
                 capabilities: &capabilities(),
@@ -1307,7 +1307,7 @@ fn context_recompile_rejects_an_audit_outside_the_trace_source_scope() {
             },
         ),
         Err(
-            cyber_agent::app::trace_eval::TraceEvalServiceError::ContextRequestAuditNotReferenced {
+            echidna::app::trace_eval::TraceEvalServiceError::ContextRequestAuditNotReferenced {
                 audit_event_id
             }
         ) if audit_event_id == unreferenced
@@ -1393,7 +1393,7 @@ async fn shadow_eval_fails_when_recorded_replay_tool_steps_are_not_consumed() {
             .shadow_model_eval(&mut agent, "inspect fixture", AgentCancellation::new(),)
             .await,
         Err(
-            cyber_agent::app::trace_eval::TraceReplayRunError::ReplayToolsNotFullyConsumed {
+            echidna::app::trace_eval::TraceReplayRunError::ReplayToolsNotFullyConsumed {
                 remaining_tool_steps: 1
             }
         )
@@ -1426,7 +1426,7 @@ async fn non_success_source_tool_result_replays_with_its_exact_output_and_cannot
         assert_eq!(tools.replay_uses().len(), 1);
         assert!(matches!(
             tools.plan(ExecutionId::new("repeat-execution"), call()),
-            Err(cyber_agent::ports::tool::ToolExecutorError::UnmatchedToolCall { .. })
+            Err(echidna::ports::tool::ToolExecutorError::UnmatchedToolCall { .. })
         ));
     }
 }

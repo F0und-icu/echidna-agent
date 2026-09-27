@@ -48,7 +48,7 @@ fn ctf_r3a2_blob_failure_never_records_a_durable_receipt_or_tool_result() {
         assert!(!events.iter().any(|event| event["event_type"]
             == "tool.execution_receipt_recorded"
             || event["event_type"] == "tool.result_cache_hit"));
-        let projection = cyber_agent::app::session::SessionProjection::replay(
+        let projection = echidna::app::session::SessionProjection::replay(
             events
                 .into_iter()
                 .map(|event| serde_json::from_value(event).unwrap()),
@@ -60,10 +60,7 @@ fn ctf_r3a2_blob_failure_never_records_a_durable_receipt_or_tool_result() {
                 .history()
                 .items()
                 .iter()
-                .any(|item| matches!(
-                    item,
-                    cyber_agent::domain::model::ContentItem::ToolResult { .. }
-                ))
+                .any(|item| matches!(item, echidna::domain::model::ContentItem::ToolResult { .. }))
         );
     }
 }
@@ -172,9 +169,9 @@ fn ctf_r3a2_durable_output_can_be_read_after_explicit_resume() {
     assert_eq!(fs::read(&blob_path).unwrap(), expected);
     // Exercise exact binary readback via the production Tool adapter on the
     // resumed project's retained Blob, not a private-path read implementation.
-    let tools = cyber_agent::adapters::tools::ToolRegistry::for_project(root.path());
-    use cyber_agent::domain::tools::{ExecutionId, ToolCall, ToolCallId, ToolName};
-    use cyber_agent::ports::tool::ToolExecutor;
+    let tools = echidna::adapters::tools::ToolRegistry::for_project(root.path());
+    use echidna::domain::tools::{ExecutionId, ToolCall, ToolCallId, ToolName};
+    use echidna::ports::tool::ToolExecutor;
     let plan = tools
         .plan(
             ExecutionId::new("read-saved"),
@@ -201,6 +198,6 @@ fn ctf_r3a2_durable_output_can_be_read_after_explicit_resume() {
     let rejected = runtime.block_on(tools.execute(plan));
     assert_eq!(
         rejected.result.status,
-        cyber_agent::domain::tools::ToolResultStatus::Failed
+        echidna::domain::tools::ToolResultStatus::Failed
     );
 }

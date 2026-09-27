@@ -92,7 +92,7 @@ fn research_world_state_and_project_snapshot_render_bounded_full_and_diff_contex
             (ResearchWorldStateSection::Target, json!({"second": true})),
         ]),
         Err(
-            cyber_agent::domain::world_state::WorldStateError::DuplicateSection {
+            echidna::domain::world_state::WorldStateError::DuplicateSection {
                 id: ResearchWorldStateSection::Target
             }
         )

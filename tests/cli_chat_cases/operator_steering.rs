@@ -12,12 +12,26 @@ struct TerminalChat {
 
 impl TerminalChat {
     fn new(root: &std::path::Path, config: &std::path::Path) -> Self {
+        Self::with_theme_environment(root, config, None, "xterm-256color")
+    }
+
+    fn with_theme_environment(
+        root: &std::path::Path,
+        config: &std::path::Path,
+        no_color: Option<&str>,
+        term: &str,
+    ) -> Self {
         let pair = native_pty_system().openpty(PtySize::default()).unwrap();
-        let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_cyber-agent"));
+        let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_echidna"));
         command.cwd(root);
         command.args(["--config", config.to_str().unwrap(), "chat"]);
         command.env("CYBER_AGENT_PRIMARY_API_KEY", "loopback-primary-secret");
         command.env("CYBER_AGENT_VISION_API_KEY", "loopback-vision-secret");
+        command.env("TERM", term);
+        command.env_remove("NO_COLOR");
+        if let Some(value) = no_color {
+            command.env("NO_COLOR", value);
+        }
         let child = pair.slave.spawn_command(command).unwrap();
         drop(pair.slave);
         let writer = pair.master.take_writer().unwrap();
@@ -83,6 +97,40 @@ impl Drop for TerminalChat {
 }
 
 #[test]
+fn echidna_terminal_theme_respects_no_color_and_dumb_without_changing_facts() {
+    for (no_color, term, colored) in [
+        (None, "xterm-256color", true),
+        (Some(""), "xterm-256color", false),
+        (Some("1"), "xterm-256color", false),
+        (None, "dumb", false),
+    ] {
+        let root = TemporaryDirectory::new("echidna-terminal-theme");
+        let harness = TemporaryDirectory::new("echidna-terminal-config");
+        initialize_project(root.path());
+        let server =
+            spawn_responses_server(vec![(200, text_response("THEME_REPLY", "theme-response"))]);
+        let config = write_config(harness.path(), &server.base_url);
+        let mut chat = TerminalChat::with_theme_environment(root.path(), &config, no_color, term);
+        chat.send("reply once\n");
+        chat.wait_for("THEME_REPLY");
+        chat.exit();
+        let captured = String::from_utf8_lossy(&chat.captured);
+        assert!(captured.contains("Local Vulnerability Research Agent"));
+        assert!(captured.contains("Question. Observe. Verify."));
+        assert!(captured.contains("Echidna> "));
+        assert_eq!(captured.contains('\u{1b}'), colored, "{captured}");
+        let request = f2a_request_body(&server.requests, "theme request").to_string();
+        let history =
+            serde_json::to_string(&session_events(root.path(), &session_id(root.path()))).unwrap();
+        for content in [&request, &history] {
+            assert!(!content.contains("Echidna>"));
+            assert!(!content.contains("Question. Observe. Verify."));
+        }
+        f2a_join_server(server, "theme request");
+    }
+}
+
+#[test]
 fn terminal_eof_during_sampling_finishes_the_response_without_cancelling() {
     let root = TemporaryDirectory::new("terminal-eof");
     let harness = TemporaryDirectory::new("terminal-eof-provider");
@@ -128,7 +176,7 @@ fn terminal_eof_during_sampling_finishes_the_response_without_cancelling() {
     let state = reduced_session(&project, &session_id(root.path()));
     assert_eq!(
         state.history().items().last().unwrap(),
-        &cyber_agent::domain::model::ContentItem::assistant_text("EOF_RESPONSE_COMPLETED")
+        &echidna::domain::model::ContentItem::assistant_text("EOF_RESPONSE_COMPLETED")
     );
     assert!(!String::from_utf8_lossy(&chat.captured).contains("[request cancelled]"));
 }
@@ -234,8 +282,8 @@ fn terminal_stop_and_correction_cancel_inflight_sampling_before_new_turn() {
             .items()
             .iter()
             .filter_map(|item| match item {
-                cyber_agent::domain::model::ContentItem::Text {
-                    role: cyber_agent::domain::model::MessageRole::User,
+                echidna::domain::model::ContentItem::Text {
+                    role: echidna::domain::model::MessageRole::User,
                     text,
                 } => Some(text.as_str()),
                 _ => None,

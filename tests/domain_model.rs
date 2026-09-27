@@ -1,9 +1,9 @@
-use cyber_agent::domain::artifacts::ArtifactId;
-use cyber_agent::domain::model::{
+use echidna::domain::artifacts::ArtifactId;
+use echidna::domain::model::{
     CapabilityMappingVersion, ContentItem, MessageRole, ModelCapabilities, ModelCapabilityError,
     ModelInputIR, ModelRequestRequirements,
 };
-use cyber_agent::domain::tools::ToolCallId;
+use echidna::domain::tools::ToolCallId;
 use serde_json::json;
 
 fn capabilities() -> ModelCapabilities {

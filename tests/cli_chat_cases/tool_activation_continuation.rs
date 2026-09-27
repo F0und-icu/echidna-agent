@@ -198,7 +198,7 @@ fn activation_case(change: Option<&str>) {
         .items()
         .iter()
         .filter_map(|item| match item {
-            cyber_agent::domain::model::ContentItem::ToolCall { call } => Some(call.name.as_str()),
+            echidna::domain::model::ContentItem::ToolCall { call } => Some(call.name.as_str()),
             _ => None,
         })
         .collect();
@@ -208,7 +208,7 @@ fn activation_case(change: Option<&str>) {
     );
     if change.is_none() {
         assert!(state.history().items().iter().any(|item| match item {
-            cyber_agent::domain::model::ContentItem::ToolResult { result } =>
+            echidna::domain::model::ContentItem::ToolResult { result } =>
                 result.tool_name.as_str() == "read_output"
                     && result.output["text"] == "ACTIVATION_RAW",
             _ => false,

@@ -71,8 +71,8 @@ fn ctf_r2b_budget_stop_requires_explicit_resume_without_repeating_input_or_tool(
             .items()
             .iter()
             .filter_map(|item| match item {
-                cyber_agent::domain::model::ContentItem::Text {
-                    role: cyber_agent::domain::model::MessageRole::User,
+                echidna::domain::model::ContentItem::Text {
+                    role: echidna::domain::model::MessageRole::User,
                     text,
                 } => Some(text.as_str()),
                 _ => None,

@@ -81,7 +81,7 @@ fn malformed_arguments_reject_the_whole_sample_without_writes_or_payload_disclos
         assert!(stderr.contains("argument corrections exhausted"));
         assert_eq!(
             state.history().items(),
-            &[cyber_agent::domain::model::ContentItem::user_text(
+            &[echidna::domain::model::ContentItem::user_text(
                 "Write an ordinary note."
             )]
         );
@@ -141,7 +141,7 @@ fn long_json_escaped_file_content_round_trips_through_wire_tool_and_durable_hist
     let state = reduced_session(&project, &session_id(root.path()));
     assert_eq!(state.execution_receipt_count(), 1);
     assert!(state.history().items().iter().any(|item| matches!(item,
-        cyber_agent::domain::model::ContentItem::ToolCall { call }
+        echidna::domain::model::ContentItem::ToolCall { call }
         if call.call_id.as_str() == "long-write" && call.arguments == arguments)));
     assert_eq!(state.history().ensure_all_tool_calls_paired(), Ok(()));
     assert_audits_reconstruct(root.path(), &state);

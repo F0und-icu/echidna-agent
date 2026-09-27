@@ -2,11 +2,11 @@ use std::convert::Infallible;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use cyber_agent::domain::events::{
+use echidna::domain::events::{
     ApplyOutcome, EventEnvelope, EventId, EventReducer, EventSequence, EventType, OccurredAt,
     State, StreamId,
 };
-use cyber_agent::ports::{EventSink, EventSource, EventStore};
+use echidna::ports::{EventSink, EventSource, EventStore};
 
 #[derive(Default)]
 struct MemoryEventStore<T> {

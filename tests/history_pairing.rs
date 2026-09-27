@@ -1,12 +1,12 @@
-use cyber_agent::domain::history::{ConversationHistory, HistoryError, normalize_content_items};
-use cyber_agent::domain::model::ContentItem;
-use cyber_agent::domain::tools::{ToolCall, ToolCallId, ToolName, ToolResult, ToolResultStatus};
+use echidna::domain::history::{ConversationHistory, HistoryError, normalize_content_items};
+use echidna::domain::model::ContentItem;
+use echidna::domain::tools::{ToolCall, ToolCallId, ToolName, ToolResult, ToolResultStatus};
 use serde_json::json;
 
 #[test]
 fn normalization_closes_open_calls_before_later_user_text_or_image() {
-    use cyber_agent::domain::artifacts::ArtifactId;
-    use cyber_agent::domain::model::MessageRole;
+    use echidna::domain::artifacts::ArtifactId;
+    use echidna::domain::model::MessageRole;
 
     for boundary in [
         ContentItem::user_text("resume without repeating the unknown execution"),
@@ -82,8 +82,8 @@ fn normalization_preserves_parallel_partial_results_and_repairs_each_user_group(
 
 #[test]
 fn normalization_rejects_late_real_results_without_reordering_or_replacing_them() {
-    use cyber_agent::domain::artifacts::ArtifactId;
-    use cyber_agent::domain::model::MessageRole;
+    use echidna::domain::artifacts::ArtifactId;
+    use echidna::domain::model::MessageRole;
 
     for boundary in [
         ContentItem::user_text("later user"),

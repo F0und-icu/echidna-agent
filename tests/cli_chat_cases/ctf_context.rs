@@ -145,10 +145,13 @@ fn ctf_r2a_isolates_prompt_memory_state_and_combined_continuation_changes() {
         assert_eq!(state.request_audits().len(), request_count);
         assert_eq!(state.execution_receipt_count(), 1);
         assert_eq!(state.history().ensure_all_tool_calls_paired(), Ok(()));
-        assert!(!state.history().items().iter().any(|item| matches!(
-            item,
-            cyber_agent::domain::model::ContentItem::Reasoning { .. }
-        )));
+        assert!(
+            !state
+                .history()
+                .items()
+                .iter()
+                .any(|item| matches!(item, echidna::domain::model::ContentItem::Reasoning { .. }))
+        );
         assert_audits_reconstruct(root.path(), &state);
         if recover {
             assert!(wires[1].get("previous_response_id").is_none());

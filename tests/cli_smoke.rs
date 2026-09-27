@@ -8,8 +8,36 @@ use std::{fs, path::Path};
 use support::TemporaryDirectory;
 
 #[test]
+fn echidna_version_separates_release_version_and_source_base() {
+    let short = Command::new(env!("CARGO_BIN_EXE_echidna"))
+        .arg("-V")
+        .output()
+        .unwrap();
+    assert!(short.status.success());
+    assert_eq!(
+        String::from_utf8(short.stdout).unwrap(),
+        concat!("echidna ", env!("CARGO_PKG_VERSION"), "\n")
+    );
+    let long = Command::new(env!("CARGO_BIN_EXE_echidna"))
+        .arg("--version")
+        .output()
+        .unwrap();
+    assert!(long.status.success());
+    assert_eq!(
+        String::from_utf8(long.stdout).unwrap(),
+        concat!(
+            "echidna ",
+            env!("CARGO_PKG_VERSION"),
+            "\nsource base: ",
+            env!("ECHIDNA_SOURCE_REVISION"),
+            "\n"
+        )
+    );
+}
+
+#[test]
 fn help_lists_m0_commands() {
-    let output = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+    let output = Command::new(env!("CARGO_BIN_EXE_echidna"))
         .arg("--help")
         .output()
         .expect("cyber-agent binary should run");
@@ -22,19 +50,21 @@ fn help_lists_m0_commands() {
     assert!(stdout.contains("doctor"));
     assert!(stdout.contains("inspect"));
     assert!(stdout.contains("session"));
+    assert!(stdout.contains("Echidna"));
+    assert!(stdout.contains("Usage: echidna"));
 }
 
 #[test]
 fn m5_session_list_show_export_and_end_use_the_existing_durable_stream() {
     let directory = TemporaryDirectory::new("m5-session-cli");
     let config = write_provider_config(directory.path());
-    let initialized = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+    let initialized = Command::new(env!("CARGO_BIN_EXE_echidna"))
         .current_dir(directory.path())
         .arg("init")
         .output()
         .unwrap();
     assert!(initialized.status.success());
-    let chat = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+    let chat = Command::new(env!("CARGO_BIN_EXE_echidna"))
         .current_dir(directory.path())
         .args(["chat", "--config", config.to_str().unwrap()])
         .output()
@@ -49,7 +79,7 @@ fn m5_session_list_show_export_and_end_use_the_existing_durable_stream() {
         .into_string()
         .unwrap();
 
-    let list = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+    let list = Command::new(env!("CARGO_BIN_EXE_echidna"))
         .current_dir(directory.path())
         .args(["session", "list"])
         .output()
@@ -59,7 +89,7 @@ fn m5_session_list_show_export_and_end_use_the_existing_durable_stream() {
     assert_eq!(list["sessions"][0]["session_id"], session);
     assert_eq!(list["sessions"][0]["lifecycle"], "active");
 
-    let show = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+    let show = Command::new(env!("CARGO_BIN_EXE_echidna"))
         .current_dir(directory.path())
         .args(["session", "show", &session])
         .output()
@@ -69,7 +99,7 @@ fn m5_session_list_show_export_and_end_use_the_existing_durable_stream() {
     assert_eq!(show["domain"], "source");
     assert_eq!(show["domain_selection_recorded"], false);
 
-    let export = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+    let export = Command::new(env!("CARGO_BIN_EXE_echidna"))
         .current_dir(directory.path())
         .args(["session", "export", &session, "--format", "json"])
         .output()
@@ -83,7 +113,7 @@ fn m5_session_list_show_export_and_end_use_the_existing_durable_stream() {
     );
 
     let export_path = directory.path().join("session-export.md");
-    let markdown = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+    let markdown = Command::new(env!("CARGO_BIN_EXE_echidna"))
         .current_dir(directory.path())
         .args([
             "session",
@@ -102,7 +132,7 @@ fn m5_session_list_show_export_and_end_use_the_existing_durable_stream() {
     assert!(retained.contains("Vision (derived non-evidence)"));
     assert!(retained.contains("Latest Compaction (derived continuation)"));
 
-    let rejected_overwrite = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+    let rejected_overwrite = Command::new(env!("CARGO_BIN_EXE_echidna"))
         .current_dir(directory.path())
         .args([
             "session",
@@ -119,7 +149,7 @@ fn m5_session_list_show_export_and_end_use_the_existing_durable_stream() {
     assert!(String::from_utf8_lossy(&rejected_overwrite.stderr).contains("cannot create export"));
     assert_eq!(fs::read_to_string(&export_path).unwrap(), retained);
 
-    let ended = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+    let ended = Command::new(env!("CARGO_BIN_EXE_echidna"))
         .current_dir(directory.path())
         .args(["session", "end", &session])
         .output()
@@ -128,7 +158,7 @@ fn m5_session_list_show_export_and_end_use_the_existing_durable_stream() {
     let ended: serde_json::Value = serde_json::from_slice(&ended.stdout).unwrap();
     assert_eq!(ended["lifecycle"], "ended");
 
-    let resume = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+    let resume = Command::new(env!("CARGO_BIN_EXE_echidna"))
         .current_dir(directory.path())
         .args([
             "chat",
@@ -148,14 +178,14 @@ fn m5_session_list_show_export_and_end_use_the_existing_durable_stream() {
 #[test]
 fn inspect_context_in_a_standalone_process_reports_no_active_context() {
     let directory = TemporaryDirectory::new("cli-inspect-context");
-    let initialized = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+    let initialized = Command::new(env!("CARGO_BIN_EXE_echidna"))
         .current_dir(directory.path())
         .arg("init")
         .output()
         .expect("cyber-agent init should run");
     assert!(initialized.status.success());
 
-    let output = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+    let output = Command::new(env!("CARGO_BIN_EXE_echidna"))
         .current_dir(directory.path())
         .args(["inspect", "context"])
         .output()
@@ -176,7 +206,7 @@ fn inspect_context_in_a_standalone_process_reports_no_active_context() {
 
 #[test]
 fn doctor_without_configuration_returns_structured_diagnostics() {
-    let output = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+    let output = Command::new(env!("CARGO_BIN_EXE_echidna"))
         .arg("doctor")
         .output()
         .expect("cyber-agent binary should run");
@@ -211,7 +241,7 @@ fn doctor_accepts_an_inline_api_key_without_displaying_it() {
     )
     .unwrap();
 
-    let doctor = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+    let doctor = Command::new(env!("CARGO_BIN_EXE_echidna"))
         .args(["--config", config.to_str().unwrap(), "doctor"])
         .env_remove("CYBER_AGENT_PRIMARY_API_KEY")
         .output()
@@ -230,7 +260,7 @@ fn doctor_and_chat_share_the_explicit_provider_configuration_path_without_a_cred
     let directory = TemporaryDirectory::new("cli-provider-config");
     let config = write_provider_config(directory.path());
 
-    let doctor = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+    let doctor = Command::new(env!("CARGO_BIN_EXE_echidna"))
         .args(["--config", config.to_str().unwrap(), "doctor"])
         .env_remove("CYBER_AGENT_PRIMARY_API_KEY")
         .env("OPENAI_API_KEY", "must-not-be-read")
@@ -244,14 +274,14 @@ fn doctor_and_chat_share_the_explicit_provider_configuration_path_without_a_cred
     assert_eq!(report["agent_profile"]["primary_profile_id"], "primary");
     assert_eq!(report["agent_profile"]["vision_profile_id"], "vision");
 
-    let initialized = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+    let initialized = Command::new(env!("CARGO_BIN_EXE_echidna"))
         .current_dir(directory.path())
         .arg("init")
         .output()
         .expect("cyber-agent init should run");
     assert!(initialized.status.success());
 
-    let chat = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+    let chat = Command::new(env!("CARGO_BIN_EXE_echidna"))
         .current_dir(directory.path())
         .args(["chat", "--config", config.to_str().unwrap()])
         .env_remove("CYBER_AGENT_PRIMARY_API_KEY")
@@ -262,6 +292,8 @@ fn doctor_and_chat_share_the_explicit_provider_configuration_path_without_a_cred
     let output = String::from_utf8(chat.stdout).unwrap();
     assert!(output.contains("Started session"));
     assert!(output.contains("EOF received"));
+    assert!(!output.contains("Question. Observe. Verify."));
+    assert!(!output.contains('\u{1b}'));
     assert!(directory.path().join(".cyber-agent/project.toml").is_file());
 }
 
@@ -270,7 +302,7 @@ fn chat_requires_an_initialized_project_and_does_not_create_one() {
     let directory = TemporaryDirectory::new("cli-chat-project-required");
     let config = write_provider_config(directory.path());
 
-    let chat = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+    let chat = Command::new(env!("CARGO_BIN_EXE_echidna"))
         .current_dir(directory.path())
         .args(["chat", "--config", config.to_str().unwrap()])
         .output()
@@ -300,7 +332,7 @@ fn doctor_and_chat_reject_the_same_invalid_provider_configuration() {
     .unwrap();
 
     for command in ["doctor", "chat"] {
-        let output = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+        let output = Command::new(env!("CARGO_BIN_EXE_echidna"))
             .args([command, "--config", config.to_str().unwrap()])
             .output()
             .unwrap();
@@ -319,7 +351,7 @@ fn doctor_and_chat_reject_the_same_invalid_provider_configuration() {
 #[test]
 fn init_creates_a_real_isolated_project_in_the_current_directory() {
     let directory = TemporaryDirectory::new("cli-init");
-    let output = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+    let output = Command::new(env!("CARGO_BIN_EXE_echidna"))
         .current_dir(directory.path())
         .arg("init")
         .output()

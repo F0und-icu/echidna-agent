@@ -5,24 +5,24 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use cyber_agent::adapters::project_event_store::{Project, ProjectEventStream};
-use cyber_agent::app::request_audit::RequestAuditService;
-use cyber_agent::app::session::SessionProjection;
-use cyber_agent::domain::context::{
+use echidna::adapters::project_event_store::{Project, ProjectEventStream};
+use echidna::app::request_audit::RequestAuditService;
+use echidna::app::session::SessionProjection;
+use echidna::domain::context::{
     ModelIdentity, ModelProfile, ProviderSessionId, ProviderSessionRef, ProviderSessionRole,
 };
-use cyber_agent::domain::events::{EventId, EventSequence, OccurredAt, StreamId};
-use cyber_agent::domain::model::{
+use echidna::domain::events::{EventId, EventSequence, OccurredAt, StreamId};
+use echidna::domain::model::{
     CapabilityMappingVersion, ContentItem, ModelCapabilities, ModelInputIR,
     ModelRequestRequirements,
 };
-use cyber_agent::domain::request_audit::{
+use echidna::domain::request_audit::{
     RequestAdapterVersion, RequestAuditAttempt, RequestAuditBinding, RequestAuditDelivery,
     RequestAuditRunContext,
 };
-use cyber_agent::domain::session::SessionEvent;
-use cyber_agent::ports::EventSource;
-use cyber_agent::ports::artifact::{ArtifactStore, StoredBlob};
+use echidna::domain::session::SessionEvent;
+use echidna::ports::EventSource;
+use echidna::ports::artifact::{ArtifactStore, StoredBlob};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -55,7 +55,7 @@ impl ArtifactStore for FileBlobStore {
             fs::write(path, bytes)?;
         }
         Ok(StoredBlob {
-            blob_id: cyber_agent::domain::artifacts::BlobId::new(blob_id).unwrap(),
+            blob_id: echidna::domain::artifacts::BlobId::new(blob_id).unwrap(),
             size_bytes: bytes.len() as u64,
             already_present,
         })
@@ -63,7 +63,7 @@ impl ArtifactStore for FileBlobStore {
 
     fn read_blob(
         &self,
-        blob_id: &cyber_agent::domain::artifacts::BlobId,
+        blob_id: &echidna::domain::artifacts::BlobId,
     ) -> Result<Vec<u8>, Self::Error> {
         fs::read(self.root.join(blob_id.as_str()))
     }
@@ -110,7 +110,7 @@ fn record_audit(root: &TemporaryDirectory) -> Vec<String> {
         input.clone(),
         input,
         RequestAuditDelivery::full(
-            cyber_agent::domain::context::BaselineInvalidationReason::NoBaseline,
+            echidna::domain::context::BaselineInvalidationReason::NoBaseline,
         ),
     )
     .unwrap();
@@ -152,7 +152,7 @@ fn record_audit(root: &TemporaryDirectory) -> Vec<String> {
 }
 
 fn cli(root: &TemporaryDirectory, args: &[&str]) -> Value {
-    let output = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+    let output = Command::new(env!("CARGO_BIN_EXE_echidna"))
         .current_dir(root.path())
         .args(args)
         .output()
@@ -162,7 +162,7 @@ fn cli(root: &TemporaryDirectory, args: &[&str]) -> Value {
 }
 
 fn cli_failure(root: &TemporaryDirectory, args: &[&str]) -> String {
-    let output = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+    let output = Command::new(env!("CARGO_BIN_EXE_echidna"))
         .current_dir(root.path())
         .args(args)
         .output()

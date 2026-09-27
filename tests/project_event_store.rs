@@ -5,13 +5,13 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use cyber_agent::adapters::project_event_store::{
+use echidna::adapters::project_event_store::{
     Project, ProjectEventStoreError, ProjectEventStream, RecoveryMetadata,
 };
-use cyber_agent::domain::events::{
+use echidna::domain::events::{
     EventEnvelope, EventId, EventSchema, EventSequence, EventType, OccurredAt, StreamId,
 };
-use cyber_agent::ports::{EventSink, EventSource, EventStore};
+use echidna::ports::{EventSink, EventSource, EventStore};
 use serde_json::{Value, json};
 use support::TemporaryDirectory;
 
@@ -299,7 +299,7 @@ fn event_store_port_enforces_strict_sequence_and_session_research_streams() {
                 &event("research-3", &research_stream, 3, json!({}))
             )),
             ProjectEventStoreError::Event(
-                cyber_agent::domain::events::EventError::UnexpectedSequence { .. }
+                echidna::domain::events::EventError::UnexpectedSequence { .. }
             )
         ));
         assert_eq!(
@@ -466,9 +466,9 @@ fn parsed_semantic_tail_errors_are_read_only_even_with_recovery_metadata() {
     let stream = ProjectEventStream::Research.stream_id();
     let first = event("event-1", &stream, 1, json!({}));
     let mut future_schema = event("event-1", &stream, 1, json!({}));
-    future_schema.schema_version = cyber_agent::domain::events::SchemaVersion::new(2);
+    future_schema.schema_version = echidna::domain::events::SchemaVersion::new(2);
     let mut missing_upcaster = event("event-1", &stream, 1, json!({}));
-    missing_upcaster.schema_version = cyber_agent::domain::events::SchemaVersion::new(0);
+    missing_upcaster.schema_version = echidna::domain::events::SchemaVersion::new(0);
     let wrong_sequence = event("event-3", &stream, 3, json!({}));
     let wrong_stream = event("event-2", &StreamId::new("another-stream"), 2, json!({}));
 

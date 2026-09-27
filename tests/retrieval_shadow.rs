@@ -5,21 +5,21 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use cyber_agent::adapters::project_event_store::{Project, ProjectEventStream};
-use cyber_agent::domain::artifacts::{ArtifactEvent, ArtifactId, ArtifactRecord, BlobId};
-use cyber_agent::domain::context::{ProviderSessionId, ProviderSessionRef, ProviderSessionRole};
-use cyber_agent::domain::events::{EventEnvelope, EventId, EventType, OccurredAt};
-use cyber_agent::domain::research::{
+use echidna::adapters::project_event_store::{Project, ProjectEventStream};
+use echidna::domain::artifacts::{ArtifactEvent, ArtifactId, ArtifactRecord, BlobId};
+use echidna::domain::context::{ProviderSessionId, ProviderSessionRef, ProviderSessionRole};
+use echidna::domain::events::{EventEnvelope, EventId, EventType, OccurredAt};
+use echidna::domain::research::{
     FindingDraft, FindingId, FindingRecord, FindingStatus, HypothesisDraft, HypothesisId,
     HypothesisRecord, HypothesisStatus, ResearchEvent, ResearchReducer, TargetKind,
     TargetSnapshotDraft, TargetSnapshotId, TargetSnapshotRecord,
 };
-use cyber_agent::domain::session::{
+use echidna::domain::session::{
     CompactionValidationContext, EvidenceSpine, NarrativeSummary, ResearchStreamIdentity,
     SessionEvent, SessionReducer, SessionSummaryDraft,
 };
-use cyber_agent::domain::tools::ToolCallId;
-use cyber_agent::ports::{EventSink, EventSource};
+use echidna::domain::tools::ToolCallId;
+use echidna::ports::{EventSink, EventSource};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -52,7 +52,7 @@ struct RequiredResult {
 }
 
 fn run(directory: &TemporaryDirectory, args: &[String]) -> Value {
-    let output = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+    let output = Command::new(env!("CARGO_BIN_EXE_echidna"))
         .current_dir(directory.path())
         .args(args)
         .output()
@@ -197,7 +197,7 @@ fn hypothesis(project: &Project, id: &str, target_id: &str, title: &str) {
 }
 
 fn start_session(project: &Project, session: &str) {
-    let session_id = cyber_agent::domain::events::StreamId::new(session);
+    let session_id = echidna::domain::events::StreamId::new(session);
     let stream_id = ProjectEventStream::Session(session_id.clone()).stream_id();
     let mut writer = project.open_writer().unwrap();
     let mut store = writer.open_session(session_id, None).unwrap();
@@ -277,7 +277,7 @@ fn append_historical_summary(project: &Project, session: &str, target: &TargetSn
         .unwrap(),
     )
     .unwrap();
-    let session_id = cyber_agent::domain::events::StreamId::new(session);
+    let session_id = echidna::domain::events::StreamId::new(session);
     let stream_id = ProjectEventStream::Session(session_id.clone()).stream_id();
     {
         let mut writer = project.open_writer().unwrap();
@@ -308,7 +308,7 @@ fn append_historical_summary(project: &Project, session: &str, target: &TargetSn
     let compaction = state.next_compaction(draft, 0, &validation).unwrap();
     let mut writer = project.open_writer().unwrap();
     let mut store = writer
-        .open_session(cyber_agent::domain::events::StreamId::new(session), None)
+        .open_session(echidna::domain::events::StreamId::new(session), None)
         .unwrap();
     let envelope = SessionEvent::CompactionCreated { compaction }
         .into_envelope(
@@ -864,7 +864,7 @@ fn memory_document_quota_preserves_selected_content_and_fixed_path_errors() {
         )
         .unwrap();
         let before = tree_bytes(&project.root().join(".cyber-agent"));
-        let output = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+        let output = Command::new(env!("CARGO_BIN_EXE_echidna"))
             .current_dir(directory.path())
             .args(command("symbol_0063", "quota-target"))
             .output()
@@ -910,7 +910,7 @@ fn memory_document_quota_preserves_path_rejections() {
             _ => unreachable!("fixed fixture entry kind"),
         }
         let before = tree_bytes(&project.root().join(".cyber-agent"));
-        let output = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+        let output = Command::new(env!("CARGO_BIN_EXE_echidna"))
             .current_dir(directory.path())
             .args(command("symbol_0000", "quota-target"))
             .output()

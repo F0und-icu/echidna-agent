@@ -1,7 +1,7 @@
 use super::*;
-use cyber_agent::domain::context::{ProviderSessionId, ProviderSessionRef, ProviderSessionRole};
-use cyber_agent::domain::model::ContentItem;
-use cyber_agent::domain::tools::{ToolCall, ToolCallId, ToolName, ToolResult, ToolResultStatus};
+use echidna::domain::context::{ProviderSessionId, ProviderSessionRef, ProviderSessionRole};
+use echidna::domain::model::ContentItem;
+use echidna::domain::tools::{ToolCall, ToolCallId, ToolName, ToolResult, ToolResultStatus};
 
 #[test]
 fn ctf_r0_clean_binary_paste_matches_durable_history_audit_and_actual_request() {

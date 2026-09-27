@@ -150,11 +150,11 @@ fn argument_correction_retains_prior_effects_reasoning_and_exact_audit_without_h
             .unwrap();
         assert_eq!(
             feedback.provenance().origin(),
-            cyber_agent::domain::context::ContextOrigin::SessionProjection
+            echidna::domain::context::ContextOrigin::SessionProjection
         );
         assert_eq!(
             feedback.provenance().authority_level(),
-            cyber_agent::domain::context::AuthorityLevel::DerivedNonEvidence
+            echidna::domain::context::AuthorityLevel::DerivedNonEvidence
         );
         assert_audits_reconstruct(root.path(), &state);
     }
@@ -333,10 +333,8 @@ fn rejection_event_replay_rejects_wrong_audit_duplicate_unknown_schema_and_exces
             events
                 .into_iter()
                 .map(|event| {
-                    serde_json::from_value::<cyber_agent::domain::events::EventEnvelope<Value>>(
-                        event,
-                    )
-                    .unwrap()
+                    serde_json::from_value::<echidna::domain::events::EventEnvelope<Value>>(event)
+                        .unwrap()
                 })
                 .collect::<Vec<_>>(),
         )

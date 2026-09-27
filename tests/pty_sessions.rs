@@ -5,12 +5,12 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use cyber_agent::adapters::tools::ToolRegistry;
-use cyber_agent::domain::tools::{
+use echidna::adapters::tools::ToolRegistry;
+use echidna::domain::tools::{
     ExecutionId, ResourceKey, ToolCall, ToolCallId, ToolExecutionOutcome, ToolExecutionPlan,
     ToolExposure, ToolExposurePlan, ToolName, ToolParallelism, ToolResultStatus, ToolRetryPolicy,
 };
-use cyber_agent::ports::tool::{ToolExecutor, ToolExecutorError};
+use echidna::ports::tool::{ToolExecutor, ToolExecutorError};
 use serde_json::{Value, json};
 
 static NEXT_PROJECT_ID: AtomicU64 = AtomicU64::new(1);

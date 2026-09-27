@@ -5,14 +5,14 @@ mod support;
 use std::fs;
 use std::sync::{Arc, Mutex};
 
-use cyber_agent::adapters::credentials::{CredentialSource, CredentialSourceError};
-use cyber_agent::app::doctor::{AgentProfileDoctorStatus, inspect_agent_model_profile};
-use cyber_agent::domain::model::{
+use echidna::adapters::credentials::{CredentialSource, CredentialSourceError};
+use echidna::app::doctor::{AgentProfileDoctorStatus, inspect_agent_model_profile};
+use echidna::domain::model::{
     ContentItem, ModelCapabilityError, ModelInputIR, ModelRequestRequirements,
 };
-use cyber_agent::domain::profile::{VisionMode, VisionRoute};
-use cyber_agent::ports::model::{ModelProviderError, ModelRequest, ProviderResponseId};
-use cyber_agent::provider_composition::{ProviderComposition, ProviderCompositionError};
+use echidna::domain::profile::{VisionMode, VisionRoute};
+use echidna::ports::model::{ModelProviderError, ModelRequest, ProviderResponseId};
+use echidna::provider_composition::{ProviderComposition, ProviderCompositionError};
 
 use support::TemporaryDirectory;
 

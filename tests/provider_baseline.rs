@@ -1,15 +1,15 @@
 use std::collections::BTreeMap;
 
-use cyber_agent::domain::context::{
+use echidna::domain::context::{
     BaselineAssessment, BaselineInvalidationReason, ContextError, InternalRequestMetadata,
     ModelIdentity, ModelProfile, ProviderSession, ProviderSessionId, ProviderSessionRef,
     ProviderSessionRole, StepSnapshot, TurnContext, TurnId,
 };
-use cyber_agent::domain::model::{
+use echidna::domain::model::{
     CapabilityMappingVersion, ContentItem, ModelCapabilities, ModelInputIR,
     ModelInputIrSchemaVersion, ModelRequestRequirements,
 };
-use cyber_agent::domain::tools::{
+use echidna::domain::tools::{
     ToolCachePolicy, ToolCall, ToolCallId, ToolDeterminism, ToolEffect, ToolExposure, ToolName,
     ToolOutputPolicy, ToolParallelism, ToolResult, ToolResultStatus, ToolRetryPolicy, ToolSpec,
 };

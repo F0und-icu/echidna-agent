@@ -2,20 +2,20 @@ mod support;
 
 use std::fs;
 
-use cyber_agent::adapters::project_event_store::{Project, ProjectEventStream};
-use cyber_agent::adapters::tools::ToolRegistry;
-use cyber_agent::domain::artifacts::{ArtifactEvent, ArtifactId, ArtifactRecord, BlobId};
-use cyber_agent::domain::events::{EventEnvelope, EventId, EventType, OccurredAt, StreamId};
-use cyber_agent::domain::research::{
+use echidna::adapters::project_event_store::{Project, ProjectEventStream};
+use echidna::adapters::tools::ToolRegistry;
+use echidna::domain::artifacts::{ArtifactEvent, ArtifactId, ArtifactRecord, BlobId};
+use echidna::domain::events::{EventEnvelope, EventId, EventType, OccurredAt, StreamId};
+use echidna::domain::research::{
     FindingDraft, FindingId, FindingRecord, FindingStatus, HypothesisDraft, HypothesisId,
     HypothesisRecord, HypothesisStatus, ResearchEvent,
 };
-use cyber_agent::domain::session::SessionEvent;
-use cyber_agent::domain::tools::{
+use echidna::domain::session::SessionEvent;
+use echidna::domain::tools::{
     ExecutionId, ExecutionReceipt, ToolCall, ToolCallId, ToolName, ToolResultStatus,
 };
-use cyber_agent::ports::EventSink;
-use cyber_agent::ports::tool::ToolExecutor;
+use echidna::ports::EventSink;
+use echidna::ports::tool::ToolExecutor;
 use serde_json::{Value, json};
 use support::TemporaryDirectory;
 
@@ -34,7 +34,7 @@ async fn execute(
     id: &str,
     name: &str,
     arguments: Value,
-) -> cyber_agent::domain::tools::ToolExecutionOutcome {
+) -> echidna::domain::tools::ToolExecutionOutcome {
     let plan = tools
         .plan(
             ExecutionId::new(format!("execution-{id}")),
@@ -226,7 +226,7 @@ fn append_artifact_for(project: &Project, artifact_id: &str, snapshot_id: &str) 
         source_path: "fixture/artifact.json".to_owned(),
         created_by_event_id: event_id.clone(),
         produced_by_tool_call_id: ToolCallId::new("artifact-tool-call"),
-        target_snapshot_id: cyber_agent::domain::research::TargetSnapshotId::new(snapshot_id),
+        target_snapshot_id: echidna::domain::research::TargetSnapshotId::new(snapshot_id),
         toolchain_fingerprint: "fixture-toolchain".to_owned(),
         parent_artifact_ids: Vec::new(),
         transform: None,
@@ -759,7 +759,7 @@ async fn v1_evidence_vectors_upcast_conservatively_without_rewriting_the_stream(
         vulnerability_class: "class".to_owned(),
         entry_point: "entry".to_owned(),
         sensitive_sink: "sink".to_owned(),
-        target_snapshot_ids: vec![cyber_agent::domain::research::TargetSnapshotId::new(
+        target_snapshot_ids: vec![echidna::domain::research::TargetSnapshotId::new(
             "snapshot-1",
         )],
         prerequisites: vec!["authenticated".to_owned()],

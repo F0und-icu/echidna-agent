@@ -5,11 +5,11 @@ mod support;
 use std::fs;
 use std::io::Cursor;
 
-use cyber_agent::adapters::project_event_store::Project;
-use cyber_agent::adapters::tools::ToolRegistry;
-use cyber_agent::domain::tools::{ExecutionId, ToolCall, ToolCallId, ToolName, ToolResultStatus};
-use cyber_agent::domain::vision::ViewImageSelection;
-use cyber_agent::ports::tool::ToolExecutor;
+use echidna::adapters::project_event_store::Project;
+use echidna::adapters::tools::ToolRegistry;
+use echidna::domain::tools::{ExecutionId, ToolCall, ToolCallId, ToolName, ToolResultStatus};
+use echidna::domain::vision::ViewImageSelection;
+use echidna::ports::tool::ToolExecutor;
 use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -26,7 +26,7 @@ async fn execute(
     call_id: &str,
     name: &str,
     arguments: Value,
-) -> cyber_agent::domain::tools::ToolExecutionOutcome {
+) -> echidna::domain::tools::ToolExecutionOutcome {
     let plan = tools
         .plan(
             ExecutionId::new(format!("execution-{call_id}")),

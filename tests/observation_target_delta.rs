@@ -2,20 +2,20 @@ mod support;
 
 use std::process::Command;
 
-use cyber_agent::adapters::project_event_store::{Project, ProjectEventStream};
-use cyber_agent::adapters::tools::ToolRegistry;
-use cyber_agent::domain::context::{ProviderSessionId, ProviderSessionRef, ProviderSessionRole};
-use cyber_agent::domain::events::{EventEnvelope, EventId, EventType, OccurredAt, StreamId};
-use cyber_agent::domain::model::ContentItem;
-use cyber_agent::domain::research::{
+use echidna::adapters::project_event_store::{Project, ProjectEventStream};
+use echidna::adapters::tools::ToolRegistry;
+use echidna::domain::context::{ProviderSessionId, ProviderSessionRef, ProviderSessionRole};
+use echidna::domain::events::{EventEnvelope, EventId, EventType, OccurredAt, StreamId};
+use echidna::domain::model::ContentItem;
+use echidna::domain::research::{
     ResearchEvent, TargetKind, TargetSnapshotDraft, TargetSnapshotId, TargetSnapshotRecord,
 };
-use cyber_agent::domain::session::SessionEvent;
-use cyber_agent::domain::tools::{
+use echidna::domain::session::SessionEvent;
+use echidna::domain::tools::{
     ExecutionId, ToolCall, ToolCallId, ToolExecutionOutcome, ToolName, ToolResultStatus,
 };
-use cyber_agent::ports::tool::ToolExecutor;
-use cyber_agent::ports::{EventSink, EventSource};
+use echidna::ports::tool::ToolExecutor;
+use echidna::ports::{EventSink, EventSource};
 use serde_json::{Value, json};
 
 use support::TemporaryDirectory;
@@ -33,7 +33,7 @@ struct Source<'a> {
 }
 
 fn execute_cli(directory: &TemporaryDirectory, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+    Command::new(env!("CARGO_BIN_EXE_echidna"))
         .current_dir(directory.path())
         .args(args)
         .output()

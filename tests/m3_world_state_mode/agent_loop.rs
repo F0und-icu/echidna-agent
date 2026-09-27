@@ -107,14 +107,14 @@ async fn queued_mode_and_agent_profile_apply_at_turn_boundary_with_fresh_primary
             .entries()
             .iter()
             .any(|entry| entry.source()
-                == cyber_agent::domain::context::ContextFragmentSource::ResearchWorldState)
+                == echidna::domain::context::ContextFragmentSource::ResearchWorldState)
     );
     assert!(
         plan.full_logical_manifest()
             .entries()
             .iter()
             .any(|entry| entry.source()
-                == cyber_agent::domain::context::ContextFragmentSource::ProjectSnapshot)
+                == echidna::domain::context::ContextFragmentSource::ProjectSnapshot)
     );
     assert!(
         !plan
@@ -220,7 +220,7 @@ async fn agent_loop_rejects_model_calls_absent_from_the_sent_schema_before_execu
     assert!(agent.history().items().iter().any(|item| matches!(
         item,
         ContentItem::ToolResult { result }
-            if result.call_id.as_str() == "hidden-call" && result.status == cyber_agent::domain::tools::ToolResultStatus::Failed
+            if result.call_id.as_str() == "hidden-call" && result.status == echidna::domain::tools::ToolResultStatus::Failed
     )));
 }
 
@@ -328,7 +328,7 @@ async fn truncated_world_state_plan_never_injects_an_unplanned_diff() {
     assert!(
         !matches!(
             state_decision,
-            cyber_agent::domain::context::ContextDecision::Include
+            echidna::domain::context::ContextDecision::Include
         ),
         "the constrained Plan must not select the complete WorldState"
     );
@@ -801,8 +801,8 @@ async fn failed_turn_boundary_configuration_keeps_pending_prompt_and_exposure_un
         .unwrap();
     assert!(matches!(
         agent.run_turn("blocked", AgentCancellation::new()).await,
-        Err(cyber_agent::app::agent_loop::AgentLoopError::Configuration(
-            cyber_agent::app::agent_loop::AgentLoopConfigurationError::PrimaryModelDoesNotMatchProvider
+        Err(echidna::app::agent_loop::AgentLoopError::Configuration(
+            echidna::app::agent_loop::AgentLoopConfigurationError::PrimaryModelDoesNotMatchProvider
         ))
     ));
     assert!(
@@ -885,7 +885,7 @@ async fn resume_replaces_the_primary_identity_forces_full_then_allows_fresh_incr
             ),
             None,
         ),
-        Err(cyber_agent::app::agent_loop::AgentLoopConfigurationError::ReplayedSessionProviderMismatch { .. })
+        Err(echidna::app::agent_loop::AgentLoopConfigurationError::ReplayedSessionProviderMismatch { .. })
     ));
     agent
         .resume_from_session(
@@ -923,7 +923,7 @@ async fn resume_replaces_the_primary_identity_forces_full_then_allows_fresh_incr
     );
     assert!(matches!(
         requests[2].delivery(),
-        cyber_agent::ports::model::ModelRequestDelivery::Incremental { continuation }
+        echidna::ports::model::ModelRequestDelivery::Incremental { continuation }
             if continuation.as_str() == "response-resumed"
     ));
 }
@@ -975,7 +975,7 @@ async fn failed_resumed_full_keeps_session_resumed_pending_for_the_next_attempt(
         agent
             .run_turn("failed resumed input", AgentCancellation::new())
             .await,
-        Err(cyber_agent::app::agent_loop::AgentLoopError::Model(_))
+        Err(echidna::app::agent_loop::AgentLoopError::Model(_))
     ));
     assert_eq!(
         agent.last_baseline_assessment(),

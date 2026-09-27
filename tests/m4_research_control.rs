@@ -2,27 +2,27 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use cyber_agent::adapters::mock_model::{MockModelFixture, MockModelProvider};
-use cyber_agent::adapters::tools::ToolRegistry;
-use cyber_agent::app::agent_loop::AgentLoop;
-use cyber_agent::app::cancellation::AgentCancellation;
-use cyber_agent::app::session::{AppendAfterDurableError, SessionProjection};
-use cyber_agent::domain::context::{
+use echidna::adapters::mock_model::{MockModelFixture, MockModelProvider};
+use echidna::adapters::tools::ToolRegistry;
+use echidna::app::agent_loop::AgentLoop;
+use echidna::app::cancellation::AgentCancellation;
+use echidna::app::session::{AppendAfterDurableError, SessionProjection};
+use echidna::domain::context::{
     ContextBudget, ContextFragmentSource, ContextPlanner, ProviderSession, ProviderSessionId,
     ProviderSessionRef, ProviderSessionRole,
 };
-use cyber_agent::domain::domain_profile::DomainProfile;
-use cyber_agent::domain::events::{
+use echidna::domain::domain_profile::DomainProfile;
+use echidna::domain::events::{
     EventEnvelope, EventId, EventSequence, EventType, OccurredAt, StreamId,
 };
-use cyber_agent::domain::model::{CapabilityMappingVersion, ModelCapabilities, ModelEvent};
-use cyber_agent::domain::research::TargetKind;
-use cyber_agent::domain::research_control::{
+use echidna::domain::model::{CapabilityMappingVersion, ModelCapabilities, ModelEvent};
+use echidna::domain::research::TargetKind;
+use echidna::domain::research_control::{
     BaseContract, PromptComposition, ResearchPhase, ResearchPhaseSelection,
 };
-use cyber_agent::domain::session::{SessionError, SessionEvent, SessionReducer, SessionState};
-use cyber_agent::ports::model::{ModelResponseCompletion, ProviderResponseId};
-use cyber_agent::ports::{EventSink, tool::ToolExecutor};
+use echidna::domain::session::{SessionError, SessionEvent, SessionReducer, SessionState};
+use echidna::ports::model::{ModelResponseCompletion, ProviderResponseId};
+use echidna::ports::{EventSink, tool::ToolExecutor};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -32,7 +32,7 @@ const MANIFEST_SHA256: &str = "7bee1a2304ecb0a1100bc5b5183b51a0f384fac03b695d0cd
 
 #[test]
 fn explicit_project_instructions_are_complete_or_refused_under_budget_pressure() {
-    use cyber_agent::domain::context::ContextPlannerError;
+    use echidna::domain::context::ContextPlannerError;
     let rules =
         "RULE: use the explicit fixture commands; never infer an omitted rule. ".repeat(256);
     let composition = PromptComposition::current().with_project(&rules).unwrap();
@@ -80,7 +80,7 @@ fn base_contract_scopes_current_facts_and_requested_answer_format() {
 
 #[test]
 fn base_revision_changes_only_its_fragment_and_preserves_historical_bytes() {
-    use cyber_agent::domain::context::{
+    use echidna::domain::context::{
         ContextFragment, ContextFragmentContent, ContextFragmentId, ContextFragmentPriority,
         FragmentCachePolicy,
     };
@@ -159,7 +159,7 @@ fn base_revision_changes_only_its_fragment_and_preserves_historical_bytes() {
 
 #[test]
 fn revised_environment_prompts_preserve_only_known_legacy_selections() {
-    use cyber_agent::domain::domain_profile::DomainProfileSelection;
+    use echidna::domain::domain_profile::DomainProfileSelection;
     for generation in [1, 2] {
         let domain: DomainProfileSelection = serde_json::from_value(json!({
             "profile":"binary", "profile_generation":generation,

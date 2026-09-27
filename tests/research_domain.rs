@@ -1,8 +1,8 @@
-use cyber_agent::domain::artifacts::ArtifactId;
-use cyber_agent::domain::events::{
+use echidna::domain::artifacts::ArtifactId;
+use echidna::domain::events::{
     EventEnvelope, EventId, EventSequence, EventType, OccurredAt, StreamId,
 };
-use cyber_agent::domain::research::{
+use echidna::domain::research::{
     CapsuleId, EvidenceLink, EvidenceRef, EvidenceRelation, ExecutionReceiptId,
     ExperimentCapsuleDraft, ExperimentDraft, ExperimentId, ExperimentRecord, ExperimentResult,
     FindingDraft, FindingId, FindingRecord, FindingStatus, FindingUpdate, HypothesisDraft,
@@ -10,7 +10,7 @@ use cyber_agent::domain::research::{
     ResearchError, ResearchEvent, ResearchReducer, TargetKind, TargetSnapshotDraft,
     TargetSnapshotId, TargetSnapshotRecord,
 };
-use cyber_agent::domain::tools::ExecutionId;
+use echidna::domain::tools::ExecutionId;
 use serde_json::{Value, json};
 
 fn target_snapshot(id: &str, captured_at: &str, notes: &str) -> TargetSnapshotRecord {

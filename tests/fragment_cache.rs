@@ -4,17 +4,17 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use cyber_agent::adapters::fragment_cache::LocalFragmentCache;
-use cyber_agent::adapters::project_event_store::Project;
-use cyber_agent::app::context_compilation::{FragmentCacheDisposition, resolve_context_fragment};
-use cyber_agent::domain::artifacts::ArtifactId;
-use cyber_agent::domain::context::{
+use echidna::adapters::fragment_cache::LocalFragmentCache;
+use echidna::adapters::project_event_store::Project;
+use echidna::app::context_compilation::{FragmentCacheDisposition, resolve_context_fragment};
+use echidna::domain::artifacts::ArtifactId;
+use echidna::domain::context::{
     ContextBudget, ContextFragment, ContextFragmentCacheKey, ContextFragmentContent,
     ContextFragmentId, ContextFragmentPriority, ContextFragmentSource, ContextPlanner,
     ContextPlannerVersions, ContextSourceFingerprint, FragmentCachePolicy,
 };
-use cyber_agent::domain::model::{CapabilityMappingVersion, ContentItem, ModelCapabilities};
-use cyber_agent::ports::context::{
+use echidna::domain::model::{CapabilityMappingVersion, ContentItem, ModelCapabilities};
+use echidna::ports::context::{
     ContextFragmentCache, ContextFragmentCacheError, ContextFragmentCacheOperation,
 };
 use serde_json::{Value, json};

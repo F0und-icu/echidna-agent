@@ -78,7 +78,7 @@ fn command_failure_diagnostics_survive_child_checkpoint_history_and_provider_del
             .count(),
         1
     );
-    let projection = cyber_agent::app::session::SessionProjection::replay(
+    let projection = echidna::app::session::SessionProjection::replay(
         events
             .into_iter()
             .map(|event| serde_json::from_value(event).unwrap()),
@@ -90,9 +90,6 @@ fn command_failure_diagnostics_survive_child_checkpoint_history_and_provider_del
             .history()
             .items()
             .iter()
-            .any(|item| matches!(
-                item,
-                cyber_agent::domain::model::ContentItem::ToolResult { .. }
-            ))
+            .any(|item| matches!(item, echidna::domain::model::ContentItem::ToolResult { .. }))
     );
 }

@@ -14,46 +14,46 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use cyber_agent::adapters::fragment_cache::LocalFragmentCache;
-use cyber_agent::adapters::mock_model::{MockModelFixture, MockModelProvider};
-use cyber_agent::adapters::project_event_store::Project;
-use cyber_agent::adapters::tools::ToolRegistry;
-use cyber_agent::app::agent_loop::{AgentLoop, AgentTurnOutcome};
-use cyber_agent::app::cancellation::AgentCancellation;
-use cyber_agent::app::doctor::{AgentProfileDoctorStatus, inspect_agent_model_profile};
-use cyber_agent::domain::context::{
+use echidna::adapters::fragment_cache::LocalFragmentCache;
+use echidna::adapters::mock_model::{MockModelFixture, MockModelProvider};
+use echidna::adapters::project_event_store::Project;
+use echidna::adapters::tools::ToolRegistry;
+use echidna::app::agent_loop::{AgentLoop, AgentTurnOutcome};
+use echidna::app::cancellation::AgentCancellation;
+use echidna::app::doctor::{AgentProfileDoctorStatus, inspect_agent_model_profile};
+use echidna::domain::context::{
     AuthorityLevel, BaselineAssessment, BaselineInvalidationReason, ContextBudget, ContextFragment,
     ContextFragmentContent, ContextFragmentId, ContextFragmentPriority, ContextFragmentSource,
     ContextPlanner, FragmentCachePolicy, InternalRequestMetadata, ModelIdentity, ModelProfile,
     ProviderSession, ProviderSessionId, ProviderSessionRef, ProviderSessionRole, StepSnapshot,
     TurnContext, TurnId,
 };
-use cyber_agent::domain::domain_profile::DomainProfile;
-use cyber_agent::domain::events::{EventId, EventSequence, OccurredAt, StreamId};
-use cyber_agent::domain::model::{
+use echidna::domain::domain_profile::DomainProfile;
+use echidna::domain::events::{EventId, EventSequence, OccurredAt, StreamId};
+use echidna::domain::model::{
     CapabilityMappingVersion, ContentItem, ModelCapabilities, ModelEvent, ModelInputIR,
     ModelRequestRequirements,
 };
-use cyber_agent::domain::profile::{
+use echidna::domain::profile::{
     AgentModelProfile, AgentModelProfileError, ProviderProfile, VisionMode, VisionRoute,
     VisionRouteReason, resolve_vision_route,
 };
-use cyber_agent::domain::project::ProjectId;
-use cyber_agent::domain::research_control::{PromptComposition, ResearchPhase};
-use cyber_agent::domain::session::{SessionEvent, SessionReducer, SessionState};
-use cyber_agent::domain::snapshot::{ProjectFingerprint, ProjectFingerprintKind, ProjectSnapshot};
-use cyber_agent::domain::tools::{
+use echidna::domain::project::ProjectId;
+use echidna::domain::research_control::{PromptComposition, ResearchPhase};
+use echidna::domain::session::{SessionEvent, SessionReducer, SessionState};
+use echidna::domain::snapshot::{ProjectFingerprint, ProjectFingerprintKind, ProjectSnapshot};
+use echidna::domain::tools::{
     DeferredActivationSet, ExecutionId, ToolCall, ToolCallId, ToolExecutionOutcome,
     ToolExecutionPlan, ToolExposure, ToolExposurePlan, ToolName, ToolSpec,
 };
-use cyber_agent::domain::world_state::{
+use echidna::domain::world_state::{
     ProjectSnapshotContext, ResearchWorldState, ResearchWorldStateSection,
 };
-use cyber_agent::ports::model::{
+use echidna::ports::model::{
     ModelEventStream, ModelProvider, ModelProviderError, ModelRequest, ModelResponseCompletion,
     ModelStreamEvent, ProviderResponseId,
 };
-use cyber_agent::ports::tool::{ToolExecutionFuture, ToolExecutor, ToolExecutorError};
+use echidna::ports::tool::{ToolExecutionFuture, ToolExecutor, ToolExecutorError};
 use futures_util::stream;
 use serde_json::json;
 use support::TemporaryDirectory;

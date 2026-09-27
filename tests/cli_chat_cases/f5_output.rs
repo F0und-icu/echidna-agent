@@ -30,12 +30,14 @@ fn r5a_assistant_sampling_replies_are_separate_without_changing_history() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("assistant> FIRST_REPLY\n"), "{stdout}");
-    assert!(stdout.contains("assistant> SECOND_REPLY\n"), "{stdout}");
-    assert_eq!(stdout.matches("assistant> ").count(), 2);
+    assert!(stdout.contains("Echidna> FIRST_REPLY\n"), "{stdout}");
+    assert!(stdout.contains("Echidna> SECOND_REPLY\n"), "{stdout}");
+    assert_eq!(stdout.matches("Echidna> ").count(), 2);
+    assert!(!stdout.contains('\u{1b}'));
+    assert!(!stdout.contains("Question. Observe. Verify."));
     let _ = f2a_request_body(&server.requests, "first step");
     let second = f2a_request_body(&server.requests, "second step");
-    assert!(!second.to_string().contains("assistant>"));
+    assert!(!second.to_string().contains("Echidna>"));
     let history = session_events(root.path(), &session_id(root.path()));
     let items: Vec<_> = history
         .iter()
@@ -45,7 +47,7 @@ fn r5a_assistant_sampling_replies_are_separate_without_changing_history() {
     let history = serde_json::to_string(&items).unwrap();
     assert!(history.contains("FIRST_REPLY"));
     assert!(history.contains("SECOND_REPLY"));
-    assert!(!history.contains("assistant>"));
+    assert!(!history.contains("Echidna>"));
     f2a_join_server(server, "reply boundaries");
 }
 

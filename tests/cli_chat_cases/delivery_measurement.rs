@@ -1,9 +1,9 @@
 //! Offline measurements at the formal CLI/wire/audit boundaries, not telemetry.
 
 use super::*;
-use cyber_agent::domain::model::{ContentItem, MessageRole};
-use cyber_agent::domain::request_audit::RequestAuditDeliveryMode;
-use cyber_agent::domain::tools::ToolResultStatus;
+use echidna::domain::model::{ContentItem, MessageRole};
+use echidna::domain::request_audit::RequestAuditDeliveryMode;
+use echidna::domain::tools::ToolResultStatus;
 use std::fs::FileTimes;
 use std::path::Path;
 
@@ -265,7 +265,7 @@ fn four_cases(repetitions: usize, emit: bool) {
                     // Use the existing public CLI projection; do not widen its private
                     // estimator API or duplicate the estimator in measurement code.
                     let metrics_output = f2a_wait_child(
-                        Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+                        Command::new(env!("CARGO_BIN_EXE_echidna"))
                             .current_dir(root.path())
                             .args(["metrics", "--session", &session])
                             .stdin(Stdio::null())

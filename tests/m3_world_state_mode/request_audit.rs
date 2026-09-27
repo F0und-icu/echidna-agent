@@ -4,18 +4,18 @@ use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::sync::Mutex;
 
-use cyber_agent::app::agent_loop::AgentLoopError;
-use cyber_agent::app::request_audit::{RequestAuditService, RequestAuditServiceError};
-use cyber_agent::app::session::SessionProjection;
-use cyber_agent::domain::artifacts::BlobId;
-use cyber_agent::domain::context::{ProviderSessionId, ProviderSessionRef, ProviderSessionRole};
-use cyber_agent::domain::events::{EventEnvelope, EventId, EventSequence, OccurredAt};
-use cyber_agent::domain::request_audit::{
+use echidna::app::agent_loop::AgentLoopError;
+use echidna::app::request_audit::{RequestAuditService, RequestAuditServiceError};
+use echidna::app::session::SessionProjection;
+use echidna::domain::artifacts::BlobId;
+use echidna::domain::context::{ProviderSessionId, ProviderSessionRef, ProviderSessionRole};
+use echidna::domain::events::{EventEnvelope, EventId, EventSequence, OccurredAt};
+use echidna::domain::request_audit::{
     RequestAdapterVersion, RequestAuditBinding, RequestAuditDeliveryReason, RequestAuditRunContext,
 };
-use cyber_agent::domain::session::SessionEvent;
-use cyber_agent::ports::EventSink;
-use cyber_agent::ports::artifact::{ArtifactStore, StoredBlob};
+use echidna::domain::session::SessionEvent;
+use echidna::ports::EventSink;
+use echidna::ports::artifact::{ArtifactStore, StoredBlob};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -336,17 +336,17 @@ async fn request_audit_v3_reconstruction_rejects_delivery_map_tampering() {
     let mut wrong_position = encoded.clone();
     wrong_position["context_delivery_map"]["content_items"][0]["final_position"] =
         serde_json::json!(1);
-    let wrong_position: cyber_agent::domain::request_audit::RequestAuditManifest =
+    let wrong_position: echidna::domain::request_audit::RequestAuditManifest =
         serde_json::from_value(wrong_position).unwrap();
     assert!(matches!(
         wrong_position.validate(),
-        Err(cyber_agent::domain::request_audit::RequestAuditError::ContextDeliveryMap { .. })
+        Err(echidna::domain::request_audit::RequestAuditError::ContextDeliveryMap { .. })
     ));
     assert!(matches!(
         service.reconstruct(&wrong_position),
         Err(
-            cyber_agent::domain::request_audit::RequestAuditReconstructionError::Audit(
-                cyber_agent::domain::request_audit::RequestAuditError::ContextDeliveryMap { .. }
+            echidna::domain::request_audit::RequestAuditReconstructionError::Audit(
+                echidna::domain::request_audit::RequestAuditError::ContextDeliveryMap { .. }
             )
         )
     ));
@@ -354,7 +354,7 @@ async fn request_audit_v3_reconstruction_rejects_delivery_map_tampering() {
     let mut wrong_hash = encoded.clone();
     wrong_hash["context_delivery_map"]["content_items"][0]["content_hash"] =
         serde_json::json!("a".repeat(64));
-    let wrong_hash: cyber_agent::domain::request_audit::RequestAuditManifest =
+    let wrong_hash: echidna::domain::request_audit::RequestAuditManifest =
         serde_json::from_value(wrong_hash).unwrap();
     wrong_hash
         .validate()
@@ -362,8 +362,8 @@ async fn request_audit_v3_reconstruction_rejects_delivery_map_tampering() {
     assert!(matches!(
         service.reconstruct(&wrong_hash),
         Err(
-            cyber_agent::domain::request_audit::RequestAuditReconstructionError::Audit(
-                cyber_agent::domain::request_audit::RequestAuditError::ContextDeliveryMap { .. }
+            echidna::domain::request_audit::RequestAuditReconstructionError::Audit(
+                echidna::domain::request_audit::RequestAuditError::ContextDeliveryMap { .. }
             )
         )
     ));
@@ -371,17 +371,17 @@ async fn request_audit_v3_reconstruction_rejects_delivery_map_tampering() {
     let mut wrong_provenance = encoded;
     wrong_provenance["context_delivery_map"]["content_items"][0]["provenance"]["authority_level"] =
         serde_json::json!("fact_reference");
-    let wrong_provenance: cyber_agent::domain::request_audit::RequestAuditManifest =
+    let wrong_provenance: echidna::domain::request_audit::RequestAuditManifest =
         serde_json::from_value(wrong_provenance).unwrap();
     assert!(matches!(
         wrong_provenance.validate(),
-        Err(cyber_agent::domain::request_audit::RequestAuditError::ContextDeliveryMap { .. })
+        Err(echidna::domain::request_audit::RequestAuditError::ContextDeliveryMap { .. })
     ));
     assert!(matches!(
         service.reconstruct(&wrong_provenance),
         Err(
-            cyber_agent::domain::request_audit::RequestAuditReconstructionError::Audit(
-                cyber_agent::domain::request_audit::RequestAuditError::ContextDeliveryMap { .. }
+            echidna::domain::request_audit::RequestAuditReconstructionError::Audit(
+                echidna::domain::request_audit::RequestAuditError::ContextDeliveryMap { .. }
             )
         )
     ));
@@ -566,19 +566,19 @@ async fn full_reasoning_tool_continuation_audit_preserves_order_and_provenance()
         map.content_items()[reasoning_position]
             .provenance()
             .authority_level(),
-        cyber_agent::domain::context::AuthorityLevel::ModelObservation
+        echidna::domain::context::AuthorityLevel::ModelObservation
     );
     assert_eq!(
         map.content_items()[reasoning_position + 1]
             .provenance()
             .authority_level(),
-        cyber_agent::domain::context::AuthorityLevel::ModelObservation
+        echidna::domain::context::AuthorityLevel::ModelObservation
     );
     assert_eq!(
         map.content_items()[reasoning_position + 2]
             .provenance()
             .authority_level(),
-        cyber_agent::domain::context::AuthorityLevel::DerivedNonEvidence
+        echidna::domain::context::AuthorityLevel::DerivedNonEvidence
     );
 }
 

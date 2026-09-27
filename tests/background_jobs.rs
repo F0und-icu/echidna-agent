@@ -4,20 +4,20 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use cyber_agent::adapters::tools::ToolRegistry;
-use cyber_agent::domain::tools::{
+use echidna::adapters::tools::ToolRegistry;
+use echidna::domain::tools::{
     ExecutionId, ToolCall, ToolCallId, ToolExecutionOutcome, ToolExecutionPlan, ToolName,
     ToolResultStatus,
 };
-use cyber_agent::ports::tool::{ToolExecutor, ToolExecutorError};
+use echidna::ports::tool::{ToolExecutor, ToolExecutorError};
 use serde_json::{Value, json};
 
 static NEXT_PROJECT_ID: AtomicU64 = AtomicU64::new(1);
 
 #[tokio::test]
 async fn global_background_lease_preserves_discovery_and_model_bound_stop() {
-    use cyber_agent::domain::research_control::ResearchPhase;
-    use cyber_agent::domain::tools::DeferredActivationSet;
+    use echidna::domain::research_control::ResearchPhase;
+    use echidna::domain::tools::DeferredActivationSet;
     for (start_name, stop_name, id_field) in [
         ("start_job", "stop_job", "job_id"),
         ("start_pty", "stop_pty", "pty_session_id"),

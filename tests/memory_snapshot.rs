@@ -7,13 +7,13 @@ mod support;
 use std::fs;
 use std::process::Command;
 
-use cyber_agent::adapters::project_event_store::Project;
-use cyber_agent::adapters::tools::ToolRegistry;
-use cyber_agent::domain::tools::{
+use echidna::adapters::project_event_store::Project;
+use echidna::adapters::tools::ToolRegistry;
+use echidna::domain::tools::{
     ExecutionId, ToolCall, ToolCallId, ToolEffect, ToolExposure, ToolExposurePlan, ToolName,
     ToolParallelism, ToolResultStatus, ToolRetryPolicy,
 };
-use cyber_agent::ports::tool::ToolExecutor;
+use echidna::ports::tool::ToolExecutor;
 use serde_json::{Value, json};
 use support::TemporaryDirectory;
 
@@ -32,7 +32,7 @@ async fn execute(
     id: &str,
     name: &str,
     arguments: Value,
-) -> cyber_agent::domain::tools::ToolExecutionOutcome {
+) -> echidna::domain::tools::ToolExecutionOutcome {
     let plan = tools
         .plan(
             ExecutionId::new(format!("execution-{id}")),
@@ -1002,7 +1002,7 @@ fn memory_and_snapshot_tool_specs_are_fixed_and_non_cacheable() {
         assert_eq!(spec.retry_policy, ToolRetryPolicy::NeverAutoRetry);
         assert_eq!(
             spec.cache_policy,
-            cyber_agent::domain::tools::ToolCachePolicy::None
+            echidna::domain::tools::ToolCachePolicy::None
         );
     }
     let memory_write = resolved

@@ -5,12 +5,12 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 
-use cyber_agent::adapters::tools::ToolRegistry;
-use cyber_agent::domain::tools::{
+use echidna::adapters::tools::ToolRegistry;
+use echidna::domain::tools::{
     ExecutionId, ToolCachePolicy, ToolCall, ToolCallId, ToolDeterminism, ToolEffect, ToolExposure,
     ToolName, ToolParallelism, ToolResultStatus, ToolRetryPolicy,
 };
-use cyber_agent::ports::tool::ToolExecutor;
+use echidna::ports::tool::ToolExecutor;
 use serde_json::{Value, json};
 
 mod support;

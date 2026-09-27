@@ -1,4 +1,4 @@
-use cyber_agent::domain::tools::{
+use echidna::domain::tools::{
     ExecutionId, ResourceKey, ToolCachePolicy, ToolCall, ToolCallId, ToolDeterminism, ToolEffect,
     ToolExecutionOutcome, ToolExecutionPlan, ToolExposure, ToolName, ToolOutputPolicy,
     ToolParallelism, ToolResultStatus, ToolRetryPolicy, ToolSpec,

@@ -2,19 +2,19 @@
 mod subcommand_fixture;
 mod support;
 
-use cyber_agent::adapters::project_event_store::{Project, ProjectEventStream};
-use cyber_agent::app::session::{AppendAfterDurableError, SessionProjection};
-use cyber_agent::domain::context::{ProviderSessionId, ProviderSessionRef, ProviderSessionRole};
-use cyber_agent::domain::events::{
+use echidna::adapters::project_event_store::{Project, ProjectEventStream};
+use echidna::app::session::{AppendAfterDurableError, SessionProjection};
+use echidna::domain::context::{ProviderSessionId, ProviderSessionRef, ProviderSessionRole};
+use echidna::domain::events::{
     EventEnvelope, EventId, EventSequence, EventType, OccurredAt, StreamId,
 };
-use cyber_agent::domain::history::normalize_content_items;
-use cyber_agent::domain::model::ContentItem;
-use cyber_agent::domain::session::{
+use echidna::domain::history::normalize_content_items;
+use echidna::domain::model::ContentItem;
+use echidna::domain::session::{
     SessionError, SessionEvent, SessionLifecycle, SessionReducer, SessionState,
 };
-use cyber_agent::domain::tools::{ToolCall, ToolCallId, ToolName, ToolResult, ToolResultStatus};
-use cyber_agent::ports::{EventSink, EventSource};
+use echidna::domain::tools::{ToolCall, ToolCallId, ToolName, ToolResult, ToolResultStatus};
+use echidna::ports::{EventSink, EventSource};
 use serde_json::{Value, json};
 use support::TemporaryDirectory;
 
@@ -454,7 +454,7 @@ fn session_reducer_rejects_unknown_schema_and_illegal_transitions_without_mutati
                 .unwrap(),
         ),
         Err(SessionError::Event(
-            cyber_agent::domain::events::EventError::UnexpectedSequence { .. }
+            echidna::domain::events::EventError::UnexpectedSequence { .. }
         ))
     ));
     assert_eq!(state, started_state);
@@ -686,7 +686,7 @@ fn session_history_facts_replay_through_the_single_pairing_owner_and_normalize_i
     assert!(matches!(
         duplicate,
         Err(SessionError::History(
-            cyber_agent::domain::history::HistoryError::DuplicateToolCall { .. }
+            echidna::domain::history::HistoryError::DuplicateToolCall { .. }
         ))
     ));
 
@@ -719,7 +719,7 @@ fn session_history_facts_replay_through_the_single_pairing_owner_and_normalize_i
     assert!(matches!(
         mismatched,
         Err(SessionError::History(
-            cyber_agent::domain::history::HistoryError::ToolNameMismatch { .. }
+            echidna::domain::history::HistoryError::ToolNameMismatch { .. }
         ))
     ));
 }
@@ -751,7 +751,7 @@ fn session_projection_replays_project_events_and_never_applies_a_failed_append()
         assert_eq!(projection.state().lifecycle(), SessionLifecycle::Active);
         assert_eq!(
             projection.append(&mut store, started).unwrap(),
-            cyber_agent::domain::events::ApplyOutcome::DuplicateIgnored
+            echidna::domain::events::ApplyOutcome::DuplicateIgnored
         );
         assert_eq!(store.next_sequence().unwrap(), EventSequence::new(2));
     }

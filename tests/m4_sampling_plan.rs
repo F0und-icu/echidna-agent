@@ -4,31 +4,31 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
-use cyber_agent::adapters::tools::ToolRegistry;
-use cyber_agent::app::agent_loop::{AgentLoop, AgentTurnOutcome};
-use cyber_agent::app::cancellation::AgentCancellation;
-use cyber_agent::domain::context::{
+use echidna::adapters::tools::ToolRegistry;
+use echidna::app::agent_loop::{AgentLoop, AgentTurnOutcome};
+use echidna::app::cancellation::AgentCancellation;
+use echidna::domain::context::{
     ContextBudget, ContextFragment, ContextFragmentContent, ContextFragmentId,
     ContextFragmentPriority, ContextFragmentSource, ContextOrigin, ContextPlanner, ContextSlot,
     FragmentCachePolicy, ModelIdentity, ModelProfile, PromptRendererIdentity, ProviderSessionId,
     ProviderSessionRef, ProviderSessionRole, TurnContext, TurnId,
 };
-use cyber_agent::domain::domain_profile::DomainProfile;
-use cyber_agent::domain::model::{
+use echidna::domain::domain_profile::DomainProfile;
+use echidna::domain::model::{
     CapabilityMappingVersion, ModelCapabilities, ModelEvent, ModelRequestRequirements,
 };
-use cyber_agent::domain::research_control::{PromptComposition, ResearchPhase};
-use cyber_agent::domain::sampling::{SamplingStepPlan, TurnConfigurationSnapshot};
-use cyber_agent::domain::tools::{
+use echidna::domain::research_control::{PromptComposition, ResearchPhase};
+use echidna::domain::sampling::{SamplingStepPlan, TurnConfigurationSnapshot};
+use echidna::domain::tools::{
     DeferredActivationSet, ExecutionId, ResolvedToolPlan, ToolCachePolicy, ToolCall, ToolCallId,
     ToolDeterminism, ToolEffect, ToolExecutionOutcome, ToolExecutionPlan, ToolExposure,
     ToolExposurePlan, ToolName, ToolOutputPolicy, ToolParallelism, ToolRetryPolicy, ToolSpec,
 };
-use cyber_agent::ports::model::{
+use echidna::ports::model::{
     ModelEventStream, ModelProvider, ModelProviderError, ModelRequest, ModelResponseCompletion,
     ModelStreamEvent,
 };
-use cyber_agent::ports::tool::{ToolExecutionFuture, ToolExecutor, ToolExecutorError};
+use echidna::ports::tool::{ToolExecutionFuture, ToolExecutor, ToolExecutorError};
 use futures_core::Stream;
 use serde_json::json;
 
@@ -181,7 +181,7 @@ async fn deferred_activation_changes_only_later_steps_and_clears_at_the_next_tur
     assert!(requests[1].input().content_items.iter().any(|item| {
         matches!(
             item,
-            cyber_agent::domain::model::ContentItem::Reasoning { text }
+            echidna::domain::model::ContentItem::Reasoning { text }
                 if text == "find the deferred write tool"
         )
     }));

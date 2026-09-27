@@ -11,47 +11,47 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use cyber_agent::adapters::tools::ToolRegistry;
-use cyber_agent::app::agent_loop::{AgentLoop, AgentLoopError, ViewImageFollowUpFuture};
-use cyber_agent::app::cancellation::AgentCancellation;
-use cyber_agent::app::request_audit::{RequestAuditService, RequestAuditServiceError};
-use cyber_agent::app::session::{AppendAfterDurableError, SessionProjection};
-use cyber_agent::app::vision::{
+use echidna::adapters::tools::ToolRegistry;
+use echidna::app::agent_loop::{AgentLoop, AgentLoopError, ViewImageFollowUpFuture};
+use echidna::app::cancellation::AgentCancellation;
+use echidna::app::request_audit::{RequestAuditService, RequestAuditServiceError};
+use echidna::app::session::{AppendAfterDurableError, SessionProjection};
+use echidna::app::vision::{
     VisionAnalysisInput, VisionDirectRequest, VisionEventStamp, VisionReplayError,
     VisionReplayService, VisionSecondaryRequest, VisionSessionError, VisionSessionService,
 };
-use cyber_agent::domain::artifacts::{ArtifactId, BlobId};
-use cyber_agent::domain::context::{
+use echidna::domain::artifacts::{ArtifactId, BlobId};
+use echidna::domain::context::{
     AuthorityLevel, ContextOrigin, ModelIdentity, ModelProfile, ProviderSession, ProviderSessionId,
     ProviderSessionRef, ProviderSessionRole, SemanticClass,
 };
-use cyber_agent::domain::domain_profile::DomainProfile;
-use cyber_agent::domain::events::{EventEnvelope, EventId, EventSequence, OccurredAt, StreamId};
-use cyber_agent::domain::model::{
+use echidna::domain::domain_profile::DomainProfile;
+use echidna::domain::events::{EventEnvelope, EventId, EventSequence, OccurredAt, StreamId};
+use echidna::domain::model::{
     CapabilityMappingVersion, ContentItem, ModelCapabilities, ModelEvent,
 };
-use cyber_agent::domain::profile::{VisionMode, VisionRoute, VisionRouteReason};
-use cyber_agent::domain::project::ProjectId;
-use cyber_agent::domain::request_audit::{
+use echidna::domain::profile::{VisionMode, VisionRoute, VisionRouteReason};
+use echidna::domain::project::ProjectId;
+use echidna::domain::request_audit::{
     REQUEST_AUDIT_MANIFEST_SCHEMA_VERSION, RequestAdapterVersion, RequestAuditBinding,
     RequestAuditError, RequestAuditManifest, RequestAuditReconstructionError,
     RequestAuditRunContext,
 };
-use cyber_agent::domain::session::{SessionError, SessionEvent};
-use cyber_agent::domain::tools::{
+use echidna::domain::session::{SessionError, SessionEvent};
+use echidna::domain::tools::{
     ExecutionId, ToolCall, ToolExecutionOutcome, ToolExecutionPlan, ToolSpec,
 };
-use cyber_agent::domain::vision::{
+use echidna::domain::vision::{
     VISION_FACT_SCHEMA_VERSION, ViewImageSelection, VisionImageGeometry, VisionObservationId,
     VisionRouteRecord,
 };
-use cyber_agent::ports::EventSink;
-use cyber_agent::ports::artifact::{ArtifactStore, StoredBlob};
-use cyber_agent::ports::model::{
+use echidna::ports::EventSink;
+use echidna::ports::artifact::{ArtifactStore, StoredBlob};
+use echidna::ports::model::{
     ModelEventStream, ModelProvider, ModelProviderError, ModelRequest, ModelResponseCompletion,
     ModelStreamEvent,
 };
-use cyber_agent::ports::tool::{ToolExecutionFuture, ToolExecutor, ToolExecutorError};
+use echidna::ports::tool::{ToolExecutionFuture, ToolExecutor, ToolExecutorError};
 use futures_util::stream;
 use sha2::{Digest, Sha256};
 
@@ -232,7 +232,7 @@ fn completed(
             text: text.into(),
         })),
         Ok(ModelStreamEvent::Completed(ModelResponseCompletion::new(
-            cyber_agent::ports::model::ProviderResponseId::new(response_id),
+            echidna::ports::model::ProviderResponseId::new(response_id),
         ))),
     ]
 }
@@ -1102,8 +1102,8 @@ fn view_image_executor() -> FixedViewImageExecutor {
 
 fn view_image_tool_call() -> ToolCall {
     ToolCall::new(
-        cyber_agent::domain::tools::ToolCallId::new("call-view-image"),
-        cyber_agent::domain::tools::ToolName::new("view_image"),
+        echidna::domain::tools::ToolCallId::new("call-view-image"),
+        echidna::domain::tools::ToolName::new("view_image"),
         serde_json::json!({}),
     )
 }
@@ -1115,7 +1115,7 @@ fn completed_tool_call(
     vec![
         Ok(ModelStreamEvent::Event(ModelEvent::ToolCall { call })),
         Ok(ModelStreamEvent::Completed(ModelResponseCompletion::new(
-            cyber_agent::ports::model::ProviderResponseId::new(response_id),
+            echidna::ports::model::ProviderResponseId::new(response_id),
         ))),
     ]
 }

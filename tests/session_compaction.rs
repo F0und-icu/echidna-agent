@@ -6,26 +6,26 @@ mod subcommand_fixture;
 use std::collections::BTreeSet;
 
 use compaction_support::{CompactionFacts, legacy_v1_summary_value, raw_research_events};
-use cyber_agent::app::session::{AppendAfterDurableError, SessionProjection};
-use cyber_agent::domain::ArtifactId;
-use cyber_agent::domain::artifacts::{ArtifactEvent, ArtifactRecord, BlobId};
-use cyber_agent::domain::context::{ProviderSessionId, ProviderSessionRef, ProviderSessionRole};
-use cyber_agent::domain::events::{
+use echidna::app::session::{AppendAfterDurableError, SessionProjection};
+use echidna::domain::ArtifactId;
+use echidna::domain::artifacts::{ArtifactEvent, ArtifactRecord, BlobId};
+use echidna::domain::context::{ProviderSessionId, ProviderSessionRef, ProviderSessionRole};
+use echidna::domain::events::{
     EventEnvelope, EventId, EventSequence, EventType, OccurredAt, StreamId,
 };
-use cyber_agent::domain::model::ContentItem;
-use cyber_agent::domain::project::ProjectId;
-use cyber_agent::domain::research::{
+use echidna::domain::model::ContentItem;
+use echidna::domain::project::ProjectId;
+use echidna::domain::research::{
     ExecutionReceiptId, HypothesisId, ResearchEvent, ResearchReducer, TargetSnapshotId,
 };
-use cyber_agent::domain::session::{
+use echidna::domain::session::{
     CompactionValidationContext, EvidenceSpine, NarrativeSummary, ResearchStreamIdentity,
     SessionError, SessionEvent, SessionReducer, SessionState, SessionSummaryDraft,
 };
-use cyber_agent::domain::tools::{
+use echidna::domain::tools::{
     ExecutionId, ExecutionReceipt, ToolCall, ToolCallId, ToolName, ToolResult, ToolResultStatus,
 };
-use cyber_agent::ports::EventSink;
+use echidna::ports::EventSink;
 use serde_json::{Value, json};
 
 type CompactionEventAlteration = Box<dyn Fn(EventEnvelope<Value>) -> EventEnvelope<Value>>;

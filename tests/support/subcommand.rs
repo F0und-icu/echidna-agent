@@ -1,4 +1,4 @@
-use cyber_agent::domain::tools::{ToolCall, ToolCallId, ToolName};
+use echidna::domain::tools::{ToolCall, ToolCallId, ToolName};
 use serde_json::{Value, json};
 
 pub fn call() -> ToolCall {

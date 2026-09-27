@@ -191,7 +191,7 @@ fn text_response(text: &str) -> String {
 }
 
 fn initialize_project(directory: &std::path::Path) {
-    let output = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+    let output = Command::new(env!("CARGO_BIN_EXE_echidna"))
         .current_dir(directory)
         .arg("init")
         .output()
@@ -210,7 +210,7 @@ fn write_config(directory: &std::path::Path, base_url: &str) -> std::path::PathB
 }
 
 fn spawn_chat(project: &std::path::Path, config: &std::path::Path, input: &str) -> Child {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_echidna"))
         .current_dir(project)
         .args(["chat", "--config", config.to_str().unwrap()])
         .env("CYBER_AGENT_PRIMARY_API_KEY", "f3-loopback-primary")
@@ -235,7 +235,7 @@ fn run_chat(
     session: &str,
     input: &str,
 ) -> std::process::Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_echidna"))
         .current_dir(project)
         .args([
             "chat",

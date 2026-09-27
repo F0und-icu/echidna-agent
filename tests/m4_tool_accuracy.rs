@@ -3,38 +3,38 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use cyber_agent::adapters::tools::ToolRegistry;
-use cyber_agent::app::agent_loop::{AgentLoop, AgentTurnOutcome};
-use cyber_agent::app::cancellation::AgentCancellation;
-use cyber_agent::app::request_audit::RequestAuditService;
-use cyber_agent::app::session::SessionProjection;
-use cyber_agent::app::trace_eval::{TraceEvalService, TraceEvalServiceError};
-use cyber_agent::domain::artifacts::BlobId;
-use cyber_agent::domain::context::{ProviderSessionId, ProviderSessionRef, ProviderSessionRole};
-use cyber_agent::domain::events::{EventEnvelope, EventId, EventSequence, OccurredAt, StreamId};
-use cyber_agent::domain::model::{
+use echidna::adapters::tools::ToolRegistry;
+use echidna::app::agent_loop::{AgentLoop, AgentTurnOutcome};
+use echidna::app::cancellation::AgentCancellation;
+use echidna::app::request_audit::RequestAuditService;
+use echidna::app::session::SessionProjection;
+use echidna::app::trace_eval::{TraceEvalService, TraceEvalServiceError};
+use echidna::domain::artifacts::BlobId;
+use echidna::domain::context::{ProviderSessionId, ProviderSessionRef, ProviderSessionRole};
+use echidna::domain::events::{EventEnvelope, EventId, EventSequence, OccurredAt, StreamId};
+use echidna::domain::model::{
     CapabilityMappingVersion, ContentItem, MessageRole, ModelCapabilities, ModelEvent,
 };
-use cyber_agent::domain::project::ProjectId;
-use cyber_agent::domain::request_audit::{
+use echidna::domain::project::ProjectId;
+use echidna::domain::request_audit::{
     RequestAdapterVersion, RequestAuditAttempt, RequestAuditBinding, RequestAuditRunContext,
 };
-use cyber_agent::domain::research::{ResearchReducer, ResearchState};
-use cyber_agent::domain::session::{SessionEvent, SessionState};
-use cyber_agent::domain::tools::{
+use echidna::domain::research::{ResearchReducer, ResearchState};
+use echidna::domain::session::{SessionEvent, SessionState};
+use echidna::domain::tools::{
     ToolCall, ToolCallId, ToolExecutionOutcome, ToolName, ToolResult, ToolResultStatus,
 };
-use cyber_agent::domain::trace_eval::{
+use echidna::domain::trace_eval::{
     BatchOpportunity, EvalEvidence, EvalProvenance, ToolAccuracyCaseExpectation,
     ToolAccuracyDeferredMetricKind, TraceEventRange, TraceExpectedInvariant, TraceFixtureManifest,
     TraceProviderEventReference,
 };
-use cyber_agent::ports::artifact::{ArtifactStore, StoredBlob};
-use cyber_agent::ports::model::{
+use echidna::ports::artifact::{ArtifactStore, StoredBlob};
+use echidna::ports::model::{
     ModelEventStream, ModelProvider, ModelProviderError, ModelRequest, ModelResponseCompletion,
     ModelStreamEvent,
 };
-use cyber_agent::ports::tool::{ToolExecutionFuture, ToolExecutor, ToolExecutorError};
+use echidna::ports::tool::{ToolExecutionFuture, ToolExecutor, ToolExecutorError};
 use futures_util::stream;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -87,7 +87,7 @@ struct RecordingSink {
     events: Vec<EventEnvelope<Value>>,
 }
 
-impl cyber_agent::ports::EventSink<Value> for RecordingSink {
+impl echidna::ports::EventSink<Value> for RecordingSink {
     type Error = &'static str;
 
     fn append_event(&mut self, event: &EventEnvelope<Value>) -> Result<(), Self::Error> {
@@ -157,24 +157,24 @@ impl RejectFirstReadExecutor {
 }
 
 impl ToolExecutor for RejectFirstReadExecutor {
-    fn catalog(&self) -> Vec<cyber_agent::domain::tools::ToolSpec> {
+    fn catalog(&self) -> Vec<echidna::domain::tools::ToolSpec> {
         self.registry.catalog()
     }
 
     fn plan(
         &self,
-        execution_id: cyber_agent::domain::tools::ExecutionId,
+        execution_id: echidna::domain::tools::ExecutionId,
         call: ToolCall,
-    ) -> Result<cyber_agent::domain::tools::ToolExecutionPlan, ToolExecutorError> {
+    ) -> Result<echidna::domain::tools::ToolExecutionPlan, ToolExecutorError> {
         self.registry.plan(execution_id, call)
     }
 
     fn plan_model_call(
         &self,
-        resolved: &cyber_agent::domain::tools::ResolvedToolPlan,
-        execution_id: cyber_agent::domain::tools::ExecutionId,
+        resolved: &echidna::domain::tools::ResolvedToolPlan,
+        execution_id: echidna::domain::tools::ExecutionId,
         call: ToolCall,
-    ) -> Result<cyber_agent::domain::tools::ToolExecutionPlan, ToolExecutorError> {
+    ) -> Result<echidna::domain::tools::ToolExecutionPlan, ToolExecutorError> {
         if call.name.as_str() == "read_file" && self.reject_first_read.swap(false, Ordering::SeqCst)
         {
             return Err(ToolExecutorError::InvalidArguments {
@@ -185,10 +185,7 @@ impl ToolExecutor for RejectFirstReadExecutor {
         self.registry.plan_model_call(resolved, execution_id, call)
     }
 
-    fn execute(
-        &self,
-        plan: cyber_agent::domain::tools::ToolExecutionPlan,
-    ) -> ToolExecutionFuture<'_> {
+    fn execute(&self, plan: echidna::domain::tools::ToolExecutionPlan) -> ToolExecutionFuture<'_> {
         self.registry.execute(plan)
     }
 }
@@ -490,13 +487,13 @@ fn execution_failure_and_cancellation_use_stable_codes() {
     let resolved = tools
         .resolve_tool_plan(
             &Default::default(),
-            &cyber_agent::domain::tools::DeferredActivationSet::default(),
+            &echidna::domain::tools::DeferredActivationSet::default(),
         )
         .unwrap();
     let plan = tools
         .plan_model_call(
             &resolved,
-            cyber_agent::domain::tools::ExecutionId::new("execution-failure-code"),
+            echidna::domain::tools::ExecutionId::new("execution-failure-code"),
             tool_call("failure-code", "read_file", json!({"path": "missing"})),
         )
         .unwrap();

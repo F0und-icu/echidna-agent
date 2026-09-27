@@ -6,36 +6,36 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
-use cyber_agent::adapters::fragment_cache::LocalFragmentCache;
-use cyber_agent::adapters::project_event_store::Project;
-use cyber_agent::adapters::tools::ToolRegistry;
-use cyber_agent::app::agent_loop::{AgentLoop, AgentLoopError, AgentTurnOutcome};
-use cyber_agent::app::cancellation::AgentCancellation;
-use cyber_agent::domain::artifacts::ArtifactId;
-use cyber_agent::domain::context::{
+use echidna::adapters::fragment_cache::LocalFragmentCache;
+use echidna::adapters::project_event_store::Project;
+use echidna::adapters::tools::ToolRegistry;
+use echidna::app::agent_loop::{AgentLoop, AgentLoopError, AgentTurnOutcome};
+use echidna::app::cancellation::AgentCancellation;
+use echidna::domain::artifacts::ArtifactId;
+use echidna::domain::context::{
     AppendOnlyCandidate, BaselineAssessment, BaselineInvalidationReason,
     LogicalAppendOnlyRejection, ModelIdentity, ModelProfile, ProviderSession, ProviderSessionId,
     ProviderSessionRole,
 };
-use cyber_agent::domain::domain_profile::DomainProfile;
-use cyber_agent::domain::events::StreamId;
-use cyber_agent::domain::model::{
+use echidna::domain::domain_profile::DomainProfile;
+use echidna::domain::events::StreamId;
+use echidna::domain::model::{
     CapabilityMappingVersion, ContentItem, ModelCapabilities, ModelEvent, ModelInputIR,
 };
-use cyber_agent::domain::project::ProjectId;
-use cyber_agent::domain::request_audit::{
+use echidna::domain::project::ProjectId;
+use echidna::domain::request_audit::{
     RequestAdapterVersion, RequestAuditBinding, RequestAuditRunContext,
 };
-use cyber_agent::domain::research_control::{BaseContract, PromptComposition, ResearchPhase};
-use cyber_agent::domain::tools::{
+use echidna::domain::research_control::{BaseContract, PromptComposition, ResearchPhase};
+use echidna::domain::tools::{
     ExecutionId, ResourceKey, ToolCall, ToolCallId, ToolExecutionOutcome, ToolExecutionPlan,
     ToolExposure, ToolExposurePlan, ToolName, ToolResultStatus, ToolSpec,
 };
-use cyber_agent::ports::model::{
+use echidna::ports::model::{
     ModelEventStream, ModelProvider, ModelProviderError, ModelRequest, ModelResponseCompletion,
     ModelStreamEvent,
 };
-use cyber_agent::ports::tool::{ToolExecutionFuture, ToolExecutor, ToolExecutorError};
+use echidna::ports::tool::{ToolExecutionFuture, ToolExecutor, ToolExecutorError};
 use futures_core::Stream;
 use futures_util::stream;
 use serde_json::{Value, json};
@@ -277,9 +277,9 @@ async fn builtin_tools_cover_files_search_argv_failures_and_bounded_output() {
     assert_eq!(
         (run_spec.effect, run_spec.retry_policy, run_spec.determinism),
         (
-            cyber_agent::domain::tools::ToolEffect::Interactive,
-            cyber_agent::domain::tools::ToolRetryPolicy::NeverAutoRetry,
-            cyber_agent::domain::tools::ToolDeterminism::Nondeterministic,
+            echidna::domain::tools::ToolEffect::Interactive,
+            echidna::domain::tools::ToolRetryPolicy::NeverAutoRetry,
+            echidna::domain::tools::ToolDeterminism::Nondeterministic,
         )
     );
     let normalized_output_plan = plan(
@@ -677,7 +677,7 @@ fn completed_response(events: Vec<ModelEvent>, response_id: Option<&str>) -> Scr
     let completion = response_id.map_or_else(
         ModelResponseCompletion::without_response_id,
         |response_id| {
-            ModelResponseCompletion::new(cyber_agent::ports::model::ProviderResponseId::new(
+            ModelResponseCompletion::new(echidna::ports::model::ProviderResponseId::new(
                 response_id,
             ))
         },
@@ -830,7 +830,7 @@ async fn reasoning_continuation_that_exceeds_context_budget_fails_before_resampl
     );
     assert!(matches!(error,
         AgentLoopError::ProviderContinuationUnavailable {
-            reason: cyber_agent::app::agent_loop::ContinuationRejection::DeliveryBudgetExceeded {
+            reason: echidna::app::agent_loop::ContinuationRejection::DeliveryBudgetExceeded {
                 rendered_input_tokens, input_token_limit,
             }
         } if rendered_input_tokens > input_token_limit && input_token_limit > 0
@@ -1329,7 +1329,7 @@ async fn incremental_delivery_uses_tool_result_then_next_user_as_strict_deltas()
     assert!(!requests[0].is_incremental());
     assert!(matches!(
         requests[1].delivery(),
-        cyber_agent::ports::model::ModelRequestDelivery::Incremental { continuation }
+        echidna::ports::model::ModelRequestDelivery::Incremental { continuation }
             if continuation.as_str() == "resp-first"
     ));
     assert!(matches!(
@@ -1339,7 +1339,7 @@ async fn incremental_delivery_uses_tool_result_then_next_user_as_strict_deltas()
     ));
     assert!(matches!(
         requests[2].delivery(),
-        cyber_agent::ports::model::ModelRequestDelivery::Incremental { continuation }
+        echidna::ports::model::ModelRequestDelivery::Incremental { continuation }
             if continuation.as_str() == "resp-tool"
     ));
     assert_eq!(
@@ -1488,7 +1488,7 @@ async fn failed_model_request_keeps_the_last_successful_context_inspection() {
             .run_turn("failed user", AgentCancellation::new())
             .await,
         Err(AgentLoopError::Model(
-            cyber_agent::app::model_streaming::ModelStreamingError::Provider(
+            echidna::app::model_streaming::ModelStreamingError::Provider(
                 ModelProviderError::TransportFailure { .. }
             )
         ))
@@ -1633,7 +1633,7 @@ async fn generic_provider_failure_never_falls_back_or_replays_a_completed_tool()
             .run_turn("inspect target", AgentCancellation::new())
             .await,
         Err(AgentLoopError::Model(
-            cyber_agent::app::model_streaming::ModelStreamingError::Provider(
+            echidna::app::model_streaming::ModelStreamingError::Provider(
                 ModelProviderError::ProviderFailure { .. }
             )
         ))
@@ -1676,7 +1676,7 @@ async fn failed_full_fallback_keeps_a_provider_rejected_reset_until_a_later_full
             .run_turn("rejected input", AgentCancellation::new())
             .await,
         Err(AgentLoopError::Model(
-            cyber_agent::app::model_streaming::ModelStreamingError::Provider(
+            echidna::app::model_streaming::ModelStreamingError::Provider(
                 ModelProviderError::TransportFailure { .. }
             )
         ))
@@ -1757,7 +1757,7 @@ async fn multiple_tool_calls_commit_one_sample_then_advance_continuation() {
     assert_eq!(requests.len(), 4);
     assert!(matches!(
         requests[2].delivery(),
-        cyber_agent::ports::model::ModelRequestDelivery::Incremental { continuation }
+        echidna::ports::model::ModelRequestDelivery::Incremental { continuation }
             if continuation.as_str() == "resp-batch"
     ));
     assert!(matches!(
@@ -1769,7 +1769,7 @@ async fn multiple_tool_calls_commit_one_sample_then_advance_continuation() {
     ));
     assert!(matches!(
         requests[3].delivery(),
-        cyber_agent::ports::model::ModelRequestDelivery::Incremental { continuation }
+        echidna::ports::model::ModelRequestDelivery::Incremental { continuation }
             if continuation.as_str() == "resp-after-batch"
     ));
     assert_eq!(
@@ -1827,7 +1827,7 @@ async fn cancelled_model_sample_keeps_the_last_committed_continuation() {
     assert_eq!(requests.len(), 3);
     assert!(matches!(
         requests[2].delivery(),
-        cyber_agent::ports::model::ModelRequestDelivery::Incremental { continuation }
+        echidna::ports::model::ModelRequestDelivery::Incremental { continuation }
             if continuation.as_str() == "resp-before-cancel"
     ));
     assert_eq!(
@@ -1879,7 +1879,7 @@ async fn empty_model_sample_keeps_the_last_committed_continuation() {
     let requests = provider.requests();
     assert!(matches!(
         requests[2].delivery(),
-        cyber_agent::ports::model::ModelRequestDelivery::Incremental { continuation }
+        echidna::ports::model::ModelRequestDelivery::Incremental { continuation }
             if continuation.as_str() == "resp-before-empty"
     ));
 }
@@ -1957,7 +1957,7 @@ async fn fresh_provider_sessions_never_share_a_continuation_identity() {
     );
     assert!(matches!(
         requests[2].delivery(),
-        cyber_agent::ports::model::ModelRequestDelivery::Incremental { continuation }
+        echidna::ports::model::ModelRequestDelivery::Incremental { continuation }
             if continuation.as_str() == "resp-primary"
     ));
 }

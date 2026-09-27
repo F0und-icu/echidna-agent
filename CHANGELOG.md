@@ -7,6 +7,13 @@ milestone history remains in `docs/development/STATUS.md` and Git history.
 
 ### Changed
 
+- E0: continue development as Echidna in the new `echidna-agent` repository.
+  Package/crate/binary becomes `echidna`; replies display `Echidna> `. Interactive
+  terminals receive a restrained welcome and optional color (NO_COLOR/TERM=dumb
+  respected). `-V` retains the short version; `--version` adds source-base HEAD.
+  Existing `.cyber-agent` data, `CYBER_AGENT_*` settings, events and prompts stay
+  unchanged. The old repository and new pre-rename branch retain the core checkpoint.
+
 - R7-F2: interactive terminal input can stop or redirect the active Turn through
   existing cancellation; background Tool discovery remains available while
   Job/PTY resource leases are held. Base generation4 clarifies current operator

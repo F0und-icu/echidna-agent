@@ -8,7 +8,7 @@ OUTPUT_DIRECTORY=${1:-"$REPOSITORY_ROOT/dist"}
 PACKAGER="$REPOSITORY_ROOT/scripts/package-macos-arm64.sh"
 
 archive_paths=$(find "$OUTPUT_DIRECTORY" -maxdepth 1 -type f \
-    -name 'cyber-agent-*-aarch64-apple-darwin.tar.gz' -print)
+    -name 'echidna-*-aarch64-apple-darwin.tar.gz' -print)
 archive_count=$(printf '%s\n' "$archive_paths" | awk 'NF { count += 1 } END { print count + 0 }')
 test "$archive_count" -eq 1 || {
     echo "distribution regression test requires exactly one release archive" >&2
@@ -21,7 +21,7 @@ package_directory=${archive_name%.tar.gz}
 
 "$PACKAGER" --verify-only "$OUTPUT_DIRECTORY"
 
-temporary_root=$(mktemp -d "${TMPDIR:-/tmp}/cyber-agent-distribution-test.XXXXXX")
+temporary_root=$(mktemp -d "${TMPDIR:-/tmp}/echidna-distribution-test.XXXXXX")
 trap 'rm -rf "$temporary_root"' EXIT HUP INT TERM
 
 expect_rejected() {
@@ -52,7 +52,7 @@ expect_rejected "$log_fixture" "a checksum-valid archive containing a local log 
 link_fixture="$temporary_root/link"
 link_stage="$link_fixture/stage"
 mkdir -p "$link_stage/$package_directory"
-ln -s /usr/bin/true "$link_stage/$package_directory/cyber-agent"
+ln -s /usr/bin/true "$link_stage/$package_directory/echidna"
 COPYFILE_DISABLE=1 tar -czf "$link_fixture/$archive_name" \
     -C "$link_stage" "$package_directory"
 (CDPATH= cd -- "$link_fixture" && shasum -a 256 "$archive_name" > SHA256SUMS)

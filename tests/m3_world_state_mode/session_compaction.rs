@@ -1,7 +1,7 @@
 use super::*;
 
 use super::compaction_support::{CompactionFacts, legacy_v1_summary_value};
-use cyber_agent::domain::session::{SessionSummary, SessionSummaryDraft};
+use echidna::domain::session::{SessionSummary, SessionSummaryDraft};
 
 fn compaction_facts() -> CompactionFacts {
     CompactionFacts::new("m3-agent-loop")
@@ -20,7 +20,7 @@ fn session_event(
     event: SessionEvent,
     id: &str,
     sequence: u64,
-) -> cyber_agent::domain::events::EventEnvelope<serde_json::Value> {
+) -> echidna::domain::events::EventEnvelope<serde_json::Value> {
     event
         .into_envelope(
             EventId::new(id),
@@ -209,12 +209,12 @@ fn resumed_legacy_compacted_session_state(
         ),
     ];
     let state = SessionReducer.reduce(events.clone()).unwrap();
-    let raw_compaction = cyber_agent::domain::events::EventEnvelope::current(
+    let raw_compaction = echidna::domain::events::EventEnvelope::current(
         EventId::new("legacy-compaction"),
         StreamId::new(stream),
         EventSequence::new(4),
         OccurredAt::new("2026-08-23T00:00:00Z"),
-        cyber_agent::domain::events::EventType::new("session.compaction_created"),
+        echidna::domain::events::EventType::new("session.compaction_created"),
         serde_json::json!({
             "schema_version": 1,
             "summary": legacy_v1_summary_value(),
@@ -255,7 +255,7 @@ fn contains_summary(items: &[ContentItem], summary: &SessionSummary) -> bool {
         matches!(
             item,
             ContentItem::Text {
-                role: cyber_agent::domain::model::MessageRole::User,
+                role: echidna::domain::model::MessageRole::User,
                 text,
             } if text.starts_with("derived_session_summary_v2:") && text.contains(fingerprint)
         )
@@ -349,7 +349,7 @@ fn compaction_application_is_idempotent_only_for_the_exact_durable_fact() {
     assert!(matches!(
         mismatched_candidate_agent.apply_compaction(&state, Some(&facts.validation())),
         Err(
-            cyber_agent::app::agent_loop::AgentLoopConfigurationError::CompactionSummaryCandidateMismatch
+            echidna::app::agent_loop::AgentLoopConfigurationError::CompactionSummaryCandidateMismatch
         )
     ));
     assert!(mismatched_candidate_agent.history().items().is_empty());
@@ -390,22 +390,18 @@ fn compaction_application_is_idempotent_only_for_the_exact_durable_fact() {
         .unwrap();
     assert!(matches!(
         agent.apply_compaction(&conflicting, Some(&facts.validation())),
-        Err(
-            cyber_agent::app::agent_loop::AgentLoopConfigurationError::ConflictingCompaction { .. }
-        )
+        Err(echidna::app::agent_loop::AgentLoopConfigurationError::ConflictingCompaction { .. })
     ));
     assert!(matches!(
         agent.apply_compaction(&conflicting_retention, Some(&facts.validation())),
-        Err(
-            cyber_agent::app::agent_loop::AgentLoopConfigurationError::ConflictingCompaction { .. }
-        )
+        Err(echidna::app::agent_loop::AgentLoopConfigurationError::ConflictingCompaction { .. })
     ));
     agent
         .apply_compaction(&later, Some(&facts.validation()))
         .unwrap();
     assert!(matches!(
         agent.apply_compaction(&state, Some(&facts.validation())),
-        Err(cyber_agent::app::agent_loop::AgentLoopConfigurationError::StaleCompaction { .. })
+        Err(echidna::app::agent_loop::AgentLoopConfigurationError::StaleCompaction { .. })
     ));
 }
 
@@ -431,7 +427,7 @@ async fn failed_empty_and_cancelled_compaction_full_do_not_consume_the_reset() {
         agent
             .run_turn("failed full", AgentCancellation::new())
             .await,
-        Err(cyber_agent::app::agent_loop::AgentLoopError::Model(_))
+        Err(echidna::app::agent_loop::AgentLoopError::Model(_))
     ));
     assert_eq!(
         agent.last_baseline_assessment(),
@@ -467,7 +463,7 @@ async fn failed_empty_and_cancelled_compaction_full_do_not_consume_the_reset() {
         .unwrap();
     assert!(matches!(
         agent.run_turn("empty full", AgentCancellation::new()).await,
-        Err(cyber_agent::app::agent_loop::AgentLoopError::EmptyModelResponse)
+        Err(echidna::app::agent_loop::AgentLoopError::EmptyModelResponse)
     ));
     assert_eq!(
         agent.last_baseline_assessment(),
@@ -574,7 +570,7 @@ async fn resume_restores_the_compacted_view_with_session_resumed_and_rejects_ano
         compacted_session_state("session:another-compaction", "primary-resumed-runtime", 2);
     assert!(matches!(
         agent.apply_compaction(&another, Some(&facts.validation())),
-        Err(cyber_agent::app::agent_loop::AgentLoopConfigurationError::CompactionSessionStreamMismatch { .. })
+        Err(echidna::app::agent_loop::AgentLoopConfigurationError::CompactionSessionStreamMismatch { .. })
     ));
 }
 
@@ -599,7 +595,7 @@ fn summary_v2_resume_requires_current_references_before_mutating_the_agent_loop(
     assert!(matches!(
         agent.resume_from_session(&session, resumed_provider(), None),
         Err(
-            cyber_agent::app::agent_loop::AgentLoopConfigurationError::CompactionValidationContextRequired
+            echidna::app::agent_loop::AgentLoopConfigurationError::CompactionValidationContextRequired
         )
     ));
     assert!(agent.history().items().is_empty());
@@ -612,8 +608,8 @@ fn summary_v2_resume_requires_current_references_before_mutating_the_agent_loop(
             Some(&wrong_facts.validation()),
         ),
         Err(
-            cyber_agent::app::agent_loop::AgentLoopConfigurationError::Session(
-                cyber_agent::domain::session::SessionError::CompactionEvidenceCrossProject { .. }
+            echidna::app::agent_loop::AgentLoopConfigurationError::Session(
+                echidna::domain::session::SessionError::CompactionEvidenceCrossProject { .. }
             )
         )
     ));

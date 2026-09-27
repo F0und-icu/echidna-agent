@@ -5,7 +5,7 @@ set -eu
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPOSITORY_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 TARGET_TRIPLE=aarch64-apple-darwin
-BINARY_NAME=cyber-agent
+BINARY_NAME=echidna
 
 usage() {
     cat >&2 <<'EOF'
@@ -90,7 +90,7 @@ verify_distribution() {
         exit 1
     }
 
-    verification_root=$(mktemp -d "${TMPDIR:-/tmp}/cyber-agent-verify.XXXXXX")
+    verification_root=$(mktemp -d "${TMPDIR:-/tmp}/echidna-verify.XXXXXX")
     trap 'rm -rf "$verification_root"' EXIT HUP INT TERM
     tar -xzf "$archive_path" -C "$verification_root"
     packaged_binary="$verification_root/$package_directory/$BINARY_NAME"
@@ -114,7 +114,7 @@ verify_distribution() {
     }
     case "$(uname -m)" in
         arm64 | aarch64)
-            reported_version=$("$packaged_binary" --version)
+            reported_version=$("$packaged_binary" -V)
             test "$reported_version" = "$BINARY_NAME $version" || {
                 echo "packaged binary version does not match Cargo metadata" >&2
                 exit 1
@@ -179,7 +179,7 @@ test -x "$source_binary" || {
 mkdir -p "$output_directory"
 rm -f "$archive_path" "$checksum_path"
 
-staging_root=$(mktemp -d "${TMPDIR:-/tmp}/cyber-agent-package.XXXXXX")
+staging_root=$(mktemp -d "${TMPDIR:-/tmp}/echidna-package.XXXXXX")
 trap 'rm -rf "$staging_root"' EXIT HUP INT TERM
 mkdir "$staging_root/$package_directory"
 cp "$source_binary" "$staging_root/$package_directory/$BINARY_NAME"

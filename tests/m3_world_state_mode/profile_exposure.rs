@@ -51,7 +51,7 @@ fn vision_route_matrix_is_capability_only_and_forced_modes_validate() {
         let vision = vision_image.map(capabilities);
         assert_eq!(
             resolve_vision_route(mode, &primary, vision.as_ref(), true),
-            cyber_agent::domain::profile::VisionRouteDecision { route, reason }
+            echidna::domain::profile::VisionRouteDecision { route, reason }
         );
         assert_eq!(
             resolve_vision_route(mode, &primary, vision.as_ref(), false).route,
@@ -97,7 +97,7 @@ fn vision_route_matrix_is_capability_only_and_forced_modes_validate() {
             Some(&incomplete_vision),
             true
         ),
-        cyber_agent::domain::profile::VisionRouteDecision {
+        echidna::domain::profile::VisionRouteDecision {
             route: VisionRoute::Rejected,
             reason: Some(VisionRouteReason::NoImageCapableProvider),
         }
@@ -279,7 +279,7 @@ async fn deferred_tool_search_changes_actual_schema_and_blocks_pre_discovery_pla
         .await;
     assert_eq!(
         search.result.status,
-        cyber_agent::domain::tools::ToolResultStatus::Succeeded
+        echidna::domain::tools::ToolResultStatus::Succeeded
     );
     assert!(
         search.result.output["matches"]

@@ -2,16 +2,16 @@ mod support;
 
 use std::fs;
 
-use cyber_agent::adapters::project_event_store::Project;
-use cyber_agent::adapters::tools::ToolRegistry;
-use cyber_agent::domain::events::{
+use echidna::adapters::project_event_store::Project;
+use echidna::adapters::tools::ToolRegistry;
+use echidna::domain::events::{
     EventEnvelope, EventId, EventSequence, EventType, OccurredAt, StreamId,
 };
-use cyber_agent::domain::tools::{
+use echidna::domain::tools::{
     ExecutionId, ResourceKey, ToolCachePolicy, ToolCall, ToolCallId, ToolDeterminism, ToolEffect,
     ToolExposure, ToolExposurePlan, ToolName, ToolParallelism, ToolResultStatus, ToolRetryPolicy,
 };
-use cyber_agent::ports::tool::ToolExecutor;
+use echidna::ports::tool::ToolExecutor;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use support::TemporaryDirectory;
@@ -37,7 +37,7 @@ async fn execute(
     call_id: &str,
     name: &str,
     arguments: Value,
-) -> cyber_agent::domain::tools::ToolExecutionOutcome {
+) -> echidna::domain::tools::ToolExecutionOutcome {
     let plan = tools
         .plan(
             ExecutionId::new(format!("execution-{call_id}")),
@@ -374,9 +374,7 @@ async fn same_blob_keeps_two_artifact_provenance_records_and_a_derived_chain() {
     assert_eq!(first.result.output["blob"]["already_present"], false);
     assert_eq!(
         first.receipt.output_artifact_ids,
-        vec![cyber_agent::domain::artifacts::ArtifactId::new(
-            "artifact-one"
-        )]
+        vec![echidna::domain::artifacts::ArtifactId::new("artifact-one")]
     );
 
     let second = execute(

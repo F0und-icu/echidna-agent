@@ -3,13 +3,13 @@ mod support;
 use std::fs;
 use std::time::Duration;
 
-use cyber_agent::adapters::project_event_store::Project;
-use cyber_agent::adapters::tools::ToolRegistry;
-use cyber_agent::domain::tools::{
+use echidna::adapters::project_event_store::Project;
+use echidna::adapters::tools::ToolRegistry;
+use echidna::domain::tools::{
     ExecutionId, ToolCachePolicy, ToolCall, ToolCallId, ToolDeterminism, ToolEffect, ToolExposure,
     ToolName, ToolParallelism, ToolResultStatus, ToolRetryPolicy,
 };
-use cyber_agent::ports::tool::{ToolExecutor, ToolExecutorError};
+use echidna::ports::tool::{ToolExecutor, ToolExecutorError};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -28,7 +28,7 @@ async fn execute(
     tools: &ToolRegistry,
     call_id: &str,
     arguments: Value,
-) -> cyber_agent::domain::tools::ToolExecutionOutcome {
+) -> echidna::domain::tools::ToolExecutionOutcome {
     execute_named(tools, call_id, "http_request", arguments).await
 }
 
@@ -37,7 +37,7 @@ async fn execute_named(
     call_id: &str,
     name: &str,
     arguments: Value,
-) -> cyber_agent::domain::tools::ToolExecutionOutcome {
+) -> echidna::domain::tools::ToolExecutionOutcome {
     let plan = tools
         .plan(
             ExecutionId::new(format!("execution-{call_id}")),

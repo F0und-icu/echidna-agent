@@ -2,19 +2,19 @@ mod support;
 
 use std::fs;
 
-use cyber_agent::adapters::project_event_store::{Project, ProjectEventStream};
-use cyber_agent::adapters::tools::ToolRegistry;
-use cyber_agent::domain::events::{EventEnvelope, EventId, EventSequence, EventType, OccurredAt};
-use cyber_agent::domain::research::{
+use echidna::adapters::project_event_store::{Project, ProjectEventStream};
+use echidna::adapters::tools::ToolRegistry;
+use echidna::domain::events::{EventEnvelope, EventId, EventSequence, EventType, OccurredAt};
+use echidna::domain::research::{
     HypothesisDraft, HypothesisId, HypothesisRecord, HypothesisStatus, MergeRecordRef,
     ResearchEvent,
 };
-use cyber_agent::domain::tools::{
+use echidna::domain::tools::{
     ExecutionId, ToolCall, ToolCallId, ToolEffect, ToolExposure, ToolExposurePlan, ToolName,
     ToolParallelism, ToolResultStatus, ToolRetryPolicy,
 };
-use cyber_agent::ports::EventSink;
-use cyber_agent::ports::tool::ToolExecutor;
+use echidna::ports::EventSink;
+use echidna::ports::tool::ToolExecutor;
 use serde_json::{Value, json};
 use support::TemporaryDirectory;
 
@@ -45,7 +45,7 @@ async fn execute_outcome(
     id: &str,
     name: &str,
     arguments: Value,
-) -> cyber_agent::domain::tools::ToolExecutionOutcome {
+) -> echidna::domain::tools::ToolExecutionOutcome {
     let plan = tools
         .plan(
             ExecutionId::new(format!("execution-{id}")),

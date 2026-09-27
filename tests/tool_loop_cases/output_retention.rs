@@ -1,6 +1,6 @@
 use super::*;
-use cyber_agent::domain::artifacts::BlobId;
-use cyber_agent::ports::artifact::{ArtifactStore, StoredBlob};
+use echidna::domain::artifacts::BlobId;
+use echidna::ports::artifact::{ArtifactStore, StoredBlob};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 

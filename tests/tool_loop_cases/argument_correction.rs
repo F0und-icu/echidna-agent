@@ -1,5 +1,5 @@
 use super::*;
-use cyber_agent::domain::model::{ToolArgumentDiagnostic, ToolArgumentErrorCategory};
+use echidna::domain::model::{ToolArgumentDiagnostic, ToolArgumentErrorCategory};
 
 fn invalid_arguments() -> ModelProviderError {
     ModelProviderError::InvalidToolArguments {

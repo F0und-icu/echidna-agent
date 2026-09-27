@@ -1,4 +1,4 @@
-use cyber_agent::domain::events::{
+use echidna::domain::events::{
     ApplyOutcome, CURRENT_SCHEMA_FAMILY, CURRENT_SCHEMA_VERSION, CurrentEventUpcaster,
     EventEnvelope, EventError, EventId, EventReducer, EventSequence, EventType, EventUpcaster,
     OccurredAt, SchemaFamily, SchemaVersion, State, StreamId,

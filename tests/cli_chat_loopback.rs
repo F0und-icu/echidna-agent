@@ -85,8 +85,8 @@ fn final_text_integrity_reaches_cli_and_history_without_committing_conflicts() {
                 .iter()
                 .filter(|item| matches!(
                     item,
-                    cyber_agent::domain::model::ContentItem::Text {
-                        role: cyber_agent::domain::model::MessageRole::Assistant,
+                    echidna::domain::model::ContentItem::Text {
+                        role: echidna::domain::model::MessageRole::Assistant,
                         ..
                     }
                 ))
@@ -97,7 +97,7 @@ fn final_text_integrity_reaches_cli_and_history_without_committing_conflicts() {
             assert!(String::from_utf8_lossy(&output.stdout).contains("prefix complete"));
             assert_eq!(
                 state.history().items().last().unwrap(),
-                &cyber_agent::domain::model::ContentItem::assistant_text(suffix)
+                &echidna::domain::model::ContentItem::assistant_text(suffix)
             );
         }
         assert_eq!(state.request_audits().len(), 1);
@@ -115,11 +115,11 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use cyber_agent::adapters::project_event_store::{Project, ProjectEventStream};
-use cyber_agent::domain::artifacts::ArtifactId;
-use cyber_agent::domain::events::{EventEnvelope, EventId, EventType, OccurredAt, StreamId};
-use cyber_agent::domain::request_audit::REQUEST_AUDIT_MANIFEST_SCHEMA_VERSION;
-use cyber_agent::domain::research::{
+use echidna::adapters::project_event_store::{Project, ProjectEventStream};
+use echidna::domain::artifacts::ArtifactId;
+use echidna::domain::events::{EventEnvelope, EventId, EventType, OccurredAt, StreamId};
+use echidna::domain::request_audit::REQUEST_AUDIT_MANIFEST_SCHEMA_VERSION;
+use echidna::domain::research::{
     EvidenceLink, EvidenceRef, EvidenceRelation, ExecutionReceiptId, ExperimentCapsuleDraft,
     ExperimentDraft, ExperimentId, ExperimentRecord, ExperimentResult, FindingDraft, FindingId,
     FindingRecord, FindingStatus, HypothesisDraft, HypothesisId, HypothesisRecord,
@@ -127,11 +127,11 @@ use cyber_agent::domain::research::{
     ResearchEvent, ResearchRecordRef, ResearchReducer, TargetKind, TargetSnapshotDraft,
     TargetSnapshotId, TargetSnapshotRecord,
 };
-use cyber_agent::domain::session::{
+use echidna::domain::session::{
     CompactionValidationContext, EvidenceSpine, NarrativeSummary, ResearchStreamIdentity,
     SessionEvent, SessionReducer, SessionState, SessionSummaryDraft,
 };
-use cyber_agent::ports::{EventSink, EventSource};
+use echidna::ports::{EventSink, EventSource};
 use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -419,7 +419,7 @@ fn write_inline_config(directory: &std::path::Path, base_url: &str) -> std::path
 }
 
 fn initialize_project(directory: &std::path::Path) {
-    let output = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+    let output = Command::new(env!("CARGO_BIN_EXE_echidna"))
         .current_dir(directory)
         .arg("init")
         .output()
@@ -446,7 +446,7 @@ fn run_chat_with_pid(
     input: &str,
     extra_args: &[&str],
 ) -> (u32, std::process::Output) {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_cyber-agent"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_echidna"));
     command
         .current_dir(project)
         .args(["chat", "--config", config.to_str().unwrap()])
@@ -474,7 +474,7 @@ fn spawn_f2a_chat(
     input: &str,
     extra_args: &[&str],
 ) -> Child {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_echidna"))
         .current_dir(project)
         .args(["chat", "--config", config.to_str().unwrap()])
         .args(extra_args)
@@ -514,7 +514,7 @@ impl WaitingChat {
 }
 
 fn spawn_waiting_chat(project: &std::path::Path, config: &std::path::Path) -> WaitingChat {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_echidna"))
         .current_dir(project)
         .args(["chat", "--config", config.to_str().unwrap()])
         .env("CYBER_AGENT_PRIMARY_API_KEY", "loopback-primary-secret")
@@ -1126,7 +1126,7 @@ fn f2a_primary_direct_cli_image_reaches_only_primary_and_keeps_real_tool_receipt
     assert_eq!(state.vision_routes().len(), 1);
     assert_eq!(
         state.vision_routes()[0].route,
-        cyber_agent::domain::profile::VisionRoute::PrimaryDirect
+        echidna::domain::profile::VisionRoute::PrimaryDirect
     );
     assert_eq!(state.vision_observations().len(), 0);
     assert_eq!(state.request_audits().len(), 2);
@@ -1992,7 +1992,7 @@ fn synthetic_long_flow_preserves_authoritative_evidence_across_compaction_and_re
         .iter()
         .filter(|manifest| {
             manifest.delivery().mode()
-                == cyber_agent::domain::request_audit::RequestAuditDeliveryMode::Full
+                == echidna::domain::request_audit::RequestAuditDeliveryMode::Full
         })
         .count();
     assert_eq!(
@@ -2013,7 +2013,7 @@ fn synthetic_long_flow_preserves_authoritative_evidence_across_compaction_and_re
             .unwrap()
             .delivery()
             .mode(),
-        cyber_agent::domain::request_audit::RequestAuditDeliveryMode::Full
+        echidna::domain::request_audit::RequestAuditDeliveryMode::Full
     );
     let latest_compaction = final_state.latest_compaction().unwrap();
     let summary = serde_json::to_value(latest_compaction.summary()).unwrap();
@@ -2052,7 +2052,7 @@ fn synthetic_long_flow_preserves_authoritative_evidence_across_compaction_and_re
         .unwrap();
     assert_ne!(started_primary, resumed_primary);
 
-    let metrics = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+    let metrics = Command::new(env!("CARGO_BIN_EXE_echidna"))
         .current_dir(root.path())
         .args(["metrics", "--session", &session])
         .output()
@@ -2248,7 +2248,7 @@ fn chat_loopback_streams_text_and_persists_started_history_audit_and_explicit_re
     );
     let first_output = String::from_utf8(first.stdout).unwrap();
     assert!(first_output.contains("Started session"));
-    assert!(first_output.contains("assistant> source answer"));
+    assert!(first_output.contains("Echidna> source answer"));
     assert!(first_output.contains("remains active for explicit resume"));
     let first_request = first_server.requests.recv().unwrap();
     first_server.join();
@@ -2300,7 +2300,7 @@ fn chat_loopback_streams_text_and_persists_started_history_audit_and_explicit_re
     );
     let resumed_output = String::from_utf8(resumed.stdout).unwrap();
     assert!(resumed_output.contains("Resumed session"));
-    assert!(resumed_output.contains("assistant> mobile answer"));
+    assert!(resumed_output.contains("Echidna> mobile answer"));
     let resumed_request = second_server.requests.recv().unwrap();
     second_server.join();
     let resumed_request: Value =
@@ -2581,20 +2581,20 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
             id: ExperimentId::new("experiment-m5-compact-old"),
             hypothesis_id: HypothesisId::new("hypothesis-m5-compact"),
             target_snapshot_id: old_target_snapshot.clone(),
-            capsule_id: cyber_agent::domain::research::CapsuleId::new("capsule-m5-compact-old"),
+            capsule_id: echidna::domain::research::CapsuleId::new("capsule-m5-compact-old"),
             goal: "read the older bounded candidate".to_owned(),
             result: ExperimentResult::Inconclusive,
             artifact_refs: vec![ArtifactId::new("artifact-m5-compact-old")],
             notes: "older Snapshot only".to_owned(),
         },
         ExperimentCapsuleDraft {
-            id: cyber_agent::domain::research::CapsuleId::new("capsule-m5-compact-old"),
+            id: echidna::domain::research::CapsuleId::new("capsule-m5-compact-old"),
             experiment_id: ExperimentId::new("experiment-m5-compact-old"),
             target_snapshot_id: old_target_snapshot.clone(),
             action: "read older candidate fixture".to_owned(),
             arguments: json!({"path": "candidate.txt", "snapshot": "old"}),
             tool_version: "1".to_owned(),
-            execution_ids: vec![cyber_agent::domain::tools::ExecutionId::new(
+            execution_ids: vec![echidna::domain::tools::ExecutionId::new(
                 "execution:m5-compact-old-artifact",
             )],
             input_artifact_ids: vec![ArtifactId::new("artifact-m5-compact-old")],
@@ -2621,20 +2621,20 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
             id: ExperimentId::new("experiment-m5-compact"),
             hypothesis_id: HypothesisId::new("hypothesis-m5-compact"),
             target_snapshot_id: target_snapshot.clone(),
-            capsule_id: cyber_agent::domain::research::CapsuleId::new("capsule-m5-compact"),
+            capsule_id: echidna::domain::research::CapsuleId::new("capsule-m5-compact"),
             goal: "read the bounded candidate".to_owned(),
             result: ExperimentResult::Inconclusive,
             artifact_refs: vec![ArtifactId::new("artifact-m5-compact")],
             notes: "no impact claim".to_owned(),
         },
         ExperimentCapsuleDraft {
-            id: cyber_agent::domain::research::CapsuleId::new("capsule-m5-compact"),
+            id: echidna::domain::research::CapsuleId::new("capsule-m5-compact"),
             experiment_id: ExperimentId::new("experiment-m5-compact"),
             target_snapshot_id: target_snapshot.clone(),
             action: "read candidate fixture".to_owned(),
             arguments: json!({"path": "candidate.txt"}),
             tool_version: "1".to_owned(),
-            execution_ids: vec![cyber_agent::domain::tools::ExecutionId::new(
+            execution_ids: vec![echidna::domain::tools::ExecutionId::new(
                 "execution:m5-compact-read",
             )],
             input_artifact_ids: vec![ArtifactId::new("artifact-m5-compact")],
@@ -2795,7 +2795,7 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
         .unwrap()
         .retained_history();
     assert_eq!(
-        cyber_agent::domain::history::normalize_content_items(retained).unwrap(),
+        echidna::domain::history::normalize_content_items(retained).unwrap(),
         retained
     );
     let summary =
@@ -2855,8 +2855,8 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
             .unwrap()
             .delivery()
             .reason(),
-        cyber_agent::domain::request_audit::RequestAuditDeliveryReason::Full(
-            cyber_agent::domain::context::BaselineInvalidationReason::CompactionReset
+        echidna::domain::request_audit::RequestAuditDeliveryReason::Full(
+            echidna::domain::context::BaselineInvalidationReason::CompactionReset
         )
     );
     assert_eq!(
@@ -3004,11 +3004,11 @@ fn m5_compaction_preconditions_never_append_a_partial_fact() {
         (
             "started",
             SessionEvent::Started {
-                primary_provider_session: cyber_agent::domain::context::ProviderSessionRef {
-                    id: cyber_agent::domain::context::ProviderSessionId::new(
+                primary_provider_session: echidna::domain::context::ProviderSessionRef {
+                    id: echidna::domain::context::ProviderSessionId::new(
                         "primary-before-incomplete-resume",
                     ),
-                    role: cyber_agent::domain::context::ProviderSessionRole::Primary,
+                    role: echidna::domain::context::ProviderSessionRole::Primary,
                     generation: 1,
                 },
             },
@@ -3016,7 +3016,7 @@ fn m5_compaction_preconditions_never_append_a_partial_fact() {
         (
             "user",
             SessionEvent::HistoryItemRecorded {
-                item: cyber_agent::domain::model::ContentItem::user_text(
+                item: echidna::domain::model::ContentItem::user_text(
                     "retain the interrupted call boundary",
                 ),
             },
@@ -3024,10 +3024,10 @@ fn m5_compaction_preconditions_never_append_a_partial_fact() {
         (
             "call",
             SessionEvent::HistoryItemRecorded {
-                item: cyber_agent::domain::model::ContentItem::ToolCall {
-                    call: cyber_agent::domain::tools::ToolCall {
-                        call_id: cyber_agent::domain::tools::ToolCallId::new("m5-incomplete-call"),
-                        name: cyber_agent::domain::tools::ToolName::new("read_file"),
+                item: echidna::domain::model::ContentItem::ToolCall {
+                    call: echidna::domain::tools::ToolCall {
+                        call_id: echidna::domain::tools::ToolCallId::new("m5-incomplete-call"),
+                        name: echidna::domain::tools::ToolName::new("read_file"),
                         arguments: json!({"path": "candidate.txt"}),
                     },
                 },
@@ -3469,7 +3469,7 @@ fn f3_graceful_interrupt_never_fabricates_a_receipt_for_unobserved_external_effe
         ),
     ]);
     let config = write_config(project.path(), &server.base_url);
-    let mut child = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_echidna"))
         .current_dir(project.path())
         .args(["chat", "--config", config.to_str().unwrap()])
         .env("CYBER_AGENT_PRIMARY_API_KEY", "loopback-primary-secret")
@@ -3531,11 +3531,11 @@ fn f3_graceful_interrupt_never_fabricates_a_receipt_for_unobserved_external_effe
     );
     assert!(state.history().ensure_all_tool_calls_paired().is_err());
     let normalized =
-        cyber_agent::domain::history::normalize_content_items(state.history().items()).unwrap();
+        echidna::domain::history::normalize_content_items(state.history().items()).unwrap();
     let unresolved = normalized
         .iter()
         .find_map(|item| match item {
-            cyber_agent::domain::model::ContentItem::ToolResult { result }
+            echidna::domain::model::ContentItem::ToolResult { result }
                 if result.call_id.as_str() == "m5-cancelled" =>
             {
                 Some(result)
@@ -3646,7 +3646,7 @@ fn m5_session_end_respects_the_active_chat_runtime_lease() {
     let waiting = spawn_waiting_chat(project.path(), &config);
     let session = session_id(project.path());
 
-    let rejected = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+    let rejected = Command::new(env!("CARGO_BIN_EXE_echidna"))
         .current_dir(project.path())
         .args(["session", "end", &session])
         .output()
@@ -3660,7 +3660,7 @@ fn m5_session_end_respects_the_active_chat_runtime_lease() {
     );
 
     waiting.exit();
-    let ended = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+    let ended = Command::new(env!("CARGO_BIN_EXE_echidna"))
         .current_dir(project.path())
         .args(["session", "end", &session])
         .output()
@@ -3964,8 +3964,8 @@ fn rejected_incremental_text_is_not_presented_before_the_full_fallback() {
         String::from_utf8_lossy(&output.stderr)
     );
     let output = String::from_utf8(output.stdout).unwrap();
-    assert!(output.contains("assistant> first answer"));
-    assert!(output.contains("assistant> full fallback"));
+    assert!(output.contains("Echidna> first answer"));
+    assert!(output.contains("Echidna> full fallback"));
     assert!(
         !output.contains("discarded incremental text"),
         "a rejected incremental attempt must not leak partial text before its Full fallback"
@@ -4024,7 +4024,7 @@ fn ctrl_c_cancels_an_active_request_and_keeps_the_session_resumable() {
     initialize_project(project.path());
     let server = spawn_pending_responses_server();
     let config = write_config(project.path(), &server.base_url);
-    let mut child = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_echidna"))
         .current_dir(project.path())
         .args(["chat", "--config", config.to_str().unwrap()])
         .env("CYBER_AGENT_PRIMARY_API_KEY", "loopback-primary-secret")

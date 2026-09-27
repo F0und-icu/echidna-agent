@@ -178,7 +178,7 @@ fn ctf_r3b1_completed_child_survives_killed_batch_and_resume_without_rerun() {
         let _ = f2a_wait_child(child, "R3b1 killed child");
         assert_eq!(fs::read(root.path().join("first-count")).unwrap(), b"x");
         assert!(root.path().join("second-start").exists());
-        let shown = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+        let shown = Command::new(env!("CARGO_BIN_EXE_echidna"))
             .current_dir(root.path())
             .args(["session", "show", &session])
             .output()

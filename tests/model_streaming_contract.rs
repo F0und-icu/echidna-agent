@@ -8,17 +8,17 @@ use futures_core::Stream;
 use futures_util::stream;
 use serde_json::json;
 
-use cyber_agent::adapters::mock_model::{MockModelFixture, MockModelProvider};
-use cyber_agent::app::model_streaming::{
+use echidna::adapters::mock_model::{MockModelFixture, MockModelProvider};
+use echidna::app::model_streaming::{
     ModelStreamCancellation, ModelStreamOutcome, ModelStreamingError, ModelStreamingService,
 };
-use cyber_agent::domain::artifacts::ArtifactId;
-use cyber_agent::domain::model::{
+use echidna::domain::artifacts::ArtifactId;
+use echidna::domain::model::{
     CapabilityMappingVersion, ContentItem, MessageRole, ModelCapabilities, ModelCapabilityError,
     ModelEvent, ModelInputIR, ModelRequestRequirements, ModelUsage,
 };
-use cyber_agent::domain::tools::{ToolCall, ToolCallId, ToolName};
-use cyber_agent::ports::model::{
+use echidna::domain::tools::{ToolCall, ToolCallId, ToolName};
+use echidna::ports::model::{
     ModelEventStream, ModelProvider, ModelProviderError, ModelRequest, ModelResponseCompletion,
     ModelStreamEvent, ProviderResponseId,
 };

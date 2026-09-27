@@ -1,15 +1,15 @@
 use std::collections::BTreeSet;
 
-use cyber_agent::domain::ArtifactId;
-use cyber_agent::domain::events::{
+use echidna::domain::ArtifactId;
+use echidna::domain::events::{
     EventEnvelope, EventId, EventSequence, EventType, OccurredAt, StreamId,
 };
-use cyber_agent::domain::project::ProjectId;
-use cyber_agent::domain::research::{
+use echidna::domain::project::ProjectId;
+use echidna::domain::research::{
     ExecutionReceiptId, ResearchEvent, ResearchReducer, ResearchState, TargetKind,
     TargetSnapshotDraft, TargetSnapshotId, TargetSnapshotRecord,
 };
-use cyber_agent::domain::session::{
+use echidna::domain::session::{
     CompactionValidationContext, EvidenceSpine, NarrativeSummary, ResearchStreamIdentity,
     SessionSummaryDraft,
 };

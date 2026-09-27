@@ -5,32 +5,32 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use base64::Engine;
-use cyber_agent::adapters::credentials::{CredentialSource, CredentialSourceError};
-use cyber_agent::adapters::project_event_store::Project;
-use cyber_agent::adapters::responses::{ResponsesHttpAdapter, ResponsesHttpConfig};
-use cyber_agent::adapters::tools::ToolRegistry;
-use cyber_agent::app::agent_loop::{AgentLoop, AgentTurnOutcome};
-use cyber_agent::app::cancellation::AgentCancellation;
-use cyber_agent::app::model_streaming::{
+use echidna::adapters::credentials::{CredentialSource, CredentialSourceError};
+use echidna::adapters::project_event_store::Project;
+use echidna::adapters::responses::{ResponsesHttpAdapter, ResponsesHttpConfig};
+use echidna::adapters::tools::ToolRegistry;
+use echidna::app::agent_loop::{AgentLoop, AgentTurnOutcome};
+use echidna::app::cancellation::AgentCancellation;
+use echidna::app::model_streaming::{
     ModelStreamCancellation, ModelStreamOutcome, ModelStreamingError, ModelStreamingService,
 };
-use cyber_agent::domain::artifacts::ArtifactId;
-use cyber_agent::domain::events::StreamId;
-use cyber_agent::domain::model::{
+use echidna::domain::artifacts::ArtifactId;
+use echidna::domain::events::StreamId;
+use echidna::domain::model::{
     CapabilityMappingVersion, ContentItem, MessageRole, ModelCapabilities, ModelEvent,
     ModelInputIR, ModelRequestRequirements, ModelUsage,
 };
-use cyber_agent::domain::project::ProjectId;
-use cyber_agent::domain::request_audit::{
+use echidna::domain::project::ProjectId;
+use echidna::domain::request_audit::{
     RequestAdapterVersion, RequestAuditBinding, RequestAuditRunContext,
 };
-use cyber_agent::domain::tools::{
+use echidna::domain::tools::{
     ExecutionId, ToolCall, ToolCallId, ToolExecutionOutcome, ToolName, ToolResult, ToolResultStatus,
 };
-use cyber_agent::ports::model::{
+use echidna::ports::model::{
     ModelProvider, ModelProviderError, ModelRequest, ModelResponseCompletion, ProviderResponseId,
 };
-use cyber_agent::ports::tool::ToolExecutor;
+use echidna::ports::tool::ToolExecutor;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -219,7 +219,7 @@ async fn publish_image_fixture(project: &Project) -> (ArtifactId, Vec<u8>) {
 }
 
 fn assert_stream_error(
-    result: Result<cyber_agent::ports::model::ModelEventStream, ModelProviderError>,
+    result: Result<echidna::ports::model::ModelEventStream, ModelProviderError>,
     expected: ModelProviderError,
 ) {
     match result {

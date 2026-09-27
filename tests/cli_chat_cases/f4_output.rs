@@ -165,7 +165,7 @@ fn assert_reasoning_streams(extra_args: &[&str]) {
         let _ = released.recv_timeout(F2A_WAIT);
         socket.write_all(end.as_bytes()).unwrap();
     });
-    let mut child = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_echidna"))
         .current_dir(root.path())
         .args(["--config", config.to_str().unwrap(), "chat"])
         .args(extra_args)
@@ -481,7 +481,7 @@ fn f4_debug_covers_both_image_routes_and_omits_image_bytes() {
 #[cfg(not(debug_assertions))]
 #[test]
 fn f4_release_rejects_debug_flag() {
-    let output = Command::new(env!("CARGO_BIN_EXE_cyber-agent"))
+    let output = Command::new(env!("CARGO_BIN_EXE_echidna"))
         .args(["chat", "--debug"])
         .output()
         .unwrap();
