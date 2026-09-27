@@ -1,4 +1,4 @@
-# Documentation example only. Replace URL, model and key before starting chat.
+# Text-only example. Replace URL/model and export the referenced key before chat.
 # Confirm every capability below against your service; these are sample values.
 # Save your real configuration outside the source repository.
 schema_version = 1
@@ -9,9 +9,9 @@ binding = "http_sse"
 wire_api = "responses"
 base_url = "https://responses.example.invalid/v1"
 model = "replace-with-your-model"
-api_key = "replace-with-your-api-key"
-# Alternatively remove api_key and use:
-# credential_ref = "CYBER_AGENT_PRIMARY_API_KEY"
+credential_ref = "CYBER_AGENT_PRIMARY_API_KEY"
+# Alternatively remove credential_ref and use a local inline key:
+# api_key = "replace-with-your-api-key"
 capability_mapping = "primary-v1"
 generation = 1
 

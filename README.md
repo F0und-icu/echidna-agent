@@ -95,7 +95,15 @@ ECHIDNA_BIN="$PWD/target/release/echidna"
 
 ### 2. 配置模型
 
-将 [配置模板](examples/provider.toml) 保存到代码仓库之外：
+按使用方式选择完整模板，保存到代码仓库之外：
+
+| 使用方式 | 完整模板 | 图像处理 |
+| --- | --- | --- |
+| 纯文本模型 | [provider.toml](examples/provider.toml) | `disabled`，不接收图像 |
+| 单个多模态模型 | [provider-multimodal.toml](examples/provider-multimodal.toml) | `primary_direct`，主模型直接接收图像 |
+| 文本主模型 + 独立视觉模型 | [provider-text-vision.toml](examples/provider-text-vision.toml) | `secondary_tool`，视觉模型分析图像，主模型使用其观察结果继续研究 |
+
+下面以纯文本模板为例；需要图像能力时，将复制命令的源文件换成对应模板：
 
 ```sh
 mkdir -p "$HOME/.config/echidna"
@@ -103,12 +111,71 @@ cp -n examples/provider.toml "$HOME/.config/echidna/provider.toml"
 chmod 600 "$HOME/.config/echidna/provider.toml"
 ```
 
-编辑该文件，填写服务地址、模型与凭据，并按服务实际能力核对窗口和各项能力声明。
-模板中的地址、密钥与 32K 窗口都是示例；`cp -n` 保留已有文件。
+编辑该文件，填写服务地址和模型，并按服务实际能力核对窗口和各项能力声明。
+模板中的地址、模型名与 32K 窗口都是示例；`cp -n` 保留已有文件。
 这里的路径由命令显式传入，程序不会自动发现它。
 
 当前接入 **HTTP/SSE + Responses** 协议。Chat Completions 接口不适用。
-凭据可使用本地 `api_key`，或改用 `CYBER_AGENT_*_API_KEY` 环境变量引用，二选一。
+分开配置时，主模型和视觉模型的服务都需要支持此协议。
+
+#### 环境变量与密钥
+
+模板通过 `credential_ref` 读取密钥；服务地址、模型名和能力声明仍写在 TOML 中。
+在启动 Echidna 的同一个终端设置：
+
+```sh
+export CYBER_AGENT_PRIMARY_API_KEY='replace-with-your-primary-key'
+# 仅在使用独立视觉模型时设置。
+export CYBER_AGENT_VISION_API_KEY='replace-with-your-vision-key'
+```
+
+对应的 Provider 配置使用 `credential_ref = "CYBER_AGENT_PRIMARY_API_KEY"`，
+视觉 Provider 使用 `credential_ref = "CYBER_AGENT_VISION_API_KEY"`。
+两者独立读取，各用一个变量名；程序不会回退到另一个角色的密钥或 `OPENAI_API_KEY`。
+自定义名称须符合 `CYBER_AGENT_*_API_KEY` 格式，且仅含大写字母、数字和下划线。
+
+程序**不会自动加载 `.env` 文件**。如果使用自行维护的可信 env 文件，需先在 shell 中加载并导出变量。
+也可以在本地 TOML 中用 `api_key = "…"` 替换 `credential_ref`；每个 Provider 必须且只能选择一种。
+真实密钥及配置保存在仓库之外，不要提交到 Git。
+
+#### 单个多模态模型
+
+使用 [多模态模板](examples/provider-multimodal.toml)，由同一个主模型处理文本、工具调用和图像。
+其 `[capability_mappings.primary-v1]` 声明 `image_input = true`，组合配置为：
+
+```toml
+[agent_profiles.default]
+primary = "primary"
+vision_mode = "primary_direct"
+generation = 1
+```
+
+只需设置主模型密钥，无需额外配置视觉 Provider。
+
+#### 文本与视觉模型分开配置
+
+使用 [双模型模板](examples/provider-text-vision.toml)，分别填写 `[providers.primary]`
+和 `[providers.vision]` 的 `base_url`、`model`、`credential_ref` 与 `capability_mapping`。
+两个模型可以使用不同服务，各自声明上下文窗口和能力。关键组合配置为：
+
+```toml
+[agent_profiles.default]
+primary = "primary"
+vision = "vision"
+vision_mode = "secondary_tool"
+generation = 1
+```
+
+主模型负责推理与工具调用；视觉模型负责图像分析，将观察结果交给主模型。
+两者仍在同一个 AgentLoop 中协作。主模型必须支持文本输入、流式输出和工具调用；
+视觉模型必须支持文本与图像输入、流式输出和结构化输出，不要求工具调用能力。
+
+`vision_mode = "auto"` 也是可选项：根据**声明的能力**优先使用主模型的图像能力，
+否则使用已配置的视觉模型；两者都不支持时拒绝图像输入。它不会探测模型能力，也不是失败后的自动切换。
+
+能力声明需要匹配实际服务；设置 `image_input = true` 不会让纯文本模型具备图像能力。
+`context_window` 分别填写各模型的真实窗口；`[runtime].model_request_limit_per_turn`
+默认为 `32`，是每轮主模型与视觉模型共享的请求次数上限。
 
 ### 3. 建立研究项目
 
@@ -121,7 +188,7 @@ cd ../echidna-research
 "$ECHIDNA_BIN" --config "$HOME/.config/echidna/provider.toml" chat
 ```
 
-`doctor` 在本地检查配置，不发送模型请求，也不验证远端服务可达性；
+`doctor` 在本地检查配置，不读取环境变量密钥、不发送模型请求，也不验证密钥有效性或远端服务可达性；
 进入 `chat` 提交任务后才使用所配置的模型。
 
 在独立研究目录启动：工具使用当前用户权限执行，当前没有内置沙箱或执行确认层。
@@ -182,7 +249,9 @@ Echidna 将执行、预算、Session 和恢复留在一个内核中。模型、�
 
 | 入口 | 内容 |
 | --- | --- |
-| [配置示例](examples/provider.toml) | Provider、能力声明与凭据占位示例 |
+| [纯文本配置](examples/provider.toml) | 主模型、能力声明与环境变量密钥引用 |
+| [单模型多模态配置](examples/provider-multimodal.toml) | 主模型直接处理文本与图像 |
+| [文本 + 视觉配置](examples/provider-text-vision.toml) | 两个模型的独立服务、能力与密钥配置 |
 | [原理图原图](assets/architecture-overview.svg) | 可放大的执行与持久化流程图 |
 | [更新记录](CHANGELOG.md) | 功能变化与兼容性说明 |
 

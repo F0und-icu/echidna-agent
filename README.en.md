@@ -102,7 +102,16 @@ Run the remaining commands in the same terminal, continuing to use `ECHIDNA_BIN`
 
 ### 2. Configure a model
 
-Copy the [configuration template](examples/provider.toml) outside the source repository:
+Choose a complete template for your setup and save it outside the source repository:
+
+| Setup | Complete template | Image handling |
+| --- | --- | --- |
+| Text-only model | [provider.toml](examples/provider.toml) | `disabled`: no image input |
+| One multimodal model | [provider-multimodal.toml](examples/provider-multimodal.toml) | `primary_direct`: the primary model receives images directly |
+| Text primary + separate vision model | [provider-text-vision.toml](examples/provider-text-vision.toml) | `secondary_tool`: the vision model analyzes images; the primary continues with its observations |
+
+The following copies the text-only template. For image support, replace the source file
+in the copy command with the appropriate template:
 
 ```sh
 mkdir -p "$HOME/.config/echidna"
@@ -110,14 +119,80 @@ cp -n examples/provider.toml "$HOME/.config/echidna/provider.toml"
 chmod 600 "$HOME/.config/echidna/provider.toml"
 ```
 
-Edit the file to set the service URL, model, and credentials. Check the context window and
-each declared capability against the service's actual support. The URL, key, and 32K window
+Edit the file to set the service URL and model. Check the context window and
+each declared capability against the service's actual support. The URL, model name, and 32K window
 in the template are examples; `cp -n` preserves an existing file. The commands pass this
 configuration path explicitly; the program does not discover it automatically.
 
 The current integration uses **HTTP/SSE + Responses**. Chat Completions endpoints are not
-supported. Choose either a local `api_key` or a `CYBER_AGENT_*_API_KEY` environment-variable
-reference for credentials.
+supported. With separate models, both the primary and vision services must support this protocol.
+
+#### Environment variables and keys
+
+The templates read keys through `credential_ref`; service URLs, model names, and capability
+declarations remain in TOML. Set the variables in the same terminal that will start Echidna:
+
+```sh
+export CYBER_AGENT_PRIMARY_API_KEY='replace-with-your-primary-key'
+# Set this only when using a separate vision model.
+export CYBER_AGENT_VISION_API_KEY='replace-with-your-vision-key'
+```
+
+The primary provider uses `credential_ref = "CYBER_AGENT_PRIMARY_API_KEY"`, and the vision
+provider uses `credential_ref = "CYBER_AGENT_VISION_API_KEY"`. Each reads its own named variable;
+there is no fallback to the other role's key or to `OPENAI_API_KEY`.
+Custom names must follow `CYBER_AGENT_*_API_KEY` and contain only uppercase letters, digits,
+and underscores.
+
+The program **does not load `.env` files automatically**. If you maintain a trusted env file,
+load it in your shell and export its variables before starting. Alternatively, replace
+`credential_ref` with `api_key = "…"` in your local TOML; each provider must use exactly one.
+Keep real keys and configuration outside the repository and out of Git.
+
+#### One multimodal model
+
+Use the [multimodal template](examples/provider-multimodal.toml) for one primary model that
+handles text, tool calls, and images. Its `[capability_mappings.primary-v1]` declares
+`image_input = true`, with the following profile:
+
+```toml
+[agent_profiles.default]
+primary = "primary"
+vision_mode = "primary_direct"
+generation = 1
+```
+
+Only the primary key is needed; no additional vision provider is required.
+
+#### Separate text and vision models
+
+Use the [two-model template](examples/provider-text-vision.toml). Set `base_url`, `model`,
+`credential_ref`, and `capability_mapping` independently in `[providers.primary]` and
+`[providers.vision]`. The models can use different services, each with its own context window
+and capabilities. The profile connects them:
+
+```toml
+[agent_profiles.default]
+primary = "primary"
+vision = "vision"
+vision_mode = "secondary_tool"
+generation = 1
+```
+
+The primary model handles reasoning and tool calls; the vision model analyzes images and
+returns observations to the primary. They work within one AgentLoop. The primary must
+support text input, streaming, and tool calls. The vision model must support text and image
+input, streaming, and structured output; it does not need tool-call support.
+
+You can also select `vision_mode = "auto"`: **declared capabilities** determine routing,
+preferring the primary model's image support, then the configured vision model. If neither
+supports images, image input is rejected. This does not probe model capabilities or provide
+automatic failover after a request fails.
+
+Declarations must match the actual service; setting `image_input = true` cannot give a
+text-only model image support. Set each model's `context_window` to its actual capacity.
+`[runtime].model_request_limit_per_turn` defaults to `32`, a per-turn request limit shared
+by the primary and vision models.
 
 ### 3. Create a research project
 
@@ -130,8 +205,9 @@ cd ../echidna-research
 "$ECHIDNA_BIN" --config "$HOME/.config/echidna/provider.toml" chat
 ```
 
-`doctor` checks configuration locally. It sends no model requests and does not verify
-remote service availability. The configured model is used when you submit a task in `chat`.
+`doctor` checks configuration locally. It does not read environment-variable keys, send model
+requests, or verify key validity or remote service availability. The configured model is used
+when you submit a task in `chat`.
 
 Start in a separate research directory. Tools execute with your current user permissions;
 there is currently no built-in sandbox or execution confirmation layer.
@@ -197,7 +273,9 @@ from actual use. External orchestration evolves independently of the single-agen
 
 | Resource | Contents |
 | --- | --- |
-| [Configuration example](examples/provider.toml) | Provider settings, capability declarations, and placeholder credentials |
+| [Text-only configuration](examples/provider.toml) | Primary model, capability declarations, and environment key reference |
+| [Single multimodal model](examples/provider-multimodal.toml) | One primary model for text and images |
+| [Text + vision configuration](examples/provider-text-vision.toml) | Independent services, capabilities, and keys for the two models |
 | [Original mechanism figure](assets/architecture-overview.svg) | Execution and persistence flow in scalable SVG form |
 | [Changelog](CHANGELOG.md) | Feature changes and compatibility notes |
 
