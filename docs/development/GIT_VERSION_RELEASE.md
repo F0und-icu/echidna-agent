@@ -2,9 +2,11 @@
 
 ## 0. 当前边界
 
-- GitHub 私有仓库：`F0und-icu/cyber-agent`。
-- 文档基线已发布到远程 `main`；后续实现仍按 Slice 独立提交。
-- 本地根目录已初始化 `.git`，当前分支为 `main`。
+- GitHub 私有主仓库：`F0und-icu/echidna-agent`；旧 `F0und-icu/cyber-agent` 保留 core 基线。
+- E0 从 `eee836d056bf71a008c5d29d0bf94c158809e687` 初始化 main 和更名前快照分支。
+- 后续按 Slice 独立提交；当前精确分支以 Git/STATUS 为准，迁移见 ECHIDNA_MIGRATION.md。
+- E0 新库初始化采用验证后快进 main，Actions 关闭；不宣称跑过 CI、不创建 Release。
+- 当前 binary 为 `echidna`；短版本 `-V` 用于包版本校验，`--version` 另列构建时 HEAD。
 - `codex/` 是独立的只读上游 Git 仓库，绝不能加入 Cyber Agent 历史。
 - 本文件是方案，不授权当前会话初始化、提交或推送。
 
@@ -237,7 +239,7 @@ Release Gate：
 - Cargo.lock 已提交。
 - `cargo build --locked --release --target aarch64-apple-darwin` 通过。
 - Release binary 生成 SHA-256。
-- `cyber-agent --version` 与 Tag 一致。
+- `echidna -V` 与 Tag 一致；`--version` 的 source base 另用于定位源码基线。
 - CHANGELOG 已从 Unreleased 移入版本节。
 - Migration Notes 完整。
 - Artifact 中不存在 API Key、`.cyber-agent/`、目标文件或本地日志。
@@ -258,7 +260,7 @@ Release Gate：
 
 普通 CI 不引用 GitHub Secret，不设置 `CYBER_AGENT_LIVE_TESTS`，所以两个
 ignored Live Smoke 不会发送远程请求。分发脚本只允许归档一个顶层目录和
-其中的 `cyber-agent` 二进制；配置、`.cyber-agent/`、日志和目标数据没有
+其中的 `echidna` 二进制；配置、`.cyber-agent/`、日志和目标数据没有
 进入包的路径。
 
 Actions 必须固定到明确版本；条件允许时固定 commit SHA。升级 Action 作为独立 chore PR。
@@ -274,7 +276,7 @@ Actions 必须固定到明确版本；条件允许时固定 commit SHA。升级 
 - 下载产物再次通过同一分发脚本的内容白名单、Mach-O arm64 和 SHA-256 校验。
 
 全部通过后才用 GitHub 当次短期 Token 创建 Release，并上传
-`cyber-agent-<version>-aarch64-apple-darwin.tar.gz` 与 `SHA256SUMS`。
+`echidna-<version>-aarch64-apple-darwin.tar.gz` 与 `SHA256SUMS`。
 M5-S2 只建立此路径，不自动创建第一个 Tag 或 Release。
 
 Workflow 不读取运行时 API Key，不运行真实漏洞研究，不上传本地项目数据。

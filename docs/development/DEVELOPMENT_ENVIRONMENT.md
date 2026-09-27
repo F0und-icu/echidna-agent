@@ -315,7 +315,7 @@ Release：
 ```sh
 rustup target add aarch64-apple-darwin
 cargo build --locked --release --target aarch64-apple-darwin
-shasum -a 256 target/aarch64-apple-darwin/release/cyber-agent
+shasum -a 256 target/aarch64-apple-darwin/release/echidna
 ```
 
 在 M0 之前这些命令没有可运行对象，不能以缺少 Cargo.toml 判断环境失败。

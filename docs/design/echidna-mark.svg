@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" fill="none">
+  <title>Echidna serpent E</title>
+  <desc>An original single-line serpent forming an E, with a quiet circular eye.</desc>
+  <rect width="160" height="160" rx="38" fill="#19171F"/>
+  <path d="M115 39H69C26 39 27 80 67 80H104C127 80 129 121 87 121H45" stroke="#ECE6DB" stroke-width="9" stroke-linecap="round"/>
+  <path d="M45 40V121M48 80H96" stroke="#A697C3" stroke-width="6" stroke-linecap="round"/>
+  <circle cx="113" cy="38" r="2.5" fill="#19171F"/>
+</svg>

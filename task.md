@@ -1,8 +1,13 @@
-# Cyber Agent 项目任务与精简架构
+# Echidna 项目任务与精简架构
+
+E0：新仓库承接完整代码与历史作为后续主线；旧 cyber-agent 保留 core 基线。
+本次仅产品命名、终端主题、构建分发及设计记录，不拆分库、不实现 TUI/队列。
+冻结链完整继承至 v1.24；旧名称与路径作为兼容标识保留，精确迁移见
+`docs/development/ECHIDNA_MIGRATION.md`。后续设计在 `docs/design/`，不替代 ADR。
 
 ## 0. 文档定位
 
-本文件是 `cyber-agent` 项目的当前权威任务文档。
+本文件是 `echidna-agent` 项目的当前权威任务文档；下方继承的历史内核规划保持可追溯。
 
 参考材料：
 

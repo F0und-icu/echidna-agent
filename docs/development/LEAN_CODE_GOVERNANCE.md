@@ -1,4 +1,9 @@
-# Cyber Agent 精简代码治理规范
+# Echidna 精简代码治理规范
+
+E0 仅增加 CLI 内私有 theme 呈现所有者及 std-only 构建元数据脚本，消费者为已有
+CLI/Clap；不新增公共 API、Port、依赖、配置或 fact schema。测试的 crate import
+更名属机械迁移，原断言不得减弱。历史名称、Prompt、冻结架构与 fixture 保真。
+未来设计文档不创建 runtime 占位；TUI、SDK、外部队列继续 Deferred。
 
 ## 0. 目的与适用范围
 

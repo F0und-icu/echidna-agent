@@ -1,4 +1,37 @@
-# Cyber Agent Development Status
+# Echidna Development Status
+
+## Current Slice — E0 repository transition and identity
+
+- State: COMPLETE_LOCAL_OFFLINE_VERIFIED (2026-09-27). The operator authorized a new Echidna
+  development mainline, preservation of the old repository as core, its final
+  commit/push, and the naming/theme/design-document work previously approved.
+- Core checkpoint: `eee836d056bf71a008c5d29d0bf94c158809e687`, pushed to
+  `F0und-icu/cyber-agent` branch `codex/r7-f1-long-task-repair`; old `main`
+  and Draft PR #88 merge status are unchanged. Existing 334-entry reviewed
+  source/test manifest verified; prior Gate evidence is reused, not rerun.
+- New private repository: `F0und-icu/echidna-agent`; initial `main` and
+  `codex/pre-echidna-rename` preserve the same checkpoint. All 446 versioned
+  files match the original working bytes. Git history is inherited; ignored
+  credentials, local targets, Sessions, builds and upstream checkout are excluded.
+- Scope: package/binary/crate name, CLI help/answer label, restrained terminal
+  theme, build source-base identity, packaging and current entrypoint docs;
+  future research and external orchestration are design-only.
+- One private CLI theme owner and a std-only build script; no new dependency,
+  public API, Port, configuration schema, prompt generation or fact authority.
+  Preserve `.cyber-agent`, `CYBER_AGENT_*`, events, model-visible tool identity,
+  historical prompts/fixtures, architecture v1–v1.24 and accepted ADR bytes.
+- Verify focused → affected → fresh independent bounded audit → repairs → full
+  offline Gate → Lean. No Live, Actions, tag/release, automatic PR merge or
+  replacement of frozen manual-test binaries. New-repo Actions are disabled.
+- The historical records below retain their original scope and limitations.
+- Verification complete: focused2 PASS; affected141 PASS/1 ignored; fresh Terra
+  xhigh independent APPROVE (10:25 UTC); full Gate45 suites/544 unique PASS/
+  4 ignored; static scans and final Lean PASS. Local arm64 package/negative archive
+  checks PASS; no arm64 execution on this x86_64 host. Initial existing15-second
+  test timeout is retained; unchanged exact rerun, final affected run and full
+  Gate passed. No code/timeout/assertion change was used to obtain a pass.
+- [Verification and Lean evidence](E0_ECHIDNA_IDENTITY_VERIFICATION.md).
+  Publication to the new mainline is the final handoff step; no next Slice starts.
 
 ## New operator report — network interruption recovery
 

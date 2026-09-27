@@ -1,4 +1,14 @@
-# Cyber Agent 文档索引与权威顺序
+# Echidna 文档索引与权威顺序
+
+当前开发主线已迁到 `F0und-icu/echidna-agent`，旧 cyber-agent 保留 core 基线。
+先读 [E0迁移记录](development/ECHIDNA_MIGRATION.md) 与 STATUS 当前 E0 条目。
+以下历史阶段记录和冻结文件保留原名、原证据，不代表当前待执行任务。
+
+- [产品主题与兼容命名](design/ECHIDNA_IDENTITY.md)
+- [随模型能力增长的研究设计](design/FUTURE_RESEARCH_DESIGN.md)
+- [未来外部协调器](design/EXTERNAL_ORCHESTRATION.md)
+
+设计储备不授权实现；准确当前状态以 STATUS 为准。
 
 ## 1. 文档目的
 

@@ -1,4 +1,16 @@
-# Cyber Agent Repository Instructions
+# Echidna Repository Instructions
+
+## Repository transition (E0)
+
+This repository is the future Echidna development mainline, inherited from
+`F0und-icu/cyber-agent` at `eee836d056bf71a008c5d29d0bf94c158809e687`.
+The old repository remains the core baseline; do not modify it from work here.
+This is a complete source continuation, not yet a separately consumable core
+library. Follow the current E0 entry in STATUS before inherited R7 records.
+Product/package/binary naming may change in E0; persistent `.cyber-agent`,
+`CYBER_AGENT_*`, event/tool identities, prompts and frozen historical docs stay
+compatible. Branding never replaces the stable research identity.
+Future designs under `docs/design/` are proposals, not implementation authority.
 
 ## Purpose
 

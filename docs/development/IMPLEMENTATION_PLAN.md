@@ -1,4 +1,19 @@
-# Cyber Agent 可执行开发计划
+# Echidna 可执行开发计划
+
+## 当前 Slice：E0 仓库迁移与产品命名
+
+从已提交的 core 基线建立新的 Echidna 主线，保持一包、一默认 binary、一个
+AgentLoop。产品名 Echidna；crate/binary 为 `echidna`；CLI 回复前缀为 `Echidna> `。
+主题仅属 CLI，欢迎与颜色仅在交互终端出现；尊重 NO_COLOR/TERM=dumb。
+构建标识区分版本与源码基线提交；不把版本输出当作完整源码校验证据。
+
+变更限于 CLI/构建打包及对应测试、当前治理入口和新设计文档。永久协议标识、
+数据路径、凭据环境变量、Prompt/历史事实与冻结架构不迁移。无新增依赖/公共 API；
+无 TUI、headless/worker 协议、队列、动态插件或内核库拆分。
+先形成主题样张，再应用 CLI。专项覆盖管道/TTY/NO_COLOR、前缀与 History 隔离、
+版本；受影响覆盖 CLI、边界、恢复/审计与本地分发；之后独立审计、完整 Gate、Lean。
+本次新仓库初始化允许通过已验证 Slice 分支快进建立 main，不涉及旧 PR 合并。
+完成提交推送与两库核验即停止。先前 R7 记录作为继承基线，未授权候选不自动实施。
 
 ## 0. 适用范围
 
