@@ -279,7 +279,12 @@ Resume 不自动续做。后台资源锁不能阻断纯 tool_search，实际执�
 - 设备、PTY 和后台 Job 状态。
 - 本 Turn 已修改文件和新建 Artifact。
 
-StepSnapshot 不做全项目重扫描。它先比较便宜的 mtime、size、Git HEAD/dirty state 和工具状态，只在指纹变化时刷新对应 Snapshot。
+StepSnapshot 优先比较 mtime、size、Git HEAD/dirty state 和工具状态，在指纹变化时刷新对应 Snapshot。当前非 Git Project 的元数据指纹仍可能递归遍历，不能宣称缓存命中即无扫描；后续优化须先测量。程序刷新与模型主动列目录是不同路径。
+
+当前任务、历史研究状态及 host/container/device 路径的语义边界见
+[R7-C1 小契约](docs/development/R7_CORE_CONTRACTS.md)。首个 R7-C1a 按 ADR-0034/v1.24
+修订固定 Base/Phase 提示及已知版本回读，不新增任务账本；默认 Phase 表达研究方法，
+不自动创建当前任务。这是提示契约，不是模型服从保证；其余上下文/能力包扩展仍待实现。
 
 每次模型采样再捕获不可变 SamplingStepPlan，绑定 TurnConfigurationSnapshot、ContextPlan、ResolvedToolPlan、AgentModelProfile/Capability Mapping、RequestRequirements 和 `generic-v1` renderer。该 Plan 同时决定发送 ToolSpecs、RequestAudit、ToolCall validation/dispatch、Receipt binding 和 Baseline admission；捕获后不受 queued 配置或后续 `tool_search` 修改。
 
@@ -1071,10 +1076,14 @@ Tool Registry 只负责：
 
 ### 10.3 自定义工具
 
-首期不实现插件市场和动态 Rust 插件。自定义工具使用两种方式：
+当前采用编译期 ToolRegistry；自定义脚本通过已有 `run_command(s)` 显式调用。
+`.cyber-agent/tools.toml` 声明名称、Schema 和 argv 模板属于 Deferred 设计，尚无生产加载器；
+本文件其他目录图/配置表中的该名称也仅表示预留设计，不能据此声称已经支持。
+没有自动 `SKILL.md` 加载、插件市场或动态 Rust 插件。
 
-1. 直接让 `run_command` 调用本地脚本。
-2. 在 `.cyber-agent/tools.toml` 中声明名称、参数 Schema 和 argv 模板。
+研究能力扩展先采用显式方法说明、脚本、解析与 fixture，复用现有执行和证据边界；
+唯一小契约见 [R7-C1](docs/development/R7_CORE_CONTRACTS.md#4-最小能力扩展契约)。
+不为了可插拔提前创建加载框架。
 
 argv 必须以数组传递，不把未经处理的模型参数拼接成 shell 字符串。
 
@@ -1103,7 +1112,7 @@ Effect 元数据只用于调度、重试、缓存和恢复，不用于确认弹�
 - `read_only + deterministic + content_addressed` 的工具才允许按 Tool Version、Input Fingerprint、TargetSnapshot 和环境指纹复用结果。
 - `dedupe_by_key` 只在稳定 Idempotency Key 完全一致时抑制同一执行；它不能替代 Research `action_fingerprint`。
 - `external_mutation` 和 `interactive` 默认 `never_auto_retry`；模型或用户可以显式重新执行，并形成新的 execution_id 和 rerun reason。
-- `run_command` 无法可靠推断副作用时使用保守的 `interactive/never_auto_retry`；在 `tools.toml` 中声明的专用脚本可以提供更精确元数据。
+- `run_command` 无法可靠推断副作用时使用保守的 `interactive/never_auto_retry`；更精确元数据目前由编译期工具契约提供，不能把尚未实现的 `tools.toml` 当作可用声明入口。
 - Tool Result Cache 是可删除派生数据，命中时仍产生新的 Tool Event，并引用原 ExecutionReceipt/Artifact，保证审计链不断裂。
 
 ### 10.5 并行和长运行工具

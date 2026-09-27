@@ -2,6 +2,14 @@
 
 ## 0. 适用范围
 
+当前设计补充为 [R7-C1 小契约](R7_CORE_CONTRACTS.md)：当前任务不由旧研究状态创建、
+研究上下文来源与环境分离、能力扩展复用现有内核。首个 R7-C1a 已授权本地实现：
+按 ADR-0034/v1.24 修订 Base/五个 Phase 固定资源与已知历史 generation 校验，补齐
+旧项目新 Session/Resume 请求回归，保留历史字节、曝光和预算门。不新增 API/Port/
+依赖/配置/任务分类器或插件。随后独立审计、完整 Gate 与 Lean 已完成，本地离线通过；
+无 Live、Git 或测试目录替换。下一候选是测试超时诊断，不自动开始；其余建议顺序
+和验收边界见该文第5节，准确状态以 STATUS 为准。
+
 本计划将 Architecture v1 基线、v1.1 能力驱动模型组合、v1.2 Research Control Plane、v1.3 Immutable Sampling/Evidence-Guided Context 和 v1.4 ToolFailure/准确率可观测性增量转成可由 Codex Luna xhigh 或其他高推理 Codex 实现的 Vertical Slices。
 
 它约束实现顺序、交付物、测试和停止条件，但不授权当前会话自动初始化 Git、提交、推送、创建 PR 或开始 Rust 实现。具体写操作仍由用户当前指令授权。

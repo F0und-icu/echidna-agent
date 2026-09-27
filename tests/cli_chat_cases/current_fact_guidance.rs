@@ -3,6 +3,132 @@ use super::*;
 use cyber_agent::domain::model::ContentItem;
 
 #[test]
+fn task_scope_is_delivered_in_a_fresh_session_and_on_resume_with_old_project_facts() {
+    let root = TemporaryDirectory::new("task-scope-project");
+    let harness = TemporaryDirectory::new("task-scope-provider");
+    initialize_project(root.path());
+    let project = Project::discover(root.path()).unwrap();
+    append_research_snapshot(&project, "old-report-target");
+    let research_path = root.path().join(".cyber-agent/research.jsonl");
+    let research_before = fs::read(&research_path).unwrap();
+    let memory = root.path().join(".cyber-agent/memory/core.md");
+    fs::create_dir_all(memory.parent().unwrap()).unwrap();
+    fs::write(
+        &memory,
+        "Historical project note: old-report-target analysis is unfinished.",
+    )
+    .unwrap();
+    let server = spawn_responses_server(vec![
+        (
+            200,
+            text_response("Old plan: inspect src/old-report-target next.", "task-old"),
+        ),
+        (
+            200,
+            text_response(
+                "Scripted greeting, not model-quality evidence.",
+                "task-hello",
+            ),
+        ),
+        (
+            200,
+            text_response(
+                "Scripted scope reply, not model-quality evidence.",
+                "task-scope",
+            ),
+        ),
+    ]);
+    let config = write_config(harness.path(), &server.base_url);
+    let old = f2a_wait_child(
+        spawn_f2a_chat(
+            root.path(),
+            &config,
+            "Inspect old-report-target later.\n/exit\n",
+            &[],
+        ),
+        "old project task",
+    );
+    assert!(
+        old.status.success(),
+        "{}",
+        String::from_utf8_lossy(&old.stderr)
+    );
+    f2a_request_body(&server.requests, "old task");
+    let old_id = session_id(root.path());
+    let old_events = session_events(root.path(), &old_id);
+    let fresh = f2a_wait_child(
+        spawn_f2a_chat(root.path(), &config, "hello\n/exit\n", &[]),
+        "new session greeting",
+    );
+    assert!(
+        fresh.status.success(),
+        "{}",
+        String::from_utf8_lossy(&fresh.stderr)
+    );
+    let hello = f2a_request_body(&server.requests, "greeting request");
+    let ids = session_ids(root.path());
+    assert_eq!(ids.len(), 2);
+    let id = ids.iter().find(|id| **id != old_id).unwrap();
+    let before_resume = session_events(root.path(), id);
+    let scope =
+        "Only check the report service connection and stop; do not continue the old analysis.";
+    let resumed = f2a_wait_child(
+        spawn_f2a_chat(
+            root.path(),
+            &config,
+            &format!("{scope}\n/exit\n"),
+            &["--resume", id],
+        ),
+        "resume narrowed scope",
+    );
+    assert!(
+        resumed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    let narrowed = f2a_request_body(&server.requests, "narrowed request");
+    for (request, current) in [(&hello, "hello"), (&narrowed, scope)] {
+        assert!(request.get("previous_response_id").is_none());
+        let instructions = request["instructions"].as_str().unwrap();
+        assert!(instructions.contains("Phases/history aren't tasks"));
+        assert!(instructions.contains("Greet without research"));
+        assert!(instructions.contains("When the requested task calls for mapping:"));
+        assert!(!instructions.contains("Current objective:"));
+        let input = request["input"].as_array().unwrap();
+        assert!(
+            input
+                .iter()
+                .any(|item| item["role"] == "user" && item.to_string().contains(current))
+        );
+        // Retaining real background is intentional; do not solve scope by deleting it.
+        assert!(request.to_string().contains("snapshot-old-report-target"));
+        assert!(request.to_string().contains("Historical project note"));
+        assert!(!request.to_string().contains("Old plan: inspect"));
+    }
+    f2a_join_server(server, "task scope delivery");
+    assert_eq!(session_events(root.path(), &old_id), old_events);
+    let after = session_events(root.path(), id);
+    assert_eq!(&after[..before_resume.len()], before_resume.as_slice());
+    assert_eq!(fs::read(research_path).unwrap(), research_before);
+    let state = reduced_session(&project, id);
+    assert_eq!(state.request_audits().len(), 2);
+    assert_audits_reconstruct(root.path(), &state);
+    let users = state
+        .history()
+        .items()
+        .iter()
+        .filter_map(|item| match item {
+            ContentItem::Text {
+                role: cyber_agent::domain::model::MessageRole::User,
+                text,
+            } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(users, ["hello", scope]);
+}
+
+#[test]
 fn repeated_compaction_then_process_resume_refreshes_facts_without_reexecuting_completed_tools() {
     let root = TemporaryDirectory::new("engineering-compact-resume");
     let harness = TemporaryDirectory::new("engineering-provider");
@@ -375,7 +501,7 @@ fn resume_delivers_current_memory_alongside_old_prose_without_rewriting_history(
         assert!(
             serde_json::to_string(audit)
                 .unwrap()
-                .contains("prompt:base:pragmatic-vulnerability-researcher:4")
+                .contains("prompt:base:pragmatic-vulnerability-researcher:5")
         );
     }
     assert_audits_reconstruct(root.path(), &after_state);

@@ -163,9 +163,9 @@ fn domain_phase_prompt_fragments_and_tool_exposure_are_stable() {
                 || id.starts_with("prompt:phase:"))
             .collect::<Vec<_>>(),
         vec![
-            "prompt:base:pragmatic-vulnerability-researcher:4",
+            "prompt:base:pragmatic-vulnerability-researcher:5",
             "prompt:domain:mobile:1",
-            "prompt:phase:hypothesis:1",
+            "prompt:phase:hypothesis:2",
         ]
     );
     assert!(first[1].id().as_str().starts_with("prompt:personal:"));

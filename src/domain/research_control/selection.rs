@@ -72,7 +72,10 @@ impl ResearchPhaseSelection {
     }
 
     pub fn validate(self) -> Result<(), ResearchControlError> {
-        let legacy_prompt = self.phase == ResearchPhase::Mapping && self.phase_generation == 1;
+        let legacy_prompt = match self.phase {
+            ResearchPhase::Mapping => matches!(self.phase_generation, 1 | 2),
+            _ => self.phase_generation == 1,
+        };
         if self.phase_generation != self.phase.generation() && !legacy_prompt {
             return Err(ResearchControlError::PhaseGenerationMismatch {
                 phase: self.phase,

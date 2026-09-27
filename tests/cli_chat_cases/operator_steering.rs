@@ -221,7 +221,7 @@ fn terminal_stop_and_correction_cancel_inflight_sampling_before_new_turn() {
             .recv_timeout(Duration::from_secs(10))
             .unwrap();
         assert!(new.contains("only check connection and stop"));
-        assert!(new.contains("Latest operator instructions override old goals and summaries"));
+        assert!(new.contains("Latest user scope wins"));
         chat.send("/stop\n");
         // Wait for the second cancellation, not an old occurrence.
         chat.captured.clear();

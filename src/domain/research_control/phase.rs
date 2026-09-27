@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::tools::{ToolExposure, ToolExposurePlan, ToolName};
 
-const BASE_PROMPT: &str = include_str!("prompts/base-v4.md");
+const BASE_PROMPT: &str = include_str!("prompts/base-v5.md");
 
 /// The only production Agent identity. Presentation preferences compose after
 /// it and cannot replace its evidence discipline.
@@ -11,7 +11,7 @@ pub struct BaseContract;
 
 impl BaseContract {
     pub const ID: &'static str = "pragmatic-vulnerability-researcher";
-    pub const GENERATION: u64 = 4;
+    pub const GENERATION: u64 = 5;
 
     pub const fn prompt(self) -> &'static str {
         BASE_PROMPT
@@ -39,8 +39,8 @@ impl ResearchPhase {
 
     pub const fn generation(self) -> u64 {
         match self {
-            Self::Mapping => 2,
-            _ => 1,
+            Self::Mapping => 3,
+            _ => 2,
         }
     }
 
@@ -56,11 +56,11 @@ impl ResearchPhase {
 
     pub const fn prompt(self) -> &'static str {
         match self {
-            Self::Mapping => include_str!("prompts/mapping-v2.md"),
-            Self::Hypothesis => include_str!("prompts/hypothesis-v1.md"),
-            Self::Experiment => include_str!("prompts/experiment-v1.md"),
-            Self::Verification => include_str!("prompts/verification-v1.md"),
-            Self::EvidenceCuration => include_str!("prompts/evidence-curation-v1.md"),
+            Self::Mapping => include_str!("prompts/mapping-v3.md"),
+            Self::Hypothesis => include_str!("prompts/hypothesis-v2.md"),
+            Self::Experiment => include_str!("prompts/experiment-v2.md"),
+            Self::Verification => include_str!("prompts/verification-v2.md"),
+            Self::EvidenceCuration => include_str!("prompts/evidence-curation-v2.md"),
         }
     }
 

@@ -56,7 +56,7 @@ fn explicit_project_instructions_are_complete_or_refused_under_budget_pressure()
 
 #[test]
 fn base_contract_scopes_current_facts_and_requested_answer_format() {
-    assert_eq!(BaseContract::GENERATION, 4);
+    assert_eq!(BaseContract::GENERATION, 5);
     for boundary in [
         "same target, field and scope",
         "historical assistant prose or summaries",
@@ -66,9 +66,13 @@ fn base_contract_scopes_current_facts_and_requested_answer_format() {
         "original baseline, post-change and current results distinct",
         "historical value is unavailable",
         "smallest decisive next action",
-        "Latest operator instructions override old goals and summaries",
-        "Checks/diagnosis: gather enough evidence, report and stop",
-        "Resume restores state, not permission to continue",
+        "Latest user scope wins",
+        "Checks: verify, report, stop",
+        "Resume restores state, not tasks",
+        "keep valid constraints",
+        "Phases/history aren't tasks",
+        "Greet without research",
+        "Continue clear unfinished work; else clarify",
     ] {
         assert!(BaseContract.prompt().contains(boundary), "{boundary}");
     }
@@ -98,6 +102,12 @@ fn base_revision_changes_only_its_fragment_and_preserves_historical_bytes() {
         "cc865337f9c30a27bea9e8d8b17653b7b1dd4a2582c9577c785b868637cfb17a"
     );
     assert!(BaseContract.prompt().starts_with(generation3));
+    let generation4 = include_str!("fixtures/prompts/base-v4.md");
+    assert_eq!(
+        sha256(generation4.as_bytes()),
+        "856ac4d1330c7d8e6dec71fbf485a156b11c9f017328cba63fa02ec68ed69e4e"
+    );
+    assert!(BaseContract.prompt().len() <= generation4.len() + 8);
     let current = PromptComposition::current().fragments().unwrap();
     let mut historical = current.clone();
     historical[0] = ContextFragment::new(
@@ -168,7 +178,7 @@ fn revised_environment_prompts_preserve_only_known_legacy_selections() {
             .with_research_phase(phase.phase());
         let fragments = composition.fragments().unwrap();
         assert_eq!(fragments[1].id().as_str(), "prompt:domain:binary:2");
-        assert_eq!(fragments[2].id().as_str(), "prompt:phase:mapping:2");
+        assert_eq!(fragments[2].id().as_str(), "prompt:phase:mapping:3");
         // Readback must not silently migrate durable selections.
         assert_eq!(
             serde_json::to_value(domain).unwrap()["profile_generation"],
@@ -186,12 +196,6 @@ fn revised_environment_prompts_preserve_only_known_legacy_selections() {
         }))
         .unwrap();
         assert!(domain.validate().is_err());
-        let phase: ResearchPhaseSelection = serde_json::from_value(json!({
-            "phase":"mapping", "phase_generation":generation,
-            "source":"operator", "reason_code":"OPERATOR_SELECTED"
-        }))
-        .unwrap();
-        assert!(phase.validate().is_err());
     }
     let old_binary = include_str!("../src/domain/domain_profile/prompts/binary-v1.md");
     let old_mapping = include_str!("../src/domain/research_control/prompts/mapping-v1.md");
@@ -209,6 +213,82 @@ fn revised_environment_prompts_preserve_only_known_legacy_selections() {
             .prompt()
             .contains("not repeat a full probe every Turn")
     );
+}
+
+#[test]
+fn task_scoped_phases_preserve_methods_and_accept_only_known_generations() {
+    let historical = [
+        (
+            ResearchPhase::Mapping,
+            include_str!("fixtures/prompts/mapping-v2.md"),
+            "2fa2ad3b41bb908479b5f8b05358b9c0269953514d14bf1a16bc3d46befe006d",
+        ),
+        (
+            ResearchPhase::Hypothesis,
+            include_str!("fixtures/prompts/hypothesis-v1.md"),
+            "84e139ceb87fa715839bcc6eeeed2ac6cd5df2aac5d2156ce5e5ad6a2ea5662a",
+        ),
+        (
+            ResearchPhase::Experiment,
+            include_str!("fixtures/prompts/experiment-v1.md"),
+            "fb447ba13b445b98576b98f7c1af95c6511a841288303542e18942b0f9984393",
+        ),
+        (
+            ResearchPhase::Verification,
+            include_str!("fixtures/prompts/verification-v1.md"),
+            "7444fe0a5fe835f24a230362c7f5b4fe51e1c25466bf8b3be898af91c5ef1c5d",
+        ),
+        (
+            ResearchPhase::EvidenceCuration,
+            include_str!("fixtures/prompts/evidence-curation-v1.md"),
+            "0a453bfb8d6c6251ce7bf15f9dae16f552ab971dde6e26fcbb86bbbee41935dc",
+        ),
+    ];
+    for (phase, old, digest) in historical {
+        assert_eq!(sha256(old.as_bytes()), digest);
+        assert!(
+            phase
+                .prompt()
+                .starts_with("When the requested task calls for ")
+        );
+        assert!(!phase.prompt().contains("Current objective:"));
+        // Only the unconditional objective prefix changes, not the method.
+        assert_eq!(
+            phase.prompt().split_once(": ").unwrap().1,
+            old.split_once(": ").unwrap().1
+        );
+        assert!(phase.prompt().len() <= old.len() + 40);
+        for generation in [0, 1, 2, 3, 4, u64::MAX] {
+            let selection: ResearchPhaseSelection = serde_json::from_value(json!({
+                "phase":phase, "phase_generation":generation,
+                "source":"operator", "reason_code":"OPERATOR_SELECTED"
+            }))
+            .unwrap();
+            let accepted = match phase {
+                ResearchPhase::Mapping => matches!(generation, 1..=3),
+                _ => matches!(generation, 1 | 2),
+            };
+            assert_eq!(
+                selection.validate().is_ok(),
+                accepted,
+                "{phase:?} {generation}"
+            );
+            assert_eq!(
+                serde_json::to_value(selection).unwrap()["phase_generation"],
+                generation
+            );
+            if accepted {
+                let fragments = PromptComposition::current()
+                    .with_research_phase(selection.phase())
+                    .fragments()
+                    .unwrap();
+                assert_eq!(
+                    fragments[2].id().as_str(),
+                    format!("prompt:phase:{}:{}", phase.id(), phase.generation())
+                );
+            }
+        }
+    }
 }
 
 fn capabilities() -> ModelCapabilities {
@@ -311,9 +391,9 @@ fn stable_base_domain_and_phase_compile_into_one_orthogonal_contract() {
                 .map(|fragment| fragment.id().as_str().to_owned())
                 .collect::<Vec<_>>(),
             vec![
-                "prompt:base:pragmatic-vulnerability-researcher:4".to_owned(),
+                "prompt:base:pragmatic-vulnerability-researcher:5".to_owned(),
                 format!("prompt:domain:{id}:{}", profile.generation()),
-                "prompt:phase:mapping:2".to_owned(),
+                "prompt:phase:mapping:3".to_owned(),
             ]
         );
         assert_eq!(fragments[1].source(), ContextFragmentSource::DomainPrompt);
@@ -636,7 +716,7 @@ fn phase_selection_event_is_versioned_strict_and_source_reason_paired() {
         event.payload,
         valid_phase_payload(json!({
             "phase": "verification",
-            "phase_generation": 1,
+            "phase_generation": 2,
             "source": "operator",
             "reason_code": "OPERATOR_SELECTED"
         }))
@@ -646,7 +726,7 @@ fn phase_selection_event_is_versioned_strict_and_source_reason_paired() {
         (
             valid_phase_payload(json!({
                 "phase": "verification",
-                "phase_generation": 2,
+                "phase_generation": 3,
                 "source": "operator",
                 "reason_code": "OPERATOR_SELECTED"
             })),

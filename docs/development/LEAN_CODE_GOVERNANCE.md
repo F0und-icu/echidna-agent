@@ -77,7 +77,7 @@
 8. 不建设通用 Hook Registry 或动态插件运行时。需要扩展时先使用 AgentLoop 内固定、命名且类型化的处理阶段；第二个真实实现出现后再评估 Trait。
 9. 不因测试失败新增中间层或包装抽象；先定位 Domain、Port、Adapter、App 或 Environment 的最小失败层。
 10. 不建设 Personality/Role、Prompt Stage、DomainProfile 或 ResearchPhase 动态 Registry。固定资源使用显式 enum/match 和一个组合路径；不要生成 `MobileVerifier` 一类笛卡尔积类型。
-11. `ResearchPhase` 只改变当前目标、Prompt 和 Tool Exposure；它不能复制 Research Ledger 状态机，也不能从模型自由文本隐式切换。
+11. `ResearchPhase` 只提供已请求任务的研究方法、Prompt 和 Tool Exposure，不自动创建目标（ADR-0034）；它不能复制 Research Ledger 状态机，也不能从模型自由文本隐式切换。
 12. 单个当前 renderer 不得产生 PromptDialect Trait/Registry/Config；第二实现必须先有真实消费者、固定 Eval 证据和 ADR。
 13. 不把 Context provenance 填进每个 ContentItem，不把 Provider DeliveryItemId 上浮为 Domain/Research identity。
 14. 不为检索建立 selector framework、默认向量/图数据库或远程裁判；固定算法先经 local Shadow 证明收益。

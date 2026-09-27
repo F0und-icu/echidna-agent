@@ -1,5 +1,166 @@
 # Cyber Agent Development Status
 
+## New operator report — network interruption recovery
+
+- 2026-09-26: operator reports network fluctuation interrupting manual-test
+  requests and requests a disconnection retry capability. Recorded as OPEN /
+  USER_REPORTED in [R7_MANUAL_TEST_ISSUES.md](R7_MANUAL_TEST_ISSUES.md#net-01网络波动后请求中断缺少断连重试恢复策略).
+- Exact log/request and transport/commit phase are not yet verified. This is
+  not evidence of durable History loss or proof the Provider never received
+  the request. Design must distinguish model transport retry from Tool replay.
+- Documentation only; no implementation, changed retry contract, Live, Git or
+  test-directory modification. Existing completed verification remains intact.
+
+## Current verification — R7-C1a separate compaction/Resume Live
+
+- Operator authorized completing real target setup/preflight and a separate
+  compaction/Resume test (2026-09-26). Prior stopped lane and allowance remain
+  closed; new evidence `/tmp/cyber-agent-r7-c1a-compact.Fp1Qij/`.
+- Fresh ordinary CSV Project; external helper uses current public TargetSnapshot
+  validation and Project EventSink, computes SHA256 from actual7206 file bytes,
+  and records observed OS/architecture/time without inventing execution evidence.
+  No product/API/test-source change or manual-test replacement.
+- Separate dummy-Provider Project has passed the full formal-CLI lifecycle:
+  actual file Tool → positive compaction → clean process exit → new-process
+  Resume → new request. Seven loopback-only requests, zero remote requests;
+  live Project has no synthetic Session. Existing observer is reused byte-for-byte.
+- New one-shot Live ceiling12remote requests/600active seconds,4per Turn,
+  8192output per response, aggregate observed500000input/20000output with one
+  in-flight crossing allowed. Test CSV read/explicit task closure/compaction/
+  Resume greeting/ambiguous continue/new file request. No automatic retry,
+  extra target, security test, Git/Actions or Codex credential access.
+  Independent review not authorized/completed.
+- Live completed once:7HTTP200/completed requests,17.26seconds,70041input/
+  883output tokens. Compaction revision1 retains2of8History items; both CLI
+  processes exit0, new-process Resume succeeds. Greeting/ambiguous continue use
+  zero Tools; completed work is not automatically resumed, new settings request
+  reads exactly its specified file. Engineering PASS / content LIMITED: initial
+  CSV-only request additionally invoked list_files before the correct read.
+- Main verification reconciles5raw replies,3Calls/3Results/3Receipts,7Audits,
+  169component refs/all38Blobs and unchanged prefixes. Target hash/Research
+  watermark and retained task-closure pair bind the Compaction; resumed request
+  omits CSV body and retains current guidance. Source334/binary/config/fixtures
+  and old/new frozen harnesses unchanged; no real credential in retained files.
+  Allowance closed. [Full result and limits](R7_C1A_COMPACTION_LIVE_2026_09_26.md).
+
+## Current verification — R7-C1a bounded ordinary-engineering Live
+
+- Operator authorized testing (2026-09-26) after local audit/Gate/Lean. New
+  isolated Project, no security target, no product edit/Git/Actions/manual-test
+  replacement or Codex login access. Prior completed acceptance is unchanged.
+- Scope: old report backlog/new Session greeting, one loopback health check,
+  Turn-boundary scope replacement, explicit compaction/new-process Resume,
+  greeting and ambiguous continuation. This is not mid-execution steering,
+  background Job control, a paired causal experiment or long-task acceptance.
+- New allowance: at most16 remote attempts/600seconds of admission and active
+  observation,4 admissions per Turn,8192 output tokens per response; observed
+  aggregate stops500000 input/20000 output (one in-flight response can cross).
+  No retry or allowance reuse. Existing manual-test config selects the Provider;
+  local observer keeps its real credential in memory, never in the test config.
+- Evidence `/tmp/cyber-agent-r7-c1a-live.z6LKTn/`; binary/source/fixture freeze
+  and local dummy-credential CLI/observer preflight precede Live. First offline
+  preflight transport-shim error is retained; final preflight PASS, zero remote
+  requests. External controller only; old test-harness diagnostic debt remains.
+  Independent subagent review requested but not yet authorized/completed.
+  Outcome now STOPPED_PARTIAL_VERIFIED:6 HTTP200/completed requests in15.156sec,
+  54101input/1175output tokens. Four model Turns completed; no autonomous Tool
+  use on greeting, one local health GET, then one requested settings read.
+  Greeting still unsolicitedly summarizes old-project/research state (LIMITED).
+- Explicit compaction exits1 because the fixture's authoritative Research stream
+  is empty. This is a main-agent-owned preparation omission; no compaction/Resume/
+  ambiguous-continue acceptance or new production regression is established.
+  Expected missing-prerequisite fatal exit is separately recorded as a CLI
+  usability candidate, not silently repaired or bypassed. No automatic retry.
+- Main read-only reconciliation verifies4 raw replies/2Calls/2Results/2Receipts,
+  6RequestAudits,138component references/31audit Blobs/all33Blob files and event
+  prefixes. All334 reviewed source/test hashes, binary, fixture and original
+  Provider config remain unchanged; no real key found in lane files. Independent
+  review still pending authorization; no general model-compliance claim.
+  Allowance closed; full result/limits: [R7_C1A_LIVE_2026_09_26.md](R7_C1A_LIVE_2026_09_26.md).
+
+## Current Slice — R7-C1a task-scoped research guidance
+
+- State: COMPLETE_LOCAL_OFFLINE_VERIFIED (2026-09-26). Operator
+  authorized implementing the small contract. Main implemented Base/Phase guidance,
+  exact known-generation readback and offline current-request/Resume fixtures.
+- Preserve incoming R7-C1 documentation and reviewed F2/F3. No new task state
+  machine, classifier, plugin loader, Tool exposure or execution semantics.
+  No new API/Port/dependency/Event/config. Versioned prompts use existing
+  composition, fingerprint, audit and invalidation owners.
+- Focused tests then affected tests completed; operator subsequently authorized
+  independent read-only audit and continuation through full Gate/Lean. No Live,
+  Git, Actions, test-directory replacement or Codex credential access.
+  Other R7-C1 follow-ups remain deferred.
+- Final focused30 PASS plus the repaired original pressure regression1 PASS;
+  affected14 suites270 PASS/2default-ignored (including CLI93PASS/1ignored and
+  domain_ports_contract2PASS). All-target/all-feature locked check, scoped
+  warnings-denied Clippy (lib/bin/five changed integration targets), fmt,
+  inline-test scan and whitespace PASS. All334 source/test hashes match final
+  candidate. Evidence `/tmp/cyber-agent-r7-c1a.ohYUN0/`; these are pre-audit
+  results, not complete Gate/Lean acceptance. Independent review follows below.
+- Initial affected run preserved: CLI92PASS/1FAIL/1ignored; new Base text caused
+  the unchanged20,000-window pressure fixture to need613 tokens with582 available.
+  Shortened the new rule, not the budget/test: final Base grows only3bytes, Phase
+  prefixes24–34bytes; whole affected rerun PASS. Initial failed log and old
+  candidate manifest retained. Historical prompt fixtures match original bytes.
+- Pre-audit scope check: production Rust net+3lines across existing phase/selection,
+  six current Prompt resources replace six old resources retained as fixtures.
+  No new production owner/API/Port/dependency/Event/config/Tool semantics; reuse
+  composition, version validation, provenance/audit and all original budgets.
+  Real-model compliance, timeout-harness diagnostics and capability packages
+  are not validated/implemented here. See R7_CORE_CONTRACTS.md §6 for handoff.
+- Fresh Terra xhigh audit attempt is INCONCLUSIVE: initial APPROVE was explicitly
+  withdrawn after mandatory full architecture/ADR reading was found incomplete.
+  Follow-up reading attempts did not establish full coverage; no approval by
+  timeout/silence or partial tests. Reviewer reports28 independent cases PASS
+  and no scoped actionable defect, but this does not satisfy the audit gate.
+  The attempt was closed before the12-minute ceiling, not as an elapsed timeout.
+  All334 candidate hashes and complete worktree fingerprints matched across
+  review. No production/test changes; result retained in independent-audit.md
+  under the evidence directory. A complete independent review is still required;
+  do not advance to Gate/Lean/Live/delivery from the withdrawn verdict.
+- Subsequent fresh GPT-5.6 Terra xhigh retry (2026-09-26) returned APPROVE
+  within the original20-minute bound, after separately confirming full required
+  authority reading and then completing finite code review. No actionable scoped
+  defect or repair requested;29 independent selected offline cases PASS, each
+  run once, including the unchanged pressure regression. Main reverified all334
+  source/test hashes and the entire worktree fingerprint unchanged across review.
+  Separate report: independent-audit-retry-20260926.md in the evidence directory;
+  the preceding INCONCLUSIVE attempt remains historical and is not overwritten.
+  Complete Gate and final Lean remain pending. No Live, Git, Actions, credential
+  access, manual-test replacement or model-compliance claim.
+- Subsequent complete Gate PASS, exit0: fmt; locked all-target/all-feature Clippy
+  with warnings denied;45 integration suites542 unique PASS/4default-ignored
+  (raw543 includes one existing writer-lock subprocess duplicate); locked build;
+  inline-test and whitespace checks. CLI93PASS/1ignored. Single full run, no
+  failure/rerun or threshold relaxation. All334 reviewed source/test hashes match
+  at Gate entry/exit; log `full-gate.2663AE` in the evidence directory.
+- Final Lean PASS: production Rust net+3lines across two existing owners; six
+  versioned resources replace six byte-preserved historical fixtures. No new
+  production module/API/Port/dependency/Event/config/cache or test-only surface.
+  Existing composition/audit/Baseline/Context owners and original budgets reused.
+  Full checklist in R7_CORE_CONTRACTS.md §6. Only completion documentation follows
+  independent review. Next proposed work: test-harness timeout diagnostics, then
+  separately bounded ordinary-engineering Live; neither starts in this closure.
+
+## Design checkpoint — R7-C1 small core contracts
+
+- State: DESIGN_ONLY_DOCUMENTED (2026-09-25). Operator requested small contracts
+  before further implementation. [R7_CORE_CONTRACTS.md](R7_CORE_CONTRACTS.md) is
+  the single design note for current task/history separation, research context
+  and minimal capability extensions. It preserves existing runtime owners and
+  distinguishes the observed hello/old-project continuation from unproved causes.
+- No production/test/config changes, new frozen architecture, runtime task
+  classifier or plugin loader. No independent audit, Cargo Gate, Live, Git
+  publication, test-binary replacement or stable-kernel acceptance claimed.
+- Next proposed implementation is the bounded Phase/current-task wording repair,
+  separately scoped/authorized with version compatibility and request fixtures;
+  follow with harness diagnostics and bounded ordinary-engineering evaluation.
+  This entry does not reopen completed F2/F3 or inherit their permissions.
+- Documentation checks: relative target files exist, git diff --check PASS;
+  exactly five Markdown files added/updated. Source/tests/Cargo and frozen
+  architecture/ADRs unchanged. No production verification rerun for this design-only edit.
+
 ## Current delivery — R7-F2/F3 reviewed repairs
 
 - Operator authorized GitHub delivery (2026-09-23). Publish the reviewed combined

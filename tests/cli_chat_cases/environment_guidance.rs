@@ -1,90 +1,103 @@
 use super::*;
 
 #[test]
-fn environment_prompt_revision_resumes_generation_one_without_rewriting_selection_events() {
+fn environment_prompt_revision_resumes_known_generations_without_rewriting_selection_events() {
     use cyber_agent::domain::context::{
         ProviderSessionId, ProviderSessionRef, ProviderSessionRole,
     };
-    let root = TemporaryDirectory::new("environment-legacy-selection");
-    let harness = TemporaryDirectory::new("environment-legacy-provider");
-    initialize_project(root.path());
-    let project = Project::discover(root.path()).unwrap();
-    let session = StreamId::new("environment-generation-one");
-    let stream = ProjectEventStream::Session(session.clone()).stream_id();
-    {
-        let mut writer = project.open_writer().unwrap();
-        let mut store = writer.open_session(session.clone(), None).unwrap();
-        let events = [
-            SessionEvent::Started {
-                primary_provider_session: ProviderSessionRef {
-                    id: ProviderSessionId::new("environment-old-primary"),
-                    role: ProviderSessionRole::Primary,
-                    generation: 1,
+    use cyber_agent::domain::research_control::ResearchPhase;
+    for (phase, generation) in [
+        (ResearchPhase::Mapping, 1),
+        (ResearchPhase::Mapping, 2),
+        (ResearchPhase::Hypothesis, 1),
+        (ResearchPhase::Experiment, 1),
+        (ResearchPhase::Verification, 1),
+        (ResearchPhase::EvidenceCuration, 1),
+    ] {
+        let root = TemporaryDirectory::new("environment-legacy-selection");
+        let harness = TemporaryDirectory::new("environment-legacy-provider");
+        initialize_project(root.path());
+        let project = Project::discover(root.path()).unwrap();
+        let session = StreamId::new("environment-generation-one");
+        let stream = ProjectEventStream::Session(session.clone()).stream_id();
+        {
+            let mut writer = project.open_writer().unwrap();
+            let mut store = writer.open_session(session.clone(), None).unwrap();
+            let events = [
+                SessionEvent::Started {
+                    primary_provider_session: ProviderSessionRef {
+                        id: ProviderSessionId::new("environment-old-primary"),
+                        role: ProviderSessionRole::Primary,
+                        generation: 1,
+                    },
                 },
-            },
-            SessionEvent::DomainProfileSelected {
-                selection: serde_json::from_value(json!({
-                    "profile":"binary", "profile_generation":1,
-                    "source":"operator", "reason_code":"OPERATOR_SELECTED"
-                }))
-                .unwrap(),
-            },
-            SessionEvent::ResearchPhaseSelected {
-                selection: serde_json::from_value(json!({
-                    "phase":"mapping", "phase_generation":1,
-                    "source":"default", "reason_code":"NEW_SESSION_DEFAULT_MAPPING"
-                }))
-                .unwrap(),
-            },
-        ];
-        for (index, event) in events.into_iter().enumerate() {
-            let envelope = event
-                .into_envelope(
-                    EventId::new(format!("old-selection-{index}")),
-                    stream.clone(),
-                    store.next_sequence().unwrap(),
-                    OccurredAt::new("2026-09-12T00:00:00Z"),
-                )
-                .unwrap();
-            store.append_event(&envelope).unwrap();
+                SessionEvent::DomainProfileSelected {
+                    selection: serde_json::from_value(json!({
+                        "profile":"binary", "profile_generation":1,
+                        "source":"operator", "reason_code":"OPERATOR_SELECTED"
+                    }))
+                    .unwrap(),
+                },
+                SessionEvent::ResearchPhaseSelected {
+                    selection: serde_json::from_value(json!({
+                        "phase":phase, "phase_generation":generation,
+                        "source": if phase == ResearchPhase::Mapping { "default" } else { "operator" },
+                        "reason_code": if phase == ResearchPhase::Mapping {
+                            "NEW_SESSION_DEFAULT_MAPPING"
+                        } else { "OPERATOR_SELECTED" }
+                    }))
+                    .unwrap(),
+                },
+            ];
+            for (index, event) in events.into_iter().enumerate() {
+                let envelope = event
+                    .into_envelope(
+                        EventId::new(format!("old-selection-{index}")),
+                        stream.clone(),
+                        store.next_sequence().unwrap(),
+                        OccurredAt::new("2026-09-12T00:00:00Z"),
+                    )
+                    .unwrap();
+                store.append_event(&envelope).unwrap();
+            }
         }
+        let before = session_events(root.path(), session.as_str());
+        let server =
+            spawn_responses_server(vec![(200, text_response("resumed", "environment-resumed"))]);
+        let config = write_config(harness.path(), &server.base_url);
+        let output = f2a_wait_child(
+            spawn_f2a_chat(
+                root.path(),
+                &config,
+                "Only answer what phase is selected.\n/exit\n",
+                &["--resume", session.as_str()],
+            ),
+            "legacy prompt resume",
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let request = f2a_request_body(&server.requests, "legacy prompt request");
+        assert!(request.get("previous_response_id").is_none());
+        assert!(
+            request["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("Binary domain profile v2")
+        );
+        assert!(
+            request["instructions"]
+                .as_str()
+                .unwrap()
+                .contains(phase.prompt())
+        );
+        f2a_join_server(server, "legacy prompt resume");
+        let after = session_events(root.path(), session.as_str());
+        assert_eq!(&after[..before.len()], before.as_slice());
+        assert_audits_reconstruct(root.path(), &reduced_session(&project, session.as_str()));
     }
-    let before = session_events(root.path(), session.as_str());
-    let server =
-        spawn_responses_server(vec![(200, text_response("resumed", "environment-resumed"))]);
-    let config = write_config(harness.path(), &server.base_url);
-    let output = f2a_wait_child(
-        spawn_f2a_chat(
-            root.path(),
-            &config,
-            "continue mapping\n/exit\n",
-            &["--resume", session.as_str()],
-        ),
-        "legacy prompt resume",
-    );
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let request = f2a_request_body(&server.requests, "legacy prompt request");
-    assert!(request.get("previous_response_id").is_none());
-    assert!(
-        request["instructions"]
-            .as_str()
-            .unwrap()
-            .contains("Binary domain profile v2")
-    );
-    assert!(
-        request["instructions"]
-            .as_str()
-            .unwrap()
-            .contains("not repeat a full probe every Turn")
-    );
-    f2a_join_server(server, "legacy prompt resume");
-    let after = session_events(root.path(), session.as_str());
-    assert_eq!(&after[..before.len()], before.as_slice());
-    assert_audits_reconstruct(root.path(), &reduced_session(&project, session.as_str()));
 }
 
 #[test]
@@ -221,6 +234,6 @@ fn environment_guidance_delivers_actual_dialect_observations_and_versioned_promp
     for audit in state.request_audits() {
         let audit = serde_json::to_string(audit).unwrap();
         assert!(audit.contains("prompt:domain:binary:2"));
-        assert!(audit.contains("prompt:phase:mapping:2"));
+        assert!(audit.contains("prompt:phase:mapping:3"));
     }
 }

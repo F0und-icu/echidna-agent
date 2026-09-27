@@ -3763,7 +3763,7 @@ fn new_chat_writes_one_default_phase_before_its_first_provider_request() {
             "schema_version": 1,
             "selection": {
                 "phase": "mapping",
-                "phase_generation": 2,
+                "phase_generation": 3,
                 "source": "default",
                 "reason_code": "NEW_SESSION_DEFAULT_MAPPING"
             }
@@ -3816,7 +3816,7 @@ fn legacy_resume_keeps_replay_read_only_then_writes_legacy_mapping_on_real_turn(
             "schema_version": 1,
             "selection": {
                 "phase": "mapping",
-                "phase_generation": 2,
+                "phase_generation": 3,
                 "source": "default",
                 "reason_code": "LEGACY_DEFAULT_MAPPING"
             }
@@ -3859,7 +3859,7 @@ fn explicit_phase_command_records_operator_source_and_reason_before_the_turn() {
             "schema_version": 1,
             "selection": {
                 "phase": "verification",
-                "phase_generation": 1,
+                "phase_generation": 2,
                 "source": "operator",
                 "reason_code": "OPERATOR_SELECTED"
             }

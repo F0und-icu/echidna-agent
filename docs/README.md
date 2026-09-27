@@ -16,7 +16,7 @@
 4. `task.md` 中当前产品范围、架构约束和里程碑。
 5. `docs/development/IMPLEMENTATION_PLAN.md`。
 6. `docs/development/LEAN_CODE_GOVERNANCE.md`。
-7. 最新的冻结架构链：`docs/architecture/CYBER_AGENT_ARCHITECTURE_V1.md` 至 `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_20.md`；ADR-0030 约束当前事实与回答指导的有限范围，ADR-0029 约束最终文本与精确激活到期，ADR-0028/0027 约束增量激活与显式哈希新鲜度，ADR-0026 约束终端投影，ADR-0025 约束环境指导与旧 Prompt 选择兼容，ADR-0024/0023/0022/0021 保留真实子项检查点、原始输出、运行句柄和有界恢复。
+7. 完整不可变架构链：`docs/architecture/CYBER_AGENT_ARCHITECTURE_V1.md` 至 `docs/architecture/CYBER_AGENT_ARCHITECTURE_V1_24.md`；v1.24 为本轮实施契约、审计待完成，本地冻结不代表远端 hash 封存。ADR-0031/0032/0033 分别约束显式指令/输出预算、操作纠偏/后台控制和有界参数重新生成；ADR-0030 及此前增量边界继续适用。
 8. 已接受的 `docs/adr/ADR-*.md`。
 9. `docs/development/GIT_VERSION_RELEASE.md` 和 `docs/development/DEVELOPMENT_ENVIRONMENT.md`。
 10. `Codex架构与漏洞挖掘Agent复用评估.md`。
@@ -24,7 +24,7 @@
 
 冻结架构是某一时点的不可变设计基线，但 `task.md` 可以通过新的 ADR 和新架构版本继续演进。不得直接修改已封存版本来掩盖设计变化。
 
-当前读取完整冻结链至v1.20，相关ADR见上述权威顺序。R6-04整理本地回归基线与状态入口；R6-SC1复用既有输入Schema定义，二者不增加架构版本。R6-SC1实验和测量见 [Schema复用报告](development/R6_SC1_SCHEMA_REUSE_MEASUREMENT.md)。准确状态和下一动作见STATUS；历史状态存档不重新授权Live或交付，远端hash封存仍未授权。
+当前读取完整链至v1.24，相关ADR见上述权威顺序。R6-04整理本地回归基线与状态入口；R6-SC1复用既有输入Schema定义，二者不增加架构版本。R6-SC1实验和测量见 [Schema复用报告](development/R6_SC1_SCHEMA_REUSE_MEASUREMENT.md)。准确状态和下一动作见STATUS；历史状态存档不重新授权Live或交付，远端hash封存仍未授权。
 
 R7-F1 当前本地修复另读 [修复计划](development/R7_REPAIR_PLAN.md)、ADR-0031 和
 Architecture v1.21 本地已审/验证版本。独立审计、完整本地 Gate/Lean 已通过，尚未远端
@@ -36,7 +36,14 @@ ADR-0032 和 Architecture v1.22。新交互行为和后台控制须经独立审�
 
 当前 R7-F3 另读 [参数纠正修复](development/R7_ARGUMENT_REGENERATION.md)、
 ADR-0033 和 Architecture v1.23：只对执行前非法工具JSON做有界模型重新生成。
-本地候选不代表独立审计/Gate或Live已完成；不继承上一轮交付授权。
+独立审计、完整本地 Gate/Lean 已通过，F2/F3 已交付 Draft PR#88；不代表 Live、
+合并或稳定内核封存，不继承上一轮交付授权。
+
+当前设计补充见 [R7-C1 小契约](development/R7_CORE_CONTRACTS.md)：当前任务、研究上下文
+与能力扩展的单一设计说明。其首个 R7-C1a 已授权本地实现：另读
+[ADR-0034](adr/ADR-0034-task-scoped-research-guidance.md) 和
+[架构 v1.24](architecture/CYBER_AGENT_ARCHITECTURE_V1_24.md)，在既有完整链后追加。
+尚待独立审计/Gate/Live，不能将全部设计当作已实现；精确状态以 STATUS 为准。
 
 随后单独授权的 [R6-SC1 Live](development/R6_SC1_LIVE_2026_09_20.md) 已完成真实Schema调用和重启回读核验，并获独立事后结果复核 RESULT APPROVE（不是事前脚本审查）；措辞/覆盖限制和绝对usage如实保留，不推定token收益。已审查代码与后续小修通过 #84/#85/#86 合并；未跑Actions。当前 [R6验收收口](development/R6_ACCEPTANCE_CLOSURE.md) 汇总已覆盖项、连续压缩/恢复缺口、原问题分类与非目标；准确执行状态以STATUS为准。
 
@@ -61,6 +68,7 @@ ADR-0033 和 Architecture v1.23：只对执行前非法工具JSON做有界模型
 | `docs/architecture/SEALED_MANIFEST.md` | 封存来源、提交基线和 Hash 清单 | 只追加新封存记录 |
 | `docs/development/IMPLEMENTATION_PLAN.md` | 按 Slice 可执行的开发步骤和验收门 | 可以，不能追溯改写已完成 Slice |
 | `docs/development/STATUS.md` | 当前唯一工作状态和下一动作 | 每个 Slice 开始/结束更新 |
+| `docs/development/R7_CORE_CONTRACTS.md` | 当前任务、研究上下文及最小能力扩展契约与验收边界 | 设计文档，实施前另定 Slice |
 | `docs/development/STATUS_HISTORY_THROUGH_2026_09_19.md` | 截至2026-09-19的完整状态历史，原字节保留 | 仅历史证据，不作为当前执行入口 |
 | `docs/development/LEAN_CODE_GOVERNANCE.md` | 语义所有权、测试外置、抽象/依赖预算、Codex PORT 和删除 Gate | 可以，治理规则变化时更新 |
 | `docs/development/GIT_VERSION_RELEASE.md` | 分支、提交、PR、版本和发布规则 | 可以，通过 ADR 修改重大规则 |
