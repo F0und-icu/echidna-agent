@@ -1,5 +1,106 @@
 # Echidna Development Status
 
+## Presentation delivery — GitHub publication authorization
+
+- On 2026-09-27, the operator authorized committing and pushing the completed
+  presentation work to inspect its GitHub rendering. This supersedes the
+  local-only delivery limits of the presentation entries below.
+- Scope: bilingual READMEs, refined logo and theme preview, shared README
+  banner and mechanism figure, documentation-only provider template, and
+  corresponding design/status records. Target: private `F0und-icu/echidna-agent`
+  `main`; no runtime changes, old-core modifications or Live requests.
+- Before publication, local `main` and fetched `origin/main` matched. Repository
+  Actions remain disabled. Prior bounded documentation/asset reviews stand;
+  final whitespace, SVG XML and deterministic banner regeneration checks PASS.
+  Remote commit and rendering results are reported in the delivery handoff.
+
+## Current presentation work — bilingual README
+
+- State: COMPLETE_LOCAL_DOCS_VERIFIED (2026-09-27). Operator requested Chinese and English
+  README versions. Keep `README.md` as the Chinese entrypoint and add
+  `README.en.md`, with reciprocal language links and matching setup/usage scope.
+  At operator request, system design precedes capabilities in both documents
+  and their navigation links.
+- Scope: translate README prose, share the existing English diagram and brand
+  assets, and verify local rendering and content parity. Preserve prior design
+  edits; no runtime, dependencies, old-core changes, Live or Git publication.
+- Delivery: complete English README and Chinese design introduction; language
+  links in both headers. Shared artwork stays English. Both versions follow
+  system design → capabilities → quick start, with matching navigation order.
+- Verification: 47 local links/anchors per version PASS; all seven shell blocks
+  match excluding translated comments; shared asset/documentation targets and
+  section order PASS. Bounded independent translation parity review APPROVE.
+  Local GFM browser previews confirm language switching in both directions,
+  header layout and the Chinese design section. Final whitespace check PASS.
+- Lean: two manually maintained README versions and status prose; no duplicate
+  artwork, generator, dependency, runtime owner, API or schema. No Rust Gate
+  rerun for this documentation-only update. Future README changes should keep
+  both languages aligned.
+
+## Current presentation work — mechanism figure and design introduction
+
+- State: COMPLETE_LOCAL_DOCS_VERIFIED (2026-09-27). Operator requested an English paper-style
+  mechanism figure and design introduction, using the existing logo palette.
+  Only the added figure and introduction are English; existing Chinese prose stays unchanged.
+- Scope: current-runtime schematic, README design prose and local preview.
+  No invented evaluation results, future queue/worker implementation claims,
+  runtime changes, frozen architecture edits, Live or Git publication.
+- Delivery: standalone accessible SVG in ink, ivory and lilac; README embeds a
+  clickable original and explains immutable sampling plans, durable checkpoints
+  and the distinction between original observations and derived context.
+- Verification: 46 README local links/anchors PASS; SVG XML, internal IDs,
+  accessibility labels, palette, self-containment and English-only added content
+  PASS. Browser inspection of the standalone figure, README embedding and prose
+  PASS after shortening an overflowing label. Bounded independent architectural
+  review APPROVE after clarifying prepared request input, the local Responses
+  adapter and the optional secondary vision path. Final whitespace check PASS.
+- Lean: one static SVG plus README/status prose; no new generator, dependency,
+  runtime owner, public API or schema. No Rust Gate rerun for this docs-only work.
+
+## Current presentation work — README design
+
+- State: COMPLETE_LOCAL_DOCS_VERIFIED (2026-09-27). Operator requested a product-facing README
+  design and explicitly excluded the recent PWN task examples/results.
+- Scope: README presentation, local brand asset and documentation-only setup
+  example. Preserve the approved logo and existing uncommitted design work.
+  No runtime, architecture, Prompt, old-core, Git publication or Live change.
+- README now presents capabilities, source-build/config/project quickstart,
+  daily commands and design directions; development details use a collapsible
+  section. At operator request, the compatibility section and theme-origin
+  footer were removed from README. No task names, results or benchmark claims added.
+- Verification: 43 local links/anchors PASS; placeholder Config v1 parses and
+  offline doctor is ready (not remote compatibility validation); CLI commands
+  checked against current source/help. Generated banner XML, deterministic
+  regeneration and exact canonical logo path identity PASS. Local GFM preview
+  inspected in browser, including narrow-panel layout; bounded independent
+  read-only documentation/asset review APPROVE; final whitespace checks PASS.
+- Lean: banner generation reuses the existing logo, uses Python standard
+  library only and is outside the Rust build; one credential-free documentation
+  example, no runtime consumer/API/dependency or schema changes. No Rust Gate
+  rerun for this documentation-only edit. Also corrected the external manual
+  test README's exit command to the actual `/exit`; its binary/config are unchanged.
+
+## Current presentation work — E0 logo refinement
+
+- State: COMPLETE_LOCAL_ASSET_VERIFIED (2026-09-27). Operator requested a stronger Re:Zero
+  Echidna influence in the existing logo. Scope is SVG, identity preview,
+  identity guidance and README alternative text only.
+- Develop an original butterfly ornament and ivory E/serpent curve; inspect
+  dark/light/monochrome presentation and 24/32 px legibility. No runtime,
+  CLI, dependency, Prompt, architecture, historical record or old-core edit.
+- This is a local visual-asset follow-up, not a new runtime Slice or reuse of
+  the prior publication allowance. Verification is asset/preview focused.
+- Verification: SVG XML and local asset/fragment references PASS; image
+  descriptions present; browser inspection at 1280 px confirms all seven
+  images load and dark/light/mono plus 24/32/48/80 px samples render.
+  Independent bounded static review APPROVE after a <=380 px single-column
+  correction; narrow viewport is static-reviewed only because the browser
+  viewport override did not change its observed 1280 px layout.
+  Final whitespace/asset checks PASS. No Rust Gate rerun for this asset-only edit.
+- Lean: one SVG geometry owner with CSS fragment variants; no script, external
+  font/image, dependency, public API or runtime change. Five presentation/docs
+  files changed; no commit/push, Actions, Live or old-core changes.
+
 ## Current Slice — E0 repository transition and identity
 
 - State: COMPLETE_PUBLISHED_OFFLINE_VERIFIED (2026-09-27). The operator authorized a new Echidna

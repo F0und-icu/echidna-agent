@@ -1,0 +1,36 @@
+# Documentation example only. Replace URL, model and key before starting chat.
+# Confirm every capability below against your service; these are sample values.
+# Save your real configuration outside the source repository.
+schema_version = 1
+active_agent_profile = "default"
+
+[providers.primary]
+binding = "http_sse"
+wire_api = "responses"
+base_url = "https://responses.example.invalid/v1"
+model = "replace-with-your-model"
+api_key = "replace-with-your-api-key"
+# Alternatively remove api_key and use:
+# credential_ref = "CYBER_AGENT_PRIMARY_API_KEY"
+capability_mapping = "primary-v1"
+generation = 1
+
+[capability_mappings.primary-v1]
+version = 1
+text_input = true
+image_input = false
+streaming = true
+tool_call = true
+structured_output = true
+incremental_input = false
+usage_reporting = true
+# Example capacity, not a detected or guaranteed model capability.
+context_window = 32768
+
+[agent_profiles.default]
+primary = "primary"
+vision_mode = "disabled"
+generation = 1
+
+[runtime]
+model_request_limit_per_turn = 32

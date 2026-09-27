@@ -1,0 +1,122 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="1030" viewBox="0 0 1500 1030" role="img" aria-labelledby="figure-title figure-description">
+  <title id="figure-title">Echidna: a traceable, single-agent research loop</title>
+  <desc id="figure-description">Research inputs enter context assembly. An immutable sampling plan binds context and tool schemas to a configured primary model. Model tool calls are validated and executed using the same plan. Results pass through a durable checkpoint before returning to context assembly. The model can instead return an assistant response to the CLI. Session events, request audits, artifact bytes and project records remain local. Explicit resume validates durable history. Future worker orchestration is not part of this figure.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#19171f" stroke-width="1.6"/></marker>
+    <marker id="accent-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#69577f" stroke-width="1.6"/></marker>
+    <style>
+      text { fill: #19171f; font-family: Arial, Helvetica, sans-serif; }
+      .heading { font-family: Georgia, 'Times New Roman', serif; font-size: 36px; }
+      .panel { font-family: Georgia, 'Times New Roman', serif; font-size: 25px; }
+      .label { font-size: 23px; font-weight: 600; }
+      .detail { font-size: 19px; }
+      .small { font-size: 17px; }
+      .muted { fill: #514959; }
+      .accent { fill: #69577f; }
+      .box { fill: #ece6db; stroke: #19171f; stroke-width: 1.5; }
+      .flow { fill: none; stroke: #19171f; stroke-width: 2; marker-end: url(#arrow); }
+      .contract { fill: none; stroke: #69577f; stroke-width: 2; stroke-dasharray: 7 6; marker-end: url(#accent-arrow); }
+      .rule { fill: none; stroke: #19171f; stroke-opacity: .22; stroke-width: 1; }
+    </style>
+  </defs>
+  <rect width="1500" height="1030" fill="#ece6db"/>
+  <text class="heading" x="54" y="61">Echidna: a traceable, single-agent research loop</text>
+  <text class="detail muted" x="55" y="98">Immutable request plans connect model inference, tool execution, and durable research records.</text>
+  <path class="rule" d="M54 122H1446"/>
+
+  <!-- (a) Input sources are distinct from runtime authority. -->
+  <text class="panel" x="54" y="168">(a) Research inputs</text>
+  <rect x="54" y="190" width="292" height="490" fill="#19171f" fill-opacity=".035"/>
+  <rect class="box" x="74" y="214" width="252" height="108" rx="5"/>
+  <text class="label" x="94" y="251">Operator / CLI</text>
+  <text class="detail" x="94" y="283">Task, scope, project</text>
+  <rect class="box" x="74" y="375" width="252" height="114" rx="5"/>
+  <text class="label" x="94" y="412">Research guidance</text>
+  <text class="detail" x="94" y="444">Base, domain, phase</text>
+  <text class="small muted" x="94" y="469">Personal / project instructions</text>
+  <rect class="box" x="74" y="542" width="252" height="114" rx="5"/>
+  <text class="label" x="94" y="579">Project context</text>
+  <text class="detail" x="94" y="611">Facts, memory, history</text>
+  <text class="small muted" x="94" y="636">Explicit source provenance</text>
+
+  <!-- (b) The provider remains outside the local AgentLoop boundary. -->
+  <text class="panel" x="412" y="168">(b) Single AgentLoop</text>
+  <rect x="412" y="190" width="670" height="490" rx="8" fill="#a697c3" fill-opacity=".13" stroke="#69577f" stroke-width="1.5"/>
+  <rect class="box" x="442" y="224" width="260" height="112" rx="5"/>
+  <text class="label" x="462" y="263">Context assembly</text>
+  <text class="detail" x="462" y="295">Budget + provenance</text>
+  <text class="small muted" x="462" y="319">ContextPlanner</text>
+  <rect x="776" y="224" width="276" height="112" rx="5" fill="#a697c3" fill-opacity=".32" stroke="#69577f" stroke-width="1.8"/>
+  <text class="label" x="796" y="263">Immutable step plan</text>
+  <text class="detail" x="796" y="295">Context + tool schemas</text>
+  <text class="small muted" x="796" y="319">SamplingStepPlan</text>
+  <rect class="box" x="776" y="495" width="276" height="138" rx="5"/>
+  <text class="label" x="796" y="534">Tool execution</text>
+  <text class="detail" x="796" y="566">Validate + dispatch</text>
+  <text class="small muted" x="796" y="594">Files / process / HTTP / PTY</text>
+  <text class="small muted" x="796" y="616">Resource-aware scheduling</text>
+  <rect class="box" x="442" y="495" width="260" height="138" rx="5"/>
+  <text class="label" x="462" y="534">Result checkpoint</text>
+  <text class="detail" x="462" y="566">Publish raw captures</text>
+  <text class="small muted" x="462" y="594">Receipts + paired tool results</text>
+  <text class="small muted" x="462" y="616">Before the next model step</text>
+
+  <path class="flow" d="M326 267H442"/>
+  <path d="M326 432H374V290H426M326 599H374V432" fill="none" stroke="#19171f" stroke-width="1.7"/>
+  <path class="flow" d="M426 290H442"/>
+  <circle cx="374" cy="432" r="3" fill="#19171f"/>
+  <path class="flow" d="M702 279H776"/>
+  <path class="contract" d="M914 336V495"/>
+  <text class="small accent" x="928" y="403">Same</text>
+  <text class="small accent" x="928" y="427">tool plan</text>
+  <path class="flow" d="M776 558H702"/>
+  <path class="flow" d="M560 495V336"/>
+  <text class="small" x="578" y="407">Next step</text>
+  <text class="small muted" x="578" y="432">with results</text>
+
+  <!-- Model inference and response delivery are separate from tool effects. -->
+  <text class="small muted" x="1134" y="168">CONFIGURED MODEL SERVICE</text>
+  <rect x="1134" y="224" width="310" height="146" rx="5" fill="#a697c3" fill-opacity=".15" stroke="#69577f" stroke-width="1.5"/>
+  <text class="label" x="1154" y="263">Primary model</text>
+  <text class="detail" x="1154" y="295">Via Responses adapter</text>
+  <text class="small muted" x="1154" y="322">Explicit capabilities and credentials</text>
+  <text class="small muted" x="1154" y="348">Service may be remote</text>
+  <path class="flow" d="M1052 279H1134"/>
+  <path d="M1289 370V440" fill="none" stroke="#19171f" stroke-width="2"/>
+  <circle cx="1289" cy="440" r="3.5" fill="#19171f"/>
+  <path class="flow" d="M1289 440H1109V558H1052"/>
+  <text class="small" x="1156" y="426">Tool calls</text>
+  <rect class="box" x="1134" y="557" width="310" height="76" rx="5"/>
+  <text class="label" x="1154" y="589">Assistant response</text>
+  <text class="small muted" x="1154" y="616">Presented to the operator in CLI</text>
+  <path class="flow" d="M1289 440V557"/>
+  <text class="small" x="1304" y="496">Answer</text>
+
+  <!-- (c) This layer collects distinct durable owners; it is not a new database. -->
+  <text class="panel" x="54" y="753">(c) Durable local record</text>
+  <path class="contract" d="M572 633V779"/>
+  <text class="small accent" x="594" y="710">Fixed persistence stages</text>
+  <text class="small muted" x="594" y="737">Request audit precedes model inference.</text>
+  <text class="small muted" x="594" y="759">Accepted samples are checkpointed before tool execution.</text>
+  <rect x="54" y="779" width="1390" height="128" fill="#19171f" fill-opacity=".035" stroke="#19171f" stroke-width="1.4"/>
+  <path class="rule" d="M386 803V883M733 803V883M1095 803V883"/>
+  <text class="label" x="78" y="821">Session events</text>
+  <text class="detail" x="78" y="851">History + real receipts</text>
+  <text class="small muted" x="78" y="880">Append-only lifecycle records</text>
+  <text class="label" x="412" y="821">Request audit</text>
+  <text class="detail" x="412" y="851">Request input + tool plan</text>
+  <text class="small muted" x="412" y="880">Bound to the sampling step</text>
+  <text class="label" x="758" y="821">Artifact store</text>
+  <text class="detail" x="758" y="851">Original bytes + references</text>
+  <text class="small muted" x="758" y="880">Captured output and research material</text>
+  <text class="label" x="1120" y="821">Project records</text>
+  <text class="detail" x="1120" y="851">Research facts + memory</text>
+  <text class="small muted" x="1120" y="880">Distinct sources, explicit provenance</text>
+
+  <path class="flow" d="M55 947H109"/>
+  <text class="small" x="125" y="953">Execution / information flow</text>
+  <path class="contract" d="M453 947H507"/>
+  <text class="small" x="523" y="953">Contract / persistence relation</text>
+  <text class="small accent" x="55" y="995">Explicit resume validates durable history.</text>
+  <text class="small muted" x="520" y="995">Summaries and image observations are derived; they do not establish verified findings.</text>
+</svg>
