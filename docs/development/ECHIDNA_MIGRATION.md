@@ -53,3 +53,8 @@ Actions 在第一次 push 前已关闭。没有运行 Live、创建 tag/release 
 
 E0 独立审计、完整离线 Gate 与 Lean 已完成，详细次数、首轮超时与后续复测、
 构建产物的来源限制见 [E0验收记录](E0_ECHIDNA_IDENTITY_VERIFICATION.md)。
+
+发布回读：代码提交 `4f7ecb7`、设计/验证提交
+`d30a5dc86f66557d0fa2408a2897079ee56ebb1e` 已推送至新库 main 与 E0 分支，
+本地/远端 SHA 一致。更名前快照仍为 `eee836d`；新仓库私有、默认 main、Actions
+关闭且运行列表为空。旧仓库仍干净，main 未更新，原 Draft PR 未合并。

@@ -2,7 +2,7 @@
 
 ## Current Slice — E0 repository transition and identity
 
-- State: COMPLETE_LOCAL_OFFLINE_VERIFIED (2026-09-27). The operator authorized a new Echidna
+- State: COMPLETE_PUBLISHED_OFFLINE_VERIFIED (2026-09-27). The operator authorized a new Echidna
   development mainline, preservation of the old repository as core, its final
   commit/push, and the naming/theme/design-document work previously approved.
 - Core checkpoint: `eee836d056bf71a008c5d29d0bf94c158809e687`, pushed to
@@ -31,7 +31,11 @@
   test timeout is retained; unchanged exact rerun, final affected run and full
   Gate passed. No code/timeout/assertion change was used to obtain a pass.
 - [Verification and Lean evidence](E0_ECHIDNA_IDENTITY_VERIFICATION.md).
-  Publication to the new mainline is the final handoff step; no next Slice starts.
+  Implementation `4f7ecb7` and design/verification checkpoint
+  `d30a5dc86f66557d0fa2408a2897079ee56ebb1e` are published to the new `main`
+  and `codex/e0-echidna-identity`; remote SHAs were read back and match.
+  `codex/pre-echidna-rename` still points to the exact core checkpoint. Old core
+  remains clean at `eee836d`; old main and PR #88 were not merged. No next Slice starts.
 
 ## New operator report — network interruption recovery
 
