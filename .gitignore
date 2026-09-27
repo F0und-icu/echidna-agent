@@ -11,3 +11,10 @@
 .DS_Store
 .idea/
 .vscode/
+
+# Local development authority, design studies, verification records and archives.
+# Public introduction assets and credential-free examples live in assets/ and examples/.
+/docs/
+/AGENTS.md
+/task.md
+/Codex架构与漏洞挖掘Agent复用评估.md

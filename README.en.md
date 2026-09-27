@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/design/readme-banner.svg" alt="Echidna — Local Vulnerability Research Agent. Question. Observe. Verify." width="100%">
+  <img src="assets/readme-banner.svg" alt="Echidna — Local Vulnerability Research Agent. Question. Observe. Verify." width="100%">
 </p>
 
 <p align="center">
@@ -37,7 +37,7 @@ The operator defines the task and scope; the runtime assembles context, requests
 inference, executes validated tool calls, and retains the observations needed to continue
 or review the research.
 
-[![Echidna system design: research inputs, a single agent loop with immutable sampling plans, and durable local records.](docs/design/architecture-overview.svg)](docs/design/architecture-overview.svg)
+[![Echidna system design: research inputs, a single agent loop with immutable sampling plans, and durable local records.](assets/architecture-overview.svg)](assets/architecture-overview.svg)
 
 *Figure 1. Echidna's execution and persistence model. (a) Operator input, research guidance,
 and project context enter through distinct sources. (b) One AgentLoop binds model inference
@@ -102,11 +102,11 @@ Run the remaining commands in the same terminal, continuing to use `ECHIDNA_BIN`
 
 ### 2. Configure a model
 
-Copy the [configuration template](docs/examples/provider.toml) outside the source repository:
+Copy the [configuration template](examples/provider.toml) outside the source repository:
 
 ```sh
 mkdir -p "$HOME/.config/echidna"
-cp -n docs/examples/provider.toml "$HOME/.config/echidna/provider.toml"
+cp -n examples/provider.toml "$HOME/.config/echidna/provider.toml"
 chmod 600 "$HOME/.config/echidna/provider.toml"
 ```
 
@@ -117,8 +117,7 @@ configuration path explicitly; the program does not discover it automatically.
 
 The current integration uses **HTTP/SSE + Responses**. Chat Completions endpoints are not
 supported. Choose either a local `api_key` or a `CYBER_AGENT_*_API_KEY` environment-variable
-reference for credentials. See [provider configuration](docs/development/DEVELOPMENT_ENVIRONMENT.md#61-应用级配置)
-for details.
+reference for credentials.
 
 ### 3. Create a research project
 
@@ -180,8 +179,8 @@ understand and maintain it.
 
 The current entrypoint is an interactive CLI. A TUI, a machine-facing worker interface,
 external task queues, and a standalone core SDK remain at the design stage.
-Network interruption recovery still has [open issues](docs/development/R7_MANUAL_TEST_ISSUES.md);
-automatic continuation after arbitrary stream interruptions is not guaranteed.
+Network interruption recovery still needs work; automatic continuation after arbitrary
+stream interruptions is not guaranteed.
 
 ## Next steps
 
@@ -191,19 +190,16 @@ automatic continuation after arbitrary stream interruptions is not guaranteed.
 | Reusable research | Make evidence and results easier to locate and hand off, and distill methods from repeated practice. |
 | External parallelism | First validate the benefits of separate directories and processes, then design an explicit machine interface and coordinator. |
 
-These are [design proposals](docs/design/FUTURE_RESEARCH_DESIGN.md); implementation order
-will follow feedback from actual use. [External orchestration](docs/design/EXTERNAL_ORCHESTRATION.md)
-evolves independently of the single-agent core.
+These directions remain at the planning stage; implementation order will follow feedback
+from actual use. External orchestration evolves independently of the single-agent core.
 
 ## Documentation
 
 | Resource | Contents |
 | --- | --- |
-| [Development environment and configuration](docs/development/DEVELOPMENT_ENVIRONMENT.md) | Providers, capability declarations, builds, and local diagnostics |
-| [Current development status](docs/development/STATUS.md) | Completed work, verification records, and known limitations |
-| [Architecture and documentation index](docs/README.md) | Core design, decision records, and development conventions |
-| [Brand and theme](docs/design/ECHIDNA_IDENTITY.md) | Logo, palette, and terminal presentation |
-| [Migration record](docs/development/ECHIDNA_MIGRATION.md) | Repository lineage and compatibility boundaries |
+| [Configuration example](examples/provider.toml) | Provider settings, capability declarations, and placeholder credentials |
+| [Original mechanism figure](assets/architecture-overview.svg) | Execution and persistence flow in scalable SVG form |
+| [Changelog](CHANGELOG.md) | Feature changes and compatibility notes |
 
 <details>
 <summary><strong>Development and verification</strong></summary>
@@ -224,9 +220,8 @@ Local distribution for macOS arm64:
 ./tests/distribution_package.sh dist
 ```
 
-The full gate also includes the [Lean governance checks](docs/development/LEAN_CODE_GOVERNANCE.md).
 Live tests are separate and must be explicitly enabled; repository Actions are currently disabled.
-Engineering verification and actual model research performance are recorded separately;
-consult STATUS for the scope of each result.
+Passing engineering checks does not establish that the model can correctly complete every
+research task.
 
 </details>

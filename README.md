@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/design/readme-banner.svg" alt="Echidna — Local Vulnerability Research Agent. Question. Observe. Verify." width="100%">
+  <img src="assets/readme-banner.svg" alt="Echidna — Local Vulnerability Research Agent. Question. Observe. Verify." width="100%">
 </p>
 
 <p align="center">
@@ -36,7 +36,7 @@ Echidna 将单个研究 Agent 循环与可检查的本地工作记录结合起�
 用户定义任务和范围；运行时负责装配上下文、请求模型推理、执行通过校验的工具调用，
 并保留继续研究或复查过程所需的观察记录。
 
-[![Echidna 系统设计：研究输入、使用不可变采样计划的单 Agent 循环，以及持久化本地记录。](docs/design/architecture-overview.svg)](docs/design/architecture-overview.svg)
+[![Echidna 系统设计：研究输入、使用不可变采样计划的单 Agent 循环，以及持久化本地记录。](assets/architecture-overview.svg)](assets/architecture-overview.svg)
 
 *图 1. Echidna 的执行与持久化模型。(a) 用户输入、研究指导和项目上下文来自不同来源。
 (b) 单个 AgentLoop 通过不可变采样计划关联模型推理与工具派发。
@@ -95,11 +95,11 @@ ECHIDNA_BIN="$PWD/target/release/echidna"
 
 ### 2. 配置模型
 
-将 [配置模板](docs/examples/provider.toml) 保存到代码仓库之外：
+将 [配置模板](examples/provider.toml) 保存到代码仓库之外：
 
 ```sh
 mkdir -p "$HOME/.config/echidna"
-cp -n docs/examples/provider.toml "$HOME/.config/echidna/provider.toml"
+cp -n examples/provider.toml "$HOME/.config/echidna/provider.toml"
 chmod 600 "$HOME/.config/echidna/provider.toml"
 ```
 
@@ -109,7 +109,6 @@ chmod 600 "$HOME/.config/echidna/provider.toml"
 
 当前接入 **HTTP/SSE + Responses** 协议。Chat Completions 接口不适用。
 凭据可使用本地 `api_key`，或改用 `CYBER_AGENT_*_API_KEY` 环境变量引用，二选一。
-详细说明见 [Provider 配置](docs/development/DEVELOPMENT_ENVIRONMENT.md#61-应用级配置)。
 
 ### 3. 建立研究项目
 
@@ -166,8 +165,7 @@ Echidna 将执行、预算、Session 和恢复留在一个内核中。模型、�
 原始材料和执行记录为后续复查提供基础。项目设计保持小而明确，方便个人理解和维护。
 
 当前入口是交互 CLI。TUI、机器 worker 入口、外部任务队列和独立 core SDK 均处于设计阶段。
-网络中断恢复仍有 [待处理项](docs/development/R7_MANUAL_TEST_ISSUES.md)；
-不承诺任意断流都能自动续传。
+网络中断恢复仍待完善，不承诺任意断流都能自动续传。
 
 ## 下一步
 
@@ -177,18 +175,16 @@ Echidna 将执行、预算、Session 和恢复留在一个内核中。模型、�
 | 可复用研究 | 更方便地定位证据、交接结果，从重复实践中整理方法。 |
 | 外部并行 | 先验证独立目录与多进程的实际收益，再设计明确的机器入口和协调器。 |
 
-这些是 [设计储备](docs/design/FUTURE_RESEARCH_DESIGN.md)，具体实施顺序由实际使用反馈决定。
-[外部协调](docs/design/EXTERNAL_ORCHESTRATION.md) 独立于单个 Agent 内核演进。
+这些方向尚处于规划阶段，具体实施顺序由实际使用反馈决定。
+外部协调独立于单个 Agent 内核演进。
 
 ## 文档
 
 | 入口 | 内容 |
 | --- | --- |
-| [开发环境与配置](docs/development/DEVELOPMENT_ENVIRONMENT.md) | Provider、能力声明、构建与本地诊断 |
-| [当前开发状态](docs/development/STATUS.md) | 已完成工作、验证记录与已知限制 |
-| [架构与文档索引](docs/README.md) | 内核设计、决策记录与开发规范 |
-| [品牌与主题](docs/design/ECHIDNA_IDENTITY.md) | 标志、配色与终端呈现 |
-| [迁移记录](docs/development/ECHIDNA_MIGRATION.md) | 新旧仓库关系与兼容边界 |
+| [配置示例](examples/provider.toml) | Provider、能力声明与凭据占位示例 |
+| [原理图原图](assets/architecture-overview.svg) | 可放大的执行与持久化流程图 |
+| [更新记录](CHANGELOG.md) | 功能变化与兼容性说明 |
 
 <details>
 <summary><strong>开发与验证</strong></summary>
@@ -209,8 +205,7 @@ macOS arm64 本地分发：
 ./tests/distribution_package.sh dist
 ```
 
-完整 Gate 还包括 [Lean 治理检查](docs/development/LEAN_CODE_GOVERNANCE.md)。
 Live 测试独立、显式启用；当前仓库 Actions 关闭。
-工程验证和模型的实际研究表现分别记录，范围以 STATUS 为准。
+工程检查通过不代表模型在所有研究任务中都能正确完成工作。
 
 </details>

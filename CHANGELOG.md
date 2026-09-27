@@ -1,7 +1,7 @@
 # Changelog
 
 User-visible changes are recorded here from the F4/F5 delivery onward; earlier
-milestone history remains in `docs/development/STATUS.md` and Git history.
+changes remain available in Git history.
 
 ## Unreleased
 
@@ -48,7 +48,7 @@ milestone history remains in `docs/development/STATUS.md` and Git history.
   contradictory terminal status; discover exact Tool names despite explanatory
   words; clarify current Tool visibility, provenance, observed time and rerun
   controls. Preserve delivery across proven temporary activation expiry without
-  keeping expired Tools callable. Verification and Live limits are in STATUS.
+  keeping expired Tools callable.
 
 - R6-01: preserve verified reasoning/state-diff continuation across proven
   additive Tool activation, using the existing Baseline and audit owners.
