@@ -662,16 +662,32 @@ async fn reasoning_extension_tool_usage_and_full_only_completion_share_one_decod
 
 #[tokio::test]
 async fn full_only_tool_loop_replays_reasoning_call_and_result_in_wire_order() {
-    let first = concat!(
-        "data: {\"type\":\"response.output_item.done\",\"item\":{",
-        "\"type\":\"reasoning\",\"content\":[{\"type\":\"reasoning_text\",",
-        "\"text\":\"Search the bounded fixture first.\"}],\"encrypted_content\":null}}\n\n",
-        "data: {\"type\":\"response.output_item.done\",\"item\":{",
-        "\"type\":\"function_call\",\"call_id\":\"call-full-reasoning\",",
-        "\"name\":\"search_files\",\"arguments\":",
-        "\"{\\\"pattern\\\":\\\"cyber-agent\\\",\\\"paths\\\":[\\\"Cargo.toml\\\"]}\"}}\n\n",
-        "data: {\"type\":\"response.completed\",\"response\":{}}\n\n",
-    );
+    let reasoning = json!({
+        "type":"reasoning",
+        "status":null,
+        "content":[{"type":"reasoning_text",
+            "text":"Search the bounded fixture first."}],
+        "encrypted_content":null
+    });
+    let call = json!({
+        "type":"function_call",
+        "call_id":"call-full-reasoning",
+        "name":"search_files",
+        "arguments":"{\"pattern\":\"cyber-agent\",\"paths\":[\"Cargo.toml\"]}"
+    });
+    let first = [
+        json!({"type":"response.output_item.done","output_index":0,
+            "item":reasoning}),
+        json!({"type":"response.output_item.done","output_index":1,
+            "item":call}),
+        json!({"type":"response.completed","response":{
+            "id":"response-nullable-reasoning","status":"completed",
+            "output":[reasoning,call]
+        }}),
+    ]
+    .into_iter()
+    .map(|event| format!("data: {event}\n\n"))
+    .collect::<String>();
     let second = concat!(
         "data: {\"type\":\"response.output_text.delta\",",
         "\"delta\":\"bounded search complete\"}\n\n",
@@ -743,6 +759,211 @@ async fn full_only_tool_loop_replays_reasoning_call_and_result_in_wire_order() {
     assert_eq!(input[1]["type"], json!("reasoning"));
     assert_eq!(input[2]["type"], json!("function_call"));
     assert_eq!(input[3]["type"], json!("function_call_output"));
+}
+
+#[tokio::test]
+async fn full_only_tool_loop_treats_absent_null_and_empty_reasoning_as_no_plaintext() {
+    for (case, status, content) in [
+        ("missing", None, None),
+        ("null", Some(Value::Null), Some(Value::Null)),
+        ("empty", Some(json!("completed")), Some(json!([]))),
+    ] {
+        let mut reasoning = json!({"type":"reasoning","id":format!("reasoning-{case}")});
+        if let Some(status) = status {
+            reasoning["status"] = status;
+        }
+        if let Some(content) = content {
+            reasoning["content"] = content;
+        }
+        let call = json!({
+            "type":"function_call",
+            "call_id":format!("call-empty-reasoning-{case}"),
+            "name":"search_files",
+            "arguments":"{\"pattern\":\"echidna\",\"paths\":[\"Cargo.toml\"]}"
+        });
+        let first = [
+            json!({"type":"response.output_item.done","output_index":0,
+                "item":reasoning}),
+            json!({"type":"response.output_item.done","output_index":1,
+                "item":call}),
+            json!({"type":"response.completed","response":{
+                "id":format!("response-empty-reasoning-{case}"),"status":"completed",
+                "output":[reasoning,call]
+            }}),
+        ]
+        .into_iter()
+        .map(|event| format!("data: {event}\n\n"))
+        .collect::<String>();
+        let second = format!(
+            "data: {}\n\ndata: {}\n\n",
+            json!({"type":"response.output_text.delta","delta":format!("complete-{case}")}),
+            json!({"type":"response.completed","response":{
+                "id":format!("response-empty-reasoning-final-{case}"),
+                "status":"completed"
+            }})
+        );
+        let (base_url, mut requests, server) = spawn_sse_sequence_server(vec![first, second]).await;
+        let mut full_only_capabilities = capabilities();
+        full_only_capabilities.incremental_input = false;
+        full_only_capabilities.usage_reporting = false;
+        let provider = ResponsesHttpAdapter::new(
+            ResponsesHttpConfig::new(
+                base_url,
+                "fixture-empty-reasoning-model",
+                FIXTURE_CREDENTIAL_REFERENCE,
+                full_only_capabilities,
+            ),
+            FakeCredentialSource::value(Some(FIXTURE_SECRET)),
+        );
+        let tools = ToolRegistry::for_project(env!("CARGO_MANIFEST_DIR"));
+        let mut agent = AgentLoop::new(&provider, &tools);
+
+        let outcome = agent
+            .run_turn("inspect the package manifest", AgentCancellation::new())
+            .await
+            .unwrap_or_else(|error| panic!("{case}: {error}"));
+        assert!(matches!(
+            outcome,
+            AgentTurnOutcome::Completed {
+                assistant_text,
+                model_requests: 2,
+                executions,
+            } if assistant_text == format!("complete-{case}") && executions.len() == 1
+        ));
+        assert!(
+            agent
+                .history()
+                .items()
+                .iter()
+                .all(|item| !matches!(item, ContentItem::Reasoning { .. })),
+            "{case}: empty reasoning must not enter History"
+        );
+        assert_eq!(agent.history().ensure_all_tool_calls_paired(), Ok(()));
+
+        requests.recv().await.unwrap();
+        let second_request = requests.recv().await.unwrap();
+        server.await.unwrap();
+        let second_body: Value = serde_json::from_str(&second_request.body).unwrap();
+        assert!(second_body.get("previous_response_id").is_none());
+        let input = second_body["input"].as_array().unwrap();
+        assert_eq!(input.len(), 3, "{case}: no reasoning item may be replayed");
+        assert_eq!(input[0]["type"], json!("message"));
+        assert_eq!(input[1]["type"], json!("function_call"));
+        assert_eq!(input[2]["type"], json!("function_call_output"));
+    }
+}
+
+#[tokio::test]
+async fn nullable_reasoning_never_commits_or_executes_without_a_valid_completion() {
+    let reasoning = json!({
+        "type":"reasoning",
+        "status":null,
+        "content":[{"type":"reasoning_text","text":"Do not commit this sample."}]
+    });
+    let call = json!({
+        "type":"function_call",
+        "call_id":"call-must-not-run",
+        "name":"write_file",
+        "arguments":"{\"path\":\"must-not-exist.txt\",\"content\":\"executed\\n\",\"expected_hash\":null}"
+    });
+    let prefix = [
+        json!({"type":"response.output_item.done","output_index":0,
+            "item":reasoning}),
+        json!({"type":"response.output_item.done","output_index":1,
+            "item":call}),
+    ]
+    .into_iter()
+    .map(|event| format!("data: {event}\n\n"))
+    .collect::<String>();
+    let mismatched_reasoning = json!({
+        "type":"reasoning",
+        "status":null,
+        "content":[{"type":"reasoning_text","text":"Changed in the snapshot."}]
+    });
+    let terminals = [
+        ("eof", String::new(), "ended before `response.completed`"),
+        (
+            "failed",
+            format!(
+                "data: {}\n\n",
+                json!({"type":"response.failed","response":{
+                    "error":{"code":"synthetic_failure","message":"synthetic failure"}
+                }})
+            ),
+            "synthetic failure",
+        ),
+        (
+            "incomplete",
+            format!(
+                "data: {}\n\n",
+                json!({"type":"response.incomplete","response":{
+                    "incomplete_details":{"reason":"synthetic_limit"}
+                }})
+            ),
+            "was incomplete: synthetic_limit",
+        ),
+        (
+            "snapshot-mismatch",
+            format!(
+                "data: {}\n\n",
+                json!({"type":"response.completed","response":{
+                    "id":"response-mismatch","status":"completed",
+                    "output":[mismatched_reasoning,call]
+                }})
+            ),
+            "completed output disagrees with completed non-text items",
+        ),
+    ];
+
+    for (case, terminal, expected_error) in terminals {
+        let body = format!("{prefix}{terminal}");
+        let (base_url, request_receiver, server) = spawn_sse_server(200, &body).await;
+        let credentials = FakeCredentialSource::value(Some(FIXTURE_SECRET));
+        let mut full_only_capabilities = capabilities();
+        full_only_capabilities.incremental_input = false;
+        full_only_capabilities.usage_reporting = false;
+        let provider = ResponsesHttpAdapter::new(
+            ResponsesHttpConfig::new(
+                base_url,
+                "fixture-nullable-reasoning-model",
+                FIXTURE_CREDENTIAL_REFERENCE,
+                full_only_capabilities,
+            ),
+            credentials.clone(),
+        );
+        let directory =
+            support::TemporaryDirectory::new(&format!("nullable-reasoning-atomicity-{case}"));
+        let tools = ToolRegistry::for_project(directory.path());
+        let mut agent = AgentLoop::new(&provider, &tools);
+
+        let error = timeout(
+            Duration::from_secs(3),
+            agent.run_turn("reject the incomplete sample", AgentCancellation::new()),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{case}: AgentLoop timed out instead of stopping"))
+        .unwrap_err();
+        assert!(
+            error.to_string().contains(expected_error),
+            "{case}: {error}"
+        );
+        assert_eq!(
+            credentials.references(),
+            vec![FIXTURE_CREDENTIAL_REFERENCE.to_owned()],
+            "{case}: the failed sample must not trigger an automatic retry"
+        );
+        assert_eq!(
+            agent.history().items(),
+            &[ContentItem::user_text("reject the incomplete sample")],
+            "{case}: model output must not commit to History"
+        );
+        assert!(
+            !directory.path().join("must-not-exist.txt").exists(),
+            "{case}: the uncommitted ToolCall must not execute"
+        );
+        request_receiver.await.unwrap();
+        server.await.unwrap();
+    }
 }
 
 #[tokio::test]

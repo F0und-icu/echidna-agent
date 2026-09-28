@@ -189,7 +189,10 @@ impl ResponseDecoder {
 }
 
 fn decode_output_item(item: Value) -> Result<DecodedResponsesEvent, ModelProviderError> {
-    if item.get("status").is_some_and(|s| s != "completed") {
+    if item.get("status").is_some_and(|status| {
+        status != "completed"
+            && !(status.is_null() && item.get("type").and_then(Value::as_str) == Some("reasoning"))
+    }) {
         return Err(protocol_error(
             "completed output item has non-completed status",
         ));
@@ -256,7 +259,7 @@ fn decode_reasoning_item(item: Value) -> Result<DecodedResponsesEvent, ModelProv
         .is_some_and(has_non_empty_wire_content);
 
     let mut text = String::new();
-    for content in reasoning.content {
+    for content in reasoning.content.unwrap_or_default() {
         let kind = content
             .get("type")
             .and_then(Value::as_str)
@@ -423,7 +426,7 @@ struct FunctionCallItem {
 #[derive(Debug, Deserialize)]
 struct ReasoningItem {
     #[serde(default)]
-    content: Vec<Value>,
+    content: Option<Vec<Value>>,
     #[serde(default)]
     encrypted_content: Option<Value>,
 }

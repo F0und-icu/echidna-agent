@@ -39,6 +39,12 @@ changes remain available in Git history.
 
 ### Fixed
 
+- Fix Qwen Responses compatibility when completed reasoning items contain
+  `status: null` or `content: null`. Nullable status is accepted only for
+  reasoning items; missing, null and empty content use the existing empty
+  reasoning path. Malformed Tool argument JSON, invalid content and conflicting
+  completion snapshots remain rejected.
+
 - R7-F1: reject invalid Unicode patch prefixes without panic and validate new
   hunk offsets before writing. File schemas explain preimage hashes and supported
   patch syntax. Malformed argument diagnostics omit payloads and distinguish

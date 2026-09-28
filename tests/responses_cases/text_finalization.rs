@@ -77,6 +77,155 @@ async fn reasoning_content_part_finalization_stays_out_of_assistant_text() {
 }
 
 #[tokio::test]
+async fn nullable_reasoning_content_matches_missing_and_empty_without_reconstructing_deltas() {
+    for (case, status, content) in [
+        ("missing", None, None),
+        ("null", Some(Value::Null), Some(Value::Null)),
+        ("empty", Some(json!("completed")), Some(json!([]))),
+    ] {
+        let mut reasoning = json!({"type":"reasoning","id":format!("reasoning-{case}")});
+        if let Some(status) = status {
+            reasoning["status"] = status;
+        }
+        if let Some(content) = content {
+            reasoning["content"] = content;
+        }
+        let answer = message(1, &["answer"]);
+        let result = consume(vec![
+            json!({"type":"response.reasoning_text.delta","delta":"transient only"}),
+            json!({"type":"response.output_item.done","output_index":0,
+                "item":reasoning}),
+            delta(1, 0, "answer"),
+            done(1, 0, "answer"),
+            completed(json!([reasoning, answer])),
+        ])
+        .await
+        .unwrap_or_else(|error| panic!("{case}: {error}"));
+        let ModelStreamOutcome::Completed { events, .. } = result else {
+            panic!("{case}: expected completed response")
+        };
+        assert_eq!(
+            events,
+            vec![
+                ModelEvent::ReasoningDelta {
+                    text: "transient only".to_owned(),
+                },
+                ModelEvent::TextDelta {
+                    text: "answer".to_owned(),
+                },
+            ],
+            "{case}: a delta must not become completed reasoning"
+        );
+    }
+}
+
+#[tokio::test]
+async fn nullable_reasoning_content_preserves_strict_content_validation() {
+    let mut cases = Vec::new();
+    for (case, content) in [
+        ("string", json!("not-an-array")),
+        ("object", json!({"type":"reasoning_text","text":"x"})),
+        ("number", json!(1)),
+        ("boolean", json!(true)),
+    ] {
+        cases.push((
+            format!("non-array-{case}"),
+            json!({"type":"reasoning","status":null,"content":content}),
+            "invalid completed reasoning item:",
+            Some("expected a sequence"),
+        ));
+    }
+    cases.extend([
+        (
+            "null-child".to_owned(),
+            json!({"type":"reasoning","status":null,"content":[null]}),
+            "reasoning content omitted string `type`",
+            None,
+        ),
+        (
+            "non-string-type".to_owned(),
+            json!({"type":"reasoning","status":null,
+                "content":[{"type":7,"text":"x"}]}),
+            "reasoning content omitted string `type`",
+            None,
+        ),
+        (
+            "unknown-type".to_owned(),
+            json!({"type":"reasoning","status":null,
+                "content":[{"type":"future_reasoning","text":"x"}]}),
+            "unsupported completed reasoning content `future_reasoning`",
+            None,
+        ),
+        (
+            "missing-text".to_owned(),
+            json!({"type":"reasoning","status":null,
+                "content":[{"type":"reasoning_text"}]}),
+            "reasoning text content omitted string `text`",
+            None,
+        ),
+        (
+            "non-string-text".to_owned(),
+            json!({"type":"reasoning","status":null,
+                "content":[{"type":"reasoning_text","text":7}]}),
+            "reasoning text content omitted string `text`",
+            None,
+        ),
+        (
+            "encrypted-only".to_owned(),
+            json!({"type":"reasoning","status":null,"content":null,
+                "encrypted_content":"opaque"}),
+            "completed reasoning item contains only unsupported encrypted content",
+            None,
+        ),
+    ]);
+
+    for (case, item, expected, additional) in cases {
+        let result = consume(vec![
+            json!({"type":"response.output_item.done","output_index":0,
+                "item":item}),
+            completed(json!([item])),
+        ])
+        .await;
+        match result {
+            Err(ModelStreamingError::Provider(ModelProviderError::ProtocolFailure { message })) => {
+                assert!(message.contains(expected), "{case}: {message}");
+                if let Some(additional) = additional {
+                    assert!(message.contains(additional), "{case}: {message}");
+                }
+            }
+            other => panic!("{case}: expected content protocol failure, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn nullable_and_nonempty_reasoning_content_cannot_disagree_across_snapshots() {
+    let empty = json!({"type":"reasoning","status":null,"content":null});
+    let nonempty = json!({"type":"reasoning","status":null,
+        "content":[{"type":"reasoning_text","text":"completed"}]});
+    for (case, item_done, snapshot) in [
+        ("null-to-nonempty", empty.clone(), nonempty.clone()),
+        ("nonempty-to-null", nonempty, empty),
+    ] {
+        let result = consume(vec![
+            json!({"type":"response.output_item.done","output_index":0,
+                "item":item_done}),
+            completed(json!([snapshot])),
+        ])
+        .await;
+        match result {
+            Err(ModelStreamingError::Provider(ModelProviderError::ProtocolFailure { message })) => {
+                assert!(
+                    message.contains("completed output disagrees with completed non-text items"),
+                    "{case}: {message}"
+                )
+            }
+            other => panic!("{case}: expected snapshot mismatch, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
 async fn final_text_recovers_only_missing_suffix_and_deduplicates_all_final_forms() {
     for prefix in ["", "答复", "答复 complete"] {
         let item = message(0, &["答复 complete"]);
@@ -215,6 +364,59 @@ async fn completed_event_cannot_mask_noncompleted_status() {
         ])
         .await;
         assert!(result.is_err(), "{status}: {result:?}");
+    }
+}
+
+#[tokio::test]
+async fn nullable_status_is_rejected_outside_completed_reasoning_items() {
+    let reasoning_content = json!([{"type":"reasoning_text","text":"bounded"}]);
+    let mut cases = Vec::new();
+    for (case, status) in [
+        ("in-progress", json!("in_progress")),
+        ("failed", json!("failed")),
+        ("incomplete", json!("incomplete")),
+        ("cancelled", json!("cancelled")),
+        ("unknown-string", json!("future_status")),
+        ("number", json!(1)),
+        ("boolean", json!(true)),
+        ("array", json!([])),
+        ("object", json!({"unexpected":true})),
+    ] {
+        cases.push((
+            format!("reasoning-{case}"),
+            json!({"type":"reasoning","status":status,
+                "content":reasoning_content}),
+            "completed output item has non-completed status",
+        ));
+    }
+    cases.extend([
+        (
+            "message-null".to_owned(),
+            json!({"type":"message","status":null,
+                "content":[{"type":"output_text","text":"answer"}]}),
+            "completed message has non-completed status",
+        ),
+        (
+            "function-call-null".to_owned(),
+            json!({"type":"function_call","status":null,"call_id":"call-null",
+                "name":"read_file","arguments":"{}"}),
+            "completed output item has non-completed status",
+        ),
+    ]);
+
+    for (case, item, expected_error) in cases {
+        let result = consume(vec![
+            json!({"type":"response.output_item.done","output_index":0,
+                "item":item}),
+            completed(json!([item])),
+        ])
+        .await;
+        match result {
+            Err(ModelStreamingError::Provider(ModelProviderError::ProtocolFailure { message })) => {
+                assert!(message.contains(expected_error), "{case}: {message}")
+            }
+            other => panic!("{case}: expected status protocol failure, got {other:?}"),
+        }
     }
 }
 
