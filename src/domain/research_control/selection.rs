@@ -14,6 +14,7 @@ pub enum ResearchPhaseSelectionSource {
 pub enum ResearchPhaseReasonCode {
     NewSessionDefaultMapping,
     LegacyDefaultMapping,
+    DefinitionDefault,
     OperatorSelected,
 }
 
@@ -29,6 +30,18 @@ pub struct ResearchPhaseSelection {
 }
 
 impl ResearchPhaseSelection {
+    pub const fn definition_default(phase: ResearchPhase) -> Self {
+        if matches!(phase, ResearchPhase::Mapping) {
+            return Self::new_session_default();
+        }
+        Self {
+            phase,
+            phase_generation: phase.generation(),
+            source: ResearchPhaseSelectionSource::Default,
+            reason_code: ResearchPhaseReasonCode::DefinitionDefault,
+        }
+    }
+
     pub const fn new_session_default() -> Self {
         Self::default_mapping(ResearchPhaseReasonCode::NewSessionDefaultMapping)
     }
@@ -90,6 +103,10 @@ impl ResearchPhaseSelection {
                 ResearchPhaseReasonCode::NewSessionDefaultMapping
                     | ResearchPhaseReasonCode::LegacyDefaultMapping,
                 ResearchPhase::Mapping
+            ) | (
+                ResearchPhaseSelectionSource::Default,
+                ResearchPhaseReasonCode::DefinitionDefault,
+                _
             ) | (
                 ResearchPhaseSelectionSource::Operator,
                 ResearchPhaseReasonCode::OperatorSelected,

@@ -90,9 +90,9 @@ fn f6a_out_of_bounds_vision_keeps_failed_attempt_and_never_samples_primary() {
     let project = Project::discover(root.path()).unwrap();
     append_research_snapshot(&project, "geometry-failure");
     fs::write(root.path().join("screen.png"), png_bytes(32, 16)).unwrap();
-    let raw = json!({"schema_version": 1, "summary": "Left red, right blue.",
+    let raw = json!({"schema_version": 2, "summary": "Left red, right blue.",
         "extracted_text": null, "regions": [{"label": "left", "x": 0, "y": 0, "width": 240, "height": 240}],
-        "security_relevant_clues": [], "uncertainty": ["dimensions estimated"]}).to_string();
+        "task_observations": [], "uncertainty": ["dimensions estimated"]}).to_string();
     let vision =
         spawn_responses_server(vec![(200, text_response(&raw, "vision-invalid-geometry"))]);
     let primary_probe = TcpListener::bind("127.0.0.1:0").unwrap();

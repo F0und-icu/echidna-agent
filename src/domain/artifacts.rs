@@ -9,6 +9,6 @@ mod records;
 mod reducer;
 
 pub use event::{ARTIFACT_SCHEMA_VERSION, ArtifactEvent, ArtifactEventError};
-pub use records::{ArtifactId, ArtifactRecord, BlobId};
+pub use records::{ArtifactId, ArtifactRecord, ArtifactScope, BlobId};
 pub use reducer::ArtifactError;
 pub(crate) use reducer::ArtifactState;

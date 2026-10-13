@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+use super::agent_definition::AgentDefinitionBinding;
 use super::context::{ProviderSessionId, ProviderSessionRef, ProviderSessionRole};
 use super::domain_profile::{DomainProfile, DomainProfileSelection};
 use super::events::{
@@ -32,6 +33,8 @@ use super::vision::{
 
 const SESSION_STREAM_PREFIX: &str = "session:";
 const SESSION_STARTED_EVENT_TYPE: &str = "session.started";
+const SESSION_STARTED_WITH_AGENT_EVENT_TYPE: &str = "session.started_with_agent";
+const AGENT_DEFINITION_APPLIED_EVENT_TYPE: &str = "session.agent_definition_applied";
 const SESSION_RESUMED_EVENT_TYPE: &str = "session.resumed";
 const SESSION_ENDED_EVENT_TYPE: &str = "session.ended";
 const RECEIPT_RECORDED_EVENT_TYPE: &str = "tool.execution_receipt_recorded";
@@ -55,6 +58,7 @@ pub use compaction::{
     CompactionValidationContext, EvidenceSpine, NarrativeSummary, ResearchStreamIdentity,
     SessionCompaction, SessionSummary, SessionSummaryDraft,
 };
+pub(crate) use compaction::{SessionSourceIdentity, TaskCompactionValidationFacts};
 
 /// A read-only projection of one existing Receipt fact. It deliberately
 /// retains the original Event identity instead of introducing another Receipt
@@ -77,6 +81,14 @@ pub enum SessionLifecycle {
 /// the Tool domain's `ExecutionReceipt` rather than defining a Session copy.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionEvent {
+    StartedWithAgent {
+        primary_provider_session: ProviderSessionRef,
+        binding: AgentDefinitionBinding,
+    },
+    AgentDefinitionApplied {
+        primary_provider_session: ProviderSessionRef,
+        binding: AgentDefinitionBinding,
+    },
     ModelSampleRejected {
         request_audit_event_id: EventId,
         diagnostic: ToolArgumentDiagnostic,
@@ -153,6 +165,10 @@ impl SessionEvent {
 
     fn event_type(&self) -> EventType {
         match self {
+            Self::StartedWithAgent { .. } => EventType::new(SESSION_STARTED_WITH_AGENT_EVENT_TYPE),
+            Self::AgentDefinitionApplied { .. } => {
+                EventType::new(AGENT_DEFINITION_APPLIED_EVENT_TYPE)
+            }
             Self::ModelSampleRejected { .. } => EventType::new(MODEL_SAMPLE_REJECTED_EVENT_TYPE),
             Self::SubcommandCheckpointed { .. } => EventType::new(SUBCOMMAND_CHECKPOINT_EVENT_TYPE),
             Self::Started { .. } => EventType::new(SESSION_STARTED_EVENT_TYPE),
@@ -180,6 +196,18 @@ impl SessionEvent {
 
     fn encode_payload(&self, event_type: &EventType) -> Result<Value, SessionError> {
         let payload = match self {
+            Self::StartedWithAgent {
+                primary_provider_session,
+                binding,
+            }
+            | Self::AgentDefinitionApplied {
+                primary_provider_session,
+                binding,
+            } => serde_json::to_value(AgentDefinitionPayload {
+                schema_version: CURRENT_SESSION_PAYLOAD_SCHEMA_VERSION,
+                primary_provider_session: primary_provider_session.clone(),
+                binding: binding.clone(),
+            }),
             Self::ModelSampleRejected {
                 request_audit_event_id,
                 diagnostic,
@@ -235,6 +263,27 @@ impl SessionEvent {
 
     fn decode(event_type: &EventType, payload: Value) -> Result<Self, SessionError> {
         match event_type.as_str() {
+            SESSION_STARTED_WITH_AGENT_EVENT_TYPE | AGENT_DEFINITION_APPLIED_EVENT_TYPE => {
+                let payload: AgentDefinitionPayload = decode_strict_payload(event_type, payload)?;
+                require_current_payload_schema(event_type, payload.schema_version)?;
+                payload
+                    .binding
+                    .validate()
+                    .map_err(|error| SessionError::AgentDefinition {
+                        message: error.to_string(),
+                    })?;
+                if event_type.as_str() == SESSION_STARTED_WITH_AGENT_EVENT_TYPE {
+                    Ok(Self::StartedWithAgent {
+                        primary_provider_session: payload.primary_provider_session,
+                        binding: payload.binding,
+                    })
+                } else {
+                    Ok(Self::AgentDefinitionApplied {
+                        primary_provider_session: payload.primary_provider_session,
+                        binding: payload.binding,
+                    })
+                }
+            }
             MODEL_SAMPLE_REJECTED_EVENT_TYPE => {
                 let payload: ModelSampleRejectedPayload =
                     decode_strict_payload(event_type, payload)?;
@@ -364,6 +413,7 @@ impl SessionEvent {
 /// The pure Session state reconstructed from one ordered Session stream.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionState {
+    agent_definition_binding: Option<AgentDefinitionBinding>,
     event_state: State,
     stream_id: Option<StreamId>,
     lifecycle: SessionLifecycle,
@@ -390,6 +440,7 @@ pub struct SessionState {
 impl Default for SessionState {
     fn default() -> Self {
         Self {
+            agent_definition_binding: None,
             event_state: State::default(),
             stream_id: None,
             lifecycle: SessionLifecycle::Unstarted,
@@ -416,6 +467,10 @@ impl Default for SessionState {
 }
 
 impl SessionState {
+    pub fn agent_definition_binding(&self) -> Option<&AgentDefinitionBinding> {
+        self.agent_definition_binding.as_ref()
+    }
+
     pub fn stream_id(&self) -> Option<&StreamId> {
         self.stream_id.as_ref()
     }
@@ -513,6 +568,14 @@ impl SessionState {
             .stream_id()
             .and_then(|stream_id| self.event_state.last_sequence_for(stream_id))
             .ok_or(SessionError::CompactionSourceSequenceMissing)?;
+        if let Some(task) = summary.task_references()
+            && (Some(task.source().stream_id()) != self.stream_id()
+                || task.source().watermark() != source_event_sequence)
+        {
+            return Err(SessionError::CompactionContextProvenance {
+                message: "task references must bind this exact Session prefix".to_owned(),
+            });
+        }
         SessionCompaction::from_history(
             &self.history,
             &self.full_normalized_history()?,
@@ -559,7 +622,15 @@ impl SessionState {
     /// Read-only legacy projection. It never backfills the Session stream.
     pub fn effective_research_phase(&self) -> ResearchPhase {
         self.research_phase_selection
-            .map_or(ResearchPhase::Mapping, ResearchPhaseSelection::phase)
+            .map(ResearchPhaseSelection::phase)
+            .or_else(|| {
+                self.agent_definition_binding
+                    .as_ref()?
+                    .definition()
+                    .research()
+                    .map(|research| research.phase())
+            })
+            .unwrap_or(ResearchPhase::Mapping)
     }
 
     /// The latest explicit durable Domain selection. Legacy Sessions remain
@@ -570,7 +641,15 @@ impl SessionState {
 
     pub fn effective_domain_profile(&self) -> DomainProfile {
         self.domain_profile_selection
-            .map_or(DomainProfile::Source, DomainProfileSelection::profile)
+            .map(DomainProfileSelection::profile)
+            .or_else(|| {
+                self.agent_definition_binding
+                    .as_ref()?
+                    .definition()
+                    .research()
+                    .map(|research| research.domain())
+            })
+            .unwrap_or(DomainProfile::Source)
     }
 
     /// Returns the precise next Session Event sequence without allocating or
@@ -604,7 +683,7 @@ impl SessionReducer {
     {
         let mut state = SessionState::default();
         for event in events {
-            self.apply(&mut state, event)?;
+            self.apply_in_place(&mut state, event)?;
         }
         Ok(state)
     }
@@ -616,15 +695,31 @@ impl SessionReducer {
         state: &mut SessionState,
         event: EventEnvelope<Value>,
     ) -> Result<ApplyOutcome, SessionError> {
+        let mut next = state.clone();
+        let outcome = self.apply_in_place(&mut next, event)?;
+        *state = next;
+        Ok(outcome)
+    }
+
+    /// Applies one transition to state exclusively owned by the caller.
+    /// Full replay owns a fresh state and discards it on any error; public
+    /// incremental apply stages a clone before entering this owner.
+    fn apply_in_place(
+        &self,
+        state: &mut SessionState,
+        event: EventEnvelope<Value>,
+    ) -> Result<ApplyOutcome, SessionError> {
         let event = EventUpcaster::upcast(&CurrentEventUpcaster, event)?;
         validate_session_stream(state, &event.stream_id)?;
         let session_event = SessionEvent::decode(&event.event_type, event.payload.clone())?;
         let stream_id = event.stream_id.clone();
         let sequence = event.sequence;
         let event_id = event.event_id.clone();
+        let source_event_sequence = state
+            .stream_id()
+            .and_then(|stream_id| state.event_state.last_sequence_for(stream_id));
 
-        let mut next = state.clone();
-        let outcome = EventReducer.apply(&mut next.event_state, event)?;
+        let outcome = EventReducer.apply(&mut state.event_state, event)?;
         if outcome == ApplyOutcome::DuplicateIgnored {
             if let SessionEvent::RequestAuditRecorded { manifest } = session_event {
                 let exact_existing = state.request_audits.iter().any(|existing| {
@@ -636,13 +731,9 @@ impl SessionReducer {
             }
             return Ok(outcome);
         }
-        require_next_sequence(state, &stream_id, sequence)?;
-        next.stream_id = Some(stream_id);
-        let source_event_sequence = state
-            .stream_id()
-            .and_then(|stream_id| state.event_state.last_sequence_for(stream_id));
-        apply_session_event(&mut next, session_event, source_event_sequence, &event_id)?;
-        *state = next;
+        require_next_sequence(source_event_sequence, &stream_id, sequence)?;
+        state.stream_id = Some(stream_id);
+        apply_session_event(state, session_event, source_event_sequence, &event_id)?;
         Ok(outcome)
     }
 }
@@ -666,11 +757,11 @@ fn decode_execution_receipt(
 }
 
 fn require_next_sequence(
-    state: &SessionState,
+    previous: Option<EventSequence>,
     stream_id: &StreamId,
     received: EventSequence,
 ) -> Result<(), SessionError> {
-    let expected = match state.event_state.last_sequence_for(stream_id) {
+    let expected = match previous {
         Some(last) => EventSequence::new(last.get().checked_add(1).ok_or_else(|| {
             SessionError::Event(EventError::SequenceOverflow {
                 stream_id: stream_id.clone(),
@@ -734,6 +825,48 @@ fn apply_session_event(
     event_id: &EventId,
 ) -> Result<(), SessionError> {
     match event {
+        SessionEvent::StartedWithAgent {
+            primary_provider_session,
+            binding,
+        } => {
+            require_primary_provider_session(&primary_provider_session)?;
+            require_transition(
+                state.lifecycle,
+                SESSION_STARTED_WITH_AGENT_EVENT_TYPE,
+                SessionLifecycle::Unstarted,
+            )?;
+            record_fresh_primary_provider_session_id(state, &primary_provider_session)?;
+            state.agent_definition_binding = Some(binding);
+            state.lifecycle = SessionLifecycle::Active;
+            state.primary_provider_session = Some(primary_provider_session);
+        }
+        SessionEvent::AgentDefinitionApplied {
+            primary_provider_session,
+            binding,
+        } => {
+            require_primary_provider_session(&primary_provider_session)?;
+            require_transition(
+                state.lifecycle,
+                AGENT_DEFINITION_APPLIED_EVENT_TYPE,
+                SessionLifecycle::Active,
+            )?;
+            if let Some(previous) = &state.agent_definition_binding {
+                state.history.ensure_all_tool_calls_paired()?;
+                previous
+                    .reload_compatible_with(binding.definition())
+                    .map_err(|error| SessionError::AgentDefinition {
+                        message: error.to_string(),
+                    })?;
+            } else if binding.definition().research().is_none() {
+                return Err(SessionError::AgentDefinition {
+                    message: "legacy Sessions require a research compatibility binding".to_owned(),
+                });
+            }
+            record_fresh_primary_provider_session_id(state, &primary_provider_session)?;
+            state.resume_count = increment("resume count", state.resume_count)?;
+            state.primary_provider_session = Some(primary_provider_session);
+            state.agent_definition_binding = Some(binding);
+        }
         SessionEvent::SubcommandCheckpointed { checkpoint } => {
             require_transition(
                 state.lifecycle,
@@ -869,6 +1002,14 @@ fn apply_session_event(
                 SessionLifecycle::Active,
             )?;
             compaction.validate_shape()?;
+            if let Some(task) = compaction.summary().task_references()
+                && (Some(task.source().stream_id()) != state.stream_id()
+                    || task.source().watermark() != compaction.source_event_sequence())
+            {
+                return Err(SessionError::CompactionContextProvenance {
+                    message: "task references must bind this exact Session prefix".to_owned(),
+                });
+            }
             if Some(compaction.source_event_sequence()) != source_event_sequence {
                 return Err(SessionError::CompactionSourceSequenceMismatch {
                     expected: source_event_sequence,
@@ -1020,6 +1161,7 @@ fn apply_session_event(
             state.vision_failures.push(failure);
         }
         SessionEvent::ResearchPhaseSelected { selection } => {
+            require_research_binding(state)?;
             require_transition(
                 state.lifecycle,
                 RESEARCH_PHASE_SELECTED_EVENT_TYPE,
@@ -1034,6 +1176,7 @@ fn apply_session_event(
             state.research_phase_selection = Some(selection);
         }
         SessionEvent::DomainProfileSelected { selection } => {
+            require_research_binding(state)?;
             require_transition(
                 state.lifecycle,
                 "session.domain_profile_selected",
@@ -1047,6 +1190,19 @@ fn apply_session_event(
                 })?;
             state.domain_profile_selection = Some(selection);
         }
+    }
+    Ok(())
+}
+
+fn require_research_binding(state: &SessionState) -> Result<(), SessionError> {
+    if state
+        .agent_definition_binding
+        .as_ref()
+        .is_some_and(|binding| binding.definition().research().is_none())
+    {
+        return Err(SessionError::AgentDefinition {
+            message: "generic Sessions cannot select research Domain/Phase".to_owned(),
+        });
     }
     Ok(())
 }
@@ -1276,6 +1432,14 @@ struct SessionLifecyclePayload {
     primary_provider_session: ProviderSessionRef,
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct AgentDefinitionPayload {
+    schema_version: u16,
+    primary_provider_session: ProviderSessionRef,
+    binding: AgentDefinitionBinding,
+}
+
 impl SessionLifecyclePayload {
     fn current(primary_provider_session: ProviderSessionRef) -> Self {
         Self {
@@ -1360,6 +1524,8 @@ impl ResearchPhaseSelectedPayload {
 /// Explicit Session schema, stream, payload and transition failures.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum SessionError {
+    #[error("invalid Agent definition binding: {message}")]
+    AgentDefinition { message: String },
     #[error(
         "model sample rejection does not reference one unrejected latest request audit or exceeds the correction bound"
     )]

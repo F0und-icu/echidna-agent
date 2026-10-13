@@ -1,12 +1,13 @@
 //! Atomic decoding and local commit of one completed model sample.
 
 use crate::domain::history::{ConversationHistory, HistoryError};
-use crate::domain::model::{ContentItem, ModelEvent};
+use crate::domain::model::{ContentItem, ModelEvent, OpaqueContinuationReference};
 use crate::domain::tools::ToolCall;
 
 enum SampleItem {
     AssistantText(String),
     Reasoning(String),
+    OpaqueContinuation(OpaqueContinuationReference),
     ToolCall(ToolCall),
 }
 
@@ -28,6 +29,12 @@ impl ModelSample {
                     }
                     items.push(SampleItem::Reasoning(reasoning));
                 }
+                ModelEvent::OpaqueContinuation { reference } => {
+                    if !text.is_empty() {
+                        items.push(SampleItem::AssistantText(std::mem::take(&mut text)));
+                    }
+                    items.push(SampleItem::OpaqueContinuation(reference));
+                }
                 ModelEvent::ToolCall { call } => {
                     if !text.is_empty() {
                         items.push(SampleItem::AssistantText(std::mem::take(&mut text)));
@@ -48,7 +55,9 @@ impl ModelSample {
             .iter()
             .filter_map(|item| match item {
                 SampleItem::ToolCall(call) => Some(call.clone()),
-                SampleItem::AssistantText(_) | SampleItem::Reasoning(_) => None,
+                SampleItem::AssistantText(_)
+                | SampleItem::Reasoning(_)
+                | SampleItem::OpaqueContinuation(_) => None,
             })
             .collect()
     }
@@ -58,7 +67,7 @@ impl ModelSample {
         for item in &self.items {
             match item {
                 SampleItem::AssistantText(text) => staged.append_assistant_text(text.clone()),
-                SampleItem::Reasoning(_) => {}
+                SampleItem::Reasoning(_) | SampleItem::OpaqueContinuation(_) => {}
                 SampleItem::ToolCall(call) => staged.append_tool_call(call.clone())?,
             }
         }
@@ -71,7 +80,9 @@ impl ModelSample {
             .iter()
             .filter_map(|item| match item {
                 SampleItem::AssistantText(text) => Some(text.as_str()),
-                SampleItem::Reasoning(_) | SampleItem::ToolCall(_) => None,
+                SampleItem::Reasoning(_)
+                | SampleItem::OpaqueContinuation(_)
+                | SampleItem::ToolCall(_) => None,
             })
             .collect()
     }
@@ -82,6 +93,9 @@ impl ModelSample {
             .map(|item| match item {
                 SampleItem::AssistantText(text) => ContentItem::assistant_text(text.clone()),
                 SampleItem::Reasoning(text) => ContentItem::Reasoning { text: text.clone() },
+                SampleItem::OpaqueContinuation(reference) => ContentItem::OpaqueContinuation {
+                    reference: reference.clone(),
+                },
                 SampleItem::ToolCall(call) => ContentItem::ToolCall { call: call.clone() },
             })
             .collect()

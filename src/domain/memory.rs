@@ -11,9 +11,34 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::domain::agent_definition::AgentId;
 use crate::domain::artifacts::BlobId;
 
-pub(crate) const MEMORY_PAYLOAD_SCHEMA_VERSION: u16 = 1;
+pub(crate) const MEMORY_PAYLOAD_SCHEMA_VERSION: u16 = 2;
+
+/// The durable namespace of a Project Memory document.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MemoryScope {
+    Project,
+    Agent { agent_id: AgentId },
+}
+
+impl MemoryScope {
+    pub(crate) fn namespace_path(&self) -> Option<&str> {
+        match self {
+            Self::Project => None,
+            Self::Agent { agent_id } => Some(agent_id.as_str()),
+        }
+    }
+
+    pub(crate) fn storage_directory(&self) -> String {
+        match self {
+            Self::Project => "memory".to_owned(),
+            Self::Agent { agent_id } => format!("memory/agents/{}", agent_id.as_str()),
+        }
+    }
+}
 
 /// A deliberately small, project-relative Markdown location.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -62,6 +87,7 @@ impl fmt::Display for MemoryPath {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MemoryRevision {
+    pub scope: MemoryScope,
     pub path: MemoryPath,
     #[serde(default)]
     pub old_hash: Option<String>,
@@ -149,12 +175,12 @@ pub(crate) enum MemoryEventType {
 /// The isolated projection used only to compare Markdown with its last audit.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct MemoryState {
-    latest: BTreeMap<MemoryPath, MemoryRevision>,
+    latest: BTreeMap<(MemoryScope, MemoryPath), MemoryRevision>,
 }
 
 impl MemoryState {
-    pub(crate) fn latest(&self, path: &MemoryPath) -> Option<&MemoryRevision> {
-        self.latest.get(path)
+    pub(crate) fn latest(&self, scope: &MemoryScope, path: &MemoryPath) -> Option<&MemoryRevision> {
+        self.latest.get(&(scope.clone(), path.clone()))
     }
 }
 
@@ -172,7 +198,8 @@ impl MemoryReducer {
     ) -> Result<(), MemoryError> {
         event.validate()?;
         let revision = event.revision();
-        if let Some(previous) = state.latest.get(&revision.path) {
+        let key = (revision.scope.clone(), revision.path.clone());
+        if let Some(previous) = state.latest.get(&key) {
             if revision.old_hash != previous.new_hash
                 || revision.old_blob_id != previous.new_blob_id
             {
@@ -191,7 +218,7 @@ impl MemoryReducer {
                 ),
             });
         }
-        state.latest.insert(revision.path.clone(), revision.clone());
+        state.latest.insert(key, revision.clone());
         Ok(())
     }
 }

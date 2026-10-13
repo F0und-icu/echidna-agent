@@ -31,7 +31,7 @@ struct ActiveTool {
 impl ActiveTool {
     fn timing(&self) -> String {
         format!(
-            "耗时 {:.1}s / deadline {:.1}s",
+            "总耗时 {:.1}s（含保存） / deadline 配置 {:.1}s",
             self.started.elapsed().as_secs_f64(),
             self.deadline_ms as f64 / 1000.0
         )
@@ -63,7 +63,7 @@ impl ToolOutput {
             },
         );
         self.sink.send(format!(
-            "\n┌ 工具 #{} · {} · 执行中（结果尚未保存） · deadline {:.1}s\n{}\n",
+            "\n┌ 工具 #{} · {} · 执行中（结果尚未保存） · deadline 配置 {:.1}s\n{}\n",
             self.next,
             escaped_text(plan.call.name.as_str()),
             plan.timeout_ms as f64 / 1000.0,
@@ -126,6 +126,13 @@ impl ToolOutput {
             ToolResultStatus::Failed => "失败",
             ToolResultStatus::Cancelled => "取消",
         };
+        let reason = outcome
+            .receipt
+            .exit_reason
+            .as_deref()
+            .filter(|reason| !reason.trim().is_empty())
+            .map(|reason| format!(" · 原因 {}", bounded_reason(reason)))
+            .unwrap_or_default();
         let reuse = if reused {
             " · 复用已有收据（未再次执行）"
         } else if outcome.receipt.cache_source.is_some() {
@@ -134,12 +141,22 @@ impl ToolOutput {
             ""
         };
         self.sink.send(format!(
-            "└ 工具 #{number} · {} · {status}{reuse} · {timing}\n{}\n{}",
+            "└ 工具 #{number} · {} · {status}{reason}{reuse} · {timing}\n{}\n{}",
             escaped_text(outcome.result.tool_name.as_str()),
             ContentView::preview(&outcome.result.output),
             capture_hints(&outcome.receipt.output_captures)
         ));
     }
+}
+
+fn bounded_reason(reason: &str) -> String {
+    let escaped = escaped_text(reason);
+    let mut characters = escaped.chars();
+    let mut bounded = characters.by_ref().take(120).collect::<String>();
+    if characters.next().is_some() {
+        bounded.push('…');
+    }
+    bounded
 }
 
 // Only typed durable observations supply readback hints. No Blob reads here.

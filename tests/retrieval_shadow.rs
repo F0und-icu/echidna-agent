@@ -231,7 +231,9 @@ fn artifact(project: &Project, id: &str, snapshot: &str, source_path: &str) {
             source_path: source_path.to_owned(),
             created_by_event_id: event_id.clone(),
             produced_by_tool_call_id: ToolCallId::new(format!("call-{id}")),
-            target_snapshot_id: TargetSnapshotId::new(snapshot),
+            scope: echidna::domain::artifacts::ArtifactScope::Target {
+                target_snapshot_id: TargetSnapshotId::new(snapshot),
+            },
             toolchain_fingerprint: "fixture-toolchain".to_owned(),
             parent_artifact_ids: Vec::new(),
             transform: None,

@@ -6,8 +6,10 @@ use std::fs;
 use crate::adapters::project_event_store::{
     Project, read_existing_research_events, read_existing_session_events,
 };
-use crate::domain::artifacts::ArtifactId;
+use crate::domain::artifacts::{ArtifactId, ArtifactScope};
+use crate::domain::events::{EventEnvelope, StreamId};
 use crate::domain::model::{ContentItem, MessageRole};
+use crate::domain::project_stream::ProjectStreamReducer;
 use crate::domain::research::{
     EvidenceRef, ExecutionReceiptId, ExperimentId, FindingId, FindingStatus, HypothesisId,
     HypothesisStatus, NextActionId, NextActionStatus, ResearchRecordRef, ResearchReducer,
@@ -19,6 +21,46 @@ use crate::domain::session::{
 };
 
 const MAX_COMPACTION_NARRATIVE_FIELD_BYTES: usize = 1536;
+
+/// Strict, discardable projection of shared project Artifact facts.
+///
+/// It intentionally exposes no Research records or current target. Consumers
+/// that only need generic Artifact provenance can validate the one physical
+/// Project stream without manufacturing Research context.
+pub(crate) struct ProjectArtifactCatalog {
+    session_artifacts: BTreeMap<StreamId, BTreeSet<ArtifactId>>,
+}
+
+impl ProjectArtifactCatalog {
+    pub(crate) fn from_events_with_references(
+        events: impl IntoIterator<Item = EventEnvelope<serde_json::Value>>,
+        references: &ResearchReferenceCatalog,
+    ) -> Result<Self, String> {
+        let state = ResearchReducer
+            .reduce_with_references(events, references)
+            .map_err(|error| error.to_string())?;
+        let mut session_artifacts = BTreeMap::new();
+        for record in state.retrieval_artifact_records() {
+            if let ArtifactScope::Session { session_id } = &record.scope {
+                session_artifacts
+                    .entry(session_id.clone())
+                    .or_insert_with(BTreeSet::new)
+                    .insert(record.id.clone());
+            }
+        }
+        Ok(Self { session_artifacts })
+    }
+
+    pub(crate) fn session_artifact_ids(
+        &self,
+        session_id: &StreamId,
+    ) -> impl Iterator<Item = &ArtifactId> {
+        self.session_artifacts
+            .get(session_id)
+            .into_iter()
+            .flat_map(|ids| ids.iter())
+    }
+}
 
 /// Ephemeral receipt-only cache for one interactive process. It is not a
 /// fact store: every Session entry is guarded by an exact JSONL byte digest
@@ -148,40 +190,7 @@ impl CompactionValidationFacts {
         previous: Option<&crate::domain::session::SessionSummary>,
         reference_limit: usize,
     ) -> Result<SessionSummaryDraft, SessionError> {
-        crate::domain::history::ConversationHistory::from_complete_content_items(history)?;
-        let latest_goal = latest_text(history, MessageRole::User)
-            .or_else(|| {
-                previous
-                    .and_then(|summary| summary.narrative())
-                    .map(|narrative| narrative.current_goal())
-            })
-            .ok_or(SessionError::CompactionResumableHistoryRequired)?;
-        let initial_goal = history
-            .iter()
-            .find_map(|item| match item {
-                ContentItem::Text {
-                    role: MessageRole::User,
-                    text,
-                } if !text.trim().is_empty() => Some(text.as_str()),
-                _ => None,
-            })
-            .unwrap_or(latest_goal);
-        let current_goal = if initial_goal == latest_goal {
-            bounded_text(latest_goal, MAX_COMPACTION_NARRATIVE_FIELD_BYTES)
-        } else {
-            format!(
-                "Initial request: {}\nLatest request: {}",
-                bounded_text(initial_goal, 640),
-                bounded_text(latest_goal, 640)
-            )
-        };
-        let progress = latest_text(history, MessageRole::Assistant).map_or_else(
-            || {
-                "No assistant continuation text was durably recorded for the latest goal."
-                    .to_owned()
-            },
-            |text| format!("Non-authoritative continuation of the latest assistant reply: {text}"),
-        );
+        let (current_goal, progress) = continuation_text(history, previous)?;
 
         let current_target_id = self
             .research_state
@@ -378,12 +387,7 @@ impl CompactionValidationFacts {
                 .take(reference_limit)
                 .collect(),
         )?;
-        let narrative = NarrativeSummary::new(
-            current_goal,
-            bounded_text(&progress, MAX_COMPACTION_NARRATIVE_FIELD_BYTES),
-            unresolved,
-            next_steps,
-        )?;
+        let narrative = NarrativeSummary::new(current_goal, progress, unresolved, next_steps)?;
         SessionSummaryDraft::new(evidence_spine, narrative)
     }
 
@@ -449,6 +453,47 @@ fn research_reference_is_retained(
     }
 }
 
+pub(super) fn continuation_text(
+    history: &[ContentItem],
+    previous: Option<&crate::domain::session::SessionSummary>,
+) -> Result<(String, String), SessionError> {
+    crate::domain::history::ConversationHistory::from_complete_content_items(history)?;
+    let latest_goal = latest_text(history, MessageRole::User)
+        .or_else(|| {
+            previous
+                .and_then(|summary| summary.narrative())
+                .map(|narrative| narrative.current_goal())
+        })
+        .ok_or(SessionError::CompactionResumableHistoryRequired)?;
+    let initial_goal = history
+        .iter()
+        .find_map(|item| match item {
+            ContentItem::Text {
+                role: MessageRole::User,
+                text,
+            } if !text.trim().is_empty() => Some(text.as_str()),
+            _ => None,
+        })
+        .unwrap_or(latest_goal);
+    let current_goal = if initial_goal == latest_goal {
+        bounded_text(latest_goal, MAX_COMPACTION_NARRATIVE_FIELD_BYTES)
+    } else {
+        format!(
+            "Initial request: {}\nLatest request: {}",
+            bounded_text(initial_goal, 640),
+            bounded_text(latest_goal, 640)
+        )
+    };
+    let progress = latest_text(history, MessageRole::Assistant).map_or_else(
+        || "No assistant continuation text was durably recorded for the latest goal.".to_owned(),
+        |text| format!("Non-authoritative continuation of the latest assistant reply: {text}"),
+    );
+    Ok((
+        current_goal,
+        bounded_text(&progress, MAX_COMPACTION_NARRATIVE_FIELD_BYTES),
+    ))
+}
+
 fn latest_text(history: &[ContentItem], expected_role: MessageRole) -> Option<&str> {
     history.iter().rev().find_map(|item| match item {
         ContentItem::Text { role, text } if *role == expected_role && !text.trim().is_empty() => {
@@ -506,6 +551,17 @@ fn load_reference_catalog_and_receipt_ids(
 
 pub(crate) fn load_research_state(project: &Project) -> Result<ResearchState, String> {
     load_research_projection(project).map(|(state, _)| state)
+}
+
+/// Validates the shared Project stream and returns only its durable event
+/// count. Generic runtime paths use this before selecting non-Research facts.
+pub(crate) fn load_project_stream_integrity(project: &Project) -> Result<usize, String> {
+    let references = load_reference_catalog(project)?;
+    let events = read_existing_research_events(project).map_err(|error| error.to_string())?;
+    ProjectStreamReducer
+        .reduce(events, &references)
+        .map(|state| state.applied_event_count())
+        .map_err(|error| error.to_string())
 }
 
 /// Reduces Research against a caller-refreshed ephemeral receipt catalog.

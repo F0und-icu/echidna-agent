@@ -1,4 +1,4 @@
-//! Session Summary v1 compatibility and reference-only v2 representation.
+//! Versioned Session summaries with typed task and optional Research references.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
@@ -17,7 +17,7 @@ use crate::domain::session::{
 
 use super::{
     CURRENT_SESSION_SUMMARY_SCHEMA_VERSION, CompactionValidationContext, EvidenceSpine,
-    fingerprint_value, require_text, validate_unique_ids,
+    SessionTaskReferences, fingerprint_value, require_text, validate_unique_ids,
 };
 
 const MAX_SESSION_SUMMARY_BYTES: usize = 8 * 1024;
@@ -73,11 +73,12 @@ impl NarrativeSummary {
     }
 }
 
-/// Caller-supplied current Summary content. Every new Compaction uses schema
-/// v2; schema v1 exists only in historical Event decoding.
+/// Caller-supplied Summary content. Bound Sessions produce v3; the legacy
+/// constructor retains exact v2 behavior for unbound historical consumers.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionSummaryDraft {
-    evidence_spine: EvidenceSpine,
+    evidence_spine: Option<EvidenceSpine>,
+    task_references: Option<SessionTaskReferences>,
     narrative: NarrativeSummary,
 }
 
@@ -87,23 +88,47 @@ impl SessionSummaryDraft {
         narrative: NarrativeSummary,
     ) -> Result<Self, SessionError> {
         let draft = Self {
-            evidence_spine,
+            evidence_spine: Some(evidence_spine),
+            task_references: None,
             narrative,
         };
         draft.validate_intrinsic()?;
         Ok(draft)
     }
 
-    pub fn evidence_spine(&self) -> &EvidenceSpine {
-        &self.evidence_spine
+    pub fn evidence_spine(&self) -> Option<&EvidenceSpine> {
+        self.evidence_spine.as_ref()
+    }
+
+    pub(crate) fn for_task(
+        task_references: SessionTaskReferences,
+        evidence_spine: Option<EvidenceSpine>,
+        narrative: NarrativeSummary,
+    ) -> Result<Self, SessionError> {
+        let draft = Self {
+            evidence_spine,
+            task_references: Some(task_references),
+            narrative,
+        };
+        draft.validate_intrinsic()?;
+        Ok(draft)
     }
 
     pub fn narrative(&self) -> &NarrativeSummary {
         &self.narrative
     }
 
+    pub(crate) fn task_references(&self) -> Option<&SessionTaskReferences> {
+        self.task_references.as_ref()
+    }
+
     fn validate_intrinsic(&self) -> Result<(), SessionError> {
-        self.evidence_spine.validate_intrinsic()?;
+        if let Some(spine) = &self.evidence_spine {
+            spine.validate_intrinsic()?;
+        }
+        if let Some(task) = &self.task_references {
+            task.validate_intrinsic()?;
+        }
         self.narrative.validate()
     }
 
@@ -112,7 +137,15 @@ impl SessionSummaryDraft {
         context: &CompactionValidationContext<'_>,
     ) -> Result<(), SessionError> {
         self.validate_intrinsic()?;
-        self.evidence_spine.validate_against(context)
+        if let Some(spine) = &self.evidence_spine {
+            spine.validate_against(context)?;
+        }
+        if let Some(task) = &self.task_references {
+            task.validate_against(context.task.ok_or_else(|| {
+                super::task::invalid_task("task Summary requires exact Session validation facts")
+            })?)?;
+        }
+        Ok(())
     }
 }
 
@@ -123,6 +156,17 @@ struct SessionSummaryV2 {
     revision: u64,
     fingerprint: String,
     evidence_spine: EvidenceSpine,
+    narrative: NarrativeSummary,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SessionSummaryV3 {
+    schema_version: u16,
+    revision: u64,
+    fingerprint: String,
+    task_references: SessionTaskReferences,
+    evidence_spine: Option<EvidenceSpine>,
     narrative: NarrativeSummary,
 }
 
@@ -158,6 +202,7 @@ enum LegacyUnfinishedExecutionRef {
 enum SessionSummaryVersion {
     LegacyV1(LegacySessionSummaryV1),
     CurrentV2(SessionSummaryV2),
+    CurrentV3(Box<SessionSummaryV3>),
 }
 
 /// Deletable derived Summary carried by one Compaction fact.
@@ -174,6 +219,7 @@ impl Serialize for SessionSummary {
         match &self.version {
             SessionSummaryVersion::LegacyV1(summary) => summary.serialize(serializer),
             SessionSummaryVersion::CurrentV2(summary) => summary.serialize(serializer),
+            SessionSummaryVersion::CurrentV3(summary) => summary.serialize(serializer),
         }
     }
 }
@@ -197,6 +243,10 @@ impl<'de> Deserialize<'de> for SessionSummary {
             2 => serde_json::from_value(value)
                 .map(SessionSummaryVersion::CurrentV2)
                 .map_err(serde::de::Error::custom)?,
+            3 => serde_json::from_value::<SessionSummaryV3>(value)
+                .map(Box::new)
+                .map(SessionSummaryVersion::CurrentV3)
+                .map_err(serde::de::Error::custom)?,
             _ => {
                 return Err(serde::de::Error::custom(format!(
                     "unsupported Session Summary schema version {schema_version}"
@@ -214,17 +264,31 @@ impl SessionSummary {
         context: &CompactionValidationContext<'_>,
     ) -> Result<Self, SessionError> {
         draft.validate_against(context)?;
-        let mut summary = SessionSummaryV2 {
-            schema_version: CURRENT_SESSION_SUMMARY_SCHEMA_VERSION,
-            revision,
-            fingerprint: String::new(),
-            evidence_spine: draft.evidence_spine,
-            narrative: draft.narrative,
+        let version = if let Some(task_references) = draft.task_references {
+            let mut summary = SessionSummaryV3 {
+                schema_version: CURRENT_SESSION_SUMMARY_SCHEMA_VERSION,
+                revision,
+                fingerprint: String::new(),
+                task_references,
+                evidence_spine: draft.evidence_spine,
+                narrative: draft.narrative,
+            };
+            summary.fingerprint = expected_v3_fingerprint(&summary)?;
+            SessionSummaryVersion::CurrentV3(Box::new(summary))
+        } else {
+            let mut summary = SessionSummaryV2 {
+                schema_version: 2,
+                revision,
+                fingerprint: String::new(),
+                evidence_spine: draft
+                    .evidence_spine
+                    .expect("legacy draft contains its EvidenceSpine"),
+                narrative: draft.narrative,
+            };
+            summary.fingerprint = expected_v2_fingerprint(&summary)?;
+            SessionSummaryVersion::CurrentV2(summary)
         };
-        summary.fingerprint = expected_v2_fingerprint(&summary)?;
-        let summary = Self {
-            version: SessionSummaryVersion::CurrentV2(summary),
-        };
+        let summary = Self { version };
         summary.validate_shape()?;
         summary.validate_encoded_size()?;
         Ok(summary)
@@ -239,12 +303,25 @@ impl SessionSummary {
                 validate_legacy_summary(summary)?;
             }
             SessionSummaryVersion::CurrentV2(summary) => {
-                if summary.schema_version != CURRENT_SESSION_SUMMARY_SCHEMA_VERSION {
+                if summary.schema_version != 2 {
                     return Err(unsupported_summary_schema(summary.schema_version));
                 }
                 summary.evidence_spine.validate_intrinsic()?;
                 summary.narrative.validate()?;
                 if summary.fingerprint != expected_v2_fingerprint(summary)? {
+                    return Err(SessionError::CompactionFingerprintMismatch);
+                }
+            }
+            SessionSummaryVersion::CurrentV3(summary) => {
+                if summary.schema_version != CURRENT_SESSION_SUMMARY_SCHEMA_VERSION {
+                    return Err(unsupported_summary_schema(summary.schema_version));
+                }
+                summary.task_references.validate_intrinsic()?;
+                if let Some(spine) = &summary.evidence_spine {
+                    spine.validate_intrinsic()?;
+                }
+                summary.narrative.validate()?;
+                if summary.fingerprint != expected_v3_fingerprint(summary)? {
                     return Err(SessionError::CompactionFingerprintMismatch);
                 }
             }
@@ -256,6 +333,7 @@ impl SessionSummary {
         match &self.version {
             SessionSummaryVersion::LegacyV1(_) => 1,
             SessionSummaryVersion::CurrentV2(_) => 2,
+            SessionSummaryVersion::CurrentV3(_) => 3,
         }
     }
 
@@ -263,6 +341,7 @@ impl SessionSummary {
         match &self.version {
             SessionSummaryVersion::LegacyV1(summary) => summary.revision,
             SessionSummaryVersion::CurrentV2(summary) => summary.revision,
+            SessionSummaryVersion::CurrentV3(summary) => summary.revision,
         }
     }
 
@@ -270,6 +349,7 @@ impl SessionSummary {
         match &self.version {
             SessionSummaryVersion::LegacyV1(summary) => &summary.fingerprint,
             SessionSummaryVersion::CurrentV2(summary) => &summary.fingerprint,
+            SessionSummaryVersion::CurrentV3(summary) => &summary.fingerprint,
         }
     }
 
@@ -277,6 +357,7 @@ impl SessionSummary {
         match &self.version {
             SessionSummaryVersion::LegacyV1(_) => None,
             SessionSummaryVersion::CurrentV2(summary) => Some(&summary.evidence_spine),
+            SessionSummaryVersion::CurrentV3(summary) => summary.evidence_spine.as_ref(),
         }
     }
 
@@ -284,6 +365,14 @@ impl SessionSummary {
         match &self.version {
             SessionSummaryVersion::LegacyV1(_) => None,
             SessionSummaryVersion::CurrentV2(summary) => Some(&summary.narrative),
+            SessionSummaryVersion::CurrentV3(summary) => Some(&summary.narrative),
+        }
+    }
+
+    pub(crate) fn task_references(&self) -> Option<&SessionTaskReferences> {
+        match &self.version {
+            SessionSummaryVersion::CurrentV3(summary) => Some(&summary.task_references),
+            _ => None,
         }
     }
 
@@ -296,11 +385,24 @@ impl SessionSummary {
             SessionSummaryVersion::CurrentV2(summary) => {
                 summary.evidence_spine.validate_against(context)
             }
+            SessionSummaryVersion::CurrentV3(summary) => {
+                summary
+                    .task_references
+                    .validate_against(context.task.ok_or_else(|| {
+                        super::task::invalid_task(
+                            "task Summary requires exact Session validation facts",
+                        )
+                    })?)?;
+                if let Some(spine) = &summary.evidence_spine {
+                    spine.validate_against(context)?;
+                }
+                Ok(())
+            }
         }
     }
 
     pub(crate) const fn requires_reference_validation(&self) -> bool {
-        matches!(self.version, SessionSummaryVersion::CurrentV2(_))
+        !matches!(self.version, SessionSummaryVersion::LegacyV1(_))
     }
 
     pub(crate) fn context_item(&self) -> Result<ContentItem, SessionError> {
@@ -308,15 +410,32 @@ impl SessionSummary {
             event_type: EventType::new(COMPACTION_CREATED_EVENT_TYPE),
             message: error.to_string(),
         })?;
-        let prefix = if self.schema_version() == 1 {
-            "derived_session_summary_v1:"
-        } else {
-            "derived_session_summary_v2:"
-        };
+        let prefix = format!("derived_session_summary_v{}:", self.schema_version());
         Ok(ContentItem::user_text(format!("{prefix}{payload}")))
     }
 
     pub(crate) fn context_provenance(&self) -> Result<Option<ContextProvenance>, SessionError> {
+        if let Some(task) = self.task_references() {
+            let references = task.context_references(
+                self.evidence_spine()
+                    .map(EvidenceSpine::context_references)
+                    .transpose()?,
+            )?;
+            let freshness = FreshnessIdentity::new(task.source().stream_hash())
+                .map_err(context_provenance_error)?
+                .with_producer_version("session-summary:3");
+            return ContextProvenance::new(
+                ContextSlot::Summary,
+                ContextOrigin::SessionProjection,
+                SemanticClass::DerivedProjection,
+                AuthorityLevel::FactReference,
+                RetentionClass::EvidenceSpine,
+                freshness,
+                references,
+            )
+            .map(Some)
+            .map_err(context_provenance_error);
+        }
         let Some(spine) = self.evidence_spine() else {
             return Ok(None);
         };
@@ -406,6 +525,12 @@ fn unsupported_summary_schema(schema_version: u16) -> SessionError {
 fn expected_v2_fingerprint(value: &SessionSummaryV2) -> Result<String, SessionError> {
     let mut value = value.clone();
     value.clear_fingerprint();
+    fingerprint_value(&value)
+}
+
+fn expected_v3_fingerprint(value: &SessionSummaryV3) -> Result<String, SessionError> {
+    let mut value = value.clone();
+    value.fingerprint.clear();
     fingerprint_value(&value)
 }
 

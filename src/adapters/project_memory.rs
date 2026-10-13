@@ -12,7 +12,7 @@ use thiserror::Error;
 
 use crate::adapters::file_diff::replacement_diff as audit_replacement_diff;
 use crate::adapters::project_event_store::{Project, replace_durable_file, sync_directory};
-use crate::domain::memory::MemoryPath;
+use crate::domain::memory::{MemoryPath, MemoryScope};
 
 const MEMORY_DIRECTORY: &str = "memory";
 pub(crate) const MAX_CORE_MEMORY_BYTES: usize = 64 * 1024;
@@ -35,11 +35,16 @@ pub(crate) struct RetrievalMemoryDocument {
 
 pub(crate) struct LocalProjectMemory<'project> {
     project: &'project Project,
+    scope: MemoryScope,
 }
 
 impl<'project> LocalProjectMemory<'project> {
     pub(crate) fn new(project: &'project Project) -> Self {
-        Self { project }
+        Self::with_scope(project, MemoryScope::Project)
+    }
+
+    pub(crate) fn with_scope(project: &'project Project, scope: MemoryScope) -> Self {
+        Self { project, scope }
     }
 
     pub(crate) fn read(
@@ -47,27 +52,11 @@ impl<'project> LocalProjectMemory<'project> {
         path: &MemoryPath,
     ) -> Result<MemoryDocument, LocalProjectMemoryError> {
         self.ensure_control_directory_existing()?;
-        let memory_root = self.memory_root();
-        match fs::symlink_metadata(&memory_root) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(LocalProjectMemoryError::Symlink { path: memory_root });
-            }
-            Ok(metadata) if !metadata.file_type().is_dir() => {
-                return Err(LocalProjectMemoryError::NotDirectory { path: memory_root });
-            }
-            Ok(_) => {}
-            Err(source) if source.kind() == io::ErrorKind::NotFound => {
-                return Ok(MemoryDocument {
-                    content: None,
-                    hash: None,
-                });
-            }
-            Err(source) => {
-                return Err(LocalProjectMemoryError::Inspect {
-                    path: memory_root,
-                    source,
-                });
-            }
+        if !self.validate_memory_root_existing()? {
+            return Ok(MemoryDocument {
+                content: None,
+                hash: None,
+            });
         }
         let document_path = self.document_path(path);
         self.ensure_note_parent_existing(path)?;
@@ -116,6 +105,10 @@ impl<'project> LocalProjectMemory<'project> {
     pub(crate) fn read_retrieval_documents(
         &self,
     ) -> Result<Vec<RetrievalMemoryDocument>, LocalProjectMemoryError> {
+        self.ensure_control_directory_existing()?;
+        if !self.validate_memory_root_existing()? {
+            return Ok(Vec::new());
+        }
         let mut paths = ["decisions.md", "failed-paths.md"]
             .into_iter()
             .map(MemoryPath::parse)
@@ -157,7 +150,7 @@ impl<'project> LocalProjectMemory<'project> {
         self.validate_content(path, content)?;
         self.ensure_control_directory_existing()?;
         let memory_root = self.memory_root();
-        ensure_directory(&memory_root)?;
+        self.ensure_memory_root()?;
         if path.as_str().starts_with("notes/") {
             ensure_directory(&memory_root.join("notes"))?;
         }
@@ -191,10 +184,42 @@ impl<'project> LocalProjectMemory<'project> {
     }
 
     fn memory_root(&self) -> PathBuf {
+        let memory_root = self.base_memory_root();
+        match self.scope.namespace_path() {
+            Some(agent_id) => memory_root.join("agents").join(agent_id),
+            None => memory_root,
+        }
+    }
+
+    fn base_memory_root(&self) -> PathBuf {
         self.project
             .root()
             .join(".cyber-agent")
             .join(MEMORY_DIRECTORY)
+    }
+
+    fn ensure_memory_root(&self) -> Result<(), LocalProjectMemoryError> {
+        let base = self.base_memory_root();
+        ensure_directory(&base)?;
+        if self.scope.namespace_path().is_some() {
+            ensure_directory(&base.join("agents"))?;
+        }
+        ensure_directory(&self.memory_root())
+    }
+
+    fn validate_memory_root_existing(&self) -> Result<bool, LocalProjectMemoryError> {
+        let base = self.base_memory_root();
+        if !validate_existing_directory(&base)? {
+            return Ok(false);
+        }
+        if self.scope.namespace_path().is_some() {
+            let agents = base.join("agents");
+            if !validate_existing_directory(&agents)? {
+                return Ok(false);
+            }
+            return validate_existing_directory(&self.memory_root());
+        }
+        Ok(true)
     }
 
     fn document_path(&self, path: &MemoryPath) -> PathBuf {
@@ -377,6 +402,25 @@ fn ensure_directory(path: &Path) -> Result<(), LocalProjectMemoryError> {
             })?;
             ensure_directory(path)
         }
+        Err(source) => Err(LocalProjectMemoryError::Inspect {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+fn validate_existing_directory(path: &Path) -> Result<bool, LocalProjectMemoryError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(LocalProjectMemoryError::Symlink {
+                path: path.to_path_buf(),
+            })
+        }
+        Ok(metadata) if metadata.file_type().is_dir() => Ok(true),
+        Ok(_) => Err(LocalProjectMemoryError::NotDirectory {
+            path: path.to_path_buf(),
+        }),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(source) => Err(LocalProjectMemoryError::Inspect {
             path: path.to_path_buf(),
             source,

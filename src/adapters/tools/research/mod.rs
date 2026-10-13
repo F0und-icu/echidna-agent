@@ -4,7 +4,7 @@ mod schema;
 
 use std::path::Path;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 
 use crate::adapters::project_event_store::{Project, ProjectEventStream};
@@ -23,9 +23,47 @@ use crate::ports::{EventSink, EventSource};
 use super::resources::ResourceKeyResolver;
 use super::{decode_arguments, invalid_plan};
 
+const DEFAULT_RECEIPT_PAGE_LIMIT: usize = 16;
+const MAX_RECEIPT_PAGE_LIMIT: usize = 32;
+const RESEARCH_REFERENCE_HINT: &str = "Use research_get.receipts to discover real Receipt Event IDs; reuse the exact target_id/version from an existing TargetSnapshot, record a missing subject before updating it, and bind the matching receipt_id and execution_id through an Experiment plus ExperimentCapsule for that TargetSnapshot before using the Receipt as target-scoped Finding evidence. A path or execution_id is not a receipt_id";
+
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct ResearchGetArgs {}
+struct ResearchGetArgs {
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    receipts: Option<ResearchReceiptQuery>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ResearchReceiptQuery {
+    #[serde(default)]
+    offset: usize,
+    #[serde(default = "default_receipt_page_limit")]
+    limit: usize,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    execution_id: Option<String>,
+}
+
+fn deserialize_non_null_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+const fn default_receipt_page_limit() -> usize {
+    DEFAULT_RECEIPT_PAGE_LIMIT
+}
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -83,7 +121,7 @@ pub(super) fn normalize_get(
     project_root: &Path,
     value: Value,
 ) -> Result<(Value, Vec<ResourceKey>), ToolExecutorError> {
-    let arguments: ResearchGetArgs = decode_arguments("research_get", value)?;
+    let arguments = decode_get_arguments(value)?;
     Ok((
         serde_json::to_value(arguments).expect("ResearchGetArgs serialization cannot fail"),
         research_resource(project_root),
@@ -111,28 +149,91 @@ pub(super) async fn execute_get(
     project_root: &Path,
     plan: ToolExecutionPlan,
 ) -> ToolExecutionOutcome {
-    let arguments: ResearchGetArgs =
-        match decode_arguments("research_get", plan.call.arguments.clone()) {
-            Ok(arguments) => arguments,
-            Err(error) => return invalid_plan(plan, error),
-        };
-    let _ = arguments;
+    let arguments = match decode_get_arguments(plan.call.arguments.clone()) {
+        Ok(arguments) => arguments,
+        Err(error) => return invalid_plan(plan, error),
+    };
     match load_state_with_references(project_root) {
         Ok((state, references)) => {
             let stream_event_count = state.applied_event_count();
             let evidence_gap_reports = state.evidence_gap_reports(&references);
-            ToolExecutionOutcome::succeeded(
-                plan,
-                json!({
-                    "status": "ok",
-                    "state": state,
-                    "stream_event_count": stream_event_count,
-                    "evidence_gap_reports": evidence_gap_reports,
-                }),
-            )
+            let mut output = serde_json::Map::from_iter([
+                ("status".to_owned(), json!("ok")),
+                ("state".to_owned(), json!(state)),
+                ("stream_event_count".to_owned(), json!(stream_event_count)),
+                (
+                    "evidence_gap_reports".to_owned(),
+                    json!(evidence_gap_reports),
+                ),
+            ]);
+            if let Some(query) = arguments.receipts.as_ref() {
+                output.insert("receipt_page".to_owned(), receipt_page(&references, query));
+            }
+            ToolExecutionOutcome::succeeded(plan, Value::Object(output))
         }
         Err(error) => research_failure(plan, "research_read_failed", error),
     }
+}
+
+fn decode_get_arguments(value: Value) -> Result<ResearchGetArgs, ToolExecutorError> {
+    let arguments: ResearchGetArgs = decode_arguments("research_get", value)?;
+    if let Some(query) = arguments.receipts.as_ref() {
+        if !(1..=MAX_RECEIPT_PAGE_LIMIT).contains(&query.limit) {
+            return Err(ToolExecutorError::InvalidArguments {
+                tool_name: "research_get".to_owned(),
+                message: format!("`receipts.limit` must be between 1 and {MAX_RECEIPT_PAGE_LIMIT}"),
+            });
+        }
+        if query.offset.checked_add(query.limit).is_none() {
+            return Err(ToolExecutorError::InvalidArguments {
+                tool_name: "research_get".to_owned(),
+                message: "`receipts.offset` plus `receipts.limit` overflows pagination".to_owned(),
+            });
+        }
+        if query
+            .execution_id
+            .as_deref()
+            .is_some_and(|execution_id| execution_id.trim().is_empty())
+        {
+            return Err(ToolExecutorError::InvalidArguments {
+                tool_name: "research_get".to_owned(),
+                message: "`receipts.execution_id` must not be empty".to_owned(),
+            });
+        }
+    }
+    Ok(arguments)
+}
+
+fn receipt_page(references: &ResearchReferenceCatalog, query: &ResearchReceiptQuery) -> Value {
+    let mut total = 0usize;
+    let mut items = Vec::with_capacity(query.limit);
+    for (receipt_id, receipt) in references.execution_receipts().filter(|(_, receipt)| {
+        query
+            .execution_id
+            .as_deref()
+            .is_none_or(|execution_id| receipt.execution_id.as_str() == execution_id)
+    }) {
+        let index = total;
+        total += 1;
+        if index >= query.offset && items.len() < query.limit {
+            items.push(json!({
+                "receipt_id": receipt_id,
+                "execution_id": receipt.execution_id,
+                "status": receipt.status,
+            }));
+        }
+    }
+    let consumed = query
+        .offset
+        .checked_add(items.len())
+        .expect("validated receipt pagination cannot overflow");
+    let next_offset = (consumed < total).then_some(consumed);
+    json!({
+        "items": items,
+        "total": total,
+        "offset": query.offset,
+        "next_offset": next_offset,
+    })
 }
 
 pub(super) async fn execute_update(
@@ -387,11 +488,15 @@ fn research_failure(
     code: &str,
     error: impl ToString,
 ) -> ToolExecutionOutcome {
-    ToolExecutionOutcome::failed(
-        plan,
+    let mut error = error.to_string();
+    if matches!(
         code,
-        json!({"error_code": code, "error": error.to_string()}),
-    )
+        "research_record_invalid" | "research_transition_rejected"
+    ) {
+        error.push_str(". Hint: ");
+        error.push_str(RESEARCH_REFERENCE_HINT);
+    }
+    ToolExecutionOutcome::failed(plan, code, json!({"error_code": code, "error": error}))
 }
 
 pub(super) fn get_input_schema() -> Value {

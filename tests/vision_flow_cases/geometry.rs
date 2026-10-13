@@ -15,13 +15,17 @@ struct Run {
 }
 
 async fn run(input: VisionAnalysisInput, regions: Value) -> Run {
-    let vision = capabilities(true, false);
     let raw = json!({
-        "schema_version": 1, "summary": "Synthetic colors only.",
+        "schema_version": 2, "summary": "Synthetic colors only.",
         "extracted_text": null, "regions": regions,
-        "security_relevant_clues": [], "uncertainty": ["not verified evidence"]
+        "task_observations": [], "uncertainty": ["not verified evidence"]
     })
     .to_string();
+    run_reply(input, raw).await
+}
+
+async fn run_reply(input: VisionAnalysisInput, raw: String) -> Run {
+    let vision = capabilities(true, false);
     let provider = ScriptedProvider::new(vision.clone(), [completed(&raw, "geometry-response")]);
     let binding = binding();
     let mut projection = projection(&binding);
@@ -60,6 +64,77 @@ async fn run(input: VisionAnalysisInput, regions: Value) -> Run {
         sink,
         blobs,
         raw,
+    }
+}
+
+#[tokio::test]
+async fn neutral_observations_keep_versioned_fields_and_legacy_semantics_separate() {
+    let input = vision_input(&capabilities(true, false));
+    let run = run(input, json!([])).await;
+    let observation = &run.result.as_ref().unwrap().observation;
+    let current = serde_json::to_value(observation).unwrap();
+    assert_eq!(current["schema_version"], 3);
+    assert!(current.get("security_relevant_clues").is_none());
+    assert_eq!(current["task_observations"], json!([]));
+    let context = observation.primary_context_text().unwrap();
+    assert!(context.contains("task_observations"));
+    assert!(!context.contains("security_relevant_clues"));
+
+    let mut legacy = current.clone();
+    legacy["schema_version"] = json!(2);
+    legacy.as_object_mut().unwrap().remove("task_observations");
+    legacy["security_relevant_clues"] = json!(["old security-specific interpretation"]);
+    let decoded: VisionObservation = serde_json::from_value(legacy.clone()).unwrap();
+    decoded.validate().unwrap();
+    assert_eq!(serde_json::to_value(&decoded).unwrap(), legacy);
+    assert!(
+        decoded
+            .primary_context_text()
+            .unwrap()
+            .contains("security_relevant_clues")
+    );
+    assert!(
+        !decoded
+            .primary_context_text()
+            .unwrap()
+            .contains("task_observations")
+    );
+    for mut malformed in [current.clone(), legacy.clone()] {
+        malformed["task_observations"] = json!([]);
+        malformed["security_relevant_clues"] = json!([]);
+        assert!(
+            serde_json::from_value::<VisionObservation>(malformed)
+                .unwrap()
+                .validate()
+                .is_err()
+        );
+    }
+    let mut missing = current;
+    missing.as_object_mut().unwrap().remove("task_observations");
+    assert!(
+        serde_json::from_value::<VisionObservation>(missing)
+            .unwrap()
+            .validate()
+            .is_err()
+    );
+    let mut null_legacy_field = serde_json::to_value(observation).unwrap();
+    null_legacy_field["security_relevant_clues"] = Value::Null;
+    assert!(serde_json::from_value::<VisionObservation>(null_legacy_field).is_err());
+}
+
+#[tokio::test]
+async fn new_secondary_requests_reject_legacy_and_incomplete_reply_schemas_once() {
+    for raw in [
+        json!({"schema_version": 1, "summary": "legacy", "security_relevant_clues": []}),
+        json!({"schema_version": 2, "summary": "mixed", "extracted_text": null, "regions": [], "task_observations": [], "security_relevant_clues": null, "uncertainty": []}),
+        json!({"schema_version": 2, "summary": "missing regions", "extracted_text": null, "task_observations": [], "uncertainty": []}),
+    ] {
+        let run = run_reply(vision_input(&capabilities(true, false)), raw.to_string()).await;
+        assert!(run.result.is_err());
+        assert_eq!(run.requests.len(), 1);
+        assert!(run.projection.state().vision_observations().is_empty());
+        assert_eq!(run.projection.state().vision_failures().len(), 1);
+        assert_eq!(run.projection.state().request_audits().len(), 1);
     }
 }
 
@@ -231,6 +306,24 @@ async fn legacy_coordinate_uncertainty_and_new_frame_replay_tampering_are_explic
 
     let mut legacy = run.sink.events.clone();
     legacy[index].payload["schema_version"] = json!(1);
+    let notes = legacy[index]
+        .payload
+        .as_object_mut()
+        .unwrap()
+        .remove("task_observations")
+        .unwrap();
+    legacy[index].payload["security_relevant_clues"] = notes;
+    let mut legacy_reply: Value = serde_json::from_str(&run.raw).unwrap();
+    legacy_reply["schema_version"] = json!(1);
+    let notes = legacy_reply
+        .as_object_mut()
+        .unwrap()
+        .remove("task_observations")
+        .unwrap();
+    legacy_reply["security_relevant_clues"] = notes;
+    let raw = serde_json::to_vec(&legacy_reply).unwrap();
+    let blob = run.blobs.publish_bytes(&raw).unwrap();
+    legacy[index].payload["raw_observation_blob_id"] = json!(blob.blob_id);
     legacy[index]
         .payload
         .as_object_mut()

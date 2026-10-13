@@ -1,11 +1,14 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Cursor;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use base64::Engine;
-use echidna::adapters::credentials::{CredentialSource, CredentialSourceError};
+use echidna::adapters::credentials::{
+    CredentialResolution, CredentialSource, CredentialSourceError,
+};
 use echidna::adapters::project_event_store::Project;
 use echidna::adapters::responses::{ResponsesHttpAdapter, ResponsesHttpConfig};
 use echidna::adapters::tools::ToolRegistry;
@@ -15,22 +18,28 @@ use echidna::app::model_streaming::{
     ModelStreamCancellation, ModelStreamOutcome, ModelStreamingError, ModelStreamingService,
 };
 use echidna::domain::artifacts::ArtifactId;
-use echidna::domain::events::StreamId;
+use echidna::domain::context::{
+    ProviderSession, ProviderSessionId, ProviderSessionRef, ProviderSessionRole,
+};
+use echidna::domain::events::{EventId, EventSequence, OccurredAt, StreamId};
 use echidna::domain::model::{
-    CapabilityMappingVersion, ContentItem, MessageRole, ModelCapabilities, ModelEvent,
-    ModelInputIR, ModelRequestRequirements, ModelUsage,
+    CapabilityMappingVersion, ContentItem, MessageRole, ModelCapabilities, ModelCapabilityError,
+    ModelEvent, ModelInputIR, ModelRequestRequirements, ModelUsage,
 };
 use echidna::domain::project::ProjectId;
 use echidna::domain::request_audit::{
     RequestAdapterVersion, RequestAuditBinding, RequestAuditRunContext,
 };
+use echidna::domain::session::{SessionEvent, SessionReducer};
 use echidna::domain::tools::{
     ExecutionId, ToolCall, ToolCallId, ToolExecutionOutcome, ToolName, ToolResult, ToolResultStatus,
 };
 use echidna::ports::model::{
-    ModelProvider, ModelProviderError, ModelRequest, ModelResponseCompletion, ProviderResponseId,
+    ModelProvider, ModelProviderError, ModelRequest, ModelResponseCompletion, ModelStreamEvent,
+    ProviderResponseId,
 };
 use echidna::ports::tool::ToolExecutor;
+use futures_util::StreamExt;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -58,6 +67,52 @@ enum FakeCredentialResult {
 struct FakeCredentialSource {
     result: FakeCredentialResult,
     references: Mutex<Vec<String>>,
+}
+
+type CredentialLookupResult = Result<Option<String>, CredentialSourceError>;
+
+struct PendingCredentialSource {
+    polls: Arc<AtomicUsize>,
+    receiver: Mutex<Option<oneshot::Receiver<CredentialLookupResult>>>,
+}
+
+impl PendingCredentialSource {
+    fn new() -> (Arc<Self>, oneshot::Sender<CredentialLookupResult>) {
+        let (sender, receiver) = oneshot::channel();
+        (
+            Arc::new(Self {
+                polls: Arc::new(AtomicUsize::new(0)),
+                receiver: Mutex::new(Some(receiver)),
+            }),
+            sender,
+        )
+    }
+
+    fn polls(&self) -> usize {
+        self.polls.load(Ordering::SeqCst)
+    }
+}
+
+impl CredentialSource for PendingCredentialSource {
+    fn read(&self, _: &str) -> Result<Option<String>, CredentialSourceError> {
+        panic!("a pending credential source must not use the synchronous reader")
+    }
+
+    fn resolve(&self, _: &str) -> CredentialResolution {
+        let receiver = self
+            .receiver
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+            .expect("each fixture adapter has one model request");
+        let polls = Arc::clone(&self.polls);
+        CredentialResolution::Pending(Box::pin(async move {
+            polls.fetch_add(1, Ordering::SeqCst);
+            receiver
+                .await
+                .expect("fixture credential sender remains alive")
+        }))
+    }
 }
 
 impl FakeCredentialSource {
@@ -152,6 +207,35 @@ fn adapter(
             capabilities(),
         ),
         credential_source,
+    )
+}
+
+fn subscription_capabilities() -> ModelCapabilities {
+    let mut capabilities = capabilities();
+    capabilities.incremental_input = false;
+    capabilities.usage_reporting = false;
+    capabilities
+}
+
+fn subscription_adapter(
+    base_url: impl Into<String>,
+    credential_source: Arc<dyn CredentialSource>,
+) -> ResponsesHttpAdapter {
+    ResponsesHttpAdapter::new(
+        ResponsesHttpConfig::new(
+            base_url,
+            "fixture-subscription-model",
+            "chatgpt_subscription:fixture",
+            subscription_capabilities(),
+        )
+        .with_chatgpt_subscription_profile(),
+        credential_source,
+    )
+}
+
+fn subscription_full(input: ModelInputIR, scope: &str) -> ModelRequest {
+    ModelRequest::full(input).with_opaque_continuation_scope(
+        serde_json::from_value(json!(scope)).expect("fixture scope serializes"),
     )
 }
 
@@ -400,6 +484,14 @@ async fn spawn_sse_server(
     status: u16,
     body: &str,
 ) -> (String, oneshot::Receiver<CapturedRequest>, JoinHandle<()>) {
+    spawn_sse_server_chunked(status, body, 17).await
+}
+
+async fn spawn_sse_server_chunked(
+    status: u16,
+    body: &str,
+    chunk_bytes: usize,
+) -> (String, oneshot::Receiver<CapturedRequest>, JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let response_body = body.as_bytes().to_vec();
@@ -417,7 +509,7 @@ async fn spawn_sse_server(
         if socket.write_all(headers.as_bytes()).await.is_err() {
             return;
         }
-        for chunk in response_body.chunks(17) {
+        for chunk in response_body.chunks(chunk_bytes) {
             if socket.write_all(chunk).await.is_err() {
                 return;
             }
@@ -658,6 +750,721 @@ async fn reasoning_extension_tool_usage_and_full_only_completion_share_one_decod
     let actual: Value = serde_json::from_str(&request.body).unwrap();
     assert_eq!(actual["model"], json!("fixture-reasoning-model"));
     assert!(actual.get("previous_response_id").is_none());
+}
+
+#[tokio::test]
+async fn subscription_profile_encodes_full_stateless_request_and_namespace_tools() {
+    let (base_url, request_receiver, server) = spawn_sse_server(
+        200,
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"subscription-request\",\"status\":\"completed\"}}\n\n",
+    )
+    .await;
+    let provider =
+        subscription_adapter(base_url, FakeCredentialSource::value(Some(FIXTURE_SECRET)));
+    let read_file = ToolRegistry::for_project(env!("CARGO_MANIFEST_DIR"))
+        .specs()
+        .into_iter()
+        .find(|spec| spec.name.as_str() == "read_file")
+        .expect("fixture registry supplies read_file");
+    let input =
+        fixture_input(ModelRequestRequirements::default()).with_tool_specs(vec![read_file.clone()]);
+
+    assert!(matches!(
+        ModelStreamingService::new(&provider)
+            .consume(
+                subscription_full(input, "subscription-request-scope"),
+                ModelStreamCancellation::new(),
+            )
+            .await,
+        Ok(ModelStreamOutcome::Completed { .. })
+    ));
+
+    let request = request_receiver.await.unwrap();
+    server.await.unwrap();
+    let wire: Value = serde_json::from_str(&request.body).unwrap();
+    assert_eq!(wire["model"], json!("fixture-subscription-model"));
+    assert_eq!(wire["store"], json!(false));
+    assert_eq!(wire["stream"], json!(true));
+    assert_eq!(wire["include"], json!(["reasoning.encrypted_content"]));
+    assert!(wire.get("previous_response_id").is_none());
+    assert!(wire.get("max_output_tokens").is_none());
+    assert_eq!(
+        wire["input"],
+        json!([{
+            "type": "message",
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "Inspect the target manifest."},
+                {"type": "input_text", "text": "Report only reproducible impact."},
+            ],
+        }])
+    );
+    let tools = wire["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 1);
+    let namespace = &tools[0];
+    assert_eq!(namespace["type"], json!("namespace"));
+    assert_eq!(namespace["name"], json!("echidna"));
+    assert_eq!(
+        namespace["description"],
+        json!("Echidna local agent tools.")
+    );
+    assert_eq!(namespace["tools"][0]["type"], json!("function"));
+    assert_eq!(
+        namespace["tools"][0]["name"],
+        json!(read_file.name.as_str())
+    );
+    assert_eq!(namespace["tools"][0]["parameters"], read_file.input_schema);
+}
+
+#[tokio::test]
+async fn subscription_tool_loop_replays_opaque_reasoning_without_disclosure() {
+    let reasoning = json!({
+        "type": "reasoning",
+        "id": "rsn-sub",
+        "status": "completed",
+        "content": [],
+        "encrypted_content": "ciphertext-canary",
+        "summary": [],
+    });
+    let call = json!({
+        "type": "function_call",
+        "call_id": "call-subscription",
+        "namespace": "echidna",
+        "name": "search_files",
+        "arguments": "{\"pattern\":\"echidna\",\"paths\":[\"Cargo.toml\"]}",
+    });
+    let first = [
+        json!({"type": "response.output_item.done", "output_index": 0, "item": reasoning}),
+        json!({"type": "response.output_item.done", "output_index": 1, "item": call}),
+        json!({"type": "response.completed", "response": {
+            "id": "response-subscription", "status": "completed", "output": [reasoning, call],
+        }}),
+    ]
+    .into_iter()
+    .map(|event| format!("data: {event}\n\n"))
+    .collect::<String>();
+    let second = concat!(
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"subscription search complete\"}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response-subscription-final\",\"status\":\"completed\"}}\n\n",
+    );
+    let (base_url, mut requests, server) =
+        spawn_sse_sequence_server(vec![first, second.to_owned()]).await;
+    let provider =
+        subscription_adapter(base_url, FakeCredentialSource::value(Some(FIXTURE_SECRET)));
+    let tools = ToolRegistry::for_project(env!("CARGO_MANIFEST_DIR"));
+    let mut agent = AgentLoop::new(&provider, &tools);
+    let audit_context = RequestAuditRunContext::new(
+        RequestAuditBinding::new(
+            ProjectId::new("project-subscription-opaque"),
+            StreamId::new("session:subscription-opaque"),
+        )
+        .unwrap(),
+        ResponsesHttpAdapter::request_adapter_version(),
+    );
+    let mut audits = Vec::new();
+
+    let outcome = agent
+        .run_turn_audited(
+            "inspect the package manifest",
+            AgentCancellation::new(),
+            &audit_context,
+            &mut |attempt| {
+                audits.push(attempt);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        AgentTurnOutcome::Completed {
+            assistant_text,
+            model_requests: 2,
+            executions,
+        } if assistant_text == "subscription search complete" && executions.len() == 1
+    ));
+    assert!(agent.history().items().iter().all(|item| {
+        !matches!(
+            item,
+            ContentItem::Reasoning { .. } | ContentItem::OpaqueContinuation { .. }
+        )
+    }));
+    assert!(!format!("{:?}", agent.history()).contains("ciphertext-canary"));
+    assert!(!format!("{audits:?}").contains("ciphertext-canary"));
+
+    let first_request = requests.recv().await.unwrap();
+    let second_request = requests.recv().await.unwrap();
+    server.await.unwrap();
+    let first_wire: Value = serde_json::from_str(&first_request.body).unwrap();
+    assert_eq!(first_wire["tools"][0]["type"], json!("namespace"));
+    assert_eq!(first_wire["tools"][0]["name"], json!("echidna"));
+    let second_wire: Value = serde_json::from_str(&second_request.body).unwrap();
+    assert!(second_wire.get("previous_response_id").is_none());
+    let input = second_wire["input"].as_array().unwrap();
+    assert_eq!(input.len(), 4);
+    assert_eq!(input[0]["type"], json!("message"));
+    assert_eq!(input[1]["type"], json!("reasoning"));
+    assert_eq!(input[1]["id"], json!("rsn-sub"));
+    assert_eq!(input[1]["encrypted_content"], json!("ciphertext-canary"));
+    assert_eq!(input[2]["type"], json!("function_call"));
+    assert_eq!(input[2]["name"], json!("search_files"));
+    assert_eq!(input[2]["namespace"], json!("echidna"));
+    assert_eq!(input[3]["type"], json!("function_call_output"));
+}
+
+#[tokio::test]
+async fn subscription_decoder_rejects_foreign_or_missing_namespaces_but_standard_accepts_flat_calls()
+ {
+    for (case, namespace) in [("missing", None), ("foreign", Some("other"))] {
+        let mut call = json!({
+            "type": "function_call",
+            "call_id": format!("call-{case}"),
+            "name": "search_files",
+            "arguments": "{\"pattern\":\"Cargo.toml\",\"paths\":[\".\"]}",
+        });
+        if let Some(namespace) = namespace {
+            call["namespace"] = json!(namespace);
+        }
+        let body = [
+            json!({"type": "response.output_item.done", "output_index": 0, "item": call}),
+            json!({"type": "response.completed", "response": {
+                "id": format!("response-{case}"), "status": "completed", "output": [call],
+            }}),
+        ]
+        .into_iter()
+        .map(|event| format!("data: {event}\n\n"))
+        .collect::<String>();
+        let (base_url, request, server) = spawn_sse_server(200, &body).await;
+        let provider =
+            subscription_adapter(base_url, FakeCredentialSource::value(Some(FIXTURE_SECRET)));
+        let result = ModelStreamingService::new(&provider)
+            .consume(
+                subscription_full(
+                    fixture_input(ModelRequestRequirements::default()),
+                    "subscription-namespace-scope",
+                ),
+                ModelStreamCancellation::new(),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(ModelStreamingError::Provider(ModelProviderError::ProtocolFailure { message }))
+                if message.contains("advertised `echidna` namespace")
+        ));
+        request.await.unwrap();
+        server.await.unwrap();
+    }
+
+    let call = json!({
+        "type": "function_call",
+        "call_id": "call-standard-flat",
+        "name": "search_files",
+        "arguments": "{\"pattern\":\"Cargo.toml\",\"paths\":[\".\"]}",
+    });
+    let body = [
+        json!({"type": "response.output_item.done", "output_index": 0, "item": call}),
+        json!({"type": "response.completed", "response": {
+            "id": "response-standard-flat", "status": "completed", "output": [call],
+        }}),
+    ]
+    .into_iter()
+    .map(|event| format!("data: {event}\n\n"))
+    .collect::<String>();
+    let (base_url, request, server) = spawn_sse_server(200, &body).await;
+    let provider = adapter(base_url, FakeCredentialSource::value(Some(FIXTURE_SECRET)));
+    assert!(matches!(
+        ModelStreamingService::new(&provider)
+            .consume(
+                full(fixture_input(ModelRequestRequirements::default())),
+                ModelStreamCancellation::new(),
+            )
+            .await,
+        Ok(ModelStreamOutcome::Completed { events, .. })
+            if matches!(events.as_slice(), [ModelEvent::ToolCall { call }]
+                if call.name.as_str() == "search_files")
+    ));
+    request.await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn subscription_opaque_references_require_the_owning_adapter_and_scope() {
+    let opaque = json!({
+        "type": "reasoning",
+        "id": "rsn-closure",
+        "status": "completed",
+        "content": [],
+        "encrypted_content": "closure-ciphertext",
+        "summary": [],
+    });
+    let completed = [
+        json!({"type": "response.output_item.done", "output_index": 0, "item": opaque}),
+        json!({"type": "response.completed", "response": {
+            "id": "response-closure", "status": "completed", "output": [opaque],
+        }}),
+    ]
+    .into_iter()
+    .map(|event| format!("data: {event}\n\n"))
+    .collect::<String>();
+    let (base_url, request, server) = spawn_sse_server(200, &completed).await;
+    let source = FakeCredentialSource::value(Some(FIXTURE_SECRET));
+    let provider = subscription_adapter(base_url, source.clone());
+    let outcome = ModelStreamingService::new(&provider)
+        .consume(
+            subscription_full(
+                fixture_input(ModelRequestRequirements::default()),
+                "subscription-closure-scope",
+            ),
+            ModelStreamCancellation::new(),
+        )
+        .await
+        .unwrap();
+    request.await.unwrap();
+    server.await.unwrap();
+    let reference = match outcome {
+        ModelStreamOutcome::Completed { events, .. } => events
+            .into_iter()
+            .find_map(|event| match event {
+                ModelEvent::OpaqueContinuation { reference } => Some(reference),
+                _ => None,
+            })
+            .expect("completed subscription response exposes an opaque reference"),
+        ModelStreamOutcome::Cancelled { .. } => panic!("fixture response must complete"),
+    };
+    assert_eq!(source.references(), vec!["chatgpt_subscription:fixture"]);
+
+    let retained = ModelInputIR::current(
+        "Keep opaque continuation bounded.",
+        vec![ContentItem::OpaqueContinuation {
+            reference: reference.clone(),
+        }],
+        ModelRequestRequirements::default(),
+    );
+    let fresh_source = FakeCredentialSource::value(Some(FIXTURE_SECRET));
+    let fresh_adapter = subscription_adapter("http://127.0.0.1:1/v1", fresh_source.clone());
+    assert!(matches!(
+        fresh_adapter.stream(subscription_full(
+            retained.clone(),
+            "subscription-closure-scope",
+        )),
+        Err(ModelProviderError::RequestEncodingFailure { message })
+            if message.contains("unavailable in this Adapter")
+    ));
+    assert!(fresh_source.references().is_empty());
+
+    assert!(matches!(
+        provider.stream(subscription_full(retained, "different-delivery-scope")),
+        Err(ModelProviderError::RequestEncodingFailure { message })
+            if message.contains("belongs to another delivery session")
+    ));
+    assert_eq!(source.references(), vec!["chatgpt_subscription:fixture"]);
+}
+
+#[tokio::test]
+async fn incomplete_subscription_stream_does_not_commit_opaque_references() {
+    let body = concat!(
+        "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{",
+        "\"type\":\"reasoning\",\"id\":\"rsn-incomplete\",\"status\":\"completed\",",
+        "\"content\":[],\"encrypted_content\":\"incomplete-ciphertext\",\"summary\":[]}}\n\n",
+    );
+    let (base_url, request, server) = spawn_sse_server(200, body).await;
+    let source = FakeCredentialSource::value(Some(FIXTURE_SECRET));
+    let provider = subscription_adapter(base_url, source.clone());
+    let mut stream = provider
+        .stream(subscription_full(
+            fixture_input(ModelRequestRequirements::default()),
+            "subscription-incomplete-scope",
+        ))
+        .unwrap();
+    let reference = match stream.next().await.unwrap().unwrap() {
+        ModelStreamEvent::Event(ModelEvent::OpaqueContinuation { reference }) => reference,
+        other => panic!("expected opaque continuation event, got {other:?}"),
+    };
+    assert!(matches!(
+        stream.next().await,
+        Some(Err(ModelProviderError::ProtocolFailure { message }))
+            if message.contains("ended before `response.completed`")
+    ));
+    request.await.unwrap();
+    server.await.unwrap();
+
+    let retained = ModelInputIR::current(
+        "Keep opaque continuation bounded.",
+        vec![ContentItem::OpaqueContinuation { reference }],
+        ModelRequestRequirements::default(),
+    );
+    assert!(matches!(
+        provider.stream(subscription_full(retained, "subscription-incomplete-scope")),
+        Err(ModelProviderError::RequestEncodingFailure { message })
+            if message.contains("unavailable in this Adapter")
+    ));
+    assert_eq!(source.references(), vec!["chatgpt_subscription:fixture"]);
+}
+
+#[tokio::test]
+async fn subscription_opaque_store_rejects_cumulative_payloads_without_commit_or_retry() {
+    let encrypted_content = "x".repeat(3_400_000);
+    let one_reasoning = json!({
+        "type": "reasoning",
+        "id": "rsn-cumulative-0",
+        "status": "completed",
+        "content": [],
+        "encrypted_content": encrypted_content,
+        "summary": [],
+    });
+    assert!(
+        serde_json::to_vec(&one_reasoning).unwrap().len() < 4 * 1024 * 1024,
+        "each staged reasoning item remains below the four-MiB item limit"
+    );
+    let body = (0..5)
+        .map(|index| {
+            let mut reasoning = one_reasoning.clone();
+            reasoning["id"] = json!(format!("rsn-cumulative-{index}"));
+            format!(
+                "data: {}\n\n",
+                json!({
+                    "type": "response.output_item.done",
+                    "output_index": index,
+                    "item": reasoning,
+                })
+            )
+        })
+        .collect::<String>();
+    let (base_url, request, server) = spawn_sse_server_chunked(200, &body, 64 * 1024).await;
+    let credentials = FakeCredentialSource::value(Some(FIXTURE_SECRET));
+    let provider = subscription_adapter(base_url, credentials.clone());
+    let scope = "subscription-cumulative-scope";
+    let mut stream = provider
+        .stream(subscription_full(
+            fixture_input(ModelRequestRequirements::default()),
+            scope,
+        ))
+        .unwrap();
+
+    let first_reference = match stream.next().await.unwrap().unwrap() {
+        ModelStreamEvent::Event(ModelEvent::OpaqueContinuation { reference }) => reference,
+        other => panic!("expected the first staged opaque continuation, got {other:?}"),
+    };
+    for _ in 1..4 {
+        assert!(matches!(
+            stream.next().await.unwrap().unwrap(),
+            ModelStreamEvent::Event(ModelEvent::OpaqueContinuation { .. })
+        ));
+    }
+    assert!(matches!(
+        stream.next().await,
+        Some(Err(ModelProviderError::ProtocolFailure { message }))
+            if message.contains("bounded byte limit")
+    ));
+    request.await.unwrap();
+    server.await.unwrap();
+
+    let retained = ModelInputIR::current(
+        "A failed sample cannot retain opaque delivery state.",
+        vec![ContentItem::OpaqueContinuation {
+            reference: first_reference,
+        }],
+        ModelRequestRequirements::default(),
+    );
+    assert!(matches!(
+        provider.stream(subscription_full(retained, scope)),
+        Err(ModelProviderError::RequestEncodingFailure { message })
+            if message.contains("unavailable in this Adapter")
+    ));
+    assert_eq!(
+        credentials.references(),
+        vec!["chatgpt_subscription:fixture"],
+        "the rejected sample cannot commit a reference or trigger a retry"
+    );
+}
+
+#[tokio::test]
+async fn subscription_failed_or_incomplete_opaque_tool_samples_are_atomic_and_not_retried() {
+    for (case, terminal, expected) in [
+        (
+            "failed",
+            json!({"type": "response.failed", "response": {
+                "error": {"code": "subscription_failure", "message": "fixture failure"},
+            }}),
+            "fixture failure",
+        ),
+        (
+            "incomplete",
+            json!({"type": "response.incomplete", "response": {
+                "incomplete_details": {"reason": "fixture_limit"},
+            }}),
+            "was incomplete: fixture_limit",
+        ),
+    ] {
+        let opaque = json!({
+            "type": "reasoning",
+            "id": format!("rsn-atomic-{case}"),
+            "status": "completed",
+            "content": [],
+            "encrypted_content": format!("atomic-ciphertext-{case}"),
+            "summary": [],
+        });
+        let call = json!({
+            "type": "function_call",
+            "call_id": format!("call-atomic-{case}"),
+            "namespace": "echidna",
+            "name": "search_files",
+            "arguments": "{\"pattern\":\"Cargo.toml\",\"paths\":[\".\"]}",
+        });
+        let body = [
+            json!({"type": "response.output_item.done", "output_index": 0, "item": opaque}),
+            json!({"type": "response.output_item.done", "output_index": 1, "item": call}),
+            terminal,
+        ]
+        .into_iter()
+        .map(|event| format!("data: {event}\n\n"))
+        .collect::<String>();
+        let (base_url, request, server) = spawn_sse_server(200, &body).await;
+        let credentials = FakeCredentialSource::value(Some(FIXTURE_SECRET));
+        let provider = subscription_adapter(base_url, credentials.clone());
+        let directory = support::TemporaryDirectory::new(&format!("subscription-atomic-{case}"));
+        let tools = ToolRegistry::for_project(directory.path());
+        let mut agent = AgentLoop::new(&provider, &tools);
+
+        let error = agent
+            .run_turn(
+                "reject the staged subscription sample",
+                AgentCancellation::new(),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains(expected), "{case}: {error}");
+        assert_eq!(
+            agent.history().items(),
+            &[ContentItem::user_text(
+                "reject the staged subscription sample"
+            )],
+            "{case}: opaque reasoning and ToolCall must not commit to History"
+        );
+        assert_eq!(
+            credentials.references(),
+            vec!["chatgpt_subscription:fixture"],
+            "{case}: terminal subscription failure must not retry"
+        );
+        request.await.unwrap();
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn subscription_http_quota_error_is_structured_safe_and_not_retried() {
+    let body = r#"{"error":{"code":"insufficient_quota","message":"account-routing-secret"}}"#;
+    let (base_url, request, server) = spawn_sse_server(429, body).await;
+    let credentials = FakeCredentialSource::value(Some(FIXTURE_SECRET));
+    let provider = subscription_adapter(base_url, credentials.clone());
+    let result = ModelStreamingService::new(&provider)
+        .consume(
+            subscription_full(
+                fixture_input(ModelRequestRequirements::default()),
+                "subscription-quota-scope",
+            ),
+            ModelStreamCancellation::new(),
+        )
+        .await;
+    assert_eq!(
+        result,
+        Err(ModelStreamingError::Provider(
+            ModelProviderError::ProviderFailure {
+                code: Some("insufficient_quota".to_owned()),
+                message: "ChatGPT subscription Responses request failed with HTTP 429".to_owned(),
+            }
+        ))
+    );
+    assert!(!format!("{result:?}").contains("account-routing-secret"));
+    assert_eq!(
+        credentials.references(),
+        vec!["chatgpt_subscription:fixture"]
+    );
+    request.await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn explicit_resume_discards_opaque_delivery_state_before_the_next_subscription_request() {
+    let opaque = json!({
+        "type": "reasoning",
+        "id": "rsn-before-resume",
+        "status": "completed",
+        "content": [],
+        "encrypted_content": "resume-ciphertext",
+        "summary": [],
+    });
+    let first = [
+        json!({"type": "response.output_item.done", "output_index": 0, "item": opaque}),
+        json!({"type": "response.output_text.delta", "delta": "opaque state committed"}),
+        json!({"type": "response.completed", "response": {
+            "id": "response-before-resume", "status": "completed",
+        }}),
+    ]
+    .into_iter()
+    .map(|event| format!("data: {event}\n\n"))
+    .collect::<String>();
+    let second = concat!(
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"fresh after resume\"}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response-after-resume\",\"status\":\"completed\"}}\n\n",
+    );
+    let (base_url, mut requests, server) =
+        spawn_sse_sequence_server(vec![first, second.to_owned()]).await;
+    let provider =
+        subscription_adapter(base_url, FakeCredentialSource::value(Some(FIXTURE_SECRET)));
+    let tools = ToolRegistry::for_project(env!("CARGO_MANIFEST_DIR"));
+    let mut agent = AgentLoop::new(&provider, &tools);
+    agent
+        .run_turn("create opaque delivery state", AgentCancellation::new())
+        .await
+        .unwrap();
+
+    let stream = StreamId::new("session:subscription-resume");
+    let resumed_primary = ProviderSessionRef {
+        id: ProviderSessionId::new("primary-subscription-resumed"),
+        role: ProviderSessionRole::Primary,
+        generation: 2,
+    };
+    let session = SessionReducer
+        .reduce([
+            SessionEvent::Started {
+                primary_provider_session: ProviderSessionRef {
+                    id: ProviderSessionId::new("primary-subscription-initial"),
+                    role: ProviderSessionRole::Primary,
+                    generation: 1,
+                },
+            }
+            .into_envelope(
+                EventId::new("subscription-resume-started"),
+                stream.clone(),
+                EventSequence::new(1),
+                OccurredAt::new("2026-10-12T00:00:00Z"),
+            )
+            .unwrap(),
+            SessionEvent::Resumed {
+                primary_provider_session: resumed_primary.clone(),
+            }
+            .into_envelope(
+                EventId::new("subscription-resume-resumed"),
+                stream,
+                EventSequence::new(2),
+                OccurredAt::new("2026-10-12T00:00:01Z"),
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+    agent
+        .resume_from_session(
+            &session,
+            ProviderSession::new(
+                resumed_primary.id,
+                ProviderSessionRole::Primary,
+                resumed_primary.generation,
+            ),
+            None,
+        )
+        .unwrap();
+    assert!(agent.history().items().is_empty());
+
+    let outcome = agent
+        .run_turn("continue after explicit Resume", AgentCancellation::new())
+        .await
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        AgentTurnOutcome::Completed { assistant_text, .. } if assistant_text == "fresh after resume"
+    ));
+    let first_request = requests.recv().await.unwrap();
+    let resumed_request = requests.recv().await.unwrap();
+    server.await.unwrap();
+    assert!(first_request.body.contains("create opaque delivery state"));
+    let resumed_wire: Value = serde_json::from_str(&resumed_request.body).unwrap();
+    assert!(resumed_wire.get("previous_response_id").is_none());
+    assert!(
+        resumed_wire["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| { item.get("type").and_then(Value::as_str) != Some("reasoning") })
+    );
+    assert!(!resumed_request.body.contains("resume-ciphertext"));
+}
+
+#[tokio::test]
+async fn pending_credentials_wait_until_first_poll_and_never_fallback() {
+    let (base_url, mut request_receiver, server) = spawn_sse_server(
+        200,
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"pending-credential\",\"status\":\"completed\"}}\n\n",
+    )
+    .await;
+    let (source, release) = PendingCredentialSource::new();
+    let provider = adapter(base_url, source.clone());
+    let mut stream = provider
+        .stream(full(fixture_input(ModelRequestRequirements::default())))
+        .unwrap();
+    assert_eq!(source.polls(), 0);
+    let poll = tokio::spawn(async move { stream.next().await });
+    timeout(Duration::from_secs(1), async {
+        while source.polls() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("first stream poll must begin credential resolution");
+    assert_eq!(source.polls(), 1);
+    assert!(
+        timeout(Duration::from_millis(50), &mut request_receiver)
+            .await
+            .is_err(),
+        "the request must wait for the pending credential"
+    );
+    release.send(Ok(Some(FIXTURE_SECRET.to_owned()))).unwrap();
+    let request = request_receiver.await.unwrap();
+    assert_eq!(request.request_line, "POST /v1/responses HTTP/1.1");
+    assert!(matches!(
+        poll.await.unwrap(),
+        Some(Ok(ModelStreamEvent::Completed(_)))
+    ));
+    server.await.unwrap();
+
+    let (failed_source, failed_release) = PendingCredentialSource::new();
+    let failed_provider = adapter("http://127.0.0.1:1/v1", failed_source.clone());
+    let mut failed_stream = failed_provider
+        .stream(full(fixture_input(ModelRequestRequirements::default())))
+        .unwrap();
+    let failed_poll = tokio::spawn(async move { failed_stream.next().await });
+    timeout(Duration::from_secs(1), async {
+        while failed_source.polls() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("failed fixture must begin credential resolution once");
+    failed_release
+        .send(Err(CredentialSourceError::ReadFailed {
+            message: "pending fixture failed".to_owned(),
+        }))
+        .unwrap();
+    assert_eq!(
+        failed_poll.await.unwrap(),
+        Some(Err(ModelProviderError::CredentialSourceFailure {
+            credential_ref: FIXTURE_CREDENTIAL_REFERENCE.to_owned(),
+            message: "credential source failed: pending fixture failed".to_owned(),
+        }))
+    );
+    assert_eq!(failed_source.polls(), 1);
+
+    let (subscription_source, _subscription_release) = PendingCredentialSource::new();
+    let subscription_provider =
+        subscription_adapter("http://127.0.0.1:1/v1", subscription_source.clone());
+    assert_stream_error(
+        subscription_provider.stream(ModelRequest::incremental(
+            fixture_input(ModelRequestRequirements::default()),
+            ProviderResponseId::new("unsupported-incremental"),
+        )),
+        ModelProviderError::Capability(ModelCapabilityError::IncrementalInputUnsupported),
+    );
+    assert_eq!(subscription_source.polls(), 0);
 }
 
 #[tokio::test]

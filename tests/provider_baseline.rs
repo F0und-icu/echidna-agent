@@ -6,14 +6,16 @@ use echidna::domain::context::{
     ProviderSessionRole, StepSnapshot, TurnContext, TurnId,
 };
 use echidna::domain::model::{
-    CapabilityMappingVersion, ContentItem, ModelCapabilities, ModelInputIR,
-    ModelInputIrSchemaVersion, ModelRequestRequirements,
+    CapabilityMappingVersion, ContentItem, MODEL_INPUT_IR_SCHEMA_VERSION, ModelCapabilities,
+    ModelInputIR, ModelInputIrSchemaVersion, ModelRequestRequirements,
 };
 use echidna::domain::tools::{
     ToolCachePolicy, ToolCall, ToolCallId, ToolDeterminism, ToolEffect, ToolExposure, ToolName,
     ToolOutputPolicy, ToolParallelism, ToolResult, ToolResultStatus, ToolRetryPolicy, ToolSpec,
 };
 use serde_json::{Value, json};
+
+const FUTURE_MODEL_INPUT_IR_SCHEMA_VERSION: u16 = MODEL_INPUT_IR_SCHEMA_VERSION + 1;
 
 fn capabilities() -> ModelCapabilities {
     ModelCapabilities {
@@ -241,7 +243,8 @@ fn invalidation_matrix_separates_model_profile_and_uses_stable_priority() {
             Change::Model => candidate_model = ModelIdentity::new("primary", "model-v2"),
             Change::Profile => candidate_profile = ModelProfile::new("fast", 2),
             Change::IrSchema => {
-                candidate_request.schema_version = ModelInputIrSchemaVersion::new(99)
+                candidate_request.schema_version =
+                    ModelInputIrSchemaVersion::new(FUTURE_MODEL_INPUT_IR_SCHEMA_VERSION)
             }
             Change::Capability => {
                 candidate_capabilities.capability_mapping_version =
@@ -287,7 +290,7 @@ fn invalidation_matrix_separates_model_profile_and_uses_stable_priority() {
     input.tool_specs[0].version = "2".to_owned();
     input.requirements.structured_output = true;
     input.requirements.usage_reporting = true;
-    input.schema_version = ModelInputIrSchemaVersion::new(99);
+    input.schema_version = ModelInputIrSchemaVersion::new(FUTURE_MODEL_INPUT_IR_SCHEMA_VERSION);
     let mut model = ModelIdentity::new("primary", "model-v2");
     let mut profile = ModelProfile::new("fast", 2);
     let mut mapping = capabilities();
@@ -322,7 +325,10 @@ fn invalidation_matrix_separates_model_profile_and_uses_stable_priority() {
             match step {
                 0 => model = ModelIdentity::new("primary", "model-v1"),
                 1 => profile = ModelProfile::new("research", 1),
-                2 => input.schema_version = ModelInputIrSchemaVersion::new(3),
+                2 => {
+                    input.schema_version =
+                        ModelInputIrSchemaVersion::new(MODEL_INPUT_IR_SCHEMA_VERSION)
+                }
                 3 => mapping.capability_mapping_version = CapabilityMappingVersion::new(1),
                 4 => input.instructions = "prompt-v1".to_owned(),
                 5 => input.tool_specs[0].version = "1".to_owned(),

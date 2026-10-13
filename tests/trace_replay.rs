@@ -281,7 +281,9 @@ fn research_with_required_artifact(
         source_path: "fixture.bin".to_owned(),
         created_by_event_id: EventId::new("artifact-event"),
         produced_by_tool_call_id: ToolCallId::new("artifact-call"),
-        target_snapshot_id: snapshot_id,
+        scope: echidna::domain::artifacts::ArtifactScope::Target {
+            target_snapshot_id: snapshot_id,
+        },
         toolchain_fingerprint: "fixture-toolchain".to_owned(),
         parent_artifact_ids: Vec::new(),
         transform: None,
@@ -838,33 +840,38 @@ async fn replay_narrows_an_incremental_source_mapping_to_full_delivery() {
 }
 
 #[tokio::test]
-async fn replay_upcasts_historical_v2_input_before_matching_a_current_request() {
-    let mut historical_input = current_prompt_input("inspect fixture", Vec::new());
-    historical_input.schema_version = echidna::domain::model::ModelInputIrSchemaVersion::new(2);
-    let provider = ReplayModelProvider::new(
-        capabilities(),
-        [ReplayModelStep::new(
-            historical_input,
-            vec![ModelEvent::TextDelta {
-                text: "historical replay output".to_owned(),
-            }],
+async fn replay_upcasts_historical_v2_and_v3_inputs_before_matching_current_requests() {
+    for schema_version in [2, 3] {
+        let mut historical_input = current_prompt_input("inspect fixture", Vec::new());
+        historical_input.schema_version =
+            echidna::domain::model::ModelInputIrSchemaVersion::new(schema_version);
+        let provider = ReplayModelProvider::new(
+            capabilities(),
+            [ReplayModelStep::new(
+                historical_input,
+                vec![ModelEvent::TextDelta {
+                    text: "historical replay output".to_owned(),
+                }],
+            )
+            .unwrap()],
         )
-        .unwrap()],
-    )
-    .unwrap();
-    let tools = ReplayToolExecutor::new(
-        replay_source(),
-        Vec::<ToolSpec>::new(),
-        Vec::<ReplayToolStep>::new(),
-    )
-    .unwrap();
-    let mut agent = AgentLoop::new(&provider, &tools);
+        .unwrap();
+        let tools = ReplayToolExecutor::new(
+            replay_source(),
+            Vec::<ToolSpec>::new(),
+            Vec::<ReplayToolStep>::new(),
+        )
+        .unwrap();
+        let mut agent = AgentLoop::new(&provider, &tools);
 
-    agent
-        .run_turn("inspect fixture", AgentCancellation::new())
-        .await
-        .expect("historical v2 input is losslessly promoted before request matching");
-    assert_eq!(provider.remaining_steps(), 0);
+        agent
+            .run_turn("inspect fixture", AgentCancellation::new())
+            .await
+            .unwrap_or_else(|error| {
+                panic!("historical v{schema_version} input must upcast losslessly: {error}")
+            });
+        assert_eq!(provider.remaining_steps(), 0);
+    }
 }
 
 #[test]

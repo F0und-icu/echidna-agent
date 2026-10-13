@@ -20,6 +20,8 @@ pub mod ports;
 pub mod provider_composition;
 pub mod trace_eval_runtime;
 
+mod cli_agent;
+mod cli_auth;
 mod cli_chat;
 mod cli_inspection;
 mod cli_session;
@@ -30,7 +32,7 @@ mod terminal_content;
     name = "echidna",
     version,
     long_version = concat!(env!("CARGO_PKG_VERSION"), "\nsource base: ", env!("ECHIDNA_SOURCE_REVISION")),
-    about = "Echidna — Local Vulnerability Research Agent"
+    about = "Echidna — Local Agent with editable task definitions"
 )]
 pub struct Cli {
     /// Load the explicit Echidna Provider configuration from this path.
@@ -46,6 +48,9 @@ enum CliCommand {
     Init,
     /// Start an interactive research session.
     Chat {
+        /// Select a local Agent definition directory or agent.toml for a new Session.
+        #[arg(long, value_name = "PATH", conflicts_with = "session")]
+        agent: Option<PathBuf>,
         /// Show sanitized sent prompts and model content, without SSE envelopes (development builds only).
         #[cfg(debug_assertions)]
         #[arg(long)]
@@ -66,6 +71,16 @@ enum CliCommand {
     },
     /// Inspect local configuration and runtime readiness.
     Doctor,
+    /// Manage the explicitly configured Echidna subscription account.
+    Auth {
+        #[command(subcommand)]
+        command: cli_auth::AuthCommand,
+    },
+    /// Create, validate, or inspect an editable Agent definition without a model request.
+    Agent {
+        #[command(subcommand)]
+        command: cli_agent::AgentCommand,
+    },
     /// Inspect the most recently committed audited request.
     Prompt {
         #[command(subcommand)]
@@ -229,6 +244,8 @@ enum PromptCommand {
 
 #[derive(Debug, Error)]
 pub enum CliError {
+    #[error("Agent definition: {message}")]
+    AgentDefinition { message: String },
     #[error("failed to render CLI help: {0}")]
     Help(#[from] io::Error),
     #[error("failed to encode diagnostic output: {0}")]
@@ -241,6 +258,12 @@ pub enum CliError {
     ProviderComposition(#[from] ProviderCompositionError),
     #[error("chat requires one explicit --config <path> Provider configuration")]
     ChatConfigurationRequired,
+    #[error("auth requires one explicit --config <path> Provider configuration")]
+    AuthConfigurationRequired,
+    #[error("failed to build the local authentication runtime: {0}")]
+    AuthRuntime(#[source] io::Error),
+    #[error("subscription authentication failed: {message}")]
+    SubscriptionAuthentication { message: String },
     #[error("failed to build the local chat runtime: {0}")]
     ChatRuntime(#[source] io::Error),
     #[error("chat failed: {message}")]
@@ -363,6 +386,7 @@ fn discover_current_project() -> Result<Project, CliError> {
 
 fn run_chat(
     config: Option<&Path>,
+    agent: Option<PathBuf>,
     session: Option<String>,
     domain: Option<CliDomainProfile>,
     phase: Option<CliResearchPhase>,
@@ -388,6 +412,7 @@ fn run_chat(
         .block_on(cli_chat::run(
             project,
             &composition,
+            agent,
             session,
             domain.map(DomainProfile::from),
             phase.map(ResearchPhase::from),
@@ -407,6 +432,7 @@ where
     match cli.command {
         Some(CliCommand::Init) => initialize_current_project(),
         Some(CliCommand::Chat {
+            agent,
             session,
             domain,
             phase,
@@ -414,6 +440,7 @@ where
             debug,
         }) => run_chat(
             cli.config.as_deref(),
+            agent,
             session,
             domain,
             phase,
@@ -424,6 +451,8 @@ where
             let composition = load_provider_composition(cli.config.as_deref())?;
             print_json(&doctor_report(composition.as_ref()))
         }
+        Some(CliCommand::Auth { command }) => cli_auth::run(cli.config.as_deref(), command),
+        Some(CliCommand::Agent { command }) => cli_agent::run(cli.config.as_deref(), command),
         Some(CliCommand::Prompt {
             inspection: PromptCommand::Inspect { session },
         }) => cli_inspection::print_prompt_inspection(session.as_deref()),

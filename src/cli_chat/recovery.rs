@@ -4,10 +4,11 @@ use super::{ChatError, DurableChatSession, unresolved_receipted_tool_call};
 use crate::adapters::project_event_store::ProjectEventStream;
 use crate::app::agent_loop::{AgentLoop, AgentLoopError};
 use crate::app::model_request_budget::ModelRequestBudget;
+use crate::app::model_streaming::ModelStreamingError;
 use crate::app::session::SessionProjection;
 use crate::domain::session::{SessionError, SessionState};
 use crate::ports::EventSource;
-use crate::ports::model::ModelProvider;
+use crate::ports::model::{ModelProvider, ModelProviderError};
 use crate::ports::tool::ToolExecutor;
 
 pub(super) fn report_budget(budget: &ModelRequestBudget) {
@@ -25,6 +26,16 @@ pub(super) fn report_budget(budget: &ModelRequestBudget) {
 pub(super) fn report_stop(error: &AgentLoopError, budget: &ModelRequestBudget) {
     eprintln!("[turn stopped] {error}");
     report_budget(budget);
+    if matches!(
+        error,
+        AgentLoopError::Model(ModelStreamingError::Provider(
+            ModelProviderError::ProtocolFailure { .. }
+        ))
+    ) {
+        println!(
+            "Protocol sample was rejected before completion; its streamed output was not committed and no Tool from this sample was dispatched."
+        );
+    }
     println!(
         "Durable checkpoint retained. Use /resume to rebuild ProviderSession explicitly, then enter a new task. No automatic retry or reasoning discard."
     );

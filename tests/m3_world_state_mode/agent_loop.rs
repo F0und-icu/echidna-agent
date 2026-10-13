@@ -294,7 +294,7 @@ async fn truncated_world_state_plan_never_injects_an_unplanned_diff() {
         // Exact Research schemas and R4b tool guidance are fixed model input.
         // Keep enough room for those contracts while still forcing the
         // deliberately oversized WorldState through the truncation path.
-        context_window: 20_480,
+        context_window: 20_992,
         ..incremental_capabilities()
     };
     let provider = ScriptedProvider::new(

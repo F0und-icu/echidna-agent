@@ -123,7 +123,12 @@ fn domain_and_ports_keep_the_required_dependency_direction() {
     );
     assert_sources_do_not_contain(
         &repository_root.join("src/adapters"),
-        &[&["crate::app", "super::app"]],
+        &[&[
+            "crate::app",
+            "super::app",
+            "crate::provider_composition",
+            "super::provider_composition",
+        ]],
     );
     assert_sources_do_not_contain(
         &repository_root.join("src/ports"),

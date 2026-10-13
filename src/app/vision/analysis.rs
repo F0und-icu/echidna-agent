@@ -19,6 +19,7 @@ use crate::domain::context::{
 use crate::domain::events::EventId;
 use crate::domain::model::{
     ContentItem, MessageRole, ModelCapabilityError, ModelEvent, ModelRequestRequirements,
+    OpaqueContinuationScope,
 };
 use crate::domain::request_audit::{
     RequestAuditAttempt, RequestAuditDelivery, RequestAuditManifest, RequestAuditRunContext,
@@ -31,7 +32,7 @@ use crate::domain::vision::{
 use crate::ports::artifact::ArtifactStore;
 use crate::ports::model::{ModelProvider, ModelRequest};
 
-const VISION_INSTRUCTIONS: &str = "Analyze the supplied local image for vulnerability research. Return only one JSON object, without Markdown or commentary. The object must contain exactly these fields: schema_version (the integer 1), summary (string), extracted_text (string or null), regions (array), security_relevant_clues (array of strings), and uncertainty (array of strings). Every regions item must contain exactly label (string), x (non-negative integer), y (non-negative integer), width (positive integer), and height (positive integer); do not add description or any other field. Use an empty array when no bounded region or clue is available. Do not call tools and do not claim a verified finding.";
+const VISION_INSTRUCTIONS: &str = "Analyze the supplied local image for the user's current task. Return only one JSON object, without Markdown or commentary. The object must contain exactly these fields: schema_version (the integer 2), summary (string), extracted_text (string or null), regions (array), task_observations (array of strings), and uncertainty (array of strings). Every regions item must contain exactly label (string), x (non-negative integer), y (non-negative integer), width (positive integer), and height (positive integer); do not add description or any other field. Use an empty array when no bounded region or task observation is available. Do not call tools. Describe observations and uncertainty; do not claim independent verification.";
 const REGION_INSTRUCTIONS: &str = "Use the supplied vision_image_geometry, not estimated image dimensions. Region coordinates are integer pixels in the delivered image, with origin at its top-left, x increasing right and y increasing down. Right and bottom edges are exclusive: x + width <= delivery_width and y + height <= delivery_height. Do not use original-image, normalized or device-screen coordinates. Do not convert coordinates implicitly. If a region cannot be localized reliably in this frame, return regions: [] and explain uncertainty. In-bounds coordinates are still unverified model observations.";
 
 /// All caller-owned identities for a single targeted image analysis.
@@ -296,7 +297,12 @@ where
             ));
         }
         let outcome = ModelStreamingService::new(self.provider)
-            .consume(ModelRequest::full(model_input), cancellation)
+            .consume(
+                ModelRequest::full(model_input).with_opaque_continuation_scope(
+                    OpaqueContinuationScope::for_provider_session(&input.provider_session),
+                ),
+                cancellation,
+            )
             .await
             .map_err(|error| {
                 attempt_failed(
@@ -328,7 +334,7 @@ where
                 error,
             )
         })?;
-        let reply = decode_model_reply(&raw).map_err(|error| {
+        let reply = decode_current_model_reply(&raw).map_err(|error| {
             attempt_failed(
                 &input,
                 &task_hash,
@@ -382,7 +388,8 @@ where
             summary: reply.summary,
             extracted_text: reply.extracted_text,
             regions: reply.regions,
-            security_relevant_clues: reply.security_relevant_clues,
+            security_relevant_clues: None,
+            task_observations: reply.task_observations,
             uncertainty: reply.uncertainty,
             provider_profile: input.provider_profile.clone(),
             capability_hash: input.capability_hash.clone(),
@@ -417,6 +424,7 @@ fn collect_json_response(events: Vec<ModelEvent>) -> Result<String, VisionAnalys
             ModelEvent::TextDelta { text } => response.push_str(&text),
             ModelEvent::ReasoningDelta { .. } => {}
             ModelEvent::ReasoningItem { .. } => {}
+            ModelEvent::OpaqueContinuation { .. } => {}
             ModelEvent::Usage { .. } => {}
             ModelEvent::ToolCall { .. } => return Err(VisionAnalysisError::ToolCallRejected),
         }
@@ -461,17 +469,33 @@ pub(super) struct VisionModelReply {
     pub(super) extracted_text: Option<String>,
     #[serde(default)]
     pub(super) regions: Vec<VisionRegion>,
-    #[serde(default)]
-    pub(super) security_relevant_clues: Vec<String>,
+    #[serde(
+        default,
+        deserialize_with = "crate::domain::vision::deserialize_present_observations"
+    )]
+    pub(super) security_relevant_clues: Option<Vec<String>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::domain::vision::deserialize_present_observations"
+    )]
+    pub(super) task_observations: Option<Vec<String>>,
     #[serde(default)]
     pub(super) uncertainty: Vec<String>,
 }
 
 impl VisionModelReply {
     fn validate(&self) -> Result<(), VisionAnalysisError> {
-        if self.schema_version != VISION_FACT_SCHEMA_VERSION {
+        if !matches!(self.schema_version, 1 | 2) {
             return Err(VisionAnalysisError::ModelReplySchema {
                 received: self.schema_version,
+            });
+        }
+        if (self.schema_version == 1 && self.task_observations.is_some())
+            || (self.schema_version == 2
+                && (self.security_relevant_clues.is_some() || self.task_observations.is_none()))
+        {
+            return Err(VisionAnalysisError::ModelReplyDecode {
+                message: "observation fields do not match reply schema".to_owned(),
             });
         }
         if self.summary.trim().is_empty() {
@@ -484,17 +508,61 @@ impl VisionModelReply {
         self.summary == observation.summary
             && self.extracted_text == observation.extracted_text
             && self.regions == observation.regions
-            && self.security_relevant_clues == observation.security_relevant_clues
+            && match observation.schema_version {
+                1 | 2 => {
+                    self.schema_version == 1
+                        && self.security_relevant_clues.as_deref().unwrap_or_default()
+                            == observation.observation_notes()
+                }
+                3 => {
+                    self.schema_version == 2
+                        && self.task_observations == observation.task_observations
+                }
+                _ => false,
+            }
             && self.uncertainty == observation.uncertainty
     }
 }
 
 pub(super) fn decode_model_reply(raw: &str) -> Result<VisionModelReply, VisionAnalysisError> {
-    let reply: VisionModelReply =
+    let value: serde_json::Value =
         serde_json::from_str(raw).map_err(|error| VisionAnalysisError::ModelReplyDecode {
             message: error.to_string(),
         })?;
+    if value
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        == Some(2)
+    {
+        for field in [
+            "summary",
+            "extracted_text",
+            "regions",
+            "task_observations",
+            "uncertainty",
+        ] {
+            if value.get(field).is_none() {
+                return Err(VisionAnalysisError::ModelReplyDecode {
+                    message: format!("reply schema 2 requires `{field}`"),
+                });
+            }
+        }
+    }
+    let reply: VisionModelReply =
+        serde_json::from_value(value).map_err(|error| VisionAnalysisError::ModelReplyDecode {
+            message: error.to_string(),
+        })?;
     reply.validate()?;
+    Ok(reply)
+}
+
+fn decode_current_model_reply(raw: &str) -> Result<VisionModelReply, VisionAnalysisError> {
+    let reply = decode_model_reply(raw)?;
+    if reply.schema_version != 2 {
+        return Err(VisionAnalysisError::ModelReplySchema {
+            received: reply.schema_version,
+        });
+    }
     Ok(reply)
 }
 

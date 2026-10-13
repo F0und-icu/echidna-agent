@@ -246,11 +246,12 @@ fn research_candidates(
             .retrieval_artifact_records()
             .take(MAX_RESEARCH_CANDIDATES_PER_KIND)
             .map(|record| {
+                let scope_identifier = artifact_scope_identifier(record);
                 candidate(
                     format!("artifact:{}", record.id),
                     project_id,
                     RetrievalSource::ArtifactMetadata,
-                    CandidateTarget::snapshot(record.target_snapshot_id.as_str()),
+                    artifact_target(record),
                     vec![
                         (RetrievalField::Title, record.id.as_str().to_owned()),
                         (
@@ -258,7 +259,7 @@ fn research_candidates(
                             join([
                                 record.id.as_str(),
                                 record.blob_id.as_str(),
-                                record.target_snapshot_id.as_str(),
+                                scope_identifier.as_str(),
                             ]),
                         ),
                         (
@@ -309,17 +310,20 @@ fn observation_candidates(
 ) -> Result<Vec<RetrievalCandidate>, RetrievalError> {
     let artifact_targets = research
         .retrieval_artifact_records()
-        .map(|record| {
-            (
-                record.id.as_str().to_owned(),
-                record.target_snapshot_id.as_str().to_owned(),
-            )
+        .filter_map(|record| {
+            record.scope.target_snapshot_id().map(|target_snapshot_id| {
+                (
+                    record.id.as_str().to_owned(),
+                    target_snapshot_id.as_str().to_owned(),
+                )
+            })
         })
         .collect::<BTreeMap<_, _>>();
     observations
         .into_iter()
         .take(MAX_RESEARCH_CANDIDATES_PER_KIND)
         .map(|(session_id, observation)| {
+            let observation_notes = observation.observation_notes().join(" ");
             let target = artifact_targets
                 .get(observation.source_artifact_id.as_str())
                 .cloned()
@@ -344,7 +348,7 @@ fn observation_candidates(
                         RetrievalField::Body,
                         join([
                             observation.extracted_text.as_deref().unwrap_or(""),
-                            &observation.security_relevant_clues.join(" "),
+                            &observation_notes,
                             &observation.uncertainty.join(" "),
                         ]),
                     ),
@@ -430,6 +434,25 @@ fn target_for_research_reference(
 
 fn hypothesis_target(record: &HypothesisRecord) -> CandidateTarget {
     CandidateTarget::target_identity(&record.target_id, None)
+}
+
+fn artifact_target(record: &crate::domain::artifacts::ArtifactRecord) -> CandidateTarget {
+    record
+        .scope
+        .target_snapshot_id()
+        .map(|target_snapshot_id| CandidateTarget::snapshot(target_snapshot_id.as_str()))
+        .unwrap_or(CandidateTarget::ProjectScoped)
+}
+
+fn artifact_scope_identifier(record: &crate::domain::artifacts::ArtifactRecord) -> String {
+    match &record.scope {
+        crate::domain::artifacts::ArtifactScope::Session { session_id } => {
+            format!("session:{session_id}")
+        }
+        crate::domain::artifacts::ArtifactScope::Target { target_snapshot_id } => {
+            target_snapshot_id.as_str().to_owned()
+        }
+    }
 }
 
 fn research_reference_id(reference: &ResearchRecordRef) -> &str {

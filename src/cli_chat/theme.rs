@@ -18,9 +18,9 @@ impl Theme {
     pub(super) fn welcome(&self) {
         if self.terminal {
             if self.color {
-                println!("\x1b[35mEchidna\x1b[0m · Local Vulnerability Research Agent");
+                println!("\x1b[35mEchidna\x1b[0m · Local Agent");
             } else {
-                println!("Echidna · Local Vulnerability Research Agent");
+                println!("Echidna · Local Agent");
             }
             println!("Question. Observe. Verify.");
         }

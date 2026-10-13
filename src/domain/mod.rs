@@ -4,6 +4,7 @@
 //! transformations. It must not perform filesystem, network, process, or
 //! clock I/O.
 
+pub mod agent_definition;
 pub mod artifacts;
 pub(crate) mod canonical_json;
 pub mod context;
@@ -17,6 +18,7 @@ pub mod model;
 pub(crate) mod observation;
 pub mod profile;
 pub mod project;
+pub(crate) mod project_stream;
 pub mod request_audit;
 pub mod research;
 pub mod research_control;

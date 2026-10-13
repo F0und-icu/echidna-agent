@@ -12,22 +12,22 @@ use crate::domain::tools::ResolvedToolPlan;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TurnConfigurationSnapshot {
     turn: TurnContext,
-    domain_profile: DomainProfile,
-    research_phase: ResearchPhase,
+    domain_profile: Option<DomainProfile>,
+    research_phase: Option<ResearchPhase>,
     agent_model_profile: Option<AgentModelProfile>,
 }
 
 impl TurnConfigurationSnapshot {
     pub fn new(
         turn: TurnContext,
-        domain_profile: DomainProfile,
-        research_phase: ResearchPhase,
+        domain_profile: impl Into<Option<DomainProfile>>,
+        research_phase: impl Into<Option<ResearchPhase>>,
         agent_model_profile: Option<AgentModelProfile>,
     ) -> Self {
         Self {
             turn,
-            domain_profile,
-            research_phase,
+            domain_profile: domain_profile.into(),
+            research_phase: research_phase.into(),
             agent_model_profile,
         }
     }
@@ -40,11 +40,11 @@ impl TurnConfigurationSnapshot {
         self.agent_model_profile.as_ref()
     }
 
-    pub const fn domain_profile(&self) -> DomainProfile {
+    pub const fn domain_profile(&self) -> Option<DomainProfile> {
         self.domain_profile
     }
 
-    pub const fn research_phase(&self) -> ResearchPhase {
+    pub const fn research_phase(&self) -> Option<ResearchPhase> {
         self.research_phase
     }
 }

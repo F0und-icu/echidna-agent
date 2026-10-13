@@ -38,7 +38,9 @@ impl ConversationHistory {
         match item {
             ContentItem::ToolCall { call } => self.append_tool_call(call),
             ContentItem::ToolResult { result } => self.append_tool_result(result),
-            ContentItem::Reasoning { .. } => Err(HistoryError::ProviderContinuationItem),
+            ContentItem::Reasoning { .. } | ContentItem::OpaqueContinuation { .. } => {
+                Err(HistoryError::ProviderContinuationItem)
+            }
             ContentItem::Text { .. }
             | ContentItem::ImageArtifact { .. }
             | ContentItem::Unsupported { .. } => {
@@ -129,6 +131,7 @@ impl ConversationHistory {
                 }
                 ContentItem::ToolResult { .. }
                 | ContentItem::Reasoning { .. }
+                | ContentItem::OpaqueContinuation { .. }
                 | ContentItem::Text { .. }
                 | ContentItem::ImageArtifact { .. }
                 | ContentItem::Unsupported { .. } => None,
@@ -174,7 +177,7 @@ pub(crate) fn normalize_with_subcommands(
             ContentItem::Text { .. }
             | ContentItem::ImageArtifact { .. }
             | ContentItem::Unsupported { .. } => history.append_content_item(item.clone())?,
-            ContentItem::Reasoning { .. } => {
+            ContentItem::Reasoning { .. } | ContentItem::OpaqueContinuation { .. } => {
                 return Err(HistoryError::ProviderContinuationItem);
             }
         }
@@ -291,6 +294,7 @@ pub(crate) fn validate_content_items(items: &[ContentItem]) -> Result<(), Histor
             ContentItem::Text { .. }
             | ContentItem::ImageArtifact { .. }
             | ContentItem::Reasoning { .. }
+            | ContentItem::OpaqueContinuation { .. }
             | ContentItem::Unsupported { .. } => {}
         }
     }

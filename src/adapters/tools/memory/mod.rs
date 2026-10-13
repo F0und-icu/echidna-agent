@@ -15,7 +15,8 @@ use crate::adapters::project_memory::{
 use crate::adapters::research_projection::load_reference_catalog;
 use crate::domain::events::{EventEnvelope, EventId, EventType, OccurredAt};
 use crate::domain::memory::{
-    MemoryEvent, MemoryPath, MemoryReducer, MemoryRevision, MemoryState, validate_content_hash,
+    MemoryEvent, MemoryPath, MemoryReducer, MemoryRevision, MemoryScope, MemoryState,
+    validate_content_hash,
 };
 use crate::domain::research::{
     ResearchEvent, ResearchReducer, ResearchReferenceCatalog, ResearchState,
@@ -33,7 +34,6 @@ use super::{decode_arguments, invalid_plan};
 struct MemoryReadArgs {
     path: String,
     event_id: String,
-    occurred_at: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -43,38 +43,40 @@ struct MemoryWriteArgs {
     content: String,
     expected_hash: Option<String>,
     event_id: String,
-    occurred_at: String,
 }
 
 pub(super) fn normalize_read(
     project_root: &Path,
+    scope: &MemoryScope,
     value: Value,
 ) -> Result<(Value, Vec<ResourceKey>), ToolExecutorError> {
     let arguments: MemoryReadArgs = decode_arguments("memory_read", value)?;
     let path = parse_path("memory_read", &arguments.path)?;
-    require_event_metadata("memory_read", &arguments.event_id, &arguments.occurred_at)?;
+    require_event_id("memory_read", &arguments.event_id)?;
     Ok((
         serde_json::to_value(&arguments).expect("MemoryReadArgs serialization cannot fail"),
-        memory_resources(project_root, &path),
+        memory_resources(project_root, scope, &path),
     ))
 }
 
 pub(super) fn normalize_write(
     project_root: &Path,
+    scope: &MemoryScope,
     value: Value,
 ) -> Result<(Value, Vec<ResourceKey>), ToolExecutorError> {
     let arguments: MemoryWriteArgs = decode_arguments("memory_write", value)?;
     let path = parse_path("memory_write", &arguments.path)?;
-    require_event_metadata("memory_write", &arguments.event_id, &arguments.occurred_at)?;
+    require_event_id("memory_write", &arguments.event_id)?;
     validate_expected_hash("memory_write", arguments.expected_hash.as_deref())?;
     Ok((
         serde_json::to_value(&arguments).expect("MemoryWriteArgs serialization cannot fail"),
-        memory_resources(project_root, &path),
+        memory_resources(project_root, scope, &path),
     ))
 }
 
 pub(super) async fn execute_read(
     project_root: &Path,
+    scope: &MemoryScope,
     plan: ToolExecutionPlan,
 ) -> ToolExecutionOutcome {
     let arguments: MemoryReadArgs =
@@ -86,11 +88,13 @@ pub(super) async fn execute_read(
         Ok(path) => path,
         Err(error) => return invalid_plan(plan, error),
     };
-    if let Err(error) =
-        require_event_metadata("memory_read", &arguments.event_id, &arguments.occurred_at)
-    {
+    if let Err(error) = require_event_id("memory_read", &arguments.event_id) {
         return invalid_plan(plan, error);
     }
+    let occurred_at = match super::operation_time::current_utc() {
+        Ok(occurred_at) => occurred_at,
+        Err(error) => return memory_failure(plan, "memory_clock_unavailable", error),
+    };
     let project = match Project::discover(project_root) {
         Ok(project) => project,
         Err(error) => return memory_failure(plan, "memory_project_unavailable", error),
@@ -111,12 +115,12 @@ pub(super) async fn execute_read(
         Ok(states) => states,
         Err(error) => return memory_failure(plan, "memory_state_invalid", error),
     };
-    let memory = LocalProjectMemory::new(&project);
+    let memory = LocalProjectMemory::with_scope(&project, scope.clone());
     let document = match memory.read(&path) {
         Ok(document) => document,
         Err(error) => return memory_failure(plan, "memory_read_failed", error),
     };
-    let external_event = match external_revision(&path, &document, &memory_state, &project) {
+    let external_event = match external_revision(&path, scope, &document, &memory_state, &project) {
         Ok(event) => event,
         Err(error) => return memory_failure(plan, "memory_revision_unavailable", error),
     };
@@ -131,7 +135,7 @@ pub(super) async fn execute_read(
             &mut research_state,
             &mut memory_state,
             event_id,
-            &arguments.occurred_at,
+            &occurred_at,
             event,
         ) {
             return memory_failure(plan, "memory_external_audit_failed", error);
@@ -153,6 +157,7 @@ pub(super) async fn execute_read(
 
 pub(super) async fn execute_write(
     project_root: &Path,
+    scope: &MemoryScope,
     plan: ToolExecutionPlan,
 ) -> ToolExecutionOutcome {
     let arguments: MemoryWriteArgs =
@@ -164,14 +169,15 @@ pub(super) async fn execute_write(
         Ok(path) => path,
         Err(error) => return invalid_plan(plan, error),
     };
-    if let Err(error) =
-        require_event_metadata("memory_write", &arguments.event_id, &arguments.occurred_at)
-            .and_then(|()| {
-                validate_expected_hash("memory_write", arguments.expected_hash.as_deref())
-            })
+    if let Err(error) = require_event_id("memory_write", &arguments.event_id)
+        .and_then(|()| validate_expected_hash("memory_write", arguments.expected_hash.as_deref()))
     {
         return invalid_plan(plan, error);
     }
+    let occurred_at = match super::operation_time::current_utc() {
+        Ok(occurred_at) => occurred_at,
+        Err(error) => return memory_failure(plan, "memory_clock_unavailable", error),
+    };
     let project = match Project::discover(project_root) {
         Ok(project) => project,
         Err(error) => return memory_failure(plan, "memory_project_unavailable", error),
@@ -196,7 +202,7 @@ pub(super) async fn execute_write(
     if research_state.has_event_id(&event_id) {
         return duplicate_event(plan, event_id);
     }
-    let memory = LocalProjectMemory::new(&project);
+    let memory = LocalProjectMemory::with_scope(&project, scope.clone());
     if let Err(error) = memory.validate_content(&path, &arguments.content) {
         return memory_failure(plan, "memory_content_too_large", error);
     }
@@ -204,7 +210,8 @@ pub(super) async fn execute_write(
         Ok(document) => document,
         Err(error) => return memory_failure(plan, "memory_read_failed", error),
     };
-    let pending_external = match external_revision(&path, &current, &memory_state, &project) {
+    let pending_external = match external_revision(&path, scope, &current, &memory_state, &project)
+    {
         Ok(event) => event,
         Err(error) => return memory_failure(plan, "memory_revision_unavailable", error),
     };
@@ -218,7 +225,7 @@ pub(super) async fn execute_write(
             &mut research_state,
             &mut memory_state,
             external_id,
-            &arguments.occurred_at,
+            &occurred_at,
             event,
         ) {
             return memory_failure(plan, "memory_external_audit_failed", error);
@@ -250,7 +257,7 @@ pub(super) async fn execute_write(
         );
     }
     let revision =
-        match revision_from_documents(&path, &current, Some(&arguments.content), &project) {
+        match revision_from_documents(scope, &path, &current, Some(&arguments.content), &project) {
             Ok(revision) => revision,
             Err(error) => return memory_failure(plan, "memory_revision_unavailable", error),
         };
@@ -262,7 +269,7 @@ pub(super) async fn execute_write(
         &mut research_state,
         &mut memory_state,
         event_id.clone(),
-        &arguments.occurred_at,
+        &occurred_at,
         MemoryEvent::Changed(revision.clone()),
     ) {
         return ToolExecutionOutcome::failed(
@@ -292,10 +299,18 @@ pub(super) async fn execute_write(
     )
 }
 
-fn memory_resources(project_root: &Path, path: &MemoryPath) -> Vec<ResourceKey> {
+fn memory_resources(
+    project_root: &Path,
+    scope: &MemoryScope,
+    path: &MemoryPath,
+) -> Vec<ResourceKey> {
     let resolver = ResourceKeyResolver::new(project_root);
     vec![
-        resolver.file(&format!(".cyber-agent/memory/{}", path.as_str())),
+        resolver.file(&format!(
+            ".cyber-agent/{}/{}",
+            scope.storage_directory(),
+            path.as_str()
+        )),
         resolver.file(".cyber-agent/research.jsonl"),
     ]
 }
@@ -307,15 +322,11 @@ fn parse_path(tool_name: &str, value: &str) -> Result<MemoryPath, ToolExecutorEr
     })
 }
 
-fn require_event_metadata(
-    tool_name: &str,
-    event_id: &str,
-    occurred_at: &str,
-) -> Result<(), ToolExecutorError> {
-    if event_id.trim().is_empty() || occurred_at.trim().is_empty() {
+fn require_event_id(tool_name: &str, event_id: &str) -> Result<(), ToolExecutorError> {
+    if event_id.trim().is_empty() {
         Err(ToolExecutorError::InvalidArguments {
             tool_name: tool_name.to_owned(),
-            message: "`event_id` and `occurred_at` must not be empty".to_owned(),
+            message: "`event_id` must not be empty".to_owned(),
         })
     } else {
         Ok(())
@@ -365,13 +376,14 @@ fn reduce_states(
 
 fn external_revision(
     path: &MemoryPath,
+    scope: &MemoryScope,
     current: &MemoryDocument,
     state: &MemoryState,
     project: &Project,
 ) -> Result<Option<MemoryEvent>, String> {
-    let Some(previous) = state.latest(path) else {
+    let Some(previous) = state.latest(scope, path) else {
         return if current.hash.is_some() {
-            revision_from_contents(path, None, current.content.as_deref(), project)
+            revision_from_contents(scope, path, None, current.content.as_deref(), project)
                 .map(MemoryEvent::ExternalChangeDetected)
                 .map(Some)
         } else {
@@ -393,6 +405,7 @@ fn external_revision(
         None => None,
     };
     revision_from_contents(
+        scope,
         path,
         old_content.as_deref(),
         current.content.as_deref(),
@@ -403,15 +416,17 @@ fn external_revision(
 }
 
 fn revision_from_documents(
+    scope: &MemoryScope,
     path: &MemoryPath,
     old: &MemoryDocument,
     new: Option<&str>,
     project: &Project,
 ) -> Result<MemoryRevision, String> {
-    revision_from_contents(path, old.content.as_deref(), new, project)
+    revision_from_contents(scope, path, old.content.as_deref(), new, project)
 }
 
 fn revision_from_contents(
+    scope: &MemoryScope,
     path: &MemoryPath,
     old: Option<&str>,
     new: Option<&str>,
@@ -442,6 +457,7 @@ fn revision_from_contents(
         .map_err(|error| error.to_string())?
         .blob_id;
     let revision = MemoryRevision {
+        scope: scope.clone(),
         path: path.clone(),
         old_hash,
         new_hash,

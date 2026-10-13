@@ -9,11 +9,12 @@ use thiserror::Error;
 use crate::domain::artifacts::{
     ArtifactEvent, ArtifactEventError, ArtifactId, ArtifactRecord, ArtifactState,
 };
-use crate::domain::canonical_json::canonical_json;
-use crate::domain::events::{EventEnvelope, EventId, OccurredAt};
+use crate::domain::events::{EventEnvelope, EventId};
 use crate::domain::memory::{
-    MEMORY_PAYLOAD_SCHEMA_VERSION, MemoryError, MemoryEvent, MemoryEventType,
+    MEMORY_PAYLOAD_SCHEMA_VERSION, MemoryError, MemoryEvent, MemoryEventType, MemoryRevision,
+    MemoryScope,
 };
+use crate::domain::project_stream::{ProjectStreamIntegrity, ProjectStreamReducer};
 use crate::domain::tools::ExecutionReceipt;
 
 use super::records::{
@@ -26,7 +27,6 @@ use super::records::{
 use super::upcast::{VersionedPayload, decode_and_upcast};
 
 pub const RESEARCH_SCHEMA_VERSION: u16 = 2;
-const RESEARCH_STREAM_ID: &str = "research";
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum ResearchError {
@@ -103,6 +103,15 @@ impl ResearchReferenceCatalog {
 
     pub(super) fn execution_receipt(&self, id: &ExecutionReceiptId) -> Option<&ExecutionReceipt> {
         self.execution_receipts.get(id)
+    }
+
+    /// Ordered existing Receipt facts for the bounded Research discovery view.
+    /// The catalog remains ephemeral and Project-scoped; callers receive no
+    /// mutation or persistence authority.
+    pub(crate) fn execution_receipts(
+        &self,
+    ) -> impl Iterator<Item = (&ExecutionReceiptId, &ExecutionReceipt)> {
+        self.execution_receipts.iter()
     }
 }
 
@@ -303,6 +312,37 @@ impl ResearchEvent {
         })
     }
 
+    /// Encodes the payload used only to establish shared project-stream Event
+    /// identity after versioned data has been decoded.
+    pub(crate) fn encode_semantic_payload(&self) -> Result<Value, ResearchError> {
+        match self {
+            Self::Artifact(event) => serde_json::to_value(VersionedPayload {
+                research_schema_version: RESEARCH_SCHEMA_VERSION,
+                data: event.encode_semantic_payload()?,
+            })
+            .map_err(|error| ResearchError::MalformedPayload {
+                message: error.to_string(),
+            }),
+            Self::Memory(event) if matches!(&event.revision().scope, MemoryScope::Project) => {
+                let data = serde_json::to_value(LegacyMemoryVersionedPayload {
+                    memory_schema_version: 1,
+                    data: LegacyMemoryEvent::from_project(event),
+                })
+                .map_err(|error| ResearchError::MalformedPayload {
+                    message: error.to_string(),
+                })?;
+                serde_json::to_value(VersionedPayload {
+                    research_schema_version: RESEARCH_SCHEMA_VERSION,
+                    data,
+                })
+                .map_err(|error| ResearchError::MalformedPayload {
+                    message: error.to_string(),
+                })
+            }
+            _ => self.encode_payload(),
+        }
+    }
+
     pub fn decode(event_type: &str, payload: Value) -> Result<Self, ResearchError> {
         let event_type = ResearchEventType::parse(event_type)?;
         let versioned = decode_and_upcast(event_type.as_str(), payload, RESEARCH_SCHEMA_VERSION)?;
@@ -364,14 +404,24 @@ impl ResearchEvent {
                     .map(Self::Artifact)?)
             }
             ResearchEventType::MemoryChanged | ResearchEventType::MemoryExternalChangeDetected => {
-                let memory: MemoryVersionedPayload = decode_record(versioned.data)?;
-                if memory.memory_schema_version != MEMORY_PAYLOAD_SCHEMA_VERSION {
-                    return Err(ResearchError::Memory(
-                        MemoryError::UnsupportedPayloadVersion {
-                            received: memory.memory_schema_version,
-                        },
-                    ));
-                }
+                let memory: MemoryEnvelope = decode_record(versioned.data)?;
+                let memory =
+                    match memory.memory_schema_version {
+                        1 => serde_json::from_value::<LegacyMemoryEvent>(memory.data)
+                            .map(LegacyMemoryEvent::into_current)
+                            .map_err(|error| ResearchError::MalformedPayload {
+                                message: error.to_string(),
+                            })?,
+                        MEMORY_PAYLOAD_SCHEMA_VERSION => serde_json::from_value(memory.data)
+                            .map_err(|error| ResearchError::MalformedPayload {
+                                message: error.to_string(),
+                            })?,
+                        received => {
+                            return Err(ResearchError::Memory(
+                                MemoryError::UnsupportedPayloadVersion { received },
+                            ));
+                        }
+                    };
                 let expected_type = match event_type {
                     ResearchEventType::MemoryChanged => MemoryEventType::Changed,
                     ResearchEventType::MemoryExternalChangeDetected => {
@@ -379,12 +429,12 @@ impl ResearchEvent {
                     }
                     _ => unreachable!("only Memory Event types enter this decode branch"),
                 };
-                if memory.data.event_type() != expected_type {
+                if memory.event_type() != expected_type {
                     return Err(ResearchError::MalformedPayload {
                         message: "Memory payload kind does not match outer Event type".to_owned(),
                     });
                 }
-                Ok(Self::Memory(memory.data))
+                Ok(Self::Memory(memory))
             }
         }
     }
@@ -433,7 +483,7 @@ impl ResearchEvent {
 #[derive(Debug, Default, Serialize)]
 pub struct ResearchState {
     #[serde(skip)]
-    applied_event_digests: BTreeMap<EventId, String>,
+    pub(crate) stream_integrity: ProjectStreamIntegrity,
     #[serde(skip)]
     latest_target_snapshot_id: Option<TargetSnapshotId>,
     target_snapshots: BTreeMap<TargetSnapshotId, TargetSnapshotRecord>,
@@ -447,11 +497,11 @@ pub struct ResearchState {
 
 impl ResearchState {
     pub fn applied_event_count(&self) -> usize {
-        self.applied_event_digests.len()
+        self.stream_integrity.applied_event_count()
     }
 
     pub fn has_event_id(&self, event_id: &EventId) -> bool {
-        self.applied_event_digests.contains_key(event_id)
+        self.stream_integrity.has_event_id(event_id)
     }
 
     /// Resolves one immutable Artifact fact from the strict Research replay.
@@ -644,7 +694,7 @@ impl ResearchState {
         }
         match reference {
             EvidenceRef::Artifact(id) => match self.artifacts.get(id) {
-                Some(record) if &record.target_snapshot_id == current_target => {
+                Some(record) if record.scope.target_snapshot_id() == Some(current_target) => {
                     ResearchReferenceTargetApplicability::Applicable
                 }
                 Some(_) => ResearchReferenceTargetApplicability::Incompatible,
@@ -698,7 +748,12 @@ impl ResearchState {
         target_version: Option<&str>,
     ) -> bool {
         self.artifacts.get(id).is_some_and(|artifact| {
-            self.target_snapshot_applies(&artifact.target_snapshot_id, target_id, target_version)
+            artifact
+                .scope
+                .target_snapshot_id()
+                .is_some_and(|snapshot_id| {
+                    self.target_snapshot_applies(snapshot_id, target_id, target_version)
+                })
         })
     }
 
@@ -801,11 +856,7 @@ impl ResearchReducer {
     where
         Events: IntoIterator<Item = EventEnvelope<Value>>,
     {
-        let mut state = ResearchState::default();
-        for event in events {
-            self.apply_with_references(&mut state, event, references)?;
-        }
-        Ok(state)
+        ProjectStreamReducer.reduce(events, references)
     }
 
     pub fn apply(
@@ -822,47 +873,7 @@ impl ResearchReducer {
         envelope: EventEnvelope<Value>,
         references: &ResearchReferenceCatalog,
     ) -> Result<(), ResearchError> {
-        if envelope.stream_id.as_str() != RESEARCH_STREAM_ID {
-            return Err(ResearchError::UnexpectedStream {
-                received: envelope.stream_id.to_string(),
-            });
-        }
-        if envelope.event_type.as_str() == "StreamRecovered" {
-            let payload = validate_stream_recovered_payload(envelope.payload)?;
-            let payload =
-                serde_json::to_value(payload).map_err(|error| ResearchError::MalformedPayload {
-                    message: error.to_string(),
-                })?;
-            let digest = semantic_event_digest(
-                &envelope.occurred_at,
-                envelope.event_type.as_str(),
-                &payload,
-            )?;
-            if event_id_is_idempotent(state, &envelope.event_id, &digest)? {
-                return Ok(());
-            }
-            state
-                .applied_event_digests
-                .insert(envelope.event_id, digest);
-            return Ok(());
-        }
-        let event = ResearchEvent::decode(envelope.event_type.as_str(), envelope.payload)?;
-        event.validate_intrinsic()?;
-        validate_created_by_event_id(&event, &envelope.event_id)?;
-        let payload = event.encode_payload()?;
-        let digest = semantic_event_digest(
-            &envelope.occurred_at,
-            envelope.event_type.as_str(),
-            &payload,
-        )?;
-        if event_id_is_idempotent(state, &envelope.event_id, &digest)? {
-            return Ok(());
-        }
-        self.apply_event_with_references(state, event, references)?;
-        state
-            .applied_event_digests
-            .insert(envelope.event_id, digest);
-        Ok(())
+        ProjectStreamReducer.apply(state, envelope, references)
     }
 
     pub fn apply_event(
@@ -1019,25 +1030,6 @@ impl ResearchReducer {
     }
 }
 
-fn validate_created_by_event_id(
-    event: &ResearchEvent,
-    envelope_event_id: &EventId,
-) -> Result<(), ResearchError> {
-    let ResearchEvent::Artifact(event) = event else {
-        return Ok(());
-    };
-    if event.record().created_by_event_id == *envelope_event_id {
-        Ok(())
-    } else {
-        Err(ResearchError::InvalidRecord {
-            message: format!(
-                "Artifact created_by_event_id `{}` does not match Event ID `{envelope_event_id}`",
-                event.record().created_by_event_id
-            ),
-        })
-    }
-}
-
 fn validate_artifact_event(
     state: &ResearchState,
     event: &ArtifactEvent,
@@ -1050,10 +1042,12 @@ fn validate_artifact_event(
         .map_err(|error| ResearchError::InvalidRecord {
             message: error.to_string(),
         })?;
-    ensure_reference(
-        state.target_snapshot(&record.target_snapshot_id).is_some(),
-        record.target_snapshot_id.as_str(),
-    )?;
+    if let Some(target_snapshot_id) = record.scope.target_snapshot_id() {
+        ensure_reference(
+            state.target_snapshot(target_snapshot_id).is_some(),
+            target_snapshot_id.as_str(),
+        )?;
+    }
     Ok(())
 }
 
@@ -1459,52 +1453,99 @@ fn decode_record<T: for<'de> Deserialize<'de>>(value: Value) -> Result<T, Resear
     })
 }
 
-fn validate_stream_recovered_payload(
-    value: Value,
-) -> Result<StreamRecoveredPayload, ResearchError> {
-    let payload: StreamRecoveredPayload = decode_record(value)?;
-    require_text(
-        "StreamRecovered recovery_artifact",
-        &payload.recovery_artifact,
-    )?;
-    Ok(payload)
-}
-
-fn event_id_is_idempotent(
-    state: &ResearchState,
-    event_id: &EventId,
-    digest: &str,
-) -> Result<bool, ResearchError> {
-    match state.applied_event_digests.get(event_id) {
-        Some(existing) if existing == digest => Ok(true),
-        Some(_) => Err(ResearchError::EventIdConflict {
-            event_id: event_id.to_string(),
-        }),
-        None => Ok(false),
-    }
-}
-
-fn semantic_event_digest(
-    occurred_at: &OccurredAt,
-    event_type: &str,
-    payload: &Value,
-) -> Result<String, ResearchError> {
-    let input = SemanticEventInput {
-        occurred_at,
-        event_type,
-        payload: canonical_json(payload),
-    };
-    let bytes = serde_json::to_vec(&input).map_err(|error| ResearchError::Fingerprint {
-        message: error.to_string(),
-    })?;
-    Ok(blake3::hash(&bytes).to_hex().to_string())
-}
-
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct MemoryVersionedPayload {
     memory_schema_version: u16,
     data: MemoryEvent,
+}
+
+#[derive(Serialize)]
+struct LegacyMemoryVersionedPayload {
+    memory_schema_version: u16,
+    data: LegacyMemoryEvent,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MemoryEnvelope {
+    memory_schema_version: u16,
+    data: Value,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(
+    tag = "kind",
+    content = "revision",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+enum LegacyMemoryEvent {
+    Changed(LegacyMemoryRevision),
+    ExternalChangeDetected(LegacyMemoryRevision),
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyMemoryRevision {
+    path: crate::domain::memory::MemoryPath,
+    #[serde(default)]
+    old_hash: Option<String>,
+    #[serde(default)]
+    new_hash: Option<String>,
+    #[serde(default)]
+    old_blob_id: Option<crate::domain::artifacts::BlobId>,
+    #[serde(default)]
+    new_blob_id: Option<crate::domain::artifacts::BlobId>,
+    #[serde(default)]
+    diff_blob_id: Option<crate::domain::artifacts::BlobId>,
+}
+
+impl LegacyMemoryEvent {
+    fn from_project(event: &MemoryEvent) -> Self {
+        match event {
+            MemoryEvent::Changed(revision) => {
+                Self::Changed(LegacyMemoryRevision::from_project(revision))
+            }
+            MemoryEvent::ExternalChangeDetected(revision) => {
+                Self::ExternalChangeDetected(LegacyMemoryRevision::from_project(revision))
+            }
+        }
+    }
+
+    fn into_current(self) -> MemoryEvent {
+        match self {
+            Self::Changed(revision) => MemoryEvent::Changed(revision.into_current()),
+            Self::ExternalChangeDetected(revision) => {
+                MemoryEvent::ExternalChangeDetected(revision.into_current())
+            }
+        }
+    }
+}
+
+impl LegacyMemoryRevision {
+    fn from_project(revision: &MemoryRevision) -> Self {
+        Self {
+            path: revision.path.clone(),
+            old_hash: revision.old_hash.clone(),
+            new_hash: revision.new_hash.clone(),
+            old_blob_id: revision.old_blob_id.clone(),
+            new_blob_id: revision.new_blob_id.clone(),
+            diff_blob_id: revision.diff_blob_id.clone(),
+        }
+    }
+
+    fn into_current(self) -> MemoryRevision {
+        MemoryRevision {
+            scope: MemoryScope::Project,
+            path: self.path,
+            old_hash: self.old_hash,
+            new_hash: self.new_hash,
+            old_blob_id: self.old_blob_id,
+            new_blob_id: self.new_blob_id,
+            diff_blob_id: self.diff_blob_id,
+        }
+    }
 }
 
 #[derive(Deserialize, Serialize)]
@@ -1538,19 +1579,4 @@ struct RecordsMergedPayload {
     from: MergeRecordRef,
     into: MergeRecordRef,
     reason: String,
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct StreamRecoveredPayload {
-    recovery_artifact: String,
-    truncated_from_offset: u64,
-    resumed_after_sequence: Option<u64>,
-}
-
-#[derive(Serialize)]
-struct SemanticEventInput<'a> {
-    occurred_at: &'a OccurredAt,
-    event_type: &'a str,
-    payload: Value,
 }

@@ -1,0 +1,60 @@
+schema_version = 1
+id = "research"
+name = "Pragmatic vulnerability research"
+
+[instructions]
+persona_file = "persona.md"
+work_file = "work.md"
+method_files = ["methods/evidence.md"]
+
+[context]
+personal = "configured"
+project = "configured"
+memory = "project"
+
+[tools]
+read_file = "direct"
+read_files = "direct"
+list_files = "direct"
+search_files = "direct"
+write_file = "deferred"
+apply_patch = "direct"
+run_command = "direct"
+read_output = "deferred"
+run_commands = "direct"
+start_job = "deferred"
+poll_job = "deferred"
+input_job = "deferred"
+stop_job = "deferred"
+start_pty = "deferred"
+poll_pty = "deferred"
+input_pty = "deferred"
+resize_pty = "deferred"
+stop_pty = "deferred"
+artifact_store = "deferred"
+view_image = "direct"
+http_request = "deferred"
+inspect_environment = "direct"
+memory_read = "deferred"
+memory_write = "deferred"
+inspect_project = "direct"
+research_get = "direct"
+research_update = "direct"
+tool_search = "direct"
+
+[research]
+domain = "source"
+phase = "mapping"
+
+[research.domain_prompt_files]
+source = "research/domain/source.md"
+web = "research/domain/web.md"
+mobile = "research/domain/mobile.md"
+binary = "research/domain/binary.md"
+
+[research.phase_prompt_files]
+mapping = "research/phase/mapping.md"
+hypothesis = "research/phase/hypothesis.md"
+experiment = "research/phase/experiment.md"
+verification = "research/phase/verification.md"
+evidence_curation = "research/phase/evidence_curation.md"

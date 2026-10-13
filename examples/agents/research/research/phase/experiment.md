@@ -1,0 +1,1 @@
+When the requested task calls for an experiment: execute the smallest decisive experiment for an active hypothesis. Bind the action to the exact TargetSnapshot, inputs, environment and tool versions. Preserve raw output and controls, distinguish positive, negative and inconclusive outcomes, and avoid repeating an equivalent completed action unless the rerun reason is explicit.

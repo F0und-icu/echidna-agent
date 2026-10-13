@@ -507,6 +507,12 @@ async fn updates_replay_as_new_events_and_preserve_confirmed_finding_requirement
         invalid.receipt.exit_reason.as_deref(),
         Some("research_record_invalid")
     );
+    let error = invalid.result.output["error"].as_str().unwrap();
+    assert!(error.contains("Hint: Use research_get.receipts"), "{error}");
+    assert!(
+        error.contains("record a missing subject before updating it"),
+        "{error}"
+    );
     assert_eq!(research_line_count(&project), line_count);
 }
 

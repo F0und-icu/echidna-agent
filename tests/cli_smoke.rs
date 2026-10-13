@@ -106,7 +106,8 @@ fn m5_session_list_show_export_and_end_use_the_existing_durable_stream() {
         .unwrap();
     assert!(export.status.success());
     let export: serde_json::Value = serde_json::from_slice(&export.stdout).unwrap();
-    assert_eq!(export["schema_version"], 1);
+    assert_eq!(export["schema_version"], 2);
+    assert!(export["agent_binding"]["definition"]["id"].is_string());
     assert_eq!(
         export["authority_boundary"]["vision"],
         "derived model observations; not Finding evidence"

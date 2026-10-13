@@ -13,19 +13,19 @@ use crate::adapters::project_event_store::Project;
 use crate::adapters::project_memory::{LocalProjectMemory, LocalProjectMemoryError};
 use crate::adapters::project_snapshot::LocalProjectSnapshot;
 use crate::adapters::research_projection::{
-    SessionReceiptCatalogCache, load_research_state_with_references,
+    SessionReceiptCatalogCache, load_project_stream_integrity, load_research_state_with_references,
 };
 use crate::adapters::tools::ToolRegistry;
 use crate::app::agent_loop::CurrentContextState;
+use crate::domain::agent_definition::{AgentDefinitionBinding, AgentMemoryScope};
 use crate::domain::context::{
     ContextFragment, ContextFragmentContent, ContextFragmentId, ContextFragmentPriority,
     ContextFragmentSource, FragmentCachePolicy,
 };
-use crate::domain::memory::MemoryPath;
+use crate::domain::memory::{MemoryPath, MemoryScope};
 use crate::domain::model::{ContentItem, MessageRole};
 use crate::domain::world_state::{ProjectSnapshotContext, ResearchWorldState};
 use crate::ports::tool::ToolExecutor;
-use crate::provider_composition::{PromptSources, ProviderComposition};
 
 /// A short-lived cache owned by one interactive Chat process. Its revision is
 /// an exact digest of every source consumed by `load_research_state`, never a
@@ -40,28 +40,30 @@ pub(crate) struct ChatContextCache {
 
 impl ChatContextCache {
     /// Captures the current inputs for one immutable later SamplingStepPlan.
-    /// Prompt and Memory content are intentionally reread every time: their
-    /// content hashes are the Context identity and an external edit must not
-    /// be hidden behind a weak filesystem metadata cache.
+    /// Facts are refreshed by content identity. Instructions come from the
+    /// durable binding and change only through an explicit reload.
     pub(crate) fn refresh(
         &mut self,
         project: &Project,
         tools: &ToolRegistry,
-        composition: &ProviderComposition,
+        binding: &AgentDefinitionBinding,
     ) -> Result<CurrentContextState, ChatContextRefreshError> {
-        let world_state = self.current_world_state(project)?;
+        let world_state = if binding.definition().research().is_some() {
+            Some(self.current_world_state(project)?)
+        } else {
+            load_project_stream_integrity(project)
+                .map_err(ChatContextRefreshError::ResearchProjection)?;
+            None
+        };
         let snapshot = LocalProjectSnapshot::new(project)
             .inspect(&tools.specs(), &[], "context-refresh")
             .map_err(ChatContextRefreshError::ProjectSnapshot)?;
         let project_snapshot = ProjectSnapshotContext::new(snapshot.snapshot)?;
-        let core_memory = load_core_memory(project)?;
-        let (personal_prompt, project_prompt) = load_prompts(composition.prompt_sources())?;
+        let core_memory = load_core_memory(project, binding)?;
         Ok(CurrentContextState::new(
             world_state,
             project_snapshot,
             core_memory,
-            personal_prompt,
-            project_prompt,
         ))
     }
 
@@ -132,29 +134,44 @@ fn digest_file(path: &Path) -> Result<String, ChatContextRefreshError> {
     Ok(blake3::hash(&bytes).to_hex().to_string())
 }
 
-fn load_core_memory(project: &Project) -> Result<Option<ContextFragment>, ChatContextRefreshError> {
+fn load_core_memory(
+    project: &Project,
+    binding: &AgentDefinitionBinding,
+) -> Result<Option<ContextFragment>, ChatContextRefreshError> {
+    let scope = match binding.definition().context().memory() {
+        AgentMemoryScope::None => return Ok(None),
+        AgentMemoryScope::Project => MemoryScope::Project,
+        AgentMemoryScope::Agent => MemoryScope::Agent {
+            agent_id: binding.definition().id().clone(),
+        },
+    };
     let path = MemoryPath::parse("core.md").expect("core.md is a fixed supported Memory path");
-    let document = LocalProjectMemory::new(project).read(&path)?;
+    let namespace = match &scope {
+        MemoryScope::Project => "project".to_owned(),
+        MemoryScope::Agent { agent_id } => format!("agent:{}", agent_id.as_str()),
+    };
+    let document = LocalProjectMemory::with_scope(project, scope).read(&path)?;
     match document.content {
         None => Ok(None),
         Some(content) if content.is_empty() => {
-            memory_core_fragment("empty", "Project Core Memory is explicitly empty.")
+            memory_core_fragment(&namespace, "empty", "Core Memory is explicitly empty.")
         }
         Some(content) => {
             let hash = document
                 .hash
                 .expect("a present LocalProjectMemory document has a content hash");
-            memory_core_fragment(&hash, &content)
+            memory_core_fragment(&namespace, &hash, &content)
         }
     }
 }
 
 fn memory_core_fragment(
+    namespace: &str,
     revision: &str,
     content: &str,
 ) -> Result<Option<ContextFragment>, ChatContextRefreshError> {
     Ok(Some(ContextFragment::new(
-        ContextFragmentId::new(format!("project-memory-core:{revision}"))?,
+        ContextFragmentId::new(format!("memory-core:{namespace}:{revision}"))?,
         ContextFragmentSource::ProjectMemoryCore,
         ContextFragmentPriority::High,
         FragmentCachePolicy::ContentAddressed,
@@ -165,43 +182,6 @@ fn memory_core_fragment(
             }],
         },
     )?))
-}
-
-fn load_prompts(
-    sources: &PromptSources,
-) -> Result<(Option<String>, Option<String>), ChatContextRefreshError> {
-    Ok((
-        sources
-            .personal_file
-            .as_deref()
-            .map(|path| read_prompt("personal", path))
-            .transpose()?,
-        sources
-            .project_file
-            .as_deref()
-            .map(|path| read_prompt("project", path))
-            .transpose()?,
-    ))
-}
-
-fn read_prompt(kind: &'static str, path: &Path) -> Result<String, ChatContextRefreshError> {
-    let metadata =
-        fs::symlink_metadata(path).map_err(|source| ChatContextRefreshError::ReadPrompt {
-            kind,
-            path: path.to_path_buf(),
-            source,
-        })?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(ChatContextRefreshError::PromptNotRegular {
-            kind,
-            path: path.to_path_buf(),
-        });
-    }
-    fs::read_to_string(path).map_err(|source| ChatContextRefreshError::ReadPrompt {
-        kind,
-        path: path.to_path_buf(),
-        source,
-    })
 }
 
 #[derive(Debug, Error)]
@@ -218,15 +198,6 @@ pub(crate) enum ChatContextRefreshError {
         #[source]
         source: std::io::Error,
     },
-    #[error("read {kind} Prompt `{path}`: {source}")]
-    ReadPrompt {
-        kind: &'static str,
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("{kind} Prompt `{path}` must be a regular non-symlink file")]
-    PromptNotRegular { kind: &'static str, path: PathBuf },
     #[error(transparent)]
     Project(#[from] crate::adapters::project_event_store::ProjectEventStoreError),
     #[error(transparent)]

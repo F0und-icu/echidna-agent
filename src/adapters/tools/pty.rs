@@ -54,6 +54,15 @@ impl PtySessions {
     ) {
         lock_table(&self.sessions).entries.insert(session_id, entry);
     }
+
+    pub(super) fn has_active_processes(&self) -> bool {
+        lock_table(&self.sessions).entries.values().any(|entry| {
+            matches!(
+                entry.status,
+                PtySessionStatus::Running | PtySessionStatus::Stopping
+            )
+        })
+    }
 }
 
 #[derive(Default)]

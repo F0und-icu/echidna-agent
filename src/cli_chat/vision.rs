@@ -14,6 +14,7 @@ use crate::app::vision::{
     VisionAnalysisInput, VisionDirectRequest, VisionEventStamp, VisionSecondaryRequest,
     VisionSessionService,
 };
+use crate::domain::artifacts::ArtifactScope;
 use crate::domain::context::{ProviderSessionId, ProviderSessionRef, ProviderSessionRole};
 use crate::domain::events::StreamId;
 use crate::domain::profile::{VisionRoute, VisionRouteDecision};
@@ -66,19 +67,33 @@ pub(super) async fn ingest_image(
     }
     require_image_route(composition)?;
 
-    let research = load_research_state(&session.project).map_err(ChatError::ResearchProjection)?;
-    let target_snapshot_id = research
-        .latest_target_snapshot_id()
-        .cloned()
-        .ok_or(ChatError::ImageTargetSnapshotRequired)?;
+    let target_snapshot_id = if session.agent_binding().definition().research().is_some() {
+        Some(
+            load_research_state(&session.project)
+                .map_err(ChatError::ResearchProjection)?
+                .latest_target_snapshot_id()
+                .cloned()
+                .ok_or(ChatError::ImageTargetSnapshotRequired)?,
+        )
+    } else {
+        None
+    };
+    let scope = match &target_snapshot_id {
+        Some(target_snapshot_id) => ArtifactScope::Target {
+            target_snapshot_id: target_snapshot_id.clone(),
+        },
+        None => ArtifactScope::Session {
+            session_id: session.session_id.clone(),
+        },
+    };
     let operation_id = image_operation_id(&session.session_id);
     let occurred_at = occurred_at();
-    let input = ViewImageToolInput::new(
+    let input = ViewImageToolInput::for_scope(
         format!("{operation_id}:artifact"),
         occurred_at.as_str(),
         format!("artifact:{operation_id}"),
         Path::new(path).display().to_string(),
-        target_snapshot_id.as_str(),
+        scope,
         CLI_IMAGE_TOOLCHAIN_FINGERPRINT,
     );
     let call = ToolCall::new(
@@ -107,7 +122,7 @@ pub(super) async fn ingest_image(
         })?;
     Ok(PendingImage {
         selection,
-        target_snapshot_id: Some(target_snapshot_id),
+        target_snapshot_id,
     })
 }
 

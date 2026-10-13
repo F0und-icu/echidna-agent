@@ -226,7 +226,34 @@ fn append_artifact_for(project: &Project, artifact_id: &str, snapshot_id: &str) 
         source_path: "fixture/artifact.json".to_owned(),
         created_by_event_id: event_id.clone(),
         produced_by_tool_call_id: ToolCallId::new("artifact-tool-call"),
-        target_snapshot_id: echidna::domain::research::TargetSnapshotId::new(snapshot_id),
+        scope: echidna::domain::artifacts::ArtifactScope::Target {
+            target_snapshot_id: echidna::domain::research::TargetSnapshotId::new(snapshot_id),
+        },
+        toolchain_fingerprint: "fixture-toolchain".to_owned(),
+        parent_artifact_ids: Vec::new(),
+        transform: None,
+    }));
+    append_event(
+        project,
+        event_id.as_str(),
+        event.event_type().as_str(),
+        event.encode_payload().unwrap(),
+    );
+}
+
+fn append_session_artifact(project: &Project, artifact_id: &str) {
+    let event_id = EventId::new(format!("event-{artifact_id}"));
+    let event = ResearchEvent::Artifact(ArtifactEvent::Created(ArtifactRecord {
+        id: ArtifactId::new(artifact_id),
+        blob_id: BlobId::new("b".repeat(64)).unwrap(),
+        media_type: "application/json".to_owned(),
+        size_bytes: 2,
+        source_path: "fixture/generic-artifact.json".to_owned(),
+        created_by_event_id: event_id.clone(),
+        produced_by_tool_call_id: ToolCallId::new("generic-artifact-tool-call"),
+        scope: echidna::domain::artifacts::ArtifactScope::Session {
+            session_id: StreamId::new("generic-session"),
+        },
         toolchain_fingerprint: "fixture-toolchain".to_owned(),
         parent_artifact_ids: Vec::new(),
         transform: None,
@@ -701,6 +728,40 @@ async fn finding_evidence_is_bound_to_the_exact_target_version_and_updates_are_a
             .iter()
             .any(|gap| gap["kind"] == "artifact_or_receipt_provenance_missing")
     );
+}
+
+#[tokio::test]
+async fn session_scoped_artifact_is_rejected_as_target_bound_finding_evidence() {
+    let (_root, project) = initialized_project("session-artifact-finding-evidence");
+    let tools = ToolRegistry::for_project(project.root());
+    record_baseline(&tools, &project).await;
+    append_session_artifact(&project, "artifact-generic-session");
+    let before = research_line_count(&project);
+
+    let rejected = execute(
+        &tools,
+        "finding-session-artifact",
+        "research_update",
+        update(
+            "event-finding-session-artifact",
+            json!({"kind": "record_finding", "keep_independent": true, "record": {
+                "id": "finding-session-artifact", "title": "Session Artifact evidence",
+                "status": "candidate", "target_id": "fixture.target", "target_version": "1.0.0",
+                "vulnerability_class": "class", "entry_point": "entry", "sensitive_sink": "sink",
+                "target_snapshot_ids": ["snapshot-1"], "prerequisites": [],
+                "impact": "candidate impact",
+                "evidence_links": [evidence_link("supports", "artifact", "artifact-generic-session")]
+            }}),
+        ),
+    )
+    .await;
+
+    assert_eq!(rejected.result.status, ToolResultStatus::Failed);
+    assert_eq!(
+        rejected.receipt.exit_reason.as_deref(),
+        Some("research_transition_rejected")
+    );
+    assert_eq!(research_line_count(&project), before);
 }
 
 #[tokio::test]

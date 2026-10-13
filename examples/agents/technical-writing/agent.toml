@@ -1,0 +1,27 @@
+schema_version = 1
+id = "technical-writing"
+name = "Technical writing"
+
+[instructions]
+persona_file = "persona.md"
+work_file = "work.md"
+method_files = ["methods/clarity.md"]
+
+[context]
+personal = "configured"
+project = "configured"
+memory = "agent"
+
+[tools]
+read_file = "direct"
+read_files = "direct"
+list_files = "direct"
+search_files = "direct"
+write_file = "direct"
+apply_patch = "direct"
+view_image = "direct"
+http_request = "direct"
+memory_read = "direct"
+memory_write = "direct"
+inspect_project = "direct"
+tool_search = "direct"

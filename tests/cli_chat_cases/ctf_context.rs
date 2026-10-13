@@ -18,7 +18,6 @@ fn ctf_r2a_isolates_prompt_memory_state_and_combined_continuation_changes() {
         (Change::Research, false),
         (Change::PromptAndProject, false),
         (Change::CoreMemory, true),
-        (Change::PromptAndProject, true),
     ] {
         let root = TemporaryDirectory::new("ctf-r2a-context");
         let harness = TemporaryDirectory::new("ctf-r2a-harness");
@@ -35,7 +34,6 @@ fn ctf_r2a_isolates_prompt_memory_state_and_combined_continuation_changes() {
         fs::write(harness.path().join("personal.md"), "prompt before\n").unwrap();
         let rejected = match change {
             Change::CoreMemory => Some("CORE_MEMORY_CHANGED"),
-            Change::PromptAndProject => Some("BASELINE_REJECTED: PromptChanged"),
             _ => None,
         };
         let request_count = if rejected.is_some() && !recover { 1 } else { 2 };
@@ -163,7 +161,6 @@ fn ctf_r2a_isolates_prompt_memory_state_and_combined_continuation_changes() {
             assert!(wires[1].to_string().contains("continue explicitly"));
             assert!(wires[1].to_string().contains(match change {
                 Change::CoreMemory => "memory after",
-                Change::PromptAndProject => "prompt after",
                 _ => unreachable!(),
             }));
         }
@@ -173,14 +170,19 @@ fn ctf_r2a_isolates_prompt_memory_state_and_combined_continuation_changes() {
             assert!(json_contains_type(&second["input"], "reasoning"));
             assert!(json_contains_type(&second["input"], "function_call_output"));
             match change {
-                Change::ExternalPrompt => assert!(
-                    second["instructions"]
-                        .as_str()
-                        .unwrap()
-                        .contains("prompt after")
-                ),
+                Change::ExternalPrompt => {
+                    let instructions = second["instructions"].as_str().unwrap();
+                    assert!(instructions.contains("prompt before"), "{instructions}");
+                    assert!(!instructions.contains("prompt after"), "{instructions}");
+                }
                 Change::Project => assert!(second.to_string().contains("changed target")),
                 Change::Research => assert!(second.to_string().contains("snapshot-r2a-after")),
+                Change::PromptAndProject => {
+                    let instructions = second["instructions"].as_str().unwrap();
+                    assert!(instructions.contains("prompt before"), "{instructions}");
+                    assert!(!instructions.contains("prompt after"), "{instructions}");
+                    assert!(second.to_string().contains("changed target"));
+                }
                 _ => unreachable!(),
             }
         }

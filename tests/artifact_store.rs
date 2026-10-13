@@ -173,7 +173,7 @@ fn artifact_store_schema_effect_retry_and_resources_are_fixed() {
         .iter()
         .find(|spec| spec.name.as_str() == "artifact_store")
         .expect("artifact_store should be model-visible only after the Mode exposes it");
-    assert_eq!(spec.version, "1");
+    assert_eq!(spec.version, "2");
     assert_eq!(spec.exposure, ToolExposure::Direct);
     assert_eq!(spec.parallelism, ToolParallelism::ResourceLocked);
     assert_eq!(spec.effect, ToolEffect::LocalMutation);
@@ -242,7 +242,7 @@ async fn artifact_event_versions_and_unknown_types_are_strict_on_replay() {
         json!({
             "research_schema_version": 1,
             "data": {
-                "artifact_schema_version": 2,
+                "artifact_schema_version": 3,
                 "record": {
                     "id": "artifact-versioned",
                     "blob_id": "0000000000000000000000000000000000000000000000000000000000000000",
@@ -419,8 +419,8 @@ async fn same_blob_keeps_two_artifact_provenance_records_and_a_derived_chain() {
         "artifact-call-derived"
     );
     assert_eq!(
-        derived.result.output["artifact"]["target_snapshot_id"],
-        "snapshot-a"
+        derived.result.output["artifact"]["scope"],
+        json!({"kind": "target", "target_snapshot_id": "snapshot-a"})
     );
 
     let before_conflicts = research_line_count(&project);

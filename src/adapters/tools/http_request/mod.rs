@@ -15,11 +15,15 @@ use reqwest::header::CONTENT_LENGTH;
 use serde_json::{Value, json};
 
 use crate::adapters::artifact_store::LocalArtifactStore;
+use crate::domain::artifacts::ArtifactScope;
 use crate::domain::tools::{ResourceKey, ToolExecutionOutcome, ToolExecutionPlan};
 use crate::ports::artifact::ArtifactStore;
 use crate::ports::tool::ToolExecutorError;
 
-use super::artifact::{ArtifactStoreArgs, PublishedArtifact, preflight_artifact, publish_artifact};
+use super::artifact::{
+    ArtifactScopeBinding, ArtifactStoreArgs, PublishedArtifact, preflight_artifact,
+    publish_artifact,
+};
 use super::resources::ResourceKeyResolver;
 use super::{decode_arguments, invalid_plan};
 
@@ -29,20 +33,27 @@ use request::{
 };
 use response::{capture_response, preview_json, response_media_type};
 
-pub(super) fn input_schema() -> Value {
-    schema::input_schema()
-}
-
 pub(super) fn output_schema() -> Value {
     schema::output_schema()
 }
 
-pub(super) fn normalize(
+pub(super) fn normalize_for_scope(
     project_root: &std::path::Path,
     value: Value,
+    binding: &ArtifactScopeBinding,
 ) -> Result<(Value, Vec<ResourceKey>), ToolExecutorError> {
-    let arguments: HttpRequestArgs = decode_arguments("http_request", value)?;
+    let mut arguments: HttpRequestArgs = decode_arguments("http_request", value)?;
+    if arguments.artifact_scope.is_some() {
+        return Err(ToolExecutorError::InvalidArguments {
+            tool_name: "http_request".to_owned(),
+            message: "artifact_scope is runtime-bound and must not be supplied".to_owned(),
+        });
+    }
     validate(&arguments)?;
+    arguments.artifact_scope = Some(scope_from_input(
+        binding,
+        arguments.artifact.target_snapshot_id.as_deref(),
+    )?);
     Ok((
         serde_json::to_value(arguments).expect("HttpRequestArgs serialization cannot fail"),
         vec![ResourceKeyResolver::new(project_root).file(".cyber-agent/research.jsonl")],
@@ -184,10 +195,51 @@ fn artifact_arguments(
         artifact_id: arguments.artifact.artifact_id.clone(),
         source_path: source_path.to_owned(),
         media_type: media_type.to_owned(),
-        target_snapshot_id: arguments.artifact.target_snapshot_id.clone(),
+        scope: arguments
+            .artifact_scope
+            .clone()
+            .expect("HTTP Artifact scope is bound during normalization"),
         toolchain_fingerprint: arguments.artifact.toolchain_fingerprint.clone(),
         parent_artifact_ids: Vec::new(),
         transform: None,
+    }
+}
+
+pub(super) fn input_schema_for_scope(binding: &ArtifactScopeBinding) -> Value {
+    schema::input_schema(matches!(binding, ArtifactScopeBinding::TargetFromArguments))
+}
+
+fn scope_from_input(
+    binding: &ArtifactScopeBinding,
+    target_snapshot_id: Option<&str>,
+) -> Result<ArtifactScope, ToolExecutorError> {
+    match binding {
+        ArtifactScopeBinding::Session(session_id) => {
+            if target_snapshot_id.is_some() {
+                return Err(ToolExecutorError::InvalidArguments {
+                    tool_name: "http_request".to_owned(),
+                    message:
+                        "artifact.target_snapshot_id is not accepted for a session-scoped Artifact"
+                            .to_owned(),
+                });
+            }
+            Ok(ArtifactScope::Session {
+                session_id: session_id.clone(),
+            })
+        }
+        ArtifactScopeBinding::TargetFromArguments => {
+            let target_snapshot_id = target_snapshot_id
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| ToolExecutorError::InvalidArguments {
+                    tool_name: "http_request".to_owned(),
+                    message: "artifact.target_snapshot_id must not be empty".to_owned(),
+                })?;
+            Ok(ArtifactScope::Target {
+                target_snapshot_id: crate::domain::research::TargetSnapshotId::new(
+                    target_snapshot_id,
+                ),
+            })
+        }
     }
 }
 

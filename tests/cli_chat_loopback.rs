@@ -1,3 +1,5 @@
+#[path = "cli_chat_cases/agent_definitions.rs"]
+mod agent_definitions;
 #[path = "cli_chat_cases/argument_regeneration.rs"]
 mod argument_regeneration;
 #[path = "cli_chat_cases/command_diagnostics.rs"]
@@ -584,11 +586,11 @@ fn text_response(text: &str, response_id: &str) -> String {
 fn vision_response(summary: &str, response_id: &str) -> String {
     text_response(
         &serde_json::to_string(&json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "summary": summary,
             "extracted_text": "fixture screenshot",
             "regions": [],
-            "security_relevant_clues": ["fixture boundary marker"],
+            "task_observations": ["fixture boundary marker"],
             "uncertainty": ["synthetic input only"]
         }))
         .unwrap(),
@@ -1798,8 +1800,8 @@ fn synthetic_long_flow_preserves_authoritative_evidence_across_compaction_and_re
         "supports"
     );
     assert_eq!(
-        research["artifacts"]["records"]["artifact-m4-s4"]["target_snapshot_id"],
-        "snapshot-m4-s4"
+        research["artifacts"]["records"]["artifact-m4-s4"]["scope"],
+        json!({"kind": "target", "target_snapshot_id": "snapshot-m4-s4"})
     );
     assert_eq!(
         research["experiments"]["experiment-m4-s4"]["hypothesis_id"],
@@ -2017,6 +2019,8 @@ fn synthetic_long_flow_preserves_authoritative_evidence_across_compaction_and_re
     );
     let latest_compaction = final_state.latest_compaction().unwrap();
     let summary = serde_json::to_value(latest_compaction.summary()).unwrap();
+    // This fixture deliberately appends the legacy EvidenceSpine-only draft.
+    // Reading it must not rewrite it into the new task-reference schema.
     assert_eq!(summary["schema_version"], 2);
     assert_eq!(
         summary["evidence_spine"]["target_snapshot_refs"],
@@ -2042,7 +2046,7 @@ fn synthetic_long_flow_preserves_authoritative_evidence_across_compaction_and_re
     let final_events = session_events(root.path(), &session);
     let started_primary = final_events
         .iter()
-        .find(|event| event["event_type"] == "session.started")
+        .find(|event| event["event_type"] == "session.started_with_agent")
         .and_then(|event| event["payload"]["primary_provider_session"]["id"].as_str())
         .unwrap();
     let resumed_primary = final_events
@@ -2267,7 +2271,7 @@ fn chat_loopback_streams_text_and_persists_started_history_audit_and_explicit_re
     assert!(
         first_events
             .iter()
-            .any(|event| event["event_type"] == "session.started")
+            .any(|event| event["event_type"] == "session.started_with_agent")
     );
     assert_eq!(
         first_events
@@ -2500,7 +2504,10 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
             ),
         ),
     ]);
-    let first_config = write_config(root.path(), &first_server.base_url);
+    // This fixture verifies evidence/compaction boundaries, not context
+    // pressure. Keep room for the complete bound instructions and scoped
+    // Artifact schemas; the separate pressure fixture tests tight windows.
+    let first_config = write_context_window_config(root.path(), &first_server.base_url, 65_536);
     let first = run_chat(
         root.path(),
         &first_config,
@@ -2744,7 +2751,8 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
             "m5-compact-second-final",
         ),
     )]);
-    let compacted_config = write_config(root.path(), &compacted_server.base_url);
+    let compacted_config =
+        write_context_window_config(root.path(), &compacted_server.base_url, 65_536);
     let compacted = run_chat(
         root.path(),
         &compacted_config,
@@ -2767,7 +2775,7 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
     assert!(compacted_request["previous_response_id"].is_null());
     let compacted_wire = serde_json::to_string(&compacted_request).unwrap();
     for expected in [
-        "derived_session_summary_v2",
+        "derived_session_summary_v3",
         "snapshot-m5-compact",
         "hypothesis-m5-compact",
         "experiment-m5-compact",
@@ -2800,7 +2808,7 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
     );
     let summary =
         serde_json::to_value(compacted_state.latest_compaction().unwrap().summary()).unwrap();
-    assert_eq!(summary["schema_version"], 2);
+    assert_eq!(summary["schema_version"], 3);
     assert_eq!(summary["revision"], 1);
     assert_eq!(
         summary["evidence_spine"]["target_snapshot_refs"],
@@ -2874,7 +2882,7 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
             "m5-compact-resume",
         ),
     )]);
-    let resumed_config = write_config(root.path(), &resumed_server.base_url);
+    let resumed_config = write_context_window_config(root.path(), &resumed_server.base_url, 65_536);
     let resumed = run_chat(
         root.path(),
         &resumed_config,
@@ -2902,7 +2910,7 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
             .contains("execute the smallest decisive experiment")
     );
     let resumed_wire = serde_json::to_string(&resumed_request).unwrap();
-    assert!(resumed_wire.contains("derived_session_summary_v2"));
+    assert!(resumed_wire.contains("derived_session_summary_v3"));
     assert!(resumed_wire.contains("continue after explicit compaction"));
     assert!(resumed_wire.contains("resume the compacted boundary"));
 }
@@ -3212,7 +3220,7 @@ fn m5_context_pressure_uses_only_planner_manifest_and_never_auto_compacts() {
     // Keep this fixture inside the warning band with headroom for canonical
     // ToolSpec guidance; the separate critical lane still proves truncation.
     let warning_config =
-        write_context_window_config(warning.path(), &warning_server.base_url, 22_000);
+        write_context_window_config(warning.path(), &warning_server.base_url, 24_000);
     let warning_output = run_chat(
         warning.path(),
         &warning_config,
@@ -3266,7 +3274,7 @@ fn m5_context_pressure_uses_only_planner_manifest_and_never_auto_compacts() {
     // Leave required fragments room while keeping the bounded Research
     // projection above the input budget; critical must not be a stopped Turn.
     let critical_config =
-        write_context_window_config(critical.path(), &critical_server.base_url, 20_000);
+        write_context_window_config(critical.path(), &critical_server.base_url, 22_000);
     let critical_output = run_chat(
         critical.path(),
         &critical_config,
@@ -3336,6 +3344,11 @@ fn m5_cli_reports_real_tool_start_and_persisted_terminal_receipt() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("┌ 工具 #1 · read_file · 执行中"));
     assert!(stderr.contains("└ 工具 #1 · read_file · 完成"));
+    assert!(stderr.contains("deadline 配置"), "{stderr}");
+    assert!(
+        stderr.contains("总耗时") && stderr.contains("含保存"),
+        "{stderr}"
+    );
     assert!(stderr.contains("path: target.txt"));
     assert!(stderr.contains("content: bounded fixture\n"));
     assert!(!stderr.contains("execution:m5-read"));
@@ -3347,6 +3360,71 @@ fn m5_cli_reports_real_tool_start_and_persisted_terminal_receipt() {
             .count(),
         1
     );
+}
+
+#[test]
+fn ec_r3_cli_shows_the_typed_research_rejection_reason_after_receipt_persistence() {
+    let project = TemporaryDirectory::new("ec-r3-research-rejection-visibility");
+    initialize_project(project.path());
+    let rejected = json!({
+        "event_id": "ec-r3-rejected-hypothesis",
+        "occurred_at": "2026-09-29T12:00:00Z",
+        "operation": {
+            "kind": "record_hypothesis",
+            "record": {
+                "id": "hypothesis-ec-r3-rejected",
+                "title": "Missing experiment evidence",
+                "target_id": "fixture.ec-r3",
+                "attack_surface": "parser",
+                "vulnerability_class": "memory safety",
+                "entry_point": "parse_input",
+                "sensitive_sink": "copy_bytes",
+                "rationale": "controlled CLI rejection fixture",
+                "status": "active",
+                "priority": 10,
+                "evidence_links": [{
+                    "relation": "supports",
+                    "evidence": {"kind": "experiment", "id": "experiment-missing"}
+                }]
+            }
+        }
+    });
+    let server = spawn_responses_server(vec![
+        (
+            200,
+            m4_long_flow_tool_response(
+                "ec-r3-rejected",
+                "research_update",
+                rejected,
+                "ec-r3-rejected-step",
+            ),
+        ),
+        (
+            200,
+            text_response("rejection observed", "ec-r3-rejected-final"),
+        ),
+    ]);
+    let config = write_config(project.path(), &server.base_url);
+    let output = run_chat(
+        project.path(),
+        &config,
+        "record the controlled invalid research reference\n/exit\n",
+        &["--domain", "source", "--phase", "experiment"],
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("· research_update · 失败 · 原因 research_transition_rejected"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("deadline 配置"), "{stderr}");
+    assert!(
+        stderr.contains("总耗时") && stderr.contains("含保存"),
+        "{stderr}"
+    );
+    server.requests.recv().unwrap();
+    server.requests.recv().unwrap();
+    server.join();
 }
 
 #[test]
@@ -3509,7 +3587,15 @@ fn f3_graceful_interrupt_never_fabricates_a_receipt_for_unobserved_external_effe
     );
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert_eq!(stderr.matches("· 执行中").count(), 2, "{stderr}");
-    assert!(stderr.contains("· run_command · 失败"));
+    assert!(
+        stderr.contains("· run_command · 失败 · 原因 command_failed"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("deadline 配置"), "{stderr}");
+    assert!(
+        stderr.contains("总耗时") && stderr.contains("含保存"),
+        "{stderr}"
+    );
     assert!(!stderr.contains("· 取消"));
     assert!(stderr.contains("external effects are unknown"));
     assert!(stderr.contains("状态未知（未观察到批次终态）"));
@@ -4199,7 +4285,7 @@ mod f3_context {
     }
 
     #[test]
-    fn current_context_refreshes_later_steps_and_filters_to_the_exact_target_snapshot() {
+    fn current_facts_refresh_but_instructions_stay_pinned_and_targets_stay_exact() {
         let root = TemporaryDirectory::new("f3-context-refresh");
         initialize_project(root.path());
         let project = Project::discover(root.path()).unwrap();
@@ -4331,8 +4417,8 @@ mod f3_context {
         );
         let second_wire = serde_json::to_string(&second).unwrap();
         let second_instructions = second["instructions"].as_str().unwrap();
-        assert!(second_instructions.contains("F3 personal prompt v2"));
-        assert!(!second_instructions.contains("F3 personal prompt v1"));
+        assert!(second_instructions.contains("F3 personal prompt v1"));
+        assert!(!second_instructions.contains("F3 personal prompt v2"));
         assert!(second_instructions.contains("F3 project prompt fixed"));
         assert!(second_wire.contains("F3 core memory v2"));
         assert!(!second_wire.contains("F3 core memory v1"));
@@ -4359,7 +4445,7 @@ mod f3_context {
         );
         assert!(!output.status.success());
         assert!(
-            String::from_utf8_lossy(&output.stderr).contains("read personal Prompt"),
+            String::from_utf8_lossy(&output.stderr).contains("missing-personal.md"),
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
@@ -4378,3 +4464,7 @@ mod f3_context {
         }
     }
 }
+#[path = "cli_chat_cases/agent_definition_admission.rs"]
+mod agent_definition_admission;
+#[path = "cli_chat_cases/agent_definition_compaction.rs"]
+mod agent_definition_compaction;

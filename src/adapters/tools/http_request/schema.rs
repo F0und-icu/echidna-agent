@@ -8,8 +8,8 @@ use super::request::{
     MAX_QUERY_VALUE_BYTES, MAX_REDIRECTS, MAX_REQUEST_BODY_BYTES, MAX_TIMEOUT_MS, MAX_URL_BYTES,
 };
 
-pub(super) fn input_schema() -> Value {
-    json!({
+pub(super) fn input_schema(target_required: bool) -> Value {
+    let mut schema = json!({
         "type": "object",
         "properties": {
             "method": {"type": "string", "enum": ["get", "head", "post", "put", "patch", "delete", "options", "trace"]},
@@ -36,7 +36,19 @@ pub(super) fn input_schema() -> Value {
         },
         "required": ["method", "url", "artifact"],
         "additionalProperties": false
-    })
+    });
+    let artifact = &mut schema["properties"]["artifact"];
+    if !target_required {
+        artifact["properties"]
+            .as_object_mut()
+            .expect("HTTP artifact properties")
+            .remove("target_snapshot_id");
+        artifact["required"]
+            .as_array_mut()
+            .expect("HTTP artifact required array")
+            .retain(|value| value != "target_snapshot_id");
+    }
+    schema
 }
 
 pub(super) fn output_schema() -> Value {

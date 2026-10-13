@@ -10,7 +10,7 @@ use crate::domain::events::EventId;
 use crate::domain::profile::{VisionMode, VisionRoute, VisionRouteReason};
 
 pub const VISION_FACT_SCHEMA_VERSION: u16 = 1;
-pub const VISION_OBSERVATION_SCHEMA_VERSION: u16 = 2;
+pub const VISION_OBSERVATION_SCHEMA_VERSION: u16 = 3;
 
 macro_rules! vision_id {
     ($name:ident, $doc:literal) => {
@@ -174,7 +174,18 @@ pub struct VisionObservation {
     pub summary: String,
     pub extracted_text: Option<String>,
     pub regions: Vec<VisionRegion>,
-    pub security_relevant_clues: Vec<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present_observations"
+    )]
+    pub security_relevant_clues: Option<Vec<String>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present_observations"
+    )]
+    pub task_observations: Option<Vec<String>>,
     pub uncertainty: Vec<String>,
     pub provider_profile: ModelProfile,
     pub capability_hash: String,
@@ -186,11 +197,22 @@ pub struct VisionObservation {
     pub raw_observation_blob_id: BlobId,
 }
 
+/// Absence selects the other schema's field; a present field must be an
+/// array. Explicit null must not hide an incompatible field name.
+pub(crate) fn deserialize_present_observations<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Vec::<String>::deserialize(deserializer).map(Some)
+}
+
 impl VisionObservation {
     pub fn validate(&self) -> Result<(), VisionFactError> {
         if !matches!(
             self.schema_version,
-            VISION_FACT_SCHEMA_VERSION | VISION_OBSERVATION_SCHEMA_VERSION
+            VISION_FACT_SCHEMA_VERSION | 2 | VISION_OBSERVATION_SCHEMA_VERSION
         ) {
             return Err(VisionFactError::UnsupportedSchemaVersion {
                 received: self.schema_version,
@@ -198,7 +220,7 @@ impl VisionObservation {
         }
         match (self.schema_version, &self.image_geometry) {
             (VISION_FACT_SCHEMA_VERSION, None) => {}
-            (VISION_OBSERVATION_SCHEMA_VERSION, Some(geometry)) => geometry.validate(
+            (2 | VISION_OBSERVATION_SCHEMA_VERSION, Some(geometry)) => geometry.validate(
                 &self.source_artifact_id,
                 &self.derived_artifact_ids,
                 &self.regions,
@@ -230,7 +252,19 @@ impl VisionObservation {
                 artifact: self.source_artifact_id.clone(),
             });
         }
-        validate_nonempty_strings("security_relevant_clues", &self.security_relevant_clues)?;
+        match (
+            self.schema_version,
+            &self.security_relevant_clues,
+            &self.task_observations,
+        ) {
+            (1 | 2, Some(clues), None) => {
+                validate_nonempty_strings("security_relevant_clues", clues)?
+            }
+            (3, None, Some(observations)) => {
+                validate_nonempty_strings("task_observations", observations)?
+            }
+            _ => return Err(VisionFactError::ObservationFieldsVersionMismatch),
+        }
         validate_nonempty_strings("uncertainty", &self.uncertainty)?;
         for region in &self.regions {
             region.validate()?;
@@ -243,7 +277,7 @@ impl VisionObservation {
     /// making the evidence boundary explicit.
     pub fn primary_context_text(&self) -> Result<String, VisionFactError> {
         self.validate()?;
-        let value = json!({
+        let mut value = json!({
             "kind": "vision_observation",
             "schema_version": self.schema_version,
             "observation_id": self.id,
@@ -255,15 +289,37 @@ impl VisionObservation {
             "summary": self.summary,
             "extracted_text": self.extracted_text,
             "regions": self.regions,
-            "security_relevant_clues": self.security_relevant_clues,
             "uncertainty": self.uncertainty,
             "evidence_status": "unverified_model_observation",
         });
+        let (field, observations) = if self.schema_version == 3 {
+            ("task_observations", self.task_observations.as_ref())
+        } else {
+            (
+                "security_relevant_clues",
+                self.security_relevant_clues.as_ref(),
+            )
+        };
+        value[field] = json!(observations.expect("validated observation has its versioned fields"));
         serde_json::to_string(&crate::domain::canonical_json::canonical_json(&value)).map_err(
             |error| VisionFactError::PrimaryContextEncoding {
                 message: error.to_string(),
             },
         )
+    }
+
+    /// Consumers can search observation text without reinterpreting legacy
+    /// security clues as new task-oriented facts.
+    pub fn observation_notes(&self) -> &[String] {
+        if self.schema_version == 3 {
+            self.task_observations
+                .as_deref()
+                .expect("validated v3 observation contains task observations")
+        } else {
+            self.security_relevant_clues
+                .as_deref()
+                .expect("validated legacy observation contains security clues")
+        }
     }
 }
 
@@ -369,8 +425,10 @@ pub enum VisionFactError {
     InvalidRegion,
     #[error("Vision image geometry is inconsistent with its selected Artifacts or dimensions")]
     InvalidImageGeometry,
-    #[error("Vision observation v2 requires image geometry; legacy v1 must not invent it")]
+    #[error("Vision observation v2/v3 requires image geometry; legacy v1 must not invent it")]
     ImageGeometryVersionMismatch,
+    #[error("Vision observation fields do not match its schema version")]
+    ObservationFieldsVersionMismatch,
     #[error("Vision region {index} exceeds the delivered-image pixel bounds")]
     RegionOutOfBounds { index: usize },
     #[error("a Vision observation requires a ProviderSession with the Vision role")]

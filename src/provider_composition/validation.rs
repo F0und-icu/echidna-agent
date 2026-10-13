@@ -25,6 +25,13 @@ impl ProviderConfigV1 {
             });
         }
         self.prompts.validate()?;
+        if self
+            .agent_definition
+            .as_ref()
+            .is_some_and(|path| path.as_os_str().is_empty())
+        {
+            return Err(ProviderCompositionError::InvalidAgentDefinitionPath);
+        }
         if !(1..=crate::app::model_request_budget::MAX_MODEL_REQUEST_LIMIT)
             .contains(&self.runtime.model_request_limit_per_turn)
         {
@@ -96,12 +103,37 @@ impl ProviderDefinition {
             });
         }
         validate_base_url(name, &self.base_url)?;
-        match (self.credential_ref.as_deref(), self.api_key.as_ref()) {
-            (Some(reference), None) => validate_credential_reference(name, reference),
-            (None, Some(api_key)) if !api_key.expose().trim().is_empty() => Ok(()),
-            (None, Some(_)) => Err(ProviderCompositionError::EmptyInlineApiKey {
+        match (
+            self.credential_ref.as_deref(),
+            self.api_key.as_ref(),
+            self.chatgpt_subscription.as_ref(),
+        ) {
+            (Some(reference), None, None) => validate_credential_reference(name, reference),
+            (None, Some(api_key), None) if !api_key.expose().trim().is_empty() => Ok(()),
+            (None, Some(_), None) => Err(ProviderCompositionError::EmptyInlineApiKey {
                 provider: name.to_owned(),
             }),
+            (None, None, Some(subscription)) => {
+                // The authentication owner validates label/path syntax. This
+                // constructor is pure: doctor never touches the private store.
+                super::subscription_service(subscription)?;
+                if self.base_url.trim_end_matches('/')
+                    != crate::adapters::subscription_auth::API_BASE_URL
+                {
+                    return Err(ProviderCompositionError::InvalidSubscription {
+                        provider: name.to_owned(),
+                        message: "subscription credentials require the official public HTTPS API audience".to_owned(),
+                    });
+                }
+                let mapping = mappings[&self.capability_mapping].to_domain();
+                if mapping.incremental_input || mapping.max_output_tokens.is_some() {
+                    return Err(ProviderCompositionError::InvalidSubscription {
+                        provider: name.to_owned(),
+                        message: "subscription HTTP requires incremental_input=false and no max_output_tokens".to_owned(),
+                    });
+                }
+                Ok(())
+            }
             _ => Err(ProviderCompositionError::CredentialSelection {
                 provider: name.to_owned(),
             }),
@@ -216,6 +248,10 @@ pub enum ProviderCompositionError {
     InvalidModelRequestLimit,
     #[error("configuration field `{field}` must name a non-empty prompt file path")]
     InvalidPromptPath { field: &'static str },
+    #[error(
+        "configuration field `agent_definition` must name a non-empty definition directory or manifest path"
+    )]
+    InvalidAgentDefinitionPath,
     #[error("configuration field `{field}` must be between 1 and 86400000 milliseconds")]
     InvalidTimeout { field: &'static str },
     #[error("failed to read Provider configuration `{path}`: {source}")]
@@ -254,8 +290,14 @@ pub enum ProviderCompositionError {
         "Provider `{provider}` credential reference `{reference}` must be a dedicated CYBER_AGENT_*_API_KEY name"
     )]
     InvalidCredentialReference { provider: String, reference: String },
-    #[error("Provider `{provider}` must configure exactly one of `api_key` or `credential_ref`")]
+    #[error(
+        "Provider `{provider}` must configure exactly one of `api_key`, `credential_ref`, or `chatgpt_subscription`"
+    )]
     CredentialSelection { provider: String },
+    #[error("Provider `{provider}` subscription configuration is invalid: {message}")]
+    InvalidSubscription { provider: String, message: String },
+    #[error("subscription authentication setup failed: {message}")]
+    SubscriptionAuthentication { message: String },
     #[error("Provider `{provider}` inline `api_key` must not be empty")]
     EmptyInlineApiKey { provider: String },
     #[error("Agent profile `{profile}` is invalid: {source}")]

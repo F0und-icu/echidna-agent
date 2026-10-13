@@ -331,7 +331,7 @@ fn repeated_compaction_then_process_resume_refreshes_facts_without_reexecuting_c
             assert!(
                 wire["input"]
                     .to_string()
-                    .contains("derived_session_summary_v2")
+                    .contains("derived_session_summary_v3")
             );
             assert!(wire["input"].to_string().contains(snapshot.as_str()));
             assert!(
@@ -498,11 +498,13 @@ fn resume_delivers_current_memory_alongside_old_prose_without_rewriting_history(
         before_state.request_audits()
     );
     for audit in after_state.request_audits() {
-        assert!(
-            serde_json::to_string(audit)
-                .unwrap()
-                .contains("prompt:base:pragmatic-vulnerability-researcher:5")
-        );
+        let binding = after_state.agent_definition_binding().unwrap();
+        let definition = binding.definition();
+        assert!(serde_json::to_string(audit).unwrap().contains(&format!(
+            "prompt:agent:01:{}:persona:{}",
+            definition.id().as_str(),
+            definition.instructions().persona().digest().as_str()
+        )));
     }
     assert_audits_reconstruct(root.path(), &after_state);
 }

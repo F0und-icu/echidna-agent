@@ -81,6 +81,62 @@ model, materials included in its requests are sent to that provider. Image suppo
 on capability configuration; model observations and answers still require verification
 against actual evidence.
 
+## External Agent definitions (separate branch)
+
+`codex/agent-definition-v1` externalizes persona, work instructions, and methods into local
+files while retaining one execution loop. This branch is maintained separately and will
+not merge into main. Research remains the default; the
+[`technical-writing` example](examples/agents/technical-writing) provides a generic agent.
+
+```sh
+echidna agent init ./my-agent --id my-writer --from technical-writing
+# Edit my-agent/persona.md, work.md, and the Markdown files under methods/.
+echidna --config /path/to/provider.toml agent check ./my-agent
+echidna --config /path/to/provider.toml agent inspect ./my-agent
+echidna --config /path/to/provider.toml chat --agent ./my-agent
+```
+
+Use `--from builtin-research` to export the research template. `check` validates resources,
+known tools, and static context budgets offline; runtime admission also checks task history
+and current facts. `inspect` shows resolved instructions and tools, including your selected
+personal/project instruction content.
+
+The version-1 `agent.toml` contains:
+
+| Setting | Meaning |
+| --- | --- |
+| `id` / `name` | Stable identity and display name. Content edits do not change memory identity. |
+| `instructions` | Relative `persona_file`, `work_file`, and ordered `method_files`. |
+| `context.personal` / `project` | `configured` snapshots the files selected in Provider config; `none` excludes them. |
+| `context.memory` | `none`, `project`, or `agent`; Agent memory is scoped by project and stable ID. |
+| `tools` | Known names mapped to `direct`, `deferred`, or `hidden`; omitted names are Hidden. Deferred tools require direct `tool_search`. |
+| Optional `research` | Existing domain/phase selections and complete external prompt maps. Omission means no Research state or default Research events. |
+
+For research definitions, Direct/Deferred are baseline exposure and existing Domain/Phase
+rules may adjust them; Hidden stays terminal. Tool visibility controls context, not permission.
+Generic image, HTTP, and artifact tools bind materials to the current Session without a fake Target.
+
+The runtime supplies the current Agent ID and Memory scope to the model.
+Logical Memory paths resolve within that scope. Missing documents return null
+content/hash; create with expected_hash:null and update with the current hash
+returned by memory_read. Version 2 of memory_read, memory_write and inspect_project
+uses runtime operation timestamps and rejects caller occurred_at/observed_at
+arguments. Historical sessions and source timestamps remain unchanged.
+
+Inside chat, `/agent` displays identity and digest. `/agent reload [directory or agent.toml]`
+reloads instructions for the same identity, keeps History, and rebuilds the Provider session.
+`/agent use <path>` opens a new Session and leaves the old one resumable. Changes require
+paired calls, no running/stopping Job or PTY, and no queued image. `/image cancel` detaches
+a queued image while preserving its durable artifact.
+
+Sessions pin complete instruction content. Editing or deleting source files does not change
+an existing Session; Resume uses its saved content and reload explicitly reads new content.
+Reload cannot change the ID, memory scope, or research contract; use a new Session for those
+changes. Neither command automatically samples a model, continues a task, or replays tools.
+New Sessions select `chat --agent`, then top-level config `agent_definition`, then builtin
+research. Config paths resolve relative to that config file. Model and credential selection
+remain independent. Older binaries cannot read the new definition events.
+
 ## Quick start
 
 The current setup primarily targets macOS. Install Git and Rust/rustup; the repository pins
@@ -148,6 +204,40 @@ The program **does not load `.env` files automatically**. If you maintain a trus
 load it in your shell and export its variables before starting. Alternatively, replace
 `credential_ref` with `api_key = "…"` in your local TOML; each provider must use exactly one.
 Keep real keys and configuration outside the repository and out of Git.
+
+#### ChatGPT subscription sign-in
+
+Use the [subscription template](examples/provider-chatgpt-subscription.toml) and save your
+configuration outside the repository. Set `auth_store` to an absolute private directory without symlinks and with an existing parent
+and retain the official API URL. `chatgpt_subscription` is mutually exclusive with
+`api_key` and `credential_ref`. Echidna performs its own OAuth authorization; it does not
+read existing Codex or browser credentials.
+
+```sh
+echidna --config /absolute/path/subscription.toml auth login --provider chatgpt
+echidna --config /absolute/path/subscription.toml auth status --provider chatgpt
+echidna --config /absolute/path/subscription.toml auth models --provider chatgpt
+```
+
+Login opens a browser. Use `--no-browser` to open the printed authorization URL manually.
+The browser must reach the loopback callback on the machine running Echidna; using a
+different machine requires forwarding the callback port.
+`status` checks local state only; `models` queries the server with the selected account.
+Put a returned model slug in `model`, verify its capabilities and context window, then use
+the same configuration for `doctor` and `chat`. The template's 32K window is an explicit
+example. Subscription HTTP requires `incremental_input = false` and does not accept
+`max_output_tokens`. Successful login and offline doctor do not prove model eligibility.
+
+```sh
+echidna --config /absolute/path/subscription.toml auth logout --provider chatgpt
+```
+
+Access tokens refresh on demand before use. Logout attempts revocation and removes local
+tokens, reporting whether remote revocation was confirmed. Keep the authentication
+directory outside repositories and research projects with owner-only directory/file access.
+Account eligibility and usage follow the [official preview limitations](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations).
+Failures do not switch to paid API access or replay tools. Other vendors' non-key
+subscriptions are not yet supported.
 
 #### One multimodal model
 

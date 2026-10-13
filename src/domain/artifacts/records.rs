@@ -3,6 +3,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::events::EventId;
+use crate::domain::events::StreamId;
 use crate::domain::research::TargetSnapshotId;
 use crate::domain::tools::ToolCallId;
 
@@ -65,6 +66,38 @@ impl fmt::Display for BlobId {
     }
 }
 
+/// The durable semantic scope of an Artifact fact.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ArtifactScope {
+    Session {
+        session_id: StreamId,
+    },
+    Target {
+        target_snapshot_id: TargetSnapshotId,
+    },
+}
+
+impl ArtifactScope {
+    pub fn target_snapshot_id(&self) -> Option<&TargetSnapshotId> {
+        match self {
+            Self::Session { .. } => None,
+            Self::Target { target_snapshot_id } => Some(target_snapshot_id),
+        }
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), ArtifactError> {
+        match self {
+            Self::Session { session_id } => {
+                require_nonempty("Artifact session_id", session_id.as_str())
+            }
+            Self::Target { target_snapshot_id } => {
+                require_nonempty("Artifact target_snapshot_id", target_snapshot_id.as_str())
+            }
+        }
+    }
+}
+
 /// One provenance-preserving use of a deduplicated content Blob.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -79,7 +112,7 @@ pub struct ArtifactRecord {
     pub source_path: String,
     pub created_by_event_id: EventId,
     pub produced_by_tool_call_id: ToolCallId,
-    pub target_snapshot_id: TargetSnapshotId,
+    pub scope: ArtifactScope,
     pub toolchain_fingerprint: String,
     #[serde(default)]
     pub parent_artifact_ids: Vec<ArtifactId>,
@@ -101,10 +134,7 @@ impl ArtifactRecord {
             "Artifact produced_by_tool_call_id",
             self.produced_by_tool_call_id.as_str(),
         )?;
-        require_nonempty(
-            "Artifact target_snapshot_id",
-            self.target_snapshot_id.as_str(),
-        )?;
+        self.scope.validate()?;
         require_nonempty(
             "Artifact toolchain_fingerprint",
             &self.toolchain_fingerprint,

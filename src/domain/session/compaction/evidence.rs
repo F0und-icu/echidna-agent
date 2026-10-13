@@ -126,6 +126,11 @@ impl ResearchStreamIdentity {
 /// store.
 pub struct CompactionValidationContext<'facts> {
     project_id: &'facts ProjectId,
+    research: Option<ResearchValidationContext<'facts>>,
+    pub(super) task: Option<&'facts super::TaskCompactionValidationFacts>,
+}
+
+struct ResearchValidationContext<'facts> {
     research_stream: &'facts ResearchStreamIdentity,
     research_state: &'facts ResearchState,
     execution_receipt_ids: &'facts BTreeSet<ExecutionReceiptId>,
@@ -140,10 +145,29 @@ impl<'facts> CompactionValidationContext<'facts> {
     ) -> Self {
         Self {
             project_id,
-            research_stream,
-            research_state,
-            execution_receipt_ids,
+            research: Some(ResearchValidationContext {
+                research_stream,
+                research_state,
+                execution_receipt_ids,
+            }),
+            task: None,
         }
+    }
+
+    pub(crate) fn for_task(
+        project_id: &'facts ProjectId,
+        task: &'facts super::TaskCompactionValidationFacts,
+    ) -> Self {
+        Self {
+            project_id,
+            research: None,
+            task: Some(task),
+        }
+    }
+
+    pub(crate) fn with_task(mut self, task: &'facts super::TaskCompactionValidationFacts) -> Self {
+        self.task = Some(task);
+        self
     }
 }
 
@@ -270,6 +294,11 @@ impl EvidenceSpine {
                 received: self.source.project_id().clone(),
             });
         }
+        let context = context.research.as_ref().ok_or_else(|| {
+            super::task::invalid_task(
+                "Research EvidenceSpine requires its authoritative Research context",
+            )
+        })?;
         if self.source.stream_id() != context.research_stream.stream_id() {
             return Err(SessionError::CompactionEvidenceResearchStreamMismatch {
                 expected: context.research_stream.stream_id().clone(),

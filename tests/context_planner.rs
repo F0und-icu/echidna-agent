@@ -8,7 +8,8 @@ use echidna::domain::context::{
     LogicalAppendOnlyRejection, LogicalBaselineRelation, RetentionClass, SemanticClass,
 };
 use echidna::domain::model::{
-    CapabilityMappingVersion, ContentItem, MessageRole, ModelCapabilities, ModelRequestRequirements,
+    CapabilityMappingVersion, ContentItem, MessageRole, ModelCapabilities,
+    ModelRequestRequirements, OpaqueContinuationReference,
 };
 use echidna::domain::research::{HypothesisId, ResearchFactRef, TargetSnapshotId};
 use echidna::domain::tools::{
@@ -466,6 +467,58 @@ fn text_and_artifact_reference_wrappers_use_the_rendered_channel_budget() {
         ))]
     );
     assert!(rendered_channel_tokens(&artifact_plan) <= artifact_budget.input_token_limit());
+}
+
+#[test]
+fn opaque_continuation_charges_its_encoded_payload_not_its_small_reference_json() {
+    let opaque = ContentItem::OpaqueContinuation {
+        reference: serde_json::from_value::<OpaqueContinuationReference>(json!({
+            "scope": "provider-session:fixture",
+            "content_identity": "digest-only-reference",
+            "encoded_byte_length": 4096,
+        }))
+        .unwrap(),
+    };
+    let reference_tokens = u32::try_from(
+        serde_json::to_vec(std::slice::from_ref(&opaque))
+            .unwrap()
+            .len()
+            .saturating_add(3)
+            / 4,
+    )
+    .unwrap();
+    assert!(
+        reference_tokens < 64,
+        "the serialized reference itself is deliberately small"
+    );
+    let opaque_fragment = ContextFragment::new(
+        ContextFragmentId::new("opaque-delivery-budget").unwrap(),
+        ContextFragmentSource::UserInput,
+        ContextFragmentPriority::Required,
+        FragmentCachePolicy::DoNotCache,
+        ContextFragmentContent::ContentItems {
+            items: vec![opaque],
+        },
+    )
+    .unwrap();
+    assert!(
+        opaque_fragment.token_estimate() > 64,
+        "the delivery payload must consume its encoded-byte budget"
+    );
+    assert!(matches!(
+        planner().compile(
+            vec![opaque_fragment],
+            ContextBudget::new(64, 0, 0).unwrap(),
+            &capabilities(),
+            Vec::new(),
+            ModelRequestRequirements::default(),
+            None,
+        ),
+        Err(ContextPlannerError::RequiredFragmentsExceedBudget {
+            input_token_limit: 64,
+            ..
+        })
+    ));
 }
 
 #[test]

@@ -67,18 +67,37 @@ fn complete_catalog_preserves_baseline_outside_explicit_file_contract_additions(
     let mut baseline_saved = 0;
     for spec in catalog {
         let original = &before[spec.name.as_str()];
-        // The frozen R6 sharing baseline must not be regenerated for R7's
-        // intentional file-contract additions. Validate and remove only those
-        // additions, then compare every remaining Schema byte/constraint.
-        let schema = without_r7_file_contract_additions(spec.name.as_str(), &spec.input_schema);
+        // Preserve the frozen R6 oracle. Reverse only explicitly checked
+        // current-contract deltas before comparing all historical constraints.
+        let schema = historical_input_schema(spec.name.as_str(), &spec.input_schema);
+        if matches!(
+            spec.name.as_str(),
+            "memory_read" | "memory_write" | "inspect_project"
+        ) {
+            assert_eq!(spec.version, "2");
+        }
         let expanded = expanded(&schema, &schema, 0);
         let hash = format!(
             "{:x}",
             Sha256::digest(serde_json::to_vec(&expanded).unwrap())
         );
-        assert_eq!(hash, original["expanded_sha256"], "{}", spec.name);
         let old_size = original["input_bytes"].as_u64().unwrap() as usize;
         let size = serde_json::to_vec(&schema).unwrap().len();
+        if spec.name.as_str() == "research_get" {
+            assert_eq!(spec.version, "2");
+            assert_eq!(
+                original["expanded_sha256"],
+                json!("d12b99d4d23a26c49f74040f41a5004299df59a4eed146f6b5ad657aae7c4b78")
+            );
+            assert_eq!(old_size, 373, "historical v1 fixture must stay frozen");
+            assert_eq!(
+                hash,
+                "589a8bc61f482a741da61facbd4bd29e816f43ae7424de1072925099464abbc7"
+            );
+            assert_eq!(size, 585);
+            continue;
+        }
+        assert_eq!(hash, original["expanded_sha256"], "{}", spec.name);
         if spec.name.as_str() == "research_update" {
             assert_eq!(old_size, 9711);
             assert_eq!(size, 8690);
@@ -91,8 +110,42 @@ fn complete_catalog_preserves_baseline_outside_explicit_file_contract_additions(
     assert_eq!(baseline_saved, 1021);
 }
 
-fn without_r7_file_contract_additions(name: &str, schema: &Value) -> Value {
+fn historical_input_schema(name: &str, schema: &Value) -> Value {
     let mut baseline = schema.clone();
+    if matches!(name, "memory_read" | "memory_write" | "inspect_project") {
+        let field = if name == "inspect_project" {
+            "observed_at"
+        } else {
+            "occurred_at"
+        };
+        let properties = baseline["properties"].as_object_mut().unwrap();
+        assert!(!properties.contains_key(field));
+        properties.insert(field.to_owned(), json!({"type":"string","minLength":1}));
+        if name == "memory_write" {
+            let hash = properties["expected_hash"].as_object().unwrap();
+            assert!(
+                hash["description"]
+                    .as_str()
+                    .unwrap()
+                    .contains("memory_read")
+            );
+            assert!(hash["description"].as_str().unwrap().contains("null"));
+            properties
+                .get_mut("expected_hash")
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .remove("description");
+        }
+        if name == "inspect_project" {
+            assert!(baseline.get("required").is_none());
+            baseline["required"] = json!([field]);
+        } else {
+            let required = baseline["required"].as_array_mut().unwrap();
+            assert!(!required.contains(&json!(field)));
+            required.push(json!(field));
+        }
+    }
     let (descriptions, hash_path): (&[(&str, &str)], &str) = match name {
         "write_file" => (
             &[

@@ -10,8 +10,8 @@ use serde_json::{Value, json};
 use crate::adapters::artifact_store::LocalArtifactStore;
 use crate::adapters::project_event_store::{Project, ProjectEventStream};
 use crate::adapters::research_projection::load_reference_catalog;
-use crate::domain::artifacts::{ArtifactEvent, ArtifactId, ArtifactRecord, BlobId};
-use crate::domain::events::{EventEnvelope, EventId, EventType, OccurredAt};
+use crate::domain::artifacts::{ArtifactEvent, ArtifactId, ArtifactRecord, ArtifactScope, BlobId};
+use crate::domain::events::{EventEnvelope, EventId, EventType, OccurredAt, StreamId};
 use crate::domain::research::{ResearchEvent, ResearchReducer, TargetSnapshotId};
 use crate::domain::tools::{ResourceKey, ToolCallId, ToolExecutionOutcome, ToolExecutionPlan};
 use crate::ports::EventSink;
@@ -23,6 +23,15 @@ use super::research::reduce_store;
 use super::resources::ResourceKeyResolver;
 use super::{decode_arguments, invalid_plan};
 
+pub(super) fn scope_schema() -> Value {
+    json!({
+        "oneOf": [
+            {"type": "object", "properties": {"kind": {"const": "session"}, "session_id": {"type": "string", "minLength": 1}}, "required": ["kind", "session_id"], "additionalProperties": false},
+            {"type": "object", "properties": {"kind": {"const": "target"}, "target_snapshot_id": {"type": "string", "minLength": 1}}, "required": ["kind", "target_snapshot_id"], "additionalProperties": false}
+        ]
+    })
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ArtifactStoreArgs {
@@ -31,12 +40,35 @@ pub(crate) struct ArtifactStoreArgs {
     pub(crate) artifact_id: String,
     pub(crate) source_path: String,
     pub(crate) media_type: String,
-    pub(crate) target_snapshot_id: String,
+    pub(crate) scope: ArtifactScope,
     pub(crate) toolchain_fingerprint: String,
     #[serde(default)]
     pub(crate) parent_artifact_ids: Vec<String>,
     #[serde(default)]
     pub(crate) transform: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArtifactStoreInput {
+    event_id: String,
+    occurred_at: String,
+    artifact_id: String,
+    source_path: String,
+    media_type: String,
+    #[serde(default)]
+    target_snapshot_id: Option<String>,
+    toolchain_fingerprint: String,
+    #[serde(default)]
+    parent_artifact_ids: Vec<String>,
+    #[serde(default)]
+    transform: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum ArtifactScopeBinding {
+    Session(StreamId),
+    TargetFromArguments,
 }
 
 /// One successful Artifact publication through the sole Blob/preflight/Event
@@ -122,11 +154,23 @@ pub(crate) fn read_artifact_bytes_bounded(
     Ok(bytes)
 }
 
-pub(super) fn normalize(
+pub(super) fn normalize_for_scope(
     project_root: &Path,
     value: Value,
+    scope_binding: &ArtifactScopeBinding,
 ) -> Result<(Value, Vec<ResourceKey>), ToolExecutorError> {
-    let arguments: ArtifactStoreArgs = decode_arguments("artifact_store", value)?;
+    let input: ArtifactStoreInput = decode_arguments("artifact_store", value)?;
+    let arguments = ArtifactStoreArgs {
+        event_id: input.event_id,
+        occurred_at: input.occurred_at,
+        artifact_id: input.artifact_id,
+        source_path: input.source_path,
+        media_type: input.media_type,
+        scope: scope_from_input(scope_binding, input.target_snapshot_id)?,
+        toolchain_fingerprint: input.toolchain_fingerprint,
+        parent_artifact_ids: input.parent_artifact_ids,
+        transform: input.transform,
+    };
     require_nonempty_arguments(&arguments)?;
     let resolver = ResourceKeyResolver::new(project_root);
     Ok((
@@ -279,7 +323,7 @@ fn artifact_event(
         source_path: arguments.source_path.clone(),
         created_by_event_id: EventId::new(arguments.event_id.clone()),
         produced_by_tool_call_id: ToolCallId::new(plan.call.call_id.as_str()),
-        target_snapshot_id: TargetSnapshotId::new(arguments.target_snapshot_id.clone()),
+        scope: arguments.scope.clone(),
         toolchain_fingerprint: arguments.toolchain_fingerprint.clone(),
         parent_artifact_ids: arguments
             .parent_artifact_ids
@@ -310,7 +354,6 @@ pub(crate) fn require_nonempty_arguments(
         ("artifact_id", &arguments.artifact_id),
         ("source_path", &arguments.source_path),
         ("media_type", &arguments.media_type),
-        ("target_snapshot_id", &arguments.target_snapshot_id),
         ("toolchain_fingerprint", &arguments.toolchain_fingerprint),
     ] {
         if value.trim().is_empty() {
@@ -335,10 +378,49 @@ fn artifact_failure(
     )
 }
 
-pub(super) fn input_schema() -> Value {
-    schema::input_schema()
+pub(super) fn input_schema_for_scope(scope_binding: &ArtifactScopeBinding) -> Value {
+    schema::input_schema(matches!(
+        scope_binding,
+        ArtifactScopeBinding::TargetFromArguments
+    ))
 }
 
 pub(super) fn output_schema() -> Value {
     schema::output_schema()
+}
+
+fn scope_from_input(
+    binding: &ArtifactScopeBinding,
+    target_snapshot_id: Option<String>,
+) -> Result<ArtifactScope, ToolExecutorError> {
+    match binding {
+        ArtifactScopeBinding::Session(session_id) => {
+            if target_snapshot_id.is_some() {
+                return Err(ToolExecutorError::InvalidArguments {
+                    tool_name: "artifact_store".to_owned(),
+                    message: "target_snapshot_id is not accepted for a session-scoped Artifact"
+                        .to_owned(),
+                });
+            }
+            Ok(ArtifactScope::Session {
+                session_id: session_id.clone(),
+            })
+        }
+        ArtifactScopeBinding::TargetFromArguments => {
+            let target_snapshot_id =
+                target_snapshot_id.ok_or_else(|| ToolExecutorError::InvalidArguments {
+                    tool_name: "artifact_store".to_owned(),
+                    message: "`target_snapshot_id` must not be empty".to_owned(),
+                })?;
+            if target_snapshot_id.trim().is_empty() {
+                return Err(ToolExecutorError::InvalidArguments {
+                    tool_name: "artifact_store".to_owned(),
+                    message: "`target_snapshot_id` must not be empty".to_owned(),
+                });
+            }
+            Ok(ArtifactScope::Target {
+                target_snapshot_id: TargetSnapshotId::new(target_snapshot_id),
+            })
+        }
+    }
 }

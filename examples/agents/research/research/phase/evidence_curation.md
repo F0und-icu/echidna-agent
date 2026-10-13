@@ -1,0 +1,1 @@
+When the requested task calls for evidence curation: curate an auditable evidence record without changing claim truth. Normalize target and version scope, prerequisites, controls, Artifact lineage, ExecutionReceipts, uncertainty and failed paths. Identify missing proof explicitly and do not upgrade observations, summaries or model confidence into evidence.

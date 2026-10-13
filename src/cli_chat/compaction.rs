@@ -3,9 +3,7 @@
 //! their existing Domain/App owners.
 
 use crate::adapters::project_event_store::ProjectEventStream;
-use crate::adapters::research_projection::{
-    CompactionValidationFacts, load_compaction_validation_facts,
-};
+use crate::adapters::session_compaction::{SessionCompactionFacts, load_session_compaction_facts};
 use crate::adapters::tools::ToolRegistry;
 use crate::app::agent_loop::AgentLoop;
 use crate::app::session::SessionProjection;
@@ -40,13 +38,13 @@ impl DurableChatSession {
     pub(super) fn rebuild_compaction(
         &self,
         state: &SessionState,
-        facts: &CompactionValidationFacts,
+        facts: &SessionCompactionFacts,
         composition: &crate::provider_composition::ProviderComposition,
         provider_session: crate::domain::context::ProviderSession,
     ) -> Result<SessionCompaction, ChatError> {
         // A context-only preflight uses the same configured Provider and Tool
         // catalog, never `stream` or a second executing AgentLoop.
-        let tools = ToolRegistry::for_project(self.project.root());
+        let tools = self.bound_tools();
         let mut preview = AgentLoop::with_primary_context(
             composition.primary_provider(),
             &tools,
@@ -54,13 +52,15 @@ impl DurableChatSession {
             composition.agent_profile().primary().profile().clone(),
             provider_session,
         )?
-        .with_domain_profile(state.effective_domain_profile())
-        .with_research_phase(state.effective_research_phase());
+        .with_prompt_composition(super::definition::prompt_for_state(
+            self.agent_binding(),
+            state,
+        )?);
         preview.queue_agent_model_profile(composition.agent_profile().clone())?;
         preview.refresh_current_context(super::context::ChatContextCache::default().refresh(
             &self.project,
             &tools,
-            composition,
+            self.agent_binding(),
         )?)?;
         let (_, candidate) = select_compaction(state, facts, |candidate| {
             preview
@@ -97,7 +97,7 @@ impl DurableChatSession {
 
         // The Writer lock freezes both Research and Session appenders while
         // these read-only facts and the new Compaction Event are composed.
-        let facts = load_compaction_validation_facts(&self.project)
+        let facts = load_session_compaction_facts(&self.project, projection.state())
             .map_err(ChatError::ResearchProjection)?;
         let (draft, compaction) = select_compaction(projection.state(), &facts, |candidate| {
             agent
@@ -138,7 +138,7 @@ impl DurableChatSession {
 /// reconstruction. Complete suffix selection remains Session/History-owned.
 pub(super) fn select_compaction(
     state: &SessionState,
-    facts: &CompactionValidationFacts,
+    facts: &SessionCompactionFacts,
     mut fits: impl FnMut(&SessionCompaction) -> Result<bool, ChatError>,
 ) -> Result<(SessionSummaryDraft, SessionCompaction), ChatError> {
     let history = state

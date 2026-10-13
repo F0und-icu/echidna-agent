@@ -9,6 +9,7 @@ use reqwest::{Method, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::domain::artifacts::ArtifactScope;
 use crate::ports::tool::ToolExecutorError;
 
 use super::super::invalid_arguments;
@@ -83,7 +84,8 @@ pub(super) struct HttpArtifactProvenance {
     pub(super) event_id: String,
     pub(super) occurred_at: String,
     pub(super) artifact_id: String,
-    pub(super) target_snapshot_id: String,
+    #[serde(default)]
+    pub(super) target_snapshot_id: Option<String>,
     pub(super) toolchain_fingerprint: String,
 }
 
@@ -107,6 +109,8 @@ pub(super) struct HttpRequestArgs {
     #[serde(default = "default_capture_bytes")]
     pub(super) capture_bytes: usize,
     pub(super) artifact: HttpArtifactProvenance,
+    #[serde(default)]
+    pub(super) artifact_scope: Option<ArtifactScope>,
 }
 
 pub(super) struct PreparedRequest {
@@ -202,10 +206,6 @@ pub(super) fn validate(arguments: &HttpRequestArgs) -> Result<(), ToolExecutorEr
         ("artifact.event_id", &arguments.artifact.event_id),
         ("artifact.occurred_at", &arguments.artifact.occurred_at),
         ("artifact.artifact_id", &arguments.artifact.artifact_id),
-        (
-            "artifact.target_snapshot_id",
-            &arguments.artifact.target_snapshot_id,
-        ),
         (
             "artifact.toolchain_fingerprint",
             &arguments.artifact.toolchain_fingerprint,

@@ -23,6 +23,7 @@ pub(super) struct ProviderConfigV1 {
     pub(super) agent_profiles: BTreeMap<String, AgentProfileDefinition>,
     #[serde(default)]
     pub(super) prompts: PromptSources,
+    pub(super) agent_definition: Option<PathBuf>,
     #[serde(default)]
     pub(super) runtime: RuntimeSettings,
 }
@@ -61,6 +62,14 @@ impl ProviderConfigV1 {
         config
             .prompts
             .resolve_relative_to(path.parent().unwrap_or_else(|| Path::new(".")));
+        if let Some(agent_definition) = &mut config.agent_definition
+            && agent_definition.is_relative()
+        {
+            *agent_definition = path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(&*agent_definition);
+        }
         Ok(config)
     }
 
@@ -68,6 +77,10 @@ impl ProviderConfigV1 {
         self.agent_profiles
             .get(&self.active_agent_profile)
             .expect("validation guarantees the active Agent profile exists")
+    }
+
+    pub(super) fn agent_definition_path(&self) -> Option<&Path> {
+        self.agent_definition.as_deref()
     }
 
     pub(super) fn provider(&self, id: &str) -> &ProviderDefinition {
@@ -179,6 +192,7 @@ pub(super) struct ProviderDefinition {
     pub(super) model: String,
     pub(super) credential_ref: Option<String>,
     pub(super) api_key: Option<InlineApiKey>,
+    pub(super) chatgpt_subscription: Option<ChatGptSubscription>,
     pub(super) capability_mapping: String,
     pub(super) generation: u64,
     #[serde(default = "default_connect_timeout_ms")]
@@ -197,9 +211,14 @@ const fn default_read_timeout_ms() -> u64 {
 
 impl ProviderDefinition {
     pub(super) fn credential(&self) -> ProviderCredential<'_> {
-        match (self.credential_ref.as_deref(), self.api_key.as_ref()) {
-            (Some(reference), None) => ProviderCredential::Reference(reference),
-            (None, Some(api_key)) => ProviderCredential::Inline(api_key.expose()),
+        match (
+            self.credential_ref.as_deref(),
+            self.api_key.as_ref(),
+            self.chatgpt_subscription.as_ref(),
+        ) {
+            (Some(reference), None, None) => ProviderCredential::Reference(reference),
+            (None, Some(api_key), None) => ProviderCredential::Inline(api_key.expose()),
+            (None, None, Some(subscription)) => ProviderCredential::Subscription(subscription),
             _ => unreachable!("validated Provider configuration has exactly one credential"),
         }
     }
@@ -208,6 +227,14 @@ impl ProviderDefinition {
 pub(super) enum ProviderCredential<'a> {
     Reference(&'a str),
     Inline(&'a str),
+    Subscription(&'a ChatGptSubscription),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ChatGptSubscription {
+    pub(super) account: String,
+    pub(super) auth_store: PathBuf,
 }
 
 #[derive(Deserialize)]

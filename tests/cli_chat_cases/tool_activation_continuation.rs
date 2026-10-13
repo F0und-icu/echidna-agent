@@ -6,7 +6,7 @@ fn full_reasoning_with_project_diff_survives_additive_tool_activation() {
 }
 
 #[test]
-fn additive_activation_does_not_mask_prompt_or_memory_replacement() {
+fn additive_activation_keeps_personal_instructions_pinned_and_rejects_memory_replacement() {
     for changed in ["prompt", "memory"] {
         activation_case(Some(changed));
     }
@@ -36,7 +36,12 @@ fn activation_case(change: Option<&str>) {
     .unwrap();
     let target = root.path().join("target.txt");
     let changed = change.map(str::to_owned);
-    let count = if change.is_some() { 2 } else { 6 };
+    let count = match change {
+        Some("memory") => 2,
+        Some("prompt") => 4,
+        None => 6,
+        Some(_) => unreachable!(),
+    };
     let (sender, requests) = mpsc::channel();
     let thread = thread::spawn(move || {
         for index in 0..count {
@@ -93,7 +98,7 @@ fn activation_case(change: Option<&str>) {
         requests,
         thread,
     };
-    let output = f2a_wait_child(
+    let output = wait_child_before_deadline(
         spawn_f2a_chat(
             root.path(),
             &config,
@@ -105,18 +110,12 @@ fn activation_case(change: Option<&str>) {
             &[],
         ),
         "activation continuation",
+        Duration::from_secs(45),
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    if let Some(change) = change {
-        assert!(!output.status.success(), "{change}: {stderr}");
-        assert!(
-            stderr.contains(if change == "prompt" {
-                "BASELINE_REJECTED: PromptChanged"
-            } else {
-                "CORE_MEMORY_CHANGED"
-            }),
-            "{stderr}"
-        );
+    if change == Some("memory") {
+        assert!(!output.status.success(), "memory: {stderr}");
+        assert!(stderr.contains("CORE_MEMORY_CHANGED"), "{stderr}");
     } else {
         // Normal expiry removes dispatch eligibility, not retained reasoning
         // or state diffs. A later explicit process Resume remains supported.
@@ -125,20 +124,22 @@ fn activation_case(change: Option<&str>) {
             String::from_utf8_lossy(&output.stdout).contains("completed fixture"),
             "{stderr}"
         );
-        let resumed = f2a_wait_child(
-            spawn_f2a_chat(
-                root.path(),
-                &config,
-                "resumed turn\n/exit\n",
-                &["--resume", "latest"],
-            ),
-            "activation resume",
-        );
-        assert!(
-            resumed.status.success(),
-            "{}",
-            String::from_utf8_lossy(&resumed.stderr)
-        );
+        if change.is_none() {
+            let resumed = f2a_wait_child(
+                spawn_f2a_chat(
+                    root.path(),
+                    &config,
+                    "resumed turn\n/exit\n",
+                    &["--resume", "latest"],
+                ),
+                "activation resume",
+            );
+            assert!(
+                resumed.status.success(),
+                "{}",
+                String::from_utf8_lossy(&resumed.stderr)
+            );
+        }
     }
     let wires: Vec<_> = (0..count)
         .map(|_| f2a_request_body(&server.requests, "activation wire"))
@@ -158,13 +159,19 @@ fn activation_case(change: Option<&str>) {
     };
     assert!(!has_reader(&wires[0]));
     assert!(!has_reader(&wires[1]));
-    if change.is_none() {
+    if change != Some("memory") {
         assert!(has_reader(&wires[2]));
         assert!(has_reader(&wires[3]));
-        assert!(!has_reader(&wires[4]), "activation must clear at next Turn");
-        assert!(!has_reader(&wires[5]), "activation must clear at Resume");
-        assert!(wires[4].to_string().contains("RETAIN_REASONING_0"));
-        assert!(wires[4].to_string().contains("project_snapshot_diff"));
+        if change == Some("prompt") {
+            let instructions = wires[2]["instructions"].as_str().unwrap();
+            assert!(instructions.contains("prompt-before"), "{instructions}");
+            assert!(!instructions.contains("prompt-after"), "{instructions}");
+        } else {
+            assert!(!has_reader(&wires[4]), "activation must clear at next Turn");
+            assert!(!has_reader(&wires[5]), "activation must clear at Resume");
+            assert!(wires[4].to_string().contains("RETAIN_REASONING_0"));
+            assert!(wires[4].to_string().contains("project_snapshot_diff"));
+        }
         for marker in [
             "RETAIN_REASONING_0",
             "RETAIN_REASONING_1",
@@ -189,7 +196,7 @@ fn activation_case(change: Option<&str>) {
     assert_eq!(state.request_audits().len(), count);
     assert_eq!(
         state.execution_receipt_count(),
-        if change.is_some() { 2 } else { 3 }
+        if change == Some("memory") { 2 } else { 3 }
     );
     assert_eq!(state.history().ensure_all_tool_calls_paired(), Ok(()));
     assert_audits_reconstruct(root.path(), &state);
@@ -206,7 +213,7 @@ fn activation_case(change: Option<&str>) {
         calls.iter().filter(|name| **name == "run_command").count(),
         1
     );
-    if change.is_none() {
+    if change != Some("memory") {
         assert!(state.history().items().iter().any(|item| match item {
             echidna::domain::model::ContentItem::ToolResult { result } =>
                 result.tool_name.as_str() == "read_output"

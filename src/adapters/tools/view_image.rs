@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 
 use crate::adapters::artifact_store::LocalArtifactStore;
 use crate::adapters::image::{LOCAL_IMAGE_INPUT_LIMITS, PreparedLocalImage, prepare_local_image};
+use crate::domain::artifacts::ArtifactScope;
 use crate::domain::image::ImageDeliveryBudget;
 use crate::domain::tools::{ResourceKey, ToolExecutionOutcome, ToolExecutionPlan};
 use crate::domain::vision::VIEW_IMAGE_SELECTION_SCHEMA_VERSION;
@@ -14,7 +15,8 @@ use crate::ports::artifact::ArtifactStore;
 use crate::ports::tool::ToolExecutorError;
 
 use super::artifact::{
-    ArtifactStoreArgs, PublishedArtifact, publish_artifact, require_nonempty_arguments,
+    ArtifactScopeBinding, ArtifactStoreArgs, PublishedArtifact, publish_artifact,
+    require_nonempty_arguments,
 };
 use super::filesystem::resolve_path;
 use super::resources::ResourceKeyResolver;
@@ -30,7 +32,8 @@ pub(crate) struct ViewImageToolInput {
     occurred_at: String,
     artifact_id: String,
     source_path: String,
-    target_snapshot_id: String,
+    #[serde(default)]
+    target_snapshot_id: Option<String>,
     toolchain_fingerprint: String,
 }
 
@@ -48,7 +51,7 @@ impl ViewImageToolInput {
             occurred_at: occurred_at.into(),
             artifact_id: artifact_id.into(),
             source_path: source_path.into(),
-            target_snapshot_id: target_snapshot_id.into(),
+            target_snapshot_id: Some(target_snapshot_id.into()),
             toolchain_fingerprint: toolchain_fingerprint.into(),
         }
     }
@@ -56,40 +59,81 @@ impl ViewImageToolInput {
     pub(crate) fn into_value(self) -> Value {
         serde_json::to_value(self).expect("ViewImageToolInput serialization cannot fail")
     }
+
+    pub(crate) fn for_scope(
+        event_id: impl Into<String>,
+        occurred_at: impl Into<String>,
+        artifact_id: impl Into<String>,
+        source_path: impl Into<String>,
+        scope: ArtifactScope,
+        toolchain_fingerprint: impl Into<String>,
+    ) -> Self {
+        match scope {
+            ArtifactScope::Target { target_snapshot_id } => Self::new(
+                event_id,
+                occurred_at,
+                artifact_id,
+                source_path,
+                target_snapshot_id.as_str(),
+                toolchain_fingerprint,
+            ),
+            ArtifactScope::Session { .. } => Self {
+                event_id: event_id.into(),
+                occurred_at: occurred_at.into(),
+                artifact_id: artifact_id.into(),
+                source_path: source_path.into(),
+                target_snapshot_id: None,
+                toolchain_fingerprint: toolchain_fingerprint.into(),
+            },
+        }
+    }
 }
 
-pub(super) fn normalize(
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ViewImageExecutionArgs {
+    #[serde(flatten)]
+    input: ViewImageToolInput,
+    scope: ArtifactScope,
+}
+
+pub(super) fn normalize_for_scope(
     project_root: &Path,
     value: Value,
+    binding: &ArtifactScopeBinding,
 ) -> Result<(Value, Vec<ResourceKey>), ToolExecutorError> {
-    let arguments: ViewImageToolInput = decode_arguments("view_image", value)?;
-    require_nonempty_view_arguments(&arguments)?;
+    let input: ViewImageToolInput = decode_arguments("view_image", value)?;
+    let scope = scope_from_input(binding, input.target_snapshot_id.as_deref())?;
+    require_nonempty_view_arguments(&input, &scope)?;
+    let arguments = ViewImageExecutionArgs { input, scope };
     let resolver = ResourceKeyResolver::new(project_root);
     Ok((
         serde_json::to_value(&arguments).expect("ViewImageArgs serialization cannot fail"),
         vec![
-            resolver.file(&arguments.source_path),
+            resolver.file(&arguments.input.source_path),
             resolver.file(".cyber-agent/research.jsonl"),
         ],
     ))
 }
 
 pub(super) async fn execute(project_root: &Path, plan: ToolExecutionPlan) -> ToolExecutionOutcome {
-    let arguments: ViewImageToolInput =
+    let arguments: ViewImageExecutionArgs =
         match decode_arguments("view_image", plan.call.arguments.clone()) {
             Ok(arguments) => arguments,
             Err(error) => return invalid_plan(plan, error),
         };
-    if let Err(error) = require_nonempty_view_arguments(&arguments) {
+    if let Err(error) = require_nonempty_view_arguments(&arguments.input, &arguments.scope) {
         return invalid_plan(plan, error);
     }
-    let source = resolve_path(project_root, &arguments.source_path);
+    let source = resolve_path(project_root, &arguments.input.source_path);
     let prepared = match prepare_local_image(&source, LOCAL_IMAGE_INPUT_LIMITS, DELIVERY_BUDGET) {
         Ok(prepared) => prepared,
         Err(error) => return image_failure(plan, "view_image_invalid", error),
     };
-    let original_arguments = original_artifact_arguments(&arguments, &prepared);
-    let derived_arguments = derived_artifact_arguments(&arguments, &prepared);
+    let original_arguments =
+        original_artifact_arguments(&arguments.input, arguments.scope.clone(), &prepared);
+    let derived_arguments =
+        derived_artifact_arguments(&arguments.input, arguments.scope.clone(), &prepared);
     let original = match publish_artifact(project_root, &plan, &original_arguments, |project| {
         LocalArtifactStore::for_project(project).publish_bytes(&prepared.original.bytes)
     }) {
@@ -135,6 +179,7 @@ pub(super) async fn execute(project_root: &Path, plan: ToolExecutionPlan) -> Too
 
 fn original_artifact_arguments(
     arguments: &ViewImageToolInput,
+    scope: ArtifactScope,
     prepared: &PreparedLocalImage,
 ) -> ArtifactStoreArgs {
     ArtifactStoreArgs {
@@ -143,7 +188,7 @@ fn original_artifact_arguments(
         artifact_id: arguments.artifact_id.clone(),
         source_path: arguments.source_path.clone(),
         media_type: prepared.original.metadata.format.media_type().to_owned(),
-        target_snapshot_id: arguments.target_snapshot_id.clone(),
+        scope,
         toolchain_fingerprint: arguments.toolchain_fingerprint.clone(),
         parent_artifact_ids: Vec::new(),
         transform: None,
@@ -152,6 +197,7 @@ fn original_artifact_arguments(
 
 fn derived_artifact_arguments(
     arguments: &ViewImageToolInput,
+    scope: ArtifactScope,
     prepared: &PreparedLocalImage,
 ) -> Option<ArtifactStoreArgs> {
     prepared
@@ -163,7 +209,7 @@ fn derived_artifact_arguments(
             artifact_id: format!("{}:image_budget_v1", arguments.artifact_id),
             source_path: arguments.source_path.clone(),
             media_type: derived.metadata.format.media_type().to_owned(),
-            target_snapshot_id: arguments.target_snapshot_id.clone(),
+            scope,
             toolchain_fingerprint: arguments.toolchain_fingerprint.clone(),
             parent_artifact_ids: vec![arguments.artifact_id.clone()],
             transform: Some("image_budget_v1".to_owned()),
@@ -185,6 +231,7 @@ fn publication_json(publication: &PublishedArtifact) -> Value {
 
 fn require_nonempty_view_arguments(
     arguments: &ViewImageToolInput,
+    scope: &ArtifactScope,
 ) -> Result<(), ToolExecutorError> {
     let probe = ArtifactStoreArgs {
         event_id: arguments.event_id.clone(),
@@ -193,7 +240,7 @@ fn require_nonempty_view_arguments(
         source_path: arguments.source_path.clone(),
         // Decoding selects the actual media type before Artifact publication.
         media_type: "image/pending-decoder".to_owned(),
-        target_snapshot_id: arguments.target_snapshot_id.clone(),
+        scope: scope.clone(),
         toolchain_fingerprint: arguments.toolchain_fingerprint.clone(),
         parent_artifact_ids: Vec::new(),
         transform: None,
@@ -233,8 +280,8 @@ fn partial_derivative_failure(
     outcome
 }
 
-pub(super) fn input_schema() -> Value {
-    json!({
+pub(super) fn input_schema_for_scope(binding: &ArtifactScopeBinding) -> Value {
+    let mut schema = json!({
         "type": "object",
         "properties": {
             "event_id": {"type": "string", "minLength": 1},
@@ -246,7 +293,51 @@ pub(super) fn input_schema() -> Value {
         },
         "required": ["event_id", "occurred_at", "artifact_id", "source_path", "target_snapshot_id", "toolchain_fingerprint"],
         "additionalProperties": false
-    })
+    });
+    if !matches!(binding, ArtifactScopeBinding::TargetFromArguments) {
+        schema["properties"]
+            .as_object_mut()
+            .expect("view-image schema properties")
+            .remove("target_snapshot_id");
+        schema["required"]
+            .as_array_mut()
+            .expect("view-image schema required array")
+            .retain(|value| value != "target_snapshot_id");
+    }
+    schema
+}
+
+fn scope_from_input(
+    binding: &ArtifactScopeBinding,
+    target_snapshot_id: Option<&str>,
+) -> Result<ArtifactScope, ToolExecutorError> {
+    match binding {
+        ArtifactScopeBinding::Session(session_id) => {
+            if target_snapshot_id.is_some() {
+                return Err(ToolExecutorError::InvalidArguments {
+                    tool_name: "view_image".to_owned(),
+                    message: "target_snapshot_id is not accepted for a session-scoped Artifact"
+                        .to_owned(),
+                });
+            }
+            Ok(ArtifactScope::Session {
+                session_id: session_id.clone(),
+            })
+        }
+        ArtifactScopeBinding::TargetFromArguments => {
+            let target_snapshot_id = target_snapshot_id
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| ToolExecutorError::InvalidArguments {
+                    tool_name: "view_image".to_owned(),
+                    message: "`target_snapshot_id` must not be empty".to_owned(),
+                })?;
+            Ok(ArtifactScope::Target {
+                target_snapshot_id: crate::domain::research::TargetSnapshotId::new(
+                    target_snapshot_id,
+                ),
+            })
+        }
+    }
 }
 
 pub(super) fn output_schema() -> Value {
@@ -279,10 +370,10 @@ fn publication_schema() -> Value {
                 "id": {"type": "string", "minLength": 1}, "blob_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
                 "media_type": {"type": "string", "enum": ["image/png", "image/jpeg"]}, "size_bytes": {"type": "integer", "minimum": 0},
                 "source_path": {"type": "string", "minLength": 1}, "created_by_event_id": {"type": "string", "minLength": 1},
-                "produced_by_tool_call_id": {"type": "string", "minLength": 1}, "target_snapshot_id": {"type": "string", "minLength": 1},
+                "produced_by_tool_call_id": {"type": "string", "minLength": 1}, "scope": super::artifact::scope_schema(),
                 "toolchain_fingerprint": {"type": "string", "minLength": 1}, "parent_artifact_ids": {"type": "array", "items": {"type": "string", "minLength": 1}},
                 "transform": {"type": ["string", "null"]}
-            }, "required": ["id", "blob_id", "media_type", "size_bytes", "source_path", "created_by_event_id", "produced_by_tool_call_id", "target_snapshot_id", "toolchain_fingerprint", "parent_artifact_ids", "transform"], "additionalProperties": false},
+            }, "required": ["id", "blob_id", "media_type", "size_bytes", "source_path", "created_by_event_id", "produced_by_tool_call_id", "scope", "toolchain_fingerprint", "parent_artifact_ids", "transform"], "additionalProperties": false},
             "blob": {"type": "object", "properties": {"blob_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "size_bytes": {"type": "integer", "minimum": 0}, "already_present": {"type": "boolean"}}, "required": ["blob_id", "size_bytes", "already_present"], "additionalProperties": false},
             "research_event_count": {"type": "integer", "minimum": 0}
         }, "required": ["event_id", "artifact", "blob", "research_event_count"], "additionalProperties": false

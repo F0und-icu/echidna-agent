@@ -118,10 +118,7 @@ fn tool_guidance_keeps_time_provenance_visibility_and_rerun_boundaries_explicit(
     let catalog = tools.catalog();
     let spec = |name: &str| catalog.iter().find(|s| s.name.as_str() == name).unwrap();
     for name in [
-        "inspect_project",
         "research_update",
-        "memory_read",
-        "memory_write",
         "artifact_store",
         "http_request",
         "view_image",
@@ -129,6 +126,15 @@ fn tool_guidance_keeps_time_provenance_visibility_and_rerun_boundaries_explicit(
         assert!(spec(name).description.contains("observed timestamps"));
         assert!(
             spec(name)
+                .description
+                .contains("preserve source timestamps")
+        );
+    }
+    for name in ["inspect_project", "memory_read", "memory_write"] {
+        assert_eq!(spec(name).version, "2");
+        assert!(!spec(name).description.contains("run_command argv"));
+        assert!(
+            !spec(name)
                 .description
                 .contains("preserve source timestamps")
         );
@@ -1026,11 +1032,7 @@ async fn agent_loop_executes_inspect_project_through_the_fixed_registry() {
     let project = TestProject::new("agent-loop-inspect-project");
     Project::initialize(&project.root).unwrap();
     project.write("target.rs", "fn fixture() {}\n");
-    let requested_call = tool_call(
-        "call-inspect-project",
-        "inspect_project",
-        json!({"observed_at": "2026-08-23T12:00:00Z"}),
-    );
+    let requested_call = tool_call("call-inspect-project", "inspect_project", json!({}));
     let provider = ScriptedProvider::new([
         vec![ModelEvent::ToolCall {
             call: requested_call,

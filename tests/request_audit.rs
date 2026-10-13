@@ -6,7 +6,9 @@ use echidna::app::session::{AppendAfterDurableError, SessionProjection};
 use echidna::domain::artifacts::BlobId;
 use echidna::domain::context::{ProviderSessionId, ProviderSessionRef, ProviderSessionRole};
 use echidna::domain::events::{EventEnvelope, EventId, EventSequence, OccurredAt, StreamId};
-use echidna::domain::model::{ModelCapabilities, ModelInputIR, ModelRequestRequirements};
+use echidna::domain::model::{
+    ModelCapabilities, ModelInputIR, ModelInputIrSchemaVersion, ModelRequestRequirements,
+};
 use echidna::domain::project::ProjectId;
 use echidna::domain::request_audit::{
     RequestAdapterVersion, RequestAuditAttempt, RequestAuditBinding, RequestAuditDelivery,
@@ -458,13 +460,27 @@ fn request_audit_rejects_unknown_schema_reordered_duplicate_and_mismatched_conte
     );
     let encoded = serde_json::to_value(&manifest).unwrap();
 
-    let mut historical_ir_v2 = encoded.clone();
-    historical_ir_v2["full_logical_input"]["schema_version"] = json!(2);
-    historical_ir_v2["delivered_input"]["schema_version"] = json!(2);
-    let historical_ir_v2: RequestAuditManifest = serde_json::from_value(historical_ir_v2).unwrap();
-    historical_ir_v2
-        .validate()
-        .expect("historical ModelInputIR v2 audit identities remain readable");
+    for schema_version in [2, 3] {
+        let mut historical_input = input("instructions", "user input");
+        historical_input.schema_version = ModelInputIrSchemaVersion::new(schema_version);
+        let mut historical_session = projection();
+        let mut historical_sink = RecordingSink::default();
+        let historical_manifest = record(
+            &service,
+            historical_input.clone(),
+            &mut historical_session,
+            &mut historical_sink,
+            &format!("request-audit-historical-ir-v{schema_version}"),
+        );
+        historical_manifest
+            .validate()
+            .unwrap_or_else(|error| panic!("historical ModelInputIR v{schema_version}: {error}"));
+        assert_eq!(
+            service.reconstruct(&historical_manifest).unwrap(),
+            historical_input,
+            "historical ModelInputIR v{schema_version} must reconstruct exactly"
+        );
+    }
 
     let mut historical_manifest_v2 = encoded.clone();
     historical_manifest_v2["schema_version"] = json!(2);

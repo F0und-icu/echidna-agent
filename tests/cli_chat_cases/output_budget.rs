@@ -66,3 +66,105 @@ fn output_limit_incomplete_stops_atomically_and_requires_explicit_resume() {
     assert_eq!(state.history().ensure_all_tool_calls_paired(), Ok(()));
     assert_audits_reconstruct(root.path(), &state);
 }
+
+fn invalid_completed_item_status_body() -> String {
+    [
+        json!({"type":"response.output_item.done","item":{
+            "type":"function_call","call_id":"uncommitted-write","name":"write_file",
+            "arguments":json!({"path":"must-not-exist.txt","content":"uncommitted","expected_hash":null}).to_string()}}),
+        json!({"type":"response.output_item.done","item":{
+            "type":"reasoning","id":"REMOTE_ID_CANARY","status":"REMOTE_STATUS_CANARY",
+            "content":[]}}),
+    ]
+    .iter()
+    .map(|event| format!("data: {event}\n\n"))
+    .collect()
+}
+
+#[test]
+fn protocol_status_failure_after_streamed_tool_remains_atomic_and_eof_requires_resume() {
+    let root = TemporaryDirectory::new("response-protocol-stop-eof");
+    initialize_project(root.path());
+    let server = spawn_responses_server(vec![(200, invalid_completed_item_status_body())]);
+    let config = write_context_window_config(root.path(), &server.base_url, 131_072);
+
+    let output = run_chat(
+        root.path(),
+        &config,
+        "First durable task before protocol rejection.\n",
+        &[],
+    );
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("source=output_item_done"), "{stderr}");
+    assert!(stderr.contains("item_family=reasoning"), "{stderr}");
+    assert!(stderr.contains("status_class=unknown_string"), "{stderr}");
+    assert!(!stderr.contains("REMOTE_ID_CANARY"), "{stderr}");
+    assert!(!stderr.contains("REMOTE_STATUS_CANARY"), "{stderr}");
+    assert!(
+        stdout.contains(
+            "Protocol sample was rejected before completion; its streamed output was not committed and no Tool from this sample was dispatched."
+        ),
+        "{stdout}"
+    );
+    assert!(stdout.contains("EOF received;"), "{stdout}");
+
+    let request = f2a_request_body(&server.requests, "protocol failure request");
+    assert!(
+        request
+            .to_string()
+            .contains("First durable task before protocol rejection."),
+        "{request}"
+    );
+    assert!(server.requests.try_recv().is_err());
+    server.join();
+
+    let project = Project::discover(root.path()).unwrap();
+    let state = reduced_session(&project, &session_id(root.path()));
+    assert_eq!(state.execution_receipt_count(), 0);
+    assert!(!root.path().join("must-not-exist.txt").exists());
+    assert_eq!(state.history().ensure_all_tool_calls_paired(), Ok(()));
+    assert_audits_reconstruct(root.path(), &state);
+}
+
+#[test]
+fn protocol_status_failure_resume_then_eof_does_not_replay_sample_or_tool() {
+    let root = TemporaryDirectory::new("response-protocol-stop-resume-eof");
+    initialize_project(root.path());
+    let server = spawn_responses_server(vec![(200, invalid_completed_item_status_body())]);
+    let config = write_context_window_config(root.path(), &server.base_url, 131_072);
+
+    let output = run_chat(
+        root.path(),
+        &config,
+        "First durable task before protocol rejection.\n/resume\n",
+        &[],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("ProviderSession rebuilt from durable History"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("No request sent or Tool retried."),
+        "{stdout}"
+    );
+    assert!(stdout.contains("EOF received;"), "{stdout}");
+
+    let _ = f2a_request_body(&server.requests, "protocol resumed request");
+    assert!(server.requests.try_recv().is_err());
+    server.join();
+
+    let project = Project::discover(root.path()).unwrap();
+    let state = reduced_session(&project, &session_id(root.path()));
+    assert_eq!(state.execution_receipt_count(), 0);
+    assert!(!root.path().join("must-not-exist.txt").exists());
+    assert_eq!(state.history().ensure_all_tool_calls_paired(), Ok(()));
+    assert_audits_reconstruct(root.path(), &state);
+}

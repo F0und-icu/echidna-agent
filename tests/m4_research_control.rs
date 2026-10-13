@@ -523,7 +523,7 @@ async fn agent_loop_consumes_each_domain_and_phase_at_the_turn_boundary() {
                     .unwrap()
                     .turn_configuration()
                     .domain_profile(),
-                profile
+                Some(profile)
             );
             assert_eq!(
                 agent
@@ -531,7 +531,7 @@ async fn agent_loop_consumes_each_domain_and_phase_at_the_turn_boundary() {
                     .unwrap()
                     .turn_configuration()
                     .research_phase(),
-                phase
+                Some(phase)
             );
         }
     }
@@ -957,7 +957,7 @@ async fn resume_restores_the_latest_durable_phase_before_capturing_a_step() {
             .unwrap()
             .turn_configuration()
             .research_phase(),
-        ResearchPhase::EvidenceCuration
+        Some(ResearchPhase::EvidenceCuration)
     );
 }
 
@@ -979,11 +979,11 @@ async fn queued_domain_and_phase_leave_the_captured_step_immutable_until_the_nex
     let captured = agent.last_sampling_step_plan().unwrap().clone();
     assert_eq!(
         captured.turn_configuration().domain_profile(),
-        DomainProfile::Source
+        Some(DomainProfile::Source)
     );
     assert_eq!(
         captured.turn_configuration().research_phase(),
-        ResearchPhase::Mapping
+        Some(ResearchPhase::Mapping)
     );
 
     agent.queue_domain_profile(DomainProfile::Mobile);
@@ -997,11 +997,11 @@ async fn queued_domain_and_phase_leave_the_captured_step_immutable_until_the_nex
     let next = agent.last_sampling_step_plan().unwrap();
     assert_eq!(
         next.turn_configuration().domain_profile(),
-        DomainProfile::Mobile
+        Some(DomainProfile::Mobile)
     );
     assert_eq!(
         next.turn_configuration().research_phase(),
-        ResearchPhase::Experiment
+        Some(ResearchPhase::Experiment)
     );
     assert_ne!(
         captured.resolved_tool_plan().fingerprint(),

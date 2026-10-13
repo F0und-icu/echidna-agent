@@ -43,6 +43,13 @@ impl BackgroundJobs {
     pub(in crate::adapters::tools::job) fn next_job_id(&self) -> JobId {
         JobId::new(self.handles.next("job"))
     }
+
+    pub(super) fn has_active_processes(&self) -> bool {
+        lock_table(&self.jobs)
+            .entries
+            .values()
+            .any(|entry| matches!(entry.status, JobStatus::Running | JobStatus::Stopping))
+    }
 }
 
 #[derive(Default)]

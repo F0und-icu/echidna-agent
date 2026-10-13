@@ -49,32 +49,26 @@ pub(super) struct ContextCompilationInput<'a> {
 /// the sole compiler after AgentLoop installs these candidates.
 #[derive(Clone, Debug)]
 pub(crate) struct CurrentContextState {
-    world_state: ResearchWorldState,
+    world_state: Option<ResearchWorldState>,
     project_snapshot: ProjectSnapshotContext,
     project_memory_core: Option<ContextFragment>,
-    personal_prompt: Option<String>,
-    project_prompt: Option<String>,
 }
 
 impl CurrentContextState {
     pub(crate) fn new(
-        world_state: ResearchWorldState,
+        world_state: Option<ResearchWorldState>,
         project_snapshot: ProjectSnapshotContext,
         project_memory_core: Option<ContextFragment>,
-        personal_prompt: Option<String>,
-        project_prompt: Option<String>,
     ) -> Self {
         Self {
             world_state,
             project_snapshot,
             project_memory_core,
-            personal_prompt,
-            project_prompt,
         }
     }
 
-    pub(crate) fn world_state(&self) -> &ResearchWorldState {
-        &self.world_state
+    pub(crate) fn world_state(&self) -> Option<&ResearchWorldState> {
+        self.world_state.as_ref()
     }
 
     pub(crate) fn project_snapshot(&self) -> &ProjectSnapshotContext {
@@ -83,20 +77,6 @@ impl CurrentContextState {
 
     pub(crate) fn project_memory_core(&self) -> Option<&ContextFragment> {
         self.project_memory_core.as_ref()
-    }
-
-    pub(crate) fn apply_prompt_sources(
-        &self,
-        composition: PromptComposition,
-    ) -> Result<PromptComposition, crate::domain::research_control::ResearchControlError> {
-        let composition = match &self.personal_prompt {
-            Some(prompt) => composition.with_personal(prompt.clone())?,
-            None => composition,
-        };
-        match &self.project_prompt {
-            Some(prompt) => composition.with_project(prompt.clone()),
-            None => Ok(composition),
-        }
     }
 }
 
@@ -281,10 +261,12 @@ pub(super) fn state_diff_delivery_input(
     let Some(committed_input) = committed_input else {
         return Ok(None);
     };
-    let retains_reasoning = committed_input
-        .content_items
-        .iter()
-        .any(|item| matches!(item, ContentItem::Reasoning { .. }));
+    let retains_reasoning = committed_input.content_items.iter().any(|item| {
+        matches!(
+            item,
+            ContentItem::Reasoning { .. } | ContentItem::OpaqueContinuation { .. }
+        )
+    });
     let Some(committed_delivery_map) = committed_delivery_map else {
         return continuation_unavailable_or_none(
             retains_reasoning,

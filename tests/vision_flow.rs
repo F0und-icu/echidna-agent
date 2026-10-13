@@ -337,7 +337,7 @@ async fn secondary_path_commits_route_audit_observation_then_primary_without_sen
     let vision_provider = ScriptedProvider::new(
         vision_capabilities.clone(),
         [completed(
-            r#"{"schema_version":1,"summary":"A debug settings control is visible.","extracted_text":"Debug","regions":[],"security_relevant_clues":["debug control"],"uncertainty":["requires runtime validation"]}"#,
+            r#"{"schema_version":2,"summary":"A debug settings control is visible.","extracted_text":"Debug","regions":[],"task_observations":["debug control"],"uncertainty":["requires runtime validation"]}"#,
             "vision-response",
         )],
     )
@@ -794,11 +794,11 @@ async fn targeted_reanalysis_appends_new_observations_and_replay_validates_raw_b
         vision_capabilities.clone(),
         [
             completed(
-                r#"{"schema_version":1,"summary":"Initial screenshot overview.","extracted_text":null,"regions":[],"security_relevant_clues":["debug label"],"uncertainty":["control effect unknown"]}"#,
+                r#"{"schema_version":2,"summary":"Initial screenshot overview.","extracted_text":null,"regions":[],"task_observations":["debug label"],"uncertainty":["control effect unknown"]}"#,
                 "vision-targeted-1",
             ),
             completed(
-                r#"{"schema_version":1,"summary":"Targeted control inspection.","extracted_text":"Debug","regions":[],"security_relevant_clues":["debug toggle"],"uncertainty":["requires runtime confirmation"]}"#,
+                r#"{"schema_version":2,"summary":"Targeted control inspection.","extracted_text":"Debug","regions":[],"task_observations":["debug toggle"],"uncertainty":["requires runtime confirmation"]}"#,
                 "vision-targeted-2",
             ),
         ],
@@ -962,7 +962,7 @@ async fn targeted_reanalysis_appends_new_observations_and_replay_validates_raw_b
         .rposition(|event| event.event_type.as_str() == "vision.observation_recorded")
         .unwrap();
     let mut unknown_schema = sink.events.clone();
-    unknown_schema[second_terminal_index].payload["schema_version"] = serde_json::json!(3);
+    unknown_schema[second_terminal_index].payload["schema_version"] = serde_json::json!(4);
     assert!(matches!(
         SessionProjection::replay(unknown_schema),
         Err(SessionError::MalformedPayload { .. })

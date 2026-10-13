@@ -8,6 +8,8 @@ mod facts;
 mod geometry;
 mod view_image;
 
+pub(crate) use facts::deserialize_present_observations;
+
 pub use facts::{
     VISION_FACT_SCHEMA_VERSION, VISION_OBSERVATION_SCHEMA_VERSION, VisionAnalysisFailure,
     VisionFactError, VisionObservation, VisionObservationId, VisionRegion, VisionRouteRecord,

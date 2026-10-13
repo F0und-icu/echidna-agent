@@ -397,7 +397,8 @@ impl ContextProvenance {
                 ..
             }
             | ContentItem::ToolCall { .. }
-            | ContentItem::Reasoning { .. } => Self::new(
+            | ContentItem::Reasoning { .. }
+            | ContentItem::OpaqueContinuation { .. } => Self::new(
                 fragment.slot(),
                 ContextOrigin::ModelOutput,
                 SemanticClass::ModelObservation,

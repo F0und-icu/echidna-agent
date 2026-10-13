@@ -51,17 +51,21 @@ where
 
         let capabilities = self.provider.capabilities();
         let budget = self.context_planner.default_budget(&capabilities)?;
-        let tool_plan = self.tools.resolve_tool_plan(
-            &self.active_tool_exposure_plan,
-            &DeferredActivationSet::default(),
-        )?;
+        let prompt = self
+            .pending_prompt_composition
+            .as_ref()
+            .unwrap_or(&self.prompt_composition);
+        let exposure = prompt.tool_exposure_for_catalog(&self.tools.catalog())?;
+        let tool_plan = self
+            .tools
+            .resolve_tool_plan(&exposure, &DeferredActivationSet::default())?;
         let empty_provenance = std::collections::BTreeMap::new();
         let compile = |items: &[ContentItem], summary| {
             let mut history = items.to_vec();
             history.push(ContentItem::user_text("Continue."));
             context_state::compile_context(context_state::ContextCompilationInput {
                 correction_feedback: &[],
-                prompt_composition: &self.prompt_composition,
+                prompt_composition: prompt,
                 world_state: self.world_state.as_ref(),
                 project_snapshot: self.project_snapshot.as_ref(),
                 project_memory_core: self.project_memory_core.as_ref(),

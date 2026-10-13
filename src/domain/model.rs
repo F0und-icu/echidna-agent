@@ -4,11 +4,13 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::artifacts::ArtifactId;
+use super::context::{ProviderSessionRef, ProviderSessionRole};
 use super::tools::{ToolCall, ToolResult, ToolSpec};
 
 /// The current version of the semantic model input representation.
-pub const MODEL_INPUT_IR_SCHEMA_VERSION: u16 = 3;
+pub const MODEL_INPUT_IR_SCHEMA_VERSION: u16 = 4;
 pub(crate) const MODEL_INPUT_IR_V2_SCHEMA_VERSION: u16 = 2;
+pub(crate) const MODEL_INPUT_IR_V3_SCHEMA_VERSION: u16 = 3;
 pub(crate) const MAX_TOOL_ARGUMENT_CORRECTIONS_PER_TURN: u8 = 2;
 
 /// A version for the provider-neutral input representation.
@@ -25,6 +27,63 @@ impl ModelInputIrSchemaVersion {
     /// Returns the serialized schema version.
     pub const fn get(self) -> u16 {
         self.0
+    }
+}
+
+/// The delivery session which owns an opaque provider continuation reference.
+/// It is a local binding, never a credential or Provider wire identity.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
+pub struct OpaqueContinuationScope(String);
+
+impl OpaqueContinuationScope {
+    /// Derives the stable, local continuation scope for one exact Provider
+    /// session. This is a Core binding only; it is neither a wire ID nor a
+    /// credential.
+    pub(crate) fn for_provider_session(session: &ProviderSessionRef) -> Self {
+        let role = match session.role {
+            ProviderSessionRole::Primary => "primary",
+            ProviderSessionRole::Vision => "vision",
+        };
+        Self(format!(
+            "provider-session:{}:{role}:{}",
+            session.id, session.generation
+        ))
+    }
+}
+
+/// An auditable reference to Adapter-local opaque continuation data.
+///
+/// The encrypted replay value never crosses this Domain boundary. The content
+/// identity and encoded length bind Context/Audit while the scope prevents
+/// reuse across delivery sessions.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpaqueContinuationReference {
+    scope: OpaqueContinuationScope,
+    content_identity: String,
+    encoded_byte_length: u32,
+}
+
+impl OpaqueContinuationReference {
+    pub(crate) fn new(
+        scope: OpaqueContinuationScope,
+        content_identity: String,
+        encoded_byte_length: u32,
+    ) -> Self {
+        Self {
+            scope,
+            content_identity,
+            encoded_byte_length,
+        }
+    }
+
+    pub(crate) fn scope(&self) -> &OpaqueContinuationScope {
+        &self.scope
+    }
+
+    pub(crate) const fn encoded_byte_length(&self) -> u32 {
+        self.encoded_byte_length
     }
 }
 
@@ -67,6 +126,11 @@ pub enum ContentItem {
     /// continuation. This is never ordinary Conversation History.
     Reasoning {
         text: String,
+    },
+    /// An Adapter-local opaque reasoning item retained for the current
+    /// provider delivery only. Its reference is never Conversation History.
+    OpaqueContinuation {
+        reference: OpaqueContinuationReference,
     },
     /// Preserves an unsupported item so it can fail explicitly at the Port.
     Unsupported {
@@ -180,7 +244,12 @@ impl ModelInputIR {
             && self
                 .content_items
                 .iter()
-                .filter(|item| !matches!(item, ContentItem::Reasoning { .. }))
+                .filter(|item| {
+                    !matches!(
+                        item,
+                        ContentItem::Reasoning { .. } | ContentItem::OpaqueContinuation { .. }
+                    )
+                })
                 .eq(logical_input.content_items.iter())
     }
 
@@ -191,10 +260,12 @@ impl ModelInputIR {
             && self.instructions == logical_input.instructions
             && self.tool_specs == logical_input.tool_specs
             && self.requirements == logical_input.requirements
-            && self
-                .content_items
-                .iter()
-                .any(|item| matches!(item, ContentItem::Reasoning { .. }))
+            && self.content_items.iter().any(|item| {
+                matches!(
+                    item,
+                    ContentItem::Reasoning { .. } | ContentItem::OpaqueContinuation { .. }
+                )
+            })
     }
 }
 
@@ -293,7 +364,8 @@ impl ModelCapabilities {
                 | ContentItem::ImageArtifact { .. }
                 | ContentItem::ToolCall { .. }
                 | ContentItem::ToolResult { .. }
-                | ContentItem::Reasoning { .. } => {}
+                | ContentItem::Reasoning { .. }
+                | ContentItem::OpaqueContinuation { .. } => {}
             }
         }
 
@@ -355,9 +427,22 @@ pub struct ModelUsage {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ModelEvent {
-    TextDelta { text: String },
-    ReasoningDelta { text: String },
-    ReasoningItem { text: String },
-    ToolCall { call: ToolCall },
-    Usage { usage: ModelUsage },
+    TextDelta {
+        text: String,
+    },
+    ReasoningDelta {
+        text: String,
+    },
+    ReasoningItem {
+        text: String,
+    },
+    OpaqueContinuation {
+        reference: OpaqueContinuationReference,
+    },
+    ToolCall {
+        call: ToolCall,
+    },
+    Usage {
+        usage: ModelUsage,
+    },
 }

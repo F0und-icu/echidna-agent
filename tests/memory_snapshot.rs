@@ -45,8 +45,7 @@ async fn execute(
 fn read_args(path: &str, event_id: &str) -> Value {
     json!({
         "path": path,
-        "event_id": event_id,
-        "occurred_at": "2026-08-23T12:00:00Z"
+        "event_id": event_id
     })
 }
 
@@ -55,8 +54,7 @@ fn write_args(path: &str, content: &str, expected_hash: Value, event_id: &str) -
         "path": path,
         "content": content,
         "expected_hash": expected_hash,
-        "event_id": event_id,
-        "occurred_at": "2026-08-23T12:00:00Z"
+        "event_id": event_id
     })
 }
 
@@ -104,6 +102,11 @@ async fn memory_write_is_cas_protected_and_external_edits_are_audited_with_blobs
     )
     .unwrap();
     let revision = &initial_event["payload"]["data"]["data"]["revision"];
+    assert!(
+        initial_event["occurred_at"]
+            .as_str()
+            .is_some_and(|occurred_at| occurred_at.starts_with("unix:"))
+    );
     let blob_root = project.root().join(".cyber-agent/artifacts/blobs/sha256");
     assert_eq!(
         fs::read_to_string(blob_root.join(revision["new_blob_id"].as_str().unwrap())).unwrap(),
@@ -394,7 +397,7 @@ async fn memory_paths_are_confined_and_research_replay_strictly_accepts_typed_me
     let version_stream = version_project.root().join(".cyber-agent/research.jsonl");
     let mut event: Value =
         serde_json::from_str(&fs::read_to_string(&version_stream).unwrap()).unwrap();
-    event["payload"]["data"]["memory_schema_version"] = json!(2);
+    event["payload"]["data"]["memory_schema_version"] = json!(3);
     fs::write(
         &version_stream,
         format!("{}\n", serde_json::to_string(&event).unwrap()),
@@ -547,7 +550,7 @@ async fn memory_adapter_rejects_symlinked_note_directories() {
         &tools,
         "inspect-symlinked-memory",
         "inspect_project",
-        json!({"observed_at": "2026-08-23T12:00:00Z"}),
+        json!({}),
     )
     .await;
     assert_eq!(inspected.result.status, ToolResultStatus::Succeeded);
@@ -570,7 +573,7 @@ async fn inspect_project_reuses_complete_cache_and_rebuilds_changed_deleted_or_c
     fs::write(project.root().join("alpha.txt"), "one\n").unwrap();
     fs::write(project.root().join("beta.txt"), "two\n").unwrap();
     let tools = ToolRegistry::for_project(project.root());
-    let arguments = |hash_paths: Value| json!({"observed_at": "2026-08-23T12:00:00Z", "hash_paths": hash_paths});
+    let arguments = |hash_paths: Value| json!({"hash_paths": hash_paths});
 
     let first = execute(
         &tools,
@@ -773,7 +776,7 @@ async fn inspect_project_never_uses_cache_to_replace_a_missing_research_fact() {
     let (_root, project) = initialized_project("snapshot-required-facts");
     fs::write(project.root().join("target.txt"), "fixture\n").unwrap();
     let tools = ToolRegistry::for_project(project.root());
-    let arguments = json!({"observed_at": "2026-08-23T12:00:00Z"});
+    let arguments = json!({});
 
     let first = execute(
         &tools,
@@ -845,7 +848,7 @@ async fn git_fingerprint_excludes_cache_writes_but_detects_tracked_changes() {
     );
     let project = Project::initialize(root.path()).unwrap();
     let tools = ToolRegistry::for_project(project.root());
-    let arguments = json!({"observed_at": "2026-08-23T12:00:00Z"});
+    let arguments = json!({});
 
     let first = execute(
         &tools,
@@ -929,13 +932,7 @@ async fn project_memory_and_snapshot_caches_are_isolated() {
     .await;
     assert_eq!(second_read.result.output["content"], Value::Null);
 
-    let first_snapshot = execute(
-        &first_tools,
-        "first-inspect",
-        "inspect_project",
-        json!({"observed_at": "2026-08-23T12:00:00Z"}),
-    )
-    .await;
+    let first_snapshot = execute(&first_tools, "first-inspect", "inspect_project", json!({})).await;
     assert_eq!(first_snapshot.result.status, ToolResultStatus::Succeeded);
     assert!(
         first
@@ -953,7 +950,7 @@ async fn project_memory_and_snapshot_caches_are_isolated() {
         &second_tools,
         "second-inspect",
         "inspect_project",
-        json!({"observed_at": "2026-08-23T12:00:00Z"}),
+        json!({}),
     )
     .await;
     assert_eq!(second_snapshot.result.status, ToolResultStatus::Succeeded);
@@ -996,7 +993,7 @@ fn memory_and_snapshot_tool_specs_are_fixed_and_non_cacheable() {
             .iter()
             .find(|spec| spec.name.as_str() == name)
             .unwrap();
-        assert_eq!(spec.version, "1");
+        assert_eq!(spec.version, "2");
         assert_eq!(spec.parallelism, ToolParallelism::ResourceLocked);
         assert_eq!(spec.effect, ToolEffect::LocalMutation);
         assert_eq!(spec.retry_policy, ToolRetryPolicy::NeverAutoRetry);
@@ -1014,4 +1011,58 @@ fn memory_and_snapshot_tool_specs_are_fixed_and_non_cacheable() {
         memory_write.input_schema["allOf"][0]["then"]["properties"]["content"]["maxLength"],
         64 * 1024
     );
+    assert!(memory_write.input_schema["properties"]["occurred_at"].is_null());
+    assert_eq!(
+        memory_write.input_schema["properties"]["expected_hash"]["description"],
+        "Current BLAKE3 content hash from memory_read. Use null only to create a document that does not exist; an existing document requires its exact hash."
+    );
+    let memory_read = resolved
+        .advertised_specs()
+        .iter()
+        .find(|spec| spec.name.as_str() == "memory_read")
+        .unwrap();
+    assert_eq!(
+        memory_read.output_schema["oneOf"][0]["properties"]["content"]["type"],
+        json!(["string", "null"])
+    );
+    let snapshot = resolved
+        .advertised_specs()
+        .iter()
+        .find(|spec| spec.name.as_str() == "inspect_project")
+        .unwrap();
+    assert!(snapshot.input_schema["properties"]["observed_at"].is_null());
+}
+
+#[test]
+fn memory_and_snapshot_reject_obsolete_model_timestamps() {
+    let (_root, project) = initialized_project("memory-snapshot-obsolete-time");
+    let tools = ToolRegistry::for_project(project.root());
+    for (name, arguments, obsolete_field) in [
+        (
+            "memory_read",
+            json!({"path": "core.md", "event_id": "obsolete-read", "occurred_at": "2026-10-13T00:00:00Z"}),
+            "occurred_at",
+        ),
+        (
+            "memory_write",
+            json!({"path": "core.md", "content": "fixture\n", "expected_hash": null, "event_id": "obsolete-write", "occurred_at": "2026-10-13T00:00:00Z"}),
+            "occurred_at",
+        ),
+        (
+            "inspect_project",
+            json!({"observed_at": "2026-10-13T00:00:00Z"}),
+            "observed_at",
+        ),
+    ] {
+        let error = tools
+            .plan(
+                ExecutionId::new(format!("obsolete-{name}")),
+                call(&format!("obsolete-{name}"), name, arguments),
+            )
+            .unwrap_err();
+        assert!(
+            error.to_string().contains(obsolete_field),
+            "{name} did not identify rejected {obsolete_field}: {error}"
+        );
+    }
 }

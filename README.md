@@ -74,6 +74,56 @@ Memory、摘要、缓存和图像观察各自保留其用途与来源，不会�
 **本地优先**指项目数据与工具执行位于本地；配置远端模型时，请求中的材料会发送给该 Provider。
 图像支持取决于能力配置，模型观察和回答仍需用实际证据验证。
 
+## 外接 Agent 定义（独立分支）
+
+`codex/agent-definition-v1` 将人格、工作内容和方法外置为本地文件，保留同一个
+执行循环。该分支独立维护，不合并主分支。默认仍为研究 Agent；也可使用
+[`examples/agents/technical-writing`](examples/agents/technical-writing) 切换为技术写作 Agent。
+
+```sh
+echidna agent init ./my-agent --id my-writer --from technical-writing
+# 编辑 my-agent/persona.md、work.md 和 methods/ 下的 Markdown。
+echidna --config /path/to/provider.toml agent check ./my-agent
+echidna --config /path/to/provider.toml agent inspect ./my-agent
+echidna --config /path/to/provider.toml chat --agent ./my-agent
+```
+
+`agent init --from builtin-research` 导出完整研究模板。`check` 离线验证资源、
+工具与静态上下文预算；任务历史和当前事实的预算在运行时继续检查。
+`inspect` 展示最终指令与工具，请留意其中可能包含你自己的指导文件内容。
+
+定义目录的 `agent.toml` 使用 `schema_version = 1`：
+
+| 配置 | 含义 |
+| --- | --- |
+| `id` / `name` | 稳定身份与显示名称；修改文字内容不会改变 Agent 记忆身份。 |
+| `instructions` | `persona_file`、`work_file`、有序 `method_files`；路径相对定义目录。 |
+| `context.personal` / `project` | `configured` 加载 Provider 配置指定的指导文件；`none` 不加载。 |
+| `context.memory` | `none`、`project` 或 `agent`；Agent 记忆按项目和稳定 `id` 隔离。 |
+| `tools` | 已知工具的 `direct`、`deferred`、`hidden`；省略即 Hidden，延迟工具要求直接提供 `tool_search`。 |
+| 可选 `research` | 研究领域、阶段及完整的外部指导文件映射；省略后没有研究状态或默认研究事件。 |
+
+研究定义的 Direct/Deferred 是基础可见性，现有 Domain/Phase 规则可进一步调整；
+Hidden 始终保持隐藏。工具可见性用于控制上下文，不是权限或沙箱。
+通用 Agent 的图片、HTTP 材料和产物属于当前 Session，不需要创建虚假研究 Target。
+
+运行时会向模型明确提供当前 Agent ID 和 Memory 作用域。Memory 逻辑路径
+相对于该作用域；读取不存在的文档返回 content/hash 为 null，新建时用
+expected_hash:null，更新时使用 memory_read 返回的当前哈希。
+memory_read、memory_write、inspect_project 的 v2 契约由运行时填写本次操作
+时间；调用参数不再接受 occurred_at/observed_at。历史会话与来源时间保持原样。
+
+会话内使用 `/agent` 查看身份和定义摘要；`/agent reload [目录或 agent.toml]`
+显式重载当前身份的指令，保留 History 并重建 Provider 会话。`/agent use <路径>`
+打开新的 Session，旧会话仍可恢复。切换要求没有未配对调用、运行中或停止中的
+Job/PTY、待提交图片；`/image cancel` 可撤下待提交图片而保留原始产物。
+
+会话保存实际使用的完整指令。修改或删除源文件不会改变已有会话；Resume 使用保存的
+内容，reload 才读取新内容。reload 不允许改变 `id`、记忆作用域或研究契约，
+这类变化使用 `use`。两个命令都不会自动请求模型、继续旧任务或重放工具。
+新会话选择顺序为 `chat --agent`、Provider 配置顶层 `agent_definition`、内置研究定义；
+配置中的路径相对配置文件。模型与凭据配置保持独立。旧二进制不能读取新定义事件。
+
 ## 快速开始
 
 当前主要面向 macOS。需要 Git 和 Rust/rustup；仓库通过
@@ -137,6 +187,35 @@ export CYBER_AGENT_VISION_API_KEY='replace-with-your-vision-key'
 程序**不会自动加载 `.env` 文件**。如果使用自行维护的可信 env 文件，需先在 shell 中加载并导出变量。
 也可以在本地 TOML 中用 `api_key = "…"` 替换 `credential_ref`；每个 Provider 必须且只能选择一种。
 真实密钥及配置保存在仓库之外，不要提交到 Git。
+
+#### ChatGPT 订阅登录
+
+使用 [订阅模板](examples/provider-chatgpt-subscription.toml)，在仓库外保存自己的配置。
+将 `auth_store` 改成不经过符号链接的绝对路径私有目录（父目录须已存在），并保留订阅配置中的官方 API 地址。
+`chatgpt_subscription` 与 `api_key`、`credential_ref` 互斥。Echidna 自己发起 OAuth
+授权，不读取 Codex 或浏览器已有的登录凭据。
+
+```sh
+echidna --config /absolute/path/subscription.toml auth login --provider chatgpt
+echidna --config /absolute/path/subscription.toml auth status --provider chatgpt
+echidna --config /absolute/path/subscription.toml auth models --provider chatgpt
+```
+
+登录会打开浏览器；加 `--no-browser` 可改为手动打开输出的授权链接。
+浏览器须能访问运行 Echidna 的回环回调地址；跨机器使用时需要转发对应端口。
+`status` 只检查本地状态；`models` 使用该账户向服务端查询模型。把返回的模型 slug
+填入 `model`，核实并填写能力及窗口后，即可用同一配置运行 `doctor` 和 `chat`。
+模板的 32K 窗口只是显式示例。HTTP 订阅路径要求 `incremental_input = false`，
+不能设置 `max_output_tokens`。登录成功和离线 doctor 不代表账户已获模型使用资格。
+
+```sh
+echidna --config /absolute/path/subscription.toml auth logout --provider chatgpt
+```
+
+访问令牌在调用前按需刷新；注销会尝试撤销授权并清除本地令牌，结果会说明远端撤销
+是否确认。请将认证目录保存在仓库和研究项目之外，目录/文件仅允许当前用户访问。
+订阅额度与服务端授权受 [官方预览限制](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations)
+约束，失败不会自动切换为付费 API 或重跑工具。其它供应商的非 API Key 订阅尚未接入。
 
 #### 单个多模态模型
 

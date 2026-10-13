@@ -29,6 +29,7 @@ pub enum DomainProfileSelectionSource {
 pub enum DomainProfileReasonCode {
     NewSessionDefaultSource,
     LegacyDefaultSource,
+    DefinitionDefault,
     OperatorSelected,
 }
 
@@ -45,6 +46,18 @@ pub struct DomainProfileSelection {
 }
 
 impl DomainProfileSelection {
+    pub const fn definition_default(profile: DomainProfile) -> Self {
+        if matches!(profile, DomainProfile::Source) {
+            return Self::new_session_default();
+        }
+        Self {
+            profile,
+            profile_generation: profile.generation(),
+            source: DomainProfileSelectionSource::Default,
+            reason_code: DomainProfileReasonCode::DefinitionDefault,
+        }
+    }
+
     pub const fn new_session_default() -> Self {
         Self::default_source(DomainProfileReasonCode::NewSessionDefaultSource)
     }
@@ -103,6 +116,10 @@ impl DomainProfileSelection {
                 DomainProfileReasonCode::NewSessionDefaultSource
                     | DomainProfileReasonCode::LegacyDefaultSource,
                 DomainProfile::Source
+            ) | (
+                DomainProfileSelectionSource::Default,
+                DomainProfileReasonCode::DefinitionDefault,
+                _
             ) | (
                 DomainProfileSelectionSource::Operator,
                 DomainProfileReasonCode::OperatorSelected,

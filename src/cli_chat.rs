@@ -8,6 +8,7 @@
 
 mod compaction;
 mod context;
+mod definition;
 mod input;
 mod recovery;
 mod theme;
@@ -16,6 +17,7 @@ mod vision;
 
 use std::cell::Cell;
 use std::io::{self, IsTerminal, Write};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -26,10 +28,10 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use crate::adapters::artifact_store::LocalArtifactStore;
 use crate::adapters::fragment_cache::LocalFragmentCache;
 use crate::adapters::project_event_store::{Project, ProjectEventStream};
-use crate::adapters::research_projection::{
-    CompactionValidationFacts, load_compaction_validation_facts,
+use crate::adapters::session_compaction::{
+    SessionCompactionFacts, load_historical_session_compaction_facts, load_resume_compaction_facts,
+    load_session_compaction_facts,
 };
-use crate::adapters::tools::ToolRegistry;
 use crate::app::agent_loop::{
     AgentLoop, AgentLoopError, AgentTurnOutcome, AssistantTextDeltaStage, ChatDurabilityCheckpoint,
     ChatDurabilityStage, CliRuntimeStages, ToolExecutionStartStage, ViewImageFollowUpFuture,
@@ -38,6 +40,7 @@ use crate::app::cancellation::AgentCancellation;
 use crate::app::model_request_budget::ModelRequestBudget;
 use crate::app::request_audit::RequestAuditService;
 use crate::app::session::{AppendAfterDurableError, SessionProjection};
+use crate::domain::agent_definition::AgentDefinitionBinding;
 use crate::domain::context::{ProviderSession, ProviderSessionId, ProviderSessionRole};
 use crate::domain::domain_profile::{DomainProfile, DomainProfileSelection};
 use crate::domain::events::{EventId, OccurredAt, StreamId};
@@ -59,455 +62,657 @@ static NEXT_CHAT_SESSION: AtomicU64 = AtomicU64::new(1);
 pub(crate) async fn run(
     project: Project,
     composition: &ProviderComposition,
-    requested_session: Option<String>,
-    requested_domain: Option<DomainProfile>,
-    requested_phase: Option<ResearchPhase>,
+    mut requested_agent: Option<PathBuf>,
+    mut requested_session: Option<String>,
+    mut requested_domain: Option<DomainProfile>,
+    mut requested_phase: Option<ResearchPhase>,
 ) -> Result<(), ChatError> {
     let _runtime_lease = project.acquire_chat_runtime_lease()?;
-    let explicit_resume = requested_session.is_some();
-    let session_id = match requested_session {
-        Some(session_id) => StreamId::new(session_id),
-        None => new_session_id(),
-    };
-    let session = DurableChatSession::new(project, session_id.clone())?;
-    let (session_state, provider_session, mut disposition, compaction_validation) =
-        session.start_or_resume(explicit_resume, composition)?;
-    let domain = requested_domain.unwrap_or_else(|| session_state.effective_domain_profile());
-
-    let tools = ToolRegistry::for_project(session.project.root());
-    let mut context_cache = context::ChatContextCache::default();
-    let mut agent = AgentLoop::with_primary_context(
-        composition.primary_provider(),
-        &tools,
-        composition.agent_profile().primary().model().clone(),
-        composition.agent_profile().primary().profile().clone(),
-        provider_session.clone(),
-    )?
-    .with_fragment_cache(Arc::new(LocalFragmentCache::for_project(&session.project)))
-    .with_output_store(LocalArtifactStore::for_project(&session.project))
-    .with_domain_profile(domain);
-    agent.queue_agent_model_profile(composition.agent_profile().clone())?;
-    if disposition == SessionDisposition::Resumed {
-        let validation = compaction_validation.as_ref().map(|facts| facts.context());
-        agent.resume_from_session(&session_state, provider_session, validation.as_ref())?;
-    }
-
-    let binding = RequestAuditBinding::new(
-        session.project.project_id().clone(),
-        ProjectEventStream::Session(session_id.clone()).stream_id(),
-    )?;
-    let audit_context = RequestAuditRunContext::new(
-        binding,
-        composition.primary_request_adapter_version().clone(),
-    );
-
-    let theme = theme::Theme::detect();
-    theme.welcome();
-    println!(
-        "{} session `{}` with domain `{}` and phase `{}`. Enter a line, or use /paste, /image, /domain, /phase, /context, /compact, /resume, /stop, /exit or EOF. While running in a terminal, /stop or a new instruction interrupts the current Turn before further input is handled.",
-        disposition.message(),
-        session_id.as_str(),
-        domain.id(),
-        requested_phase
-            .unwrap_or_else(|| session_state.effective_research_phase())
-            .id(),
-    );
-    let mut pending_domain = requested_domain.map(DomainProfileSelection::operator);
-    let mut pending_phase = requested_phase.map(ResearchPhaseSelection::operator);
-    let mut pending_image: Option<vision::PendingImage> = None;
-    let mut recovery_required = false;
     let terminal_input = io::stdin().is_terminal();
     let mut input_closed = false;
     let mut pending_input = None;
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
-    let tool_output = std::cell::RefCell::new(tool_output::ToolOutput::default());
-    loop {
-        print!("you> ");
-        io::stdout().flush()?;
-        let line = if pending_input.is_some() {
-            pending_input.take()
-        } else if input_closed {
-            None
-        } else {
-            tokio::select! {
-                line = lines.next_line() => line?,
-                signal = tokio::signal::ctrl_c() => {
-                    signal?;
-                    println!("\nInterrupted while waiting for input; Session `{}` remains active.", session_id.as_str());
-                    return recovery::exit_status(recovery_required);
-                }
-            }
+    let mut next_binding = None;
+    'sessions: loop {
+        let explicit_resume = requested_session.is_some();
+        let session_id = match requested_session.take() {
+            Some(session_id) => StreamId::new(session_id),
+            None => new_session_id(),
         };
-        let Some(line) = line else {
+        let binding = match next_binding.take() {
+            Some(binding) => binding,
+            None => definition::initial_binding(
+                &project,
+                &session_id,
+                explicit_resume,
+                requested_agent.take().as_deref(),
+                composition,
+            )?,
+        };
+        let research_enabled = binding.definition().research().is_some();
+        if !research_enabled && (requested_domain.is_some() || requested_phase.is_some()) {
+            return Err(definition::error(
+                "--domain/--phase require a research-enabled Agent definition",
+            ));
+        }
+        let mut session = DurableChatSession::new(project.clone(), session_id.clone(), binding)?;
+        let (session_state, provider_session, mut disposition, compaction_validation) =
+            session.start_or_resume(explicit_resume, composition, false)?;
+        let domain = requested_domain.unwrap_or_else(|| {
+            session_state
+                .domain_profile_selection()
+                .map(|selection| selection.profile())
+                .or_else(|| {
+                    session
+                        .binding
+                        .definition()
+                        .research()
+                        .map(|research| research.domain())
+                })
+                .unwrap_or(DomainProfile::Source)
+        });
+
+        let tools = session.bound_tools();
+        let mut context_cache = context::ChatContextCache::default();
+        let mut agent = AgentLoop::with_primary_context(
+            composition.primary_provider(),
+            &tools,
+            composition.agent_profile().primary().model().clone(),
+            composition.agent_profile().primary().profile().clone(),
+            provider_session.clone(),
+        )?
+        .with_fragment_cache(Arc::new(LocalFragmentCache::for_project(&session.project)))
+        .with_output_store(LocalArtifactStore::for_project(&session.project))
+        .with_prompt_composition(definition::prompt_for_state(
+            &session.binding,
+            &session_state,
+        )?);
+        if research_enabled {
+            agent.queue_domain_profile(domain);
+        }
+        agent.queue_agent_model_profile(composition.agent_profile().clone())?;
+        if disposition == SessionDisposition::Resumed {
+            let validation = compaction_validation.as_ref().map(|facts| facts.context());
+            agent.resume_from_session(&session_state, provider_session, validation.as_ref())?;
+        }
+
+        let binding = RequestAuditBinding::new(
+            session.project.project_id().clone(),
+            ProjectEventStream::Session(session_id.clone()).stream_id(),
+        )?;
+        let audit_context = RequestAuditRunContext::new(
+            binding,
+            composition.primary_request_adapter_version().clone(),
+        );
+
+        let theme = theme::Theme::detect();
+        theme.welcome();
+        if research_enabled {
             println!(
-                "EOF received; Session `{}` remains active.",
-                session_id.as_str()
+                "{} session `{}` with domain `{}` and phase `{}`. Enter a line, or use /paste, /image, /domain, /phase, /context, /compact, /resume, /stop, /exit or EOF. While running in a terminal, /stop or a new instruction interrupts the current Turn before further input is handled.",
+                disposition.message(),
+                session_id.as_str(),
+                domain.id(),
+                requested_phase
+                    .unwrap_or_else(|| session_state.effective_research_phase())
+                    .id(),
             );
-            return recovery::exit_status(recovery_required);
-        };
-        let line = if line == "/paste" {
-            println!("Paste mode; finish with /end on its own line.");
-            let mut pasted = Vec::new();
-            loop {
-                print!("...> ");
-                io::stdout().flush()?;
-                let next = tokio::select! {
+        } else {
+            println!(
+                "{} session `{}` with Agent `{}`. Enter a task, or use /agent, /agent reload, /agent use <path>, /image, /compact, /resume or /exit.",
+                disposition.message(),
+                session_id.as_str(),
+                session.binding.definition().id().as_str()
+            );
+        }
+        let mut pending_domain = requested_domain.map(DomainProfileSelection::operator);
+        let mut pending_phase = requested_phase.map(ResearchPhaseSelection::operator);
+        let mut pending_image: Option<vision::PendingImage> = None;
+        let mut recovery_required = false;
+        let tool_output = std::cell::RefCell::new(tool_output::ToolOutput::default());
+        loop {
+            print!("you> ");
+            io::stdout().flush()?;
+            let line = if pending_input.is_some() {
+                pending_input.take()
+            } else if input_closed {
+                None
+            } else {
+                tokio::select! {
                     line = lines.next_line() => line?,
                     signal = tokio::signal::ctrl_c() => {
                         signal?;
-                        println!("\n[paste cancelled]");
-                        pasted.clear();
-                        break None;
-                    }
-                };
-                match next {
-                    Some(value) if value == "/end" => break Some(pasted.join("\n")),
-                    Some(value) => pasted.push(value),
-                    None => {
-                        println!(
-                            "EOF received during paste; Session `{}` remains active and the incomplete paste was discarded.",
-                            session_id.as_str()
-                        );
+                        println!("\nInterrupted while waiting for input; Session `{}` remains active.", session_id.as_str());
                         return recovery::exit_status(recovery_required);
                     }
                 }
-            }
-        } else {
-            Some(line)
-        };
-        let Some(line) = line else {
-            continue;
-        };
-        if line.is_empty() {
-            println!("Empty input ignored.");
-            continue;
-        }
-        if line == "/exit" {
-            println!(
-                "Session `{}` remains active for explicit resume.",
-                session_id.as_str()
-            );
-            return recovery::exit_status(recovery_required);
-        }
-        if line == "/stop" {
-            println!("No Turn is running. Background Jobs/PTYs, if any, are not stopped by /stop.");
-            continue;
-        }
-        if line == "/context" {
-            match agent.last_context_plan() {
-                Some(plan) => {
-                    println!("{}", compaction::ContextPressure::from_plan(plan).message())
+            };
+            let Some(line) = line else {
+                println!(
+                    "EOF received; Session `{}` remains active.",
+                    session_id.as_str()
+                );
+                return recovery::exit_status(recovery_required);
+            };
+            let line = if line == "/paste" {
+                println!("Paste mode; finish with /end on its own line.");
+                let mut pasted = Vec::new();
+                loop {
+                    print!("...> ");
+                    io::stdout().flush()?;
+                    let next = tokio::select! {
+                        line = lines.next_line() => line?,
+                        signal = tokio::signal::ctrl_c() => {
+                            signal?;
+                            println!("\n[paste cancelled]");
+                            pasted.clear();
+                            break None;
+                        }
+                    };
+                    match next {
+                        Some(value) if value == "/end" => break Some(pasted.join("\n")),
+                        Some(value) => pasted.push(value),
+                        None => {
+                            println!(
+                                "EOF received during paste; Session `{}` remains active and the incomplete paste was discarded.",
+                                session_id.as_str()
+                            );
+                            return recovery::exit_status(recovery_required);
+                        }
+                    }
                 }
-                None => println!(
-                    "Context pressure is unavailable before the first model request; Provider usage is not inferred."
-                ),
-            }
-            continue;
-        }
-        if line == "/resume" {
-            if !recovery_required {
-                println!("No stopped Turn needs recovery; no ProviderSession was replaced.");
+            } else {
+                Some(line)
+            };
+            let Some(line) = line else {
+                continue;
+            };
+            if line.is_empty() {
+                println!("Empty input ignored.");
                 continue;
             }
-            let (state, provider_session, resumed, validation) =
-                session.start_or_resume(true, composition)?;
-            let validation = validation.as_ref().map(|facts| facts.context());
-            agent.resume_from_session(&state, provider_session, validation.as_ref())?;
-            disposition = resumed;
-            recovery_required = false;
-            println!(
-                "ProviderSession rebuilt from durable History; volatile reasoning cleared by explicit /resume. No request sent or Tool retried. Enter a new instruction or /compact."
-            );
-            continue;
-        }
-        if recovery_required {
-            println!(
-                "Task input not accepted or saved: use /resume first, or /context /exit. No old input or Tool will be retried."
-            );
-            continue;
-        }
-        if line == "/compact" {
-            if let Some(image) = &pending_image {
+            if line == "/exit" {
                 println!(
-                    "Compaction is unavailable while image `{}` is queued; submit its Turn first.",
-                    image.delivery_artifact_id()
+                    "Session `{}` remains active for explicit resume.",
+                    session_id.as_str()
+                );
+                return recovery::exit_status(recovery_required);
+            }
+            if line == "/stop" {
+                println!(
+                    "No Turn is running. Background Jobs/PTYs, if any, are not stopped by /stop."
                 );
                 continue;
             }
-            let current = context_cache.refresh(&session.project, &tools, composition)?;
-            agent.refresh_current_context(current)?;
-            println!("{}", session.compact(&mut agent)?.message());
-            continue;
-        }
-        if line == "/image" {
-            println!("Usage: /image <path>");
-            continue;
-        }
-        if let Some(path) = line.strip_prefix("/image ") {
-            if let Some(image) = &pending_image {
+            if line == "/context" {
+                match agent.last_context_plan() {
+                    Some(plan) => {
+                        println!("{}", compaction::ContextPressure::from_plan(plan).message())
+                    }
+                    None => println!(
+                        "Context pressure is unavailable before the first model request; Provider usage is not inferred."
+                    ),
+                }
+                continue;
+            }
+            if line == "/agent" {
                 println!(
-                    "Image `{}` is already queued for the next Turn; submit a prompt before attaching another image.",
-                    image.delivery_artifact_id()
+                    "{}",
+                    serde_json::json!({
+                        "agent_id": session.binding.definition().id(),
+                        "definition_digest": session.binding.definition().digest(),
+                        "source": session.binding.source_locator(),
+                        "memory": session.binding.definition().context().memory(),
+                        "research_enabled": research_enabled,
+                        "session_id": session_id.as_str(),
+                    })
                 );
                 continue;
             }
-            match vision::ingest_image(&session, &tools, composition, path).await {
-                Ok(image) => {
+            if line == "/resume" {
+                if !recovery_required {
+                    println!("No stopped Turn needs recovery; no ProviderSession was replaced.");
+                    continue;
+                }
+                let (state, provider_session, resumed, validation) =
+                    session.start_or_resume(true, composition, false)?;
+                let validation = validation.as_ref().map(|facts| facts.context());
+                agent.resume_from_session(&state, provider_session, validation.as_ref())?;
+                disposition = resumed;
+                recovery_required = false;
+                println!(
+                    "ProviderSession rebuilt from durable History; volatile reasoning cleared by explicit /resume. No request sent or Tool retried. Enter a new instruction or /compact."
+                );
+                continue;
+            }
+            if recovery_required {
+                println!(
+                    "Task input not accepted or saved: use /resume first, or /context /exit. No old input or Tool will be retried."
+                );
+                continue;
+            }
+            if line == "/agent reload"
+                || line.starts_with("/agent reload ")
+                || line.starts_with("/agent use ")
+            {
+                if pending_image.is_some() {
                     println!(
-                        "Queued image `{}` for TargetSnapshot `{}` and the next Turn.",
-                        image.delivery_artifact_id(),
-                        image
-                            .target_snapshot_id()
-                            .expect("operator image intake always binds a TargetSnapshot")
+                        "Agent changes require no queued image; submit it or use /image cancel."
                     );
-                    pending_image = Some(image);
+                    continue;
                 }
-                Err(error) => println!("Image rejected: {error}"),
-            }
-            continue;
-        }
-        if let Some(value) = line.strip_prefix("/phase ") {
-            let phase = parse_phase(value)?;
-            pending_phase = Some(ResearchPhaseSelection::operator(phase));
-            println!("Queued phase `{}` for the next Turn.", phase.id());
-            continue;
-        }
-        if let Some(value) = line.strip_prefix("/domain ") {
-            let selected_domain = parse_domain(value)?;
-            pending_domain = Some(DomainProfileSelection::operator(selected_domain));
-            println!(
-                "Queued domain `{}` for the next Turn.",
-                selected_domain.id()
-            );
-            continue;
-        }
-
-        let domain = session.prepare_domain_for_turn(disposition, pending_domain.take())?;
-        agent.queue_domain_profile(domain);
-        let phase = session.prepare_phase_for_turn(disposition, pending_phase.take())?;
-        agent.queue_research_phase(phase);
-
-        // Prompt/core filesystem failures occur before a possible scoped
-        // Vision request as well as before the Primary Provider request.
-        let current = context_cache.refresh(&session.project, &tools, composition)?;
-        agent.refresh_current_context(current)?;
-        let cancellation = AgentCancellation::new();
-        let request_budget = Arc::new(ModelRequestBudget::new(
-            composition.runtime().model_request_limit_per_turn,
-        ));
-        let initial_image = match pending_image.take() {
-            Some(image) => {
-                let preparation = vision::prepare_primary_context(
-                    &session,
+                if tools.has_active_processes() {
+                    println!(
+                        "Agent changes require all running or stopping Jobs/PTYs to finish. Their existing controls remain available."
+                    );
+                    continue;
+                }
+                if let Err(error) = agent.history().ensure_all_tool_calls_paired() {
+                    println!("Agent change rejected: {error}");
+                    continue;
+                }
+                session.validate_stopped_runtime(&agent)?;
+                if let Some(path) = line.strip_prefix("/agent use ") {
+                    let path = path.trim();
+                    if path.is_empty() {
+                        println!("Usage: /agent use <path>");
+                        continue;
+                    }
+                    let catalog =
+                        crate::adapters::tools::ToolRegistry::for_project(session.project.root());
+                    let candidate = match crate::cli_agent::select_binding(
+                        Some(Path::new(path)),
+                        composition,
+                        &catalog,
+                    ) {
+                        Ok(candidate) => candidate,
+                        Err(error) => {
+                            println!("Agent change rejected: {error}");
+                            continue;
+                        }
+                    };
+                    let preview = DurableChatSession::new(
+                        session.project.clone(),
+                        new_session_id(),
+                        candidate.clone(),
+                    )?;
+                    if let Err(error) =
+                        preview.preflight_binding(&SessionState::default(), composition)
+                    {
+                        println!("Agent change rejected: {error}");
+                        continue;
+                    }
+                    println!(
+                        "Session `{}` remains available for Resume; opening a new Session with Agent `{}`.",
+                        session_id.as_str(),
+                        candidate.definition().id().as_str()
+                    );
+                    next_binding = Some(candidate);
+                    requested_domain = None;
+                    requested_phase = None;
+                    continue 'sessions;
+                }
+                let path = line.strip_prefix("/agent reload ").map(str::trim);
+                let catalog =
+                    crate::adapters::tools::ToolRegistry::for_project(session.project.root());
+                let candidate = match definition::reload_candidate(
+                    &session.binding,
+                    path.map(Path::new),
                     composition,
-                    image,
-                    &line,
-                    cancellation.clone(),
-                    Arc::clone(&request_budget),
+                    &catalog,
+                ) {
+                    Ok(candidate) => candidate,
+                    Err(error) => {
+                        println!("Agent reload rejected: {error}");
+                        continue;
+                    }
+                };
+                let candidate_session = DurableChatSession::new(
+                    session.project.clone(),
+                    session_id.clone(),
+                    candidate,
+                )?;
+                let durable = crate::adapters::project_event_store::read_existing_session_events(
+                    &session.project,
+                    &session_id,
+                )
+                .map_err(definition::error)?;
+                let state = crate::domain::session::SessionReducer.reduce(durable)?;
+                if let Err(error) = candidate_session.preflight_binding(&state, composition) {
+                    println!("Agent reload rejected: {error}");
+                    continue;
+                }
+                let (state, provider_session, resumed, facts) =
+                    candidate_session.start_or_resume(true, composition, true)?;
+                let validation = facts.as_ref().map(|facts| facts.context());
+                agent.queue_prompt_composition(definition::prompt_for_state(
+                    &candidate_session.binding,
+                    &state,
+                )?);
+                agent.resume_from_session(&state, provider_session, validation.as_ref())?;
+                session.binding = candidate_session.binding;
+                disposition = resumed;
+                context_cache = context::ChatContextCache::default();
+                println!(
+                    "Agent `{}` reloaded at definition `{}`; ProviderSession rebuilt. No model request or Tool execution was started. Enter a new instruction.",
+                    session.binding.definition().id().as_str(),
+                    session.binding.definition().digest().as_str()
                 );
-                let prepared = input::interruptible(
-                    preparation,
-                    &cancellation,
+                continue;
+            }
+            if line == "/agent use" {
+                println!("Usage: /agent use <path>");
+                continue;
+            }
+            if line == "/image cancel" {
+                println!(
+                    "{}",
+                    if pending_image.take().is_some() {
+                        "Queued image detached; its durable Artifact remains available."
+                    } else {
+                        "No image is queued."
+                    }
+                );
+                continue;
+            }
+            if line == "/compact" {
+                if let Some(image) = &pending_image {
+                    println!(
+                        "Compaction is unavailable while image `{}` is queued; submit its Turn first.",
+                        image.delivery_artifact_id()
+                    );
+                    continue;
+                }
+                let current = context_cache.refresh(&session.project, &tools, &session.binding)?;
+                agent.refresh_current_context(current)?;
+                println!("{}", session.compact(&mut agent)?.message());
+                continue;
+            }
+            if line == "/image" {
+                println!("Usage: /image <path>");
+                continue;
+            }
+            if let Some(path) = line.strip_prefix("/image ") {
+                if let Some(image) = &pending_image {
+                    println!(
+                        "Image `{}` is already queued for the next Turn; submit a prompt before attaching another image.",
+                        image.delivery_artifact_id()
+                    );
+                    continue;
+                }
+                match vision::ingest_image(&session, &tools, composition, path).await {
+                    Ok(image) => {
+                        match image.target_snapshot_id() {
+                            Some(target) => println!(
+                                "Queued image `{}` for TargetSnapshot `{}` and the next Turn.",
+                                image.delivery_artifact_id(),
+                                target
+                            ),
+                            None => println!(
+                                "Queued image `{}` for Session `{}` and the next Turn.",
+                                image.delivery_artifact_id(),
+                                session_id.as_str()
+                            ),
+                        }
+                        pending_image = Some(image);
+                    }
+                    Err(error) => println!("Image rejected: {error}"),
+                }
+                continue;
+            }
+            if let Some(value) = line.strip_prefix("/phase ") {
+                if !research_enabled {
+                    println!("This Agent has no ResearchPhase.");
+                    continue;
+                }
+                let phase = parse_phase(value)?;
+                pending_phase = Some(ResearchPhaseSelection::operator(phase));
+                println!("Queued phase `{}` for the next Turn.", phase.id());
+                continue;
+            }
+            if let Some(value) = line.strip_prefix("/domain ") {
+                if !research_enabled {
+                    println!("This Agent has no Research DomainProfile.");
+                    continue;
+                }
+                let selected_domain = parse_domain(value)?;
+                pending_domain = Some(DomainProfileSelection::operator(selected_domain));
+                println!(
+                    "Queued domain `{}` for the next Turn.",
+                    selected_domain.id()
+                );
+                continue;
+            }
+
+            if research_enabled {
+                let domain = session.prepare_domain_for_turn(disposition, pending_domain.take())?;
+                agent.queue_domain_profile(domain);
+                let phase = session.prepare_phase_for_turn(disposition, pending_phase.take())?;
+                agent.queue_research_phase(phase);
+            }
+
+            // Prompt/core filesystem failures occur before a possible scoped
+            // Vision request as well as before the Primary Provider request.
+            let current = context_cache.refresh(&session.project, &tools, &session.binding)?;
+            agent.refresh_current_context(current)?;
+            let cancellation = AgentCancellation::new();
+            let request_budget = Arc::new(ModelRequestBudget::new(
+                composition.runtime().model_request_limit_per_turn,
+            ));
+            let initial_image = match pending_image.take() {
+                Some(image) => {
+                    let preparation = vision::prepare_primary_context(
+                        &session,
+                        composition,
+                        image,
+                        &line,
+                        cancellation.clone(),
+                        Arc::clone(&request_budget),
+                    );
+                    let prepared = input::interruptible(
+                        preparation,
+                        &cancellation,
+                        &mut lines,
+                        terminal_input,
+                        &mut input_closed,
+                        &mut pending_input,
+                    )
+                    .await?;
+                    if cancellation.is_cancelled() {
+                        match prepared {
+                            Ok(_) | Err(ChatError::VisionCancelled) => {
+                                println!(
+                                    "\n[vision request cancelled; no Primary request was started]"
+                                );
+                                continue;
+                            }
+                            Err(error) => {
+                                input::reject_pending(&mut pending_input);
+                                return Err(error);
+                            }
+                        }
+                    }
+                    match prepared {
+                        Ok(prepared) => Some(prepared),
+                        Err(error) => {
+                            let error = vision::follow_up_error(error);
+                            if agent.permits_explicit_recovery(&error) {
+                                session.validate_stopped_runtime(&agent)?;
+                                recovery_required = true;
+                                recovery::report_stop(&error, &request_budget);
+                                input::reject_pending(&mut pending_input);
+                                println!(
+                                    "Initial image/task was not submitted to Primary; reattach the image explicitly after /resume if needed."
+                                );
+                                continue;
+                            }
+                            return Err(ChatError::Agent(error));
+                        }
+                    }
+                }
+                None => None,
+            };
+            let signal_cancellation = cancellation.clone();
+            let answer_started = Cell::new(false);
+            let end_answer = || {
+                if answer_started.replace(false) {
+                    println!();
+                }
+            };
+            let mut text_delta = |text: &str| {
+                if !answer_started.get() && !text.is_empty() {
+                    print!("{}", theme.answer_prefix());
+                    answer_started.set(true);
+                }
+                print!("{text}");
+                io::stdout()
+                    .flush()
+                    .map_err(|error| AgentLoopError::TextDeltaOutput {
+                        message: error.to_string(),
+                    })
+            };
+            let mut record_attempt = |attempt: RequestAuditAttempt| {
+                // Sampling boundaries affect only presentation, never History bytes.
+                end_answer();
+                session
+                    .record_request_audit(attempt)
+                    .map_err(ChatError::into_request_audit_agent_loop_error)
+            };
+            let mut tool_start = |plan: &crate::domain::tools::ToolExecutionPlan| {
+                end_answer();
+                tool_output.borrow_mut().started(plan);
+            };
+            let mut durability = |checkpoint: ChatDurabilityCheckpoint<'_>| match checkpoint {
+                ChatDurabilityCheckpoint::ModelSampleRejected {
+                    diagnostic,
+                    corrections_used,
+                } => {
+                    end_answer();
+                    session
+                        .record_model_rejection(*diagnostic, corrections_used)
+                        .map_err(|error| AgentLoopError::ModelRejectionCommit {
+                            message: error.to_string(),
+                        })?;
+                    let limit = crate::domain::model::MAX_TOOL_ARGUMENT_CORRECTIONS_PER_TURN;
+                    eprintln!(
+                        "\n[model sample rejected] {diagnostic}; streamed prose was not committed and no Tool from this sample ran."
+                    );
+                    if corrections_used < limit {
+                        eprintln!(
+                            "[argument correction {}/{limit}] Regenerating the failed sample if budget permits; completed tools will not be replayed.",
+                            corrections_used + 1
+                        );
+                    } else {
+                        eprintln!(
+                            "[argument corrections exhausted] Returning control without another request."
+                        );
+                    }
+                    Ok(())
+                }
+                ChatDurabilityCheckpoint::Subcommand(checkpoint) => {
+                    session
+                        .record_subcommand(checkpoint)
+                        .map_err(ChatError::into_execution_receipt_agent_loop_error)?;
+                    tool_output.borrow_mut().checkpointed(checkpoint);
+                    Ok(())
+                }
+                ChatDurabilityCheckpoint::History(items) => session
+                    .record_history(items)
+                    .map_err(ChatError::into_history_checkpoint_agent_loop_error),
+                ChatDurabilityCheckpoint::ExecutionReceipt(outcome) => {
+                    let disposition = session
+                        .record_execution(outcome)
+                        .map_err(ChatError::into_execution_receipt_agent_loop_error)?;
+                    tool_output.borrow_mut().recorded(
+                        outcome,
+                        matches!(disposition, ReceiptRecordDisposition::Existing),
+                    );
+                    Ok(())
+                }
+            };
+            let follow_up_session = &session;
+            let follow_up_composition = composition;
+            let follow_up_task = line.clone();
+            let follow_up_cancellation = cancellation.clone();
+            let follow_up_budget = Arc::clone(&request_budget);
+            let mut follow_up = move |selection| -> ViewImageFollowUpFuture<'_> {
+                let task = follow_up_task.clone();
+                let cancellation = follow_up_cancellation.clone();
+                let request_budget = Arc::clone(&follow_up_budget);
+                Box::pin(async move {
+                    vision::prepare_primary_context(
+                        follow_up_session,
+                        follow_up_composition,
+                        vision::PendingImage::from_selection(selection),
+                        &task,
+                        cancellation,
+                        request_budget,
+                    )
+                    .await
+                    .map_err(vision::follow_up_error)
+                })
+            };
+            let mut refresh_context = || {
+                context_cache
+                    .refresh(&session.project, &tools, &session.binding)
+                    .map_err(|error| AgentLoopError::ContextRefresh {
+                        message: error.to_string(),
+                    })
+            };
+            let outcome = {
+                let turn = agent.run_turn_audited_with_context_refresh_and_vision_stages(
+                    line,
+                    initial_image,
+                    cancellation,
+                    &audit_context,
+                    &mut record_attempt,
+                    CliRuntimeStages::new(
+                        &mut follow_up,
+                        &mut text_delta as &mut AssistantTextDeltaStage<'_>,
+                        &mut tool_start as &mut ToolExecutionStartStage<'_>,
+                        &mut durability as &mut ChatDurabilityStage<'_>,
+                        &mut refresh_context,
+                        Arc::clone(&request_budget),
+                    ),
+                );
+                input::interruptible(
+                    turn,
+                    &signal_cancellation,
                     &mut lines,
                     terminal_input,
                     &mut input_closed,
                     &mut pending_input,
                 )
-                .await?;
-                if cancellation.is_cancelled() {
-                    match prepared {
-                        Ok(_) | Err(ChatError::VisionCancelled) => {
-                            println!(
-                                "\n[vision request cancelled; no Primary request was started]"
-                            );
-                            continue;
-                        }
-                        Err(error) => {
-                            input::reject_pending(&mut pending_input);
-                            return Err(error);
-                        }
-                    }
+                .await?
+            };
+
+            tool_output.borrow_mut().finish_turn();
+            match outcome {
+                Ok(AgentTurnOutcome::Completed { .. }) => {
+                    println!();
                 }
-                match prepared {
-                    Ok(prepared) => Some(prepared),
-                    Err(error) => {
-                        let error = vision::follow_up_error(error);
-                        if agent.permits_explicit_recovery(&error) {
-                            session.validate_stopped_runtime(&agent)?;
-                            recovery_required = true;
-                            recovery::report_stop(&error, &request_budget);
-                            input::reject_pending(&mut pending_input);
-                            println!(
-                                "Initial image/task was not submitted to Primary; reattach the image explicitly after /resume if needed."
-                            );
-                            continue;
-                        }
+                Ok(AgentTurnOutcome::Cancelled { .. }) => {
+                    println!("\n[request cancelled]");
+                }
+                Err(error) => {
+                    println!();
+                    input::reject_pending(&mut pending_input);
+                    if !agent.permits_explicit_recovery(&error) {
                         return Err(ChatError::Agent(error));
                     }
+                    session.validate_stopped_runtime(&agent)?;
+                    recovery_required = true;
+                    recovery::report_stop(&error, &request_budget);
                 }
             }
-            None => None,
-        };
-        let signal_cancellation = cancellation.clone();
-        let answer_started = Cell::new(false);
-        let end_answer = || {
-            if answer_started.replace(false) {
-                println!();
+            if !recovery_required {
+                recovery::report_budget(&request_budget);
             }
-        };
-        let mut text_delta = |text: &str| {
-            if !answer_started.get() && !text.is_empty() {
-                print!("{}", theme.answer_prefix());
-                answer_started.set(true);
-            }
-            print!("{text}");
-            io::stdout()
-                .flush()
-                .map_err(|error| AgentLoopError::TextDeltaOutput {
-                    message: error.to_string(),
-                })
-        };
-        let mut record_attempt = |attempt: RequestAuditAttempt| {
-            // Sampling boundaries affect only presentation, never History bytes.
-            end_answer();
-            session
-                .record_request_audit(attempt)
-                .map_err(ChatError::into_request_audit_agent_loop_error)
-        };
-        let mut tool_start = |plan: &crate::domain::tools::ToolExecutionPlan| {
-            end_answer();
-            tool_output.borrow_mut().started(plan);
-        };
-        let mut durability = |checkpoint: ChatDurabilityCheckpoint<'_>| match checkpoint {
-            ChatDurabilityCheckpoint::ModelSampleRejected {
-                diagnostic,
-                corrections_used,
-            } => {
-                end_answer();
-                session
-                    .record_model_rejection(*diagnostic, corrections_used)
-                    .map_err(|error| AgentLoopError::ModelRejectionCommit {
-                        message: error.to_string(),
-                    })?;
-                let limit = crate::domain::model::MAX_TOOL_ARGUMENT_CORRECTIONS_PER_TURN;
-                eprintln!(
-                    "\n[model sample rejected] {diagnostic}; streamed prose was not committed and no Tool from this sample ran."
-                );
-                if corrections_used < limit {
-                    eprintln!(
-                        "[argument correction {}/{limit}] Regenerating the failed sample if budget permits; completed tools will not be replayed.",
-                        corrections_used + 1
-                    );
-                } else {
-                    eprintln!(
-                        "[argument corrections exhausted] Returning control without another request."
-                    );
+            if let Some(plan) = agent.last_context_plan() {
+                let pressure = compaction::ContextPressure::from_plan(plan);
+                if pressure.should_remind() {
+                    println!("{}", pressure.message());
                 }
-                Ok(())
-            }
-            ChatDurabilityCheckpoint::Subcommand(checkpoint) => {
-                session
-                    .record_subcommand(checkpoint)
-                    .map_err(ChatError::into_execution_receipt_agent_loop_error)?;
-                tool_output.borrow_mut().checkpointed(checkpoint);
-                Ok(())
-            }
-            ChatDurabilityCheckpoint::History(items) => session
-                .record_history(items)
-                .map_err(ChatError::into_history_checkpoint_agent_loop_error),
-            ChatDurabilityCheckpoint::ExecutionReceipt(outcome) => {
-                let disposition = session
-                    .record_execution(outcome)
-                    .map_err(ChatError::into_execution_receipt_agent_loop_error)?;
-                tool_output.borrow_mut().recorded(
-                    outcome,
-                    matches!(disposition, ReceiptRecordDisposition::Existing),
-                );
-                Ok(())
-            }
-        };
-        let follow_up_session = &session;
-        let follow_up_composition = composition;
-        let follow_up_task = line.clone();
-        let follow_up_cancellation = cancellation.clone();
-        let follow_up_budget = Arc::clone(&request_budget);
-        let mut follow_up = move |selection| -> ViewImageFollowUpFuture<'_> {
-            let task = follow_up_task.clone();
-            let cancellation = follow_up_cancellation.clone();
-            let request_budget = Arc::clone(&follow_up_budget);
-            Box::pin(async move {
-                vision::prepare_primary_context(
-                    follow_up_session,
-                    follow_up_composition,
-                    vision::PendingImage::from_selection(selection),
-                    &task,
-                    cancellation,
-                    request_budget,
-                )
-                .await
-                .map_err(vision::follow_up_error)
-            })
-        };
-        let mut refresh_context = || {
-            context_cache
-                .refresh(&session.project, &tools, composition)
-                .map_err(|error| AgentLoopError::ContextRefresh {
-                    message: error.to_string(),
-                })
-        };
-        let outcome = {
-            let turn = agent.run_turn_audited_with_context_refresh_and_vision_stages(
-                line,
-                initial_image,
-                cancellation,
-                &audit_context,
-                &mut record_attempt,
-                CliRuntimeStages::new(
-                    &mut follow_up,
-                    &mut text_delta as &mut AssistantTextDeltaStage<'_>,
-                    &mut tool_start as &mut ToolExecutionStartStage<'_>,
-                    &mut durability as &mut ChatDurabilityStage<'_>,
-                    &mut refresh_context,
-                    Arc::clone(&request_budget),
-                ),
-            );
-            input::interruptible(
-                turn,
-                &signal_cancellation,
-                &mut lines,
-                terminal_input,
-                &mut input_closed,
-                &mut pending_input,
-            )
-            .await?
-        };
-
-        tool_output.borrow_mut().finish_turn();
-        match outcome {
-            Ok(AgentTurnOutcome::Completed { .. }) => {
-                println!();
-            }
-            Ok(AgentTurnOutcome::Cancelled { .. }) => {
-                println!("\n[request cancelled]");
-            }
-            Err(error) => {
-                println!();
-                input::reject_pending(&mut pending_input);
-                if !agent.permits_explicit_recovery(&error) {
-                    return Err(ChatError::Agent(error));
-                }
-                session.validate_stopped_runtime(&agent)?;
-                recovery_required = true;
-                recovery::report_stop(&error, &request_budget);
-            }
-        }
-        if !recovery_required {
-            recovery::report_budget(&request_budget);
-        }
-        if let Some(plan) = agent.last_context_plan() {
-            let pressure = compaction::ContextPressure::from_plan(plan);
-            if pressure.should_remind() {
-                println!("{}", pressure.message());
             }
         }
     }
@@ -536,15 +741,21 @@ struct DurableChatSession {
     project: Project,
     session_id: StreamId,
     artifacts: LocalArtifactStore,
+    binding: AgentDefinitionBinding,
 }
 
 impl DurableChatSession {
-    fn new(project: Project, session_id: StreamId) -> Result<Self, ChatError> {
+    fn new(
+        project: Project,
+        session_id: StreamId,
+        binding: AgentDefinitionBinding,
+    ) -> Result<Self, ChatError> {
         let artifacts = LocalArtifactStore::for_project(&project);
         Ok(Self {
             project,
             session_id,
             artifacts,
+            binding,
         })
     }
 
@@ -552,12 +763,13 @@ impl DurableChatSession {
         &self,
         explicit_resume: bool,
         composition: &ProviderComposition,
+        replace_definition: bool,
     ) -> Result<
         (
             SessionState,
             ProviderSession,
             SessionDisposition,
-            Option<CompactionValidationFacts>,
+            Option<SessionCompactionFacts>,
         ),
         ChatError,
     > {
@@ -573,11 +785,18 @@ impl DurableChatSession {
             });
         }
 
+        if !explicit_resume {
+            self.preflight_binding(&SessionState::default(), composition)?;
+        }
+
         let mut writer = self.project.open_writer()?;
         let mut store = writer.open_session(self.session_id.clone(), None)?;
         let stream_id = ProjectEventStream::Session(self.session_id.clone()).stream_id();
         let mut projection =
             SessionProjection::replay(EventSource::read_events(&store, &stream_id)?)?;
+        if explicit_resume {
+            self.preflight_binding(projection.state(), composition)?;
+        }
         let sequence = store.next_sequence()?;
         let provider_session = ProviderSession::new(
             ProviderSessionId::new(format!(
@@ -607,18 +826,18 @@ impl DurableChatSession {
             if let Some(compaction) = projection
                 .state()
                 .latest_compaction()
-                .filter(|compaction| compaction.summary().schema_version() == 2)
+                .filter(|compaction| compaction.summary().requires_reference_validation())
             {
-                let facts = load_compaction_validation_facts(&self.project)
+                let mut facts = load_resume_compaction_facts(&self.project, compaction.summary())
                     .map_err(ChatError::ResearchProjection)?;
                 match compaction.validate_references(&facts.context()) {
                     Ok(()) => {},
                     Err(crate::domain::session::SessionError::CompactionEvidenceStaleResearchRevision { .. }) => {
-                        let historical = crate::adapters::research_projection::load_historical_compaction_facts(
-                            &self.project,
-                            compaction.summary().evidence_spine().expect("v2 has an EvidenceSpine").source(),
-                        ).map_err(ChatError::ResearchProjection)?;
+                        let historical = load_historical_session_compaction_facts(&self.project, compaction.summary())
+                            .map_err(ChatError::ResearchProjection)?;
                         compaction.validate_references(&historical.context())?;
+                        facts = load_session_compaction_facts(&self.project, projection.state())
+                            .map_err(ChatError::ResearchProjection)?;
                         let rebuilt = self.rebuild_compaction(projection.state(), &facts, composition, provider_session.clone())?;
                         let recovery_sequence = store.next_sequence()?;
                         let recovery = SessionEvent::CompactionCreated { compaction: rebuilt }.into_envelope(
@@ -632,8 +851,15 @@ impl DurableChatSession {
                 compaction_validation = Some(facts);
             }
             (
-                SessionEvent::Resumed {
-                    primary_provider_session: provider_session.reference().clone(),
+                if replace_definition || projection.state().agent_definition_binding().is_none() {
+                    SessionEvent::AgentDefinitionApplied {
+                        primary_provider_session: provider_session.reference().clone(),
+                        binding: self.binding.clone(),
+                    }
+                } else {
+                    SessionEvent::Resumed {
+                        primary_provider_session: provider_session.reference().clone(),
+                    }
                 },
                 SessionDisposition::Resumed,
             )
@@ -644,8 +870,9 @@ impl DurableChatSession {
                 });
             }
             (
-                SessionEvent::Started {
+                SessionEvent::StartedWithAgent {
                     primary_provider_session: provider_session.reference().clone(),
+                    binding: self.binding.clone(),
                 },
                 SessionDisposition::Started,
             )
@@ -690,9 +917,27 @@ impl DurableChatSession {
             None => match projection.state().research_phase_selection() {
                 Some(selection) => return Ok(selection.phase()),
                 None if disposition == SessionDisposition::Started => {
-                    ResearchPhaseSelection::new_session_default()
+                    ResearchPhaseSelection::definition_default(
+                        self.binding
+                            .definition()
+                            .research()
+                            .expect("research command admission")
+                            .phase(),
+                    )
                 }
-                None => ResearchPhaseSelection::legacy_default(),
+                None => {
+                    let phase = self
+                        .binding
+                        .definition()
+                        .research()
+                        .expect("research command admission")
+                        .phase();
+                    if phase == ResearchPhase::Mapping {
+                        ResearchPhaseSelection::legacy_default()
+                    } else {
+                        ResearchPhaseSelection::definition_default(phase)
+                    }
+                }
             },
         };
         let sequence = store.next_sequence()?;
@@ -730,9 +975,27 @@ impl DurableChatSession {
             None => match projection.state().domain_profile_selection() {
                 Some(selection) => return Ok(selection.profile()),
                 None if disposition == SessionDisposition::Started => {
-                    DomainProfileSelection::new_session_default()
+                    DomainProfileSelection::definition_default(
+                        self.binding
+                            .definition()
+                            .research()
+                            .expect("research command admission")
+                            .domain(),
+                    )
                 }
-                None => DomainProfileSelection::legacy_default(),
+                None => {
+                    let domain = self
+                        .binding
+                        .definition()
+                        .research()
+                        .expect("research command admission")
+                        .domain();
+                    if domain == DomainProfile::Source {
+                        DomainProfileSelection::legacy_default()
+                    } else {
+                        DomainProfileSelection::definition_default(domain)
+                    }
+                }
             },
         };
         let sequence = store.next_sequence()?;
@@ -1022,6 +1285,8 @@ fn event_id(project_id: &ProjectId, session_id: &StreamId, sequence: u64, kind: 
 
 #[derive(Debug, Error)]
 pub(crate) enum ChatError {
+    #[error("Agent definition: {message}")]
+    Definition { message: String },
     #[error("Session has an unresolved stopped Turn; resume its Session explicitly")]
     UnresolvedTurnStop,
     #[error(transparent)]

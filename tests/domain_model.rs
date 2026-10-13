@@ -138,7 +138,7 @@ fn model_input_ir_json_has_a_stable_current_version_and_content_shape() {
     assert_eq!(
         serde_json::to_value(input).expect("ModelInputIR should serialize"),
         json!({
-            "schema_version": 3,
+            "schema_version": 4,
             "instructions": "test instructions",
             "content_items": [
                 {"kind": "text", "role": "user", "text": "test input"},

@@ -31,9 +31,19 @@ impl ArtifactState {
             });
         }
         for parent in &record.parent_artifact_ids {
-            if !self.records.contains_key(parent) {
-                return Err(ArtifactError::MissingParent {
-                    parent: parent.to_string(),
+            let parent_record =
+                self.records
+                    .get(parent)
+                    .ok_or_else(|| ArtifactError::MissingParent {
+                        parent: parent.to_string(),
+                    })?;
+            if let Some(target_snapshot_id) = record.scope.target_snapshot_id()
+                && parent_record.scope.target_snapshot_id() != Some(target_snapshot_id)
+            {
+                return Err(ArtifactError::InvalidRecord {
+                    message: format!(
+                        "target-scoped Artifact parent `{parent}` does not share TargetSnapshot `{target_snapshot_id}`"
+                    ),
                 });
             }
         }

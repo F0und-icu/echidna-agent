@@ -421,6 +421,65 @@ async fn nullable_status_is_rejected_outside_completed_reasoning_items() {
 }
 
 #[tokio::test]
+async fn invalid_completed_item_status_uses_fixed_diagnostics_at_both_wire_entrypoints() {
+    let cases = [
+        (
+            json!({"type":"reasoning","id":"reasoning-id",
+                "status":"in_progress","content":[]}),
+            "item_family=reasoning status_class=known_non_completed",
+        ),
+        (
+            json!({"type":"function_call","id":"call-id","status":null,
+                "call_id":"call-id","name":"read_file","arguments":"{}"}),
+            "item_family=function_call status_class=null_outside_reasoning",
+        ),
+        (
+            json!({"type":"REMOTE_TYPE_CANARY","id":"REMOTE_ID_CANARY",
+                "status":"REMOTE_STATUS_CANARY"}),
+            "item_family=other status_class=unknown_string",
+        ),
+        (
+            json!({"type":"function_call","id":"REMOTE_ID_CANARY",
+                "status":{"REMOTE_STATUS_OBJECT_CANARY":true},"call_id":"call-id",
+                "name":"read_file","arguments":"{}"}),
+            "item_family=function_call status_class=non_string",
+        ),
+    ];
+
+    for (item, expected) in cases {
+        for (source, events) in [
+            (
+                "output_item_done",
+                vec![json!({"type":"response.output_item.done","output_index":0,
+                    "item":item.clone()})],
+            ),
+            ("completed_snapshot", vec![completed(json!([item.clone()]))]),
+        ] {
+            let message = match consume(events).await {
+                Err(ModelStreamingError::Provider(ModelProviderError::ProtocolFailure {
+                    message,
+                })) => message,
+                other => panic!("{source}: expected status protocol failure, got {other:?}"),
+            };
+            assert_eq!(
+                message,
+                format!(
+                    "completed output item has non-completed status (source={source} {expected})"
+                )
+            );
+            for canary in [
+                "REMOTE_TYPE_CANARY",
+                "REMOTE_ID_CANARY",
+                "REMOTE_STATUS_CANARY",
+                "REMOTE_STATUS_OBJECT_CANARY",
+            ] {
+                assert!(!message.contains(canary), "{source}: {message}");
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn completed_snapshots_cannot_drop_text_or_introduce_unobserved_semantic_items() {
     let tool = json!({"type":"function_call","call_id":"c","name":"read_file","arguments":"{}"});
     for events in [

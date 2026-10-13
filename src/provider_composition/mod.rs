@@ -7,9 +7,10 @@ mod validation;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::adapters::credentials::{CredentialSource, CredentialSourceError};
+use crate::adapters::credentials::{CredentialResolution, CredentialSource, CredentialSourceError};
 use crate::adapters::project_event_store::Project;
-use crate::adapters::responses::{ResponsesHttpAdapter, ResponsesHttpConfig};
+use crate::adapters::responses::{ResponsesHttpAdapter, ResponsesHttpConfig, ResponsesWireProfile};
+use crate::adapters::subscription_auth::SubscriptionAuthService;
 use crate::domain::model::ModelCapabilities;
 use crate::domain::profile::AgentModelProfile;
 use crate::domain::request_audit::RequestAdapterVersion;
@@ -26,7 +27,9 @@ pub struct ProviderComposition {
     primary: Arc<dyn ModelProvider>,
     vision: Option<Arc<dyn ModelProvider>>,
     primary_request_adapter_version: RequestAdapterVersion,
+    vision_request_adapter_version: Option<RequestAdapterVersion>,
     prompt_sources: PromptSources,
+    agent_definition_path: Option<std::path::PathBuf>,
     runtime: RuntimeSettings,
 }
 
@@ -60,6 +63,28 @@ impl ProviderComposition {
         let config = ProviderConfigV1::load(path)?;
         config.validate()?;
         Ok(ValidatedProviderConfig(config))
+    }
+
+    /// Selects an explicitly configured subscription account without resolving
+    /// credentials. Auth commands do not need a research Project or AgentLoop.
+    pub(crate) fn subscription_auth(
+        path: impl AsRef<Path>,
+        provider_id: &str,
+    ) -> Result<SubscriptionAuthService, ProviderCompositionError> {
+        let config = Self::load_config(path)?.0;
+        let definition = config.providers.get(provider_id).ok_or_else(|| {
+            ProviderCompositionError::InvalidSubscription {
+                provider: provider_id.to_owned(),
+                message: "unknown Provider profile".to_owned(),
+            }
+        })?;
+        let subscription = definition.chatgpt_subscription.as_ref().ok_or_else(|| {
+            ProviderCompositionError::InvalidSubscription {
+                provider: provider_id.to_owned(),
+                message: "this Provider does not select chatgpt_subscription".to_owned(),
+            }
+        })?;
+        subscription_service(subscription)
     }
 
     /// Binds one validated configuration to an already-discovered Project.
@@ -100,18 +125,21 @@ impl ProviderComposition {
     }
 
     /// Returns the scoped Vision request Adapter identity when a Vision
-    /// Provider is configured. The fixed Responses binding currently shares
-    /// one wire owner, but callers do not infer that from profile names.
+    /// Provider is configured. Each role carries its configured protocol profile.
     pub(crate) fn vision_request_adapter_version(&self) -> Option<&RequestAdapterVersion> {
-        self.vision
-            .as_ref()
-            .map(|_| &self.primary_request_adapter_version)
+        self.vision_request_adapter_version.as_ref()
     }
 
     /// Paths only: the CLI refresh stage reads optional prompt content at a
     /// Turn boundary and reports filesystem errors before Provider activity.
     pub(crate) fn prompt_sources(&self) -> &PromptSources {
         &self.prompt_sources
+    }
+
+    /// An explicit configured definition source for a new Session. Existing
+    /// Session bindings remain their own immutable authority.
+    pub(crate) fn agent_definition_path(&self) -> Option<&Path> {
+        self.agent_definition_path.as_deref()
     }
 
     pub(crate) fn runtime(&self) -> RuntimeSettings {
@@ -126,6 +154,7 @@ impl ProviderComposition {
     ) -> Result<Self, ProviderCompositionError> {
         let config = config.0;
         let prompt_sources = config.prompts.clone();
+        let agent_definition_path = config.agent_definition_path().map(Path::to_path_buf);
 
         let agent = config.active_agent_definition();
         let primary_definition = config.provider(&agent.primary);
@@ -138,28 +167,38 @@ impl ProviderComposition {
             project.as_ref().map(|_| "primary"),
             #[cfg(debug_assertions)]
             debug,
-        );
-        let vision = agent.vision.as_deref().map(|vision_id| {
-            let definition = config.provider(vision_id);
-            compose_provider(
-                vision_id,
-                definition,
-                config.capabilities(definition),
-                Arc::clone(&credential_source),
-                project.as_ref(),
-                project.as_ref().map(|_| "vision"),
-                #[cfg(debug_assertions)]
-                debug,
-            )
-        });
+        )?;
+        let vision = agent
+            .vision
+            .as_deref()
+            .map(|vision_id| {
+                let definition = config.provider(vision_id);
+                compose_provider(
+                    vision_id,
+                    definition,
+                    config.capabilities(definition),
+                    Arc::clone(&credential_source),
+                    project.as_ref(),
+                    project.as_ref().map(|_| "vision"),
+                    #[cfg(debug_assertions)]
+                    debug,
+                )
+            })
+            .transpose()?;
         let agent_profile = config.active_agent_model_profile()?;
 
         Ok(Self {
             agent_profile,
             primary,
             vision,
-            primary_request_adapter_version: ResponsesHttpAdapter::request_adapter_version(),
+            primary_request_adapter_version: wire_profile(primary_definition)
+                .request_adapter_version(),
+            vision_request_adapter_version: agent
+                .vision
+                .as_deref()
+                .map(|id| wire_profile(config.provider(id)).request_adapter_version()),
             prompt_sources,
+            agent_definition_path,
             runtime: config.runtime,
         })
     }
@@ -173,7 +212,7 @@ fn compose_provider(
     project: Option<&Project>,
     cli_role: Option<&'static str>,
     #[cfg(debug_assertions)] debug: bool,
-) -> Arc<dyn ModelProvider> {
+) -> Result<Arc<dyn ModelProvider>, ProviderCompositionError> {
     let (credential_reference, credential_source) = match definition.credential() {
         ProviderCredential::Reference(reference) => (reference.to_owned(), credential_source),
         ProviderCredential::Inline(value) => {
@@ -184,19 +223,31 @@ fn compose_provider(
             });
             (reference, source)
         }
+        ProviderCredential::Subscription(subscription) => {
+            let reference = format!("chatgpt_subscription:{provider_id}");
+            let source: Arc<dyn CredentialSource> = Arc::new(SubscriptionCredentialSource {
+                reference: reference.clone(),
+                service: Arc::new(subscription_service(subscription)?),
+            });
+            (reference, source)
+        }
     };
     match (definition.binding, definition.wire_api) {
         (ProviderBinding::HttpSse, WireApi::Responses) => {
-            let adapter = ResponsesHttpAdapter::new(
-                ResponsesHttpConfig::new(
-                    &definition.base_url,
-                    &definition.model,
-                    credential_reference,
-                    capabilities,
-                )
-                .with_timeouts(definition.connect_timeout_ms, definition.read_timeout_ms),
-                credential_source,
-            );
+            let config = ResponsesHttpConfig::new(
+                &definition.base_url,
+                &definition.model,
+                credential_reference,
+                capabilities,
+            )
+            .with_timeouts(definition.connect_timeout_ms, definition.read_timeout_ms);
+            let config = match wire_profile(definition) {
+                ResponsesWireProfile::Standard => config,
+                ResponsesWireProfile::ChatGptSubscription => {
+                    config.with_chatgpt_subscription_profile()
+                }
+            };
+            let adapter = ResponsesHttpAdapter::new(config, credential_source);
             let adapter = match project {
                 Some(project) => adapter.with_project_image_resolver(project.clone()),
                 None => adapter,
@@ -206,8 +257,57 @@ fn compose_provider(
                 #[cfg(debug_assertions)]
                 debug,
             );
-            Arc::new(adapter)
+            Ok(Arc::new(adapter))
         }
+    }
+}
+
+fn wire_profile(definition: &ProviderDefinition) -> ResponsesWireProfile {
+    if definition.chatgpt_subscription.is_some() {
+        ResponsesWireProfile::ChatGptSubscription
+    } else {
+        ResponsesWireProfile::Standard
+    }
+}
+
+fn subscription_service(
+    subscription: &config::ChatGptSubscription,
+) -> Result<SubscriptionAuthService, ProviderCompositionError> {
+    SubscriptionAuthService::new(
+        subscription.auth_store.clone(),
+        subscription.account.clone(),
+    )
+    .map_err(
+        |error| ProviderCompositionError::SubscriptionAuthentication {
+            message: error.to_string(),
+        },
+    )
+}
+
+struct SubscriptionCredentialSource {
+    reference: String,
+    service: Arc<SubscriptionAuthService>,
+}
+
+impl CredentialSource for SubscriptionCredentialSource {
+    fn read(&self, _reference: &str) -> Result<Option<String>, CredentialSourceError> {
+        Err(CredentialSourceError::ReadFailed {
+            message: "subscription credentials require asynchronous resolution".to_owned(),
+        })
+    }
+
+    fn resolve(&self, reference: &str) -> CredentialResolution {
+        if reference != self.reference {
+            return CredentialResolution::Ready(Ok(None));
+        }
+        let service = Arc::clone(&self.service);
+        CredentialResolution::Pending(Box::pin(async move {
+            service.access_token().await.map(Some).map_err(|error| {
+                CredentialSourceError::ReadFailed {
+                    message: error.to_string(),
+                }
+            })
+        }))
     }
 }
 

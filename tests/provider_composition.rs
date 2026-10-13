@@ -378,12 +378,12 @@ fn config_is_strict_and_rejects_unsafe_or_dangling_bindings() {
                 "credential_ref = \"CYBER_AGENT_PRIMARY_API_KEY\"\napi_key = \"fixture-inline\"",
                 1,
             ),
-            "exactly one of `api_key` or `credential_ref`",
+            "exactly one of `api_key`, `credential_ref`, or `chatgpt_subscription`",
         ),
         (
             "credential-missing",
             valid_config().replacen("credential_ref = \"CYBER_AGENT_PRIMARY_API_KEY\"\n", "", 1),
-            "exactly one of `api_key` or `credential_ref`",
+            "exactly one of `api_key`, `credential_ref`, or `chatgpt_subscription`",
         ),
         (
             "credential-empty-inline",

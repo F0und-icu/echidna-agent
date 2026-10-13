@@ -9,6 +9,7 @@ mod filesystem;
 mod http_request;
 mod job;
 mod memory;
+mod operation_time;
 mod output;
 mod process_identity;
 mod pty;
@@ -29,6 +30,8 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::domain::events::StreamId;
+use crate::domain::memory::MemoryScope;
 use crate::domain::tools::{
     ExecutionId, ResolvedToolPlan, ResourceKey, ToolCachePolicy, ToolCall, ToolDeterminism,
     ToolEffect, ToolExecutionOutcome, ToolExecutionPlan, ToolExposure, ToolName, ToolOutputPolicy,
@@ -79,12 +82,42 @@ pub struct ToolRegistry {
     jobs: job::BackgroundJobs,
     ptys: pty::PtySessions,
     active_leases: ActiveProcessLeases,
+    artifact_scope: artifact::ArtifactScopeBinding,
+    memory_scope: Option<MemoryScope>,
 }
 
 impl ToolRegistry {
     pub fn for_project(project_root: impl Into<PathBuf>) -> Self {
+        Self::with_bindings(
+            project_root,
+            artifact::ArtifactScopeBinding::TargetFromArguments,
+            Some(MemoryScope::Project),
+            true,
+        )
+    }
+
+    pub fn for_agent(
+        project_root: impl Into<PathBuf>,
+        session_id: StreamId,
+        memory_scope: Option<MemoryScope>,
+        research_enabled: bool,
+    ) -> Self {
+        let artifact_scope = if research_enabled {
+            artifact::ArtifactScopeBinding::TargetFromArguments
+        } else {
+            artifact::ArtifactScopeBinding::Session(session_id)
+        };
+        Self::with_bindings(project_root, artifact_scope, memory_scope, research_enabled)
+    }
+
+    fn with_bindings(
+        project_root: impl Into<PathBuf>,
+        artifact_scope: artifact::ArtifactScopeBinding,
+        memory_scope: Option<MemoryScope>,
+        research_enabled: bool,
+    ) -> Self {
         let project_root = project_root.into();
-        let tools = [
+        let mut tools: BTreeMap<ToolName, BuiltinTool> = [
             (ToolName::new("read_file"), BuiltinTool::ReadFile),
             (ToolName::new("read_files"), BuiltinTool::ReadFiles),
             (ToolName::new("list_files"), BuiltinTool::ListFiles),
@@ -125,17 +158,44 @@ impl ToolRegistry {
         ]
         .into_iter()
         .collect();
+        if !research_enabled {
+            tools.remove(&ToolName::new("research_get"));
+            tools.remove(&ToolName::new("research_update"));
+        }
+        if memory_scope.is_none() {
+            tools.remove(&ToolName::new("memory_read"));
+            tools.remove(&ToolName::new("memory_write"));
+        }
         Self {
             project_root,
             tools,
             jobs: job::BackgroundJobs::new(),
             ptys: pty::PtySessions::new(),
             active_leases: ActiveProcessLeases::new(),
+            artifact_scope,
+            memory_scope,
         }
     }
 
-    fn canonical_spec(name: &ToolName, tool: BuiltinTool) -> ToolSpec {
+    fn canonical_spec(&self, name: &ToolName, tool: BuiltinTool) -> ToolSpec {
         let mut builtin_spec = tool.spec();
+        match tool {
+            BuiltinTool::ArtifactStore => {
+                builtin_spec.input_schema =
+                    with_execution_control(artifact::input_schema_for_scope(&self.artifact_scope));
+            }
+            BuiltinTool::ViewImage => {
+                builtin_spec.input_schema = with_execution_control(
+                    view_image::input_schema_for_scope(&self.artifact_scope),
+                );
+            }
+            BuiltinTool::HttpRequest => {
+                builtin_spec.input_schema = with_execution_control(
+                    http_request::input_schema_for_scope(&self.artifact_scope),
+                );
+            }
+            _ => {}
+        }
         if matches!(
             tool,
             BuiltinTool::RunCommand
@@ -158,8 +218,26 @@ impl ToolRegistry {
         }
         if matches!(
             tool,
-            BuiltinTool::InspectEnvironment | BuiltinTool::HttpRequest
+            BuiltinTool::InspectEnvironment
+                | BuiltinTool::ArtifactStore
+                | BuiltinTool::ViewImage
+                | BuiltinTool::MemoryRead
+                | BuiltinTool::MemoryWrite
+                | BuiltinTool::InspectProject
         ) {
+            builtin_spec.version = "2".to_owned();
+        }
+        if tool == BuiltinTool::HttpRequest {
+            builtin_spec.version = "3".to_owned();
+        }
+        if matches!(
+            self.artifact_scope,
+            artifact::ArtifactScopeBinding::Session(_)
+        ) && tool == BuiltinTool::ArtifactStore
+        {
+            builtin_spec.description = canonical_description(name.as_str(), false);
+        }
+        if matches!(tool, BuiltinTool::ResearchGet | BuiltinTool::ResearchUpdate) {
             builtin_spec.version = "2".to_owned();
         }
         debug_assert_eq!(&builtin_spec.name, name);
@@ -170,7 +248,7 @@ impl ToolRegistry {
     fn canonical_specs(&self) -> Vec<ToolSpec> {
         self.tools
             .iter()
-            .map(|(name, tool)| Self::canonical_spec(name, *tool))
+            .map(|(name, tool)| self.canonical_spec(name, *tool))
             .collect()
     }
 
@@ -194,8 +272,12 @@ impl ToolRegistry {
                 message: error.to_string(),
             }
         })?;
-        let (normalized_arguments, resource_keys) =
-            tool.normalize(&self.project_root, arguments)?;
+        let (normalized_arguments, resource_keys) = tool.normalize(
+            &self.project_root,
+            arguments,
+            &self.artifact_scope,
+            self.memory_scope.as_ref(),
+        )?;
         call.arguments = normalized_arguments;
         let mut plan = ToolExecutionPlan::new_with_rerun_reason(
             execution_id,
@@ -237,7 +319,7 @@ impl ToolExecutor for ToolRegistry {
                 .ok_or_else(|| ToolExecutorError::UnknownTool {
                     tool_name: call.name.to_string(),
                 })?;
-        let spec = Self::canonical_spec(&call.name, tool);
+        let spec = self.canonical_spec(&call.name, tool);
         self.plan_with_spec(execution_id, call, &spec, None)
     }
 
@@ -309,15 +391,7 @@ impl ToolRegistry {
                 if tool == BuiltinTool::RunCommands && observer.is_some() {
                     command::execute_batch_observed(&self.project_root, plan, observer).await
                 } else {
-                    tool.execute(
-                        &self.project_root,
-                        &self.jobs,
-                        &self.ptys,
-                        &self.active_leases,
-                        &specs,
-                        plan,
-                    )
-                    .await
+                    tool.execute(self, &specs, plan).await
                 }
             })
             .await
@@ -326,6 +400,10 @@ impl ToolRegistry {
                 Err(_) => ToolExecutionOutcome::cancelled(timeout_plan, "tool_timeout"),
             }
         })
+    }
+
+    pub fn has_active_processes(&self) -> bool {
+        self.jobs.has_active_processes() || self.ptys.has_active_processes()
     }
 }
 
@@ -405,6 +483,8 @@ impl BuiltinTool {
         self,
         project_root: &Path,
         arguments: Value,
+        artifact_scope: &artifact::ArtifactScopeBinding,
+        memory_scope: Option<&MemoryScope>,
     ) -> Result<(Value, Vec<ResourceKey>), ToolExecutorError> {
         match self {
             Self::ReadFile => filesystem::normalize_read_file(project_root, arguments),
@@ -425,12 +505,26 @@ impl BuiltinTool {
             Self::InputPty => pty::normalize_input(arguments),
             Self::ResizePty => pty::normalize_resize(arguments),
             Self::StopPty => pty::normalize_stop(arguments),
-            Self::ArtifactStore => artifact::normalize(project_root, arguments),
-            Self::ViewImage => view_image::normalize(project_root, arguments),
-            Self::HttpRequest => http_request::normalize(project_root, arguments),
+            Self::ArtifactStore => {
+                artifact::normalize_for_scope(project_root, arguments, artifact_scope)
+            }
+            Self::ViewImage => {
+                view_image::normalize_for_scope(project_root, arguments, artifact_scope)
+            }
+            Self::HttpRequest => {
+                http_request::normalize_for_scope(project_root, arguments, artifact_scope)
+            }
             Self::InspectEnvironment => environment::normalize(project_root, arguments),
-            Self::MemoryRead => memory::normalize_read(project_root, arguments),
-            Self::MemoryWrite => memory::normalize_write(project_root, arguments),
+            Self::MemoryRead => memory::normalize_read(
+                project_root,
+                memory_scope.expect("Memory Tool is registered only with a scope"),
+                arguments,
+            ),
+            Self::MemoryWrite => memory::normalize_write(
+                project_root,
+                memory_scope.expect("Memory Tool is registered only with a scope"),
+                arguments,
+            ),
             Self::InspectProject => snapshot::normalize(project_root, arguments),
             Self::ResearchGet => research::normalize_get(project_root, arguments),
             Self::ResearchUpdate => research::normalize_update(project_root, arguments),
@@ -440,41 +534,74 @@ impl BuiltinTool {
 
     async fn execute(
         self,
-        project_root: &Path,
-        jobs: &job::BackgroundJobs,
-        ptys: &pty::PtySessions,
-        active_leases: &ActiveProcessLeases,
+        registry: &ToolRegistry,
         specs: &[ToolSpec],
         plan: ToolExecutionPlan,
     ) -> ToolExecutionOutcome {
         match self {
-            Self::ReadFile => filesystem::execute_read_file(project_root, plan).await,
-            Self::ReadFiles => filesystem::execute_read_files(project_root, plan).await,
-            Self::ListFiles => filesystem::execute_list_files(project_root, plan).await,
-            Self::SearchFiles => search::execute(project_root, plan).await,
-            Self::WriteFile => file_write::execute_write_file(project_root, plan).await,
-            Self::ApplyPatch => file_write::execute_apply_patch(project_root, plan).await,
-            Self::RunCommand => command::execute_one(project_root, plan).await,
-            Self::ReadOutput => read_output::execute(project_root, plan).await,
-            Self::RunCommands => command::execute_batch(project_root, plan).await,
-            Self::StartJob => job::execute_start(project_root, jobs, active_leases, plan).await,
-            Self::PollJob => job::execute_poll(jobs, plan).await,
-            Self::InputJob => job::execute_input(jobs, plan).await,
-            Self::StopJob => job::execute_stop(jobs, plan).await,
-            Self::StartPty => pty::execute_start(project_root, ptys, active_leases, plan).await,
-            Self::PollPty => pty::execute_poll(ptys, plan).await,
-            Self::InputPty => pty::execute_input(ptys, plan).await,
-            Self::ResizePty => pty::execute_resize(ptys, plan).await,
-            Self::StopPty => pty::execute_stop(ptys, plan).await,
-            Self::ArtifactStore => artifact::execute(project_root, plan).await,
-            Self::ViewImage => view_image::execute(project_root, plan).await,
-            Self::HttpRequest => http_request::execute(project_root, plan).await,
-            Self::InspectEnvironment => environment::execute(project_root, plan).await,
-            Self::MemoryRead => memory::execute_read(project_root, plan).await,
-            Self::MemoryWrite => memory::execute_write(project_root, plan).await,
-            Self::InspectProject => snapshot::execute(project_root, specs, plan).await,
-            Self::ResearchGet => research::execute_get(project_root, plan).await,
-            Self::ResearchUpdate => research::execute_update(project_root, plan).await,
+            Self::ReadFile => filesystem::execute_read_file(&registry.project_root, plan).await,
+            Self::ReadFiles => filesystem::execute_read_files(&registry.project_root, plan).await,
+            Self::ListFiles => filesystem::execute_list_files(&registry.project_root, plan).await,
+            Self::SearchFiles => search::execute(&registry.project_root, plan).await,
+            Self::WriteFile => file_write::execute_write_file(&registry.project_root, plan).await,
+            Self::ApplyPatch => file_write::execute_apply_patch(&registry.project_root, plan).await,
+            Self::RunCommand => command::execute_one(&registry.project_root, plan).await,
+            Self::ReadOutput => read_output::execute(&registry.project_root, plan).await,
+            Self::RunCommands => command::execute_batch(&registry.project_root, plan).await,
+            Self::StartJob => {
+                job::execute_start(
+                    &registry.project_root,
+                    &registry.jobs,
+                    &registry.active_leases,
+                    plan,
+                )
+                .await
+            }
+            Self::PollJob => job::execute_poll(&registry.jobs, plan).await,
+            Self::InputJob => job::execute_input(&registry.jobs, plan).await,
+            Self::StopJob => job::execute_stop(&registry.jobs, plan).await,
+            Self::StartPty => {
+                pty::execute_start(
+                    &registry.project_root,
+                    &registry.ptys,
+                    &registry.active_leases,
+                    plan,
+                )
+                .await
+            }
+            Self::PollPty => pty::execute_poll(&registry.ptys, plan).await,
+            Self::InputPty => pty::execute_input(&registry.ptys, plan).await,
+            Self::ResizePty => pty::execute_resize(&registry.ptys, plan).await,
+            Self::StopPty => pty::execute_stop(&registry.ptys, plan).await,
+            Self::ArtifactStore => artifact::execute(&registry.project_root, plan).await,
+            Self::ViewImage => view_image::execute(&registry.project_root, plan).await,
+            Self::HttpRequest => http_request::execute(&registry.project_root, plan).await,
+            Self::InspectEnvironment => environment::execute(&registry.project_root, plan).await,
+            Self::MemoryRead => {
+                memory::execute_read(
+                    &registry.project_root,
+                    registry
+                        .memory_scope
+                        .as_ref()
+                        .expect("Memory Tool is registered only with a scope"),
+                    plan,
+                )
+                .await
+            }
+            Self::MemoryWrite => {
+                memory::execute_write(
+                    &registry.project_root,
+                    registry
+                        .memory_scope
+                        .as_ref()
+                        .expect("Memory Tool is registered only with a scope"),
+                    plan,
+                )
+                .await
+            }
+            Self::InspectProject => snapshot::execute(&registry.project_root, specs, plan).await,
+            Self::ResearchGet => research::execute_get(&registry.project_root, plan).await,
+            Self::ResearchUpdate => research::execute_update(&registry.project_root, plan).await,
             Self::ToolSearch => unreachable!("Tool search executes through ToolRegistry state"),
         }
     }
@@ -840,7 +967,9 @@ impl BuiltinTool {
             ),
             Self::ArtifactStore => spec(
                 "artifact_store",
-                artifact::input_schema(),
+                artifact::input_schema_for_scope(
+                    &artifact::ArtifactScopeBinding::TargetFromArguments,
+                ),
                 artifact::output_schema(),
                 ToolParallelism::ResourceLocked,
                 Some("file:{source_path},file:.cyber-agent/research.jsonl"),
@@ -851,7 +980,9 @@ impl BuiltinTool {
             ),
             Self::ViewImage => spec(
                 "view_image",
-                view_image::input_schema(),
+                view_image::input_schema_for_scope(
+                    &artifact::ArtifactScopeBinding::TargetFromArguments,
+                ),
                 view_image::output_schema(),
                 ToolParallelism::ResourceLocked,
                 Some("file:{source_path},file:.cyber-agent/research.jsonl"),
@@ -862,7 +993,9 @@ impl BuiltinTool {
             ),
             Self::HttpRequest => spec(
                 "http_request",
-                http_request::input_schema(),
+                http_request::input_schema_for_scope(
+                    &artifact::ArtifactScopeBinding::TargetFromArguments,
+                ),
                 http_request::output_schema(),
                 ToolParallelism::ResourceLocked,
                 Some("file:.cyber-agent/research.jsonl"),
@@ -1212,7 +1345,7 @@ fn spec(
     ToolSpec {
         name: ToolName::new(name),
         version: TOOL_VERSION.to_owned(),
-        description: canonical_description(name),
+        description: canonical_description(name, true),
         input_schema: with_execution_control(input_schema),
         output_schema,
         exposure: ToolExposure::Direct,
@@ -1232,7 +1365,7 @@ fn spec(
 /// Canonical model-facing guidance.  Keeping the four headings in the
 /// ToolSpec owner makes descriptions searchable, auditable and stable across
 /// every Adapter (including `tool_search`) without duplicating prompt prose.
-fn canonical_description(name: &str) -> String {
+fn canonical_description(name: &str, target_scoped: bool) -> String {
     let use_when = match name {
         "read_file" => "one local file",
         "read_files" => "several independent local files",
@@ -1254,10 +1387,10 @@ fn canonical_description(name: &str) -> String {
         "stop_pty" => "stop a running PTY",
         "artifact_store" => "durable raw-output provenance",
         "view_image" => "one supported local image",
-        "http_request" => "one bounded HTTP research request",
-        "inspect_environment" => "the current vulnerability-research environment",
-        "memory_read" => "bounded project Memory",
-        "memory_write" => "a focused project Memory update",
+        "http_request" => "one bounded HTTP request",
+        "inspect_environment" => "the current execution environment",
+        "memory_read" => "bounded Memory in the Agent's configured scope",
+        "memory_write" => "a focused Memory update in the Agent's configured scope",
         "inspect_project" => "current project metadata",
         "research_get" => "existing typed Research state",
         "research_update" => "supported typed Research facts",
@@ -1357,8 +1490,16 @@ fn canonical_description(name: &str) -> String {
         ),
         "artifact_store" => (
             "text is transient or lacks source provenance.",
-            "an existing real TargetSnapshot and root source or complete derived lineage. Read retained command bytes with read_output first; raw capture Blob refs are not Research Artifact provenance. Do not create placeholder evidence just to retain output.",
-            "Blob and Artifact.",
+            if target_scoped {
+                "an existing real TargetSnapshot and root source or complete derived lineage. Read retained command bytes with read_output first; raw capture Blob refs are not Research Artifact provenance. Do not create placeholder evidence just to retain output."
+            } else {
+                "an original local source or complete derived lineage. The runtime binds the Artifact to this Session; no TargetSnapshot is required. Read retained command bytes with read_output first; raw capture is not verified evidence."
+            },
+            if target_scoped {
+                "Blob and Artifact."
+            } else {
+                "Blob and Session Artifact."
+            },
         ),
         "view_image" => (
             "format validation or proof is needed.",
@@ -1378,11 +1519,11 @@ fn canonical_description(name: &str) -> String {
         "memory_read" => (
             "a mutation or verified Research fact is needed.",
             "the smallest missing document; reuse current delivered Core Memory instead of rereading it routinely.",
-            "path, content and hash.",
+            "path, content and hash; content:null and hash:null mean the document is absent in the bound Memory namespace.",
         ),
         "memory_write" => (
-            "there is no expected hash or content is transient.",
-            "focused update.",
+            "content is transient, or an existing document lacks its current hash.",
+            "a focused update; use expected_hash:null only to create a missing document, otherwise read the current hash first.",
             "hashes, Blob and status.",
         ),
         "inspect_project" => (
@@ -1392,12 +1533,12 @@ fn canonical_description(name: &str) -> String {
         ),
         "research_get" => (
             "a mutation or transition is needed.",
-            "reuse current delivered Research facts; fetch only to fill a concrete state/reference gap.",
-            "typed Research state.",
+            "reuse current delivered Research facts; fetch only to fill a concrete state/reference gap. Request receipts only to discover bounded, real Receipt Event IDs; filter by an exact execution_id when known. Paths and execution IDs are not receipt IDs.",
+            "typed Research state and, when explicitly requested, a bounded receipt page sorted by receipt_id.",
         ),
         "research_update" => (
             "the source is unbacked.",
-            "typed facts with real references. Establish the actual TargetSnapshot before dependent records; keep tentative analysis out of verified facts. Do not manufacture research records for routine progress narration.",
+            "typed facts with real references. Reuse the exact target_id/version from research_get, create a missing record before updating it, and discover real Receipt Event IDs through research_get.receipts. A Receipt becomes target-scoped evidence only after an explicit Experiment and ExperimentCapsule bind its receipt_id and matching execution_id to that TargetSnapshot. Keep tentative analysis out of verified facts and do not manufacture records for routine progress narration.",
             "record status.",
         ),
         "tool_search" => (
@@ -1419,13 +1560,7 @@ fn canonical_description(name: &str) -> String {
     };
     let time_guidance = if matches!(
         name,
-        "inspect_project"
-            | "research_update"
-            | "memory_read"
-            | "memory_write"
-            | "artifact_store"
-            | "http_request"
-            | "view_image"
+        "research_update" | "artifact_store" | "http_request" | "view_image"
     ) {
         " Use observed timestamps, never guessed dates. For current UTC time use run_command argv [\"date\",\"-u\",\"+%Y-%m-%dT%H:%M:%SZ\"] when needed; preserve source timestamps for historical facts."
     } else {

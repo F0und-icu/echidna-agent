@@ -37,6 +37,16 @@ fn ctf_r3b1_real_executor_deadline_preserves_acknowledged_children() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("· run_commands · 取消 · 原因 tool_timeout"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("deadline 配置"), "{stderr}");
+    assert!(
+        stderr.contains("总耗时") && stderr.contains("含保存"),
+        "{stderr}"
+    );
     let _ = f2a_request_body(&server.requests, "timeout first");
     let request = f2a_request_body(&server.requests, "timeout followup");
     f2a_join_server(server, "timeout");

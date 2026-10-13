@@ -37,10 +37,17 @@ impl ObservationService {
                 supplied: artifact.id.to_string(),
             });
         }
-        if artifact.target_snapshot_id != *batch.target_snapshot_id() {
+        let artifact_snapshot_id = artifact.scope.target_snapshot_id().ok_or_else(|| {
+            ObservationServiceError::ArtifactSnapshotMismatch {
+                artifact_id: artifact.id.to_string(),
+                artifact_snapshot_id: "session-scoped".to_owned(),
+                observation_snapshot_id: batch.target_snapshot_id().to_string(),
+            }
+        })?;
+        if artifact_snapshot_id != batch.target_snapshot_id() {
             return Err(ObservationServiceError::ArtifactSnapshotMismatch {
                 artifact_id: artifact.id.to_string(),
-                artifact_snapshot_id: artifact.target_snapshot_id.to_string(),
+                artifact_snapshot_id: artifact_snapshot_id.to_string(),
                 observation_snapshot_id: batch.target_snapshot_id().to_string(),
             });
         }
@@ -69,10 +76,20 @@ impl ObservationService {
                             artifact_id: evidence.to_string(),
                         }
                     })?;
-                    if evidence_artifact.target_snapshot_id != observation.target_snapshot_id {
+                    let evidence_snapshot_id = evidence_artifact
+                        .scope
+                        .target_snapshot_id()
+                        .ok_or_else(|| {
+                            ObservationServiceError::EvidenceArtifactSnapshotMismatch {
+                                artifact_id: evidence.to_string(),
+                                artifact_snapshot_id: "session-scoped".to_owned(),
+                                observation_snapshot_id: observation.target_snapshot_id.to_string(),
+                            }
+                        })?;
+                    if evidence_snapshot_id != &observation.target_snapshot_id {
                         return Err(ObservationServiceError::EvidenceArtifactSnapshotMismatch {
                             artifact_id: evidence.to_string(),
-                            artifact_snapshot_id: evidence_artifact.target_snapshot_id.to_string(),
+                            artifact_snapshot_id: evidence_snapshot_id.to_string(),
                             observation_snapshot_id: observation.target_snapshot_id.to_string(),
                         });
                     }
@@ -117,6 +134,7 @@ fn validate_external_command_source(
             ContentItem::Text { .. }
             | ContentItem::ImageArtifact { .. }
             | ContentItem::Reasoning { .. }
+            | ContentItem::OpaqueContinuation { .. }
             | ContentItem::ToolCall { .. }
             | ContentItem::ToolResult { .. }
             | ContentItem::Unsupported { .. } => None,
@@ -174,6 +192,7 @@ fn validate_paired_success(
             ContentItem::Text { .. }
             | ContentItem::ImageArtifact { .. }
             | ContentItem::Reasoning { .. }
+            | ContentItem::OpaqueContinuation { .. }
             | ContentItem::ToolCall { .. }
             | ContentItem::ToolResult { .. }
             | ContentItem::Unsupported { .. } => None,

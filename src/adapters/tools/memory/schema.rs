@@ -5,10 +5,9 @@ pub(super) fn read_input_schema() -> Value {
         "type": "object",
         "properties": {
             "path": memory_path_schema(),
-            "event_id": {"type": "string", "minLength": 1},
-            "occurred_at": {"type": "string", "minLength": 1}
+            "event_id": {"type": "string", "minLength": 1}
         },
-        "required": ["path", "event_id", "occurred_at"],
+        "required": ["path", "event_id"],
         "additionalProperties": false
     })
 }
@@ -20,11 +19,11 @@ pub(super) fn write_input_schema() -> Value {
         "properties": {
             "path": memory_path_schema(),
             "content": {"type": "string"},
-            "expected_hash": {"type": ["string", "null"]},
-            "event_id": {"type": "string", "minLength": 1},
-            "occurred_at": {"type": "string", "minLength": 1}
+            "expected_hash": {"type": ["string", "null"],
+                "description": "Current BLAKE3 content hash from memory_read. Use null only to create a document that does not exist; an existing document requires its exact hash."},
+            "event_id": {"type": "string", "minLength": 1}
         },
-        "required": ["path", "content", "expected_hash", "event_id", "occurred_at"],
+        "required": ["path", "content", "expected_hash", "event_id"],
         "allOf": [{
             "if": {
                 "properties": {"path": {"const": "core.md"}},
@@ -49,7 +48,7 @@ pub(super) fn output_schema() -> Value {
             {
                 "type": "object", "properties": {
                     "status": {"type": "string", "const": "ok"}, "path": {"type": "string", "minLength": 1},
-                    "content": {"type": "string"}, "hash": {"type": ["string", "null"]},
+                    "content": {"type": ["string", "null"]}, "hash": {"type": ["string", "null"]},
                     "external_change_detected": {"type": "boolean"}, "stream_event_count": {"type": "integer", "minimum": 0}
                 }, "required": ["status", "path", "content", "hash", "external_change_detected", "stream_event_count"], "additionalProperties": false
             },

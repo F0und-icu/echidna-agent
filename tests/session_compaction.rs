@@ -315,7 +315,9 @@ fn authoritative_research_events_with_artifact(label: &str) -> Vec<EventEnvelope
         source_path: format!("fixtures/{label}.bin"),
         created_by_event_id: artifact_event_id.clone(),
         produced_by_tool_call_id: ToolCallId::new(format!("artifact-call-{label}")),
-        target_snapshot_id: TargetSnapshotId::new(format!("target-snapshot-{label}")),
+        scope: echidna::domain::artifacts::ArtifactScope::Target {
+            target_snapshot_id: TargetSnapshotId::new(format!("target-snapshot-{label}")),
+        },
         toolchain_fingerprint: "fixture-toolchain-v1".to_owned(),
         parent_artifact_ids: Vec::new(),
         transform: None,

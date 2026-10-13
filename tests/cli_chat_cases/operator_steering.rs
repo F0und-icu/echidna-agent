@@ -115,7 +115,7 @@ fn echidna_terminal_theme_respects_no_color_and_dumb_without_changing_facts() {
         chat.wait_for("THEME_REPLY");
         chat.exit();
         let captured = String::from_utf8_lossy(&chat.captured);
-        assert!(captured.contains("Local Vulnerability Research Agent"));
+        assert!(captured.contains("Local Agent"));
         assert!(captured.contains("Question. Observe. Verify."));
         assert!(captured.contains("Echidna> "));
         assert_eq!(captured.contains('\u{1b}'), colored, "{captured}");

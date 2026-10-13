@@ -3,6 +3,7 @@
 mod argument_correction;
 mod compaction;
 mod context_state;
+mod definition;
 mod output_capture;
 mod recovery;
 mod request_audit;
@@ -27,7 +28,7 @@ use crate::domain::context::{
 use crate::domain::domain_profile::DomainProfile;
 use crate::domain::events::{EventId, StreamId};
 use crate::domain::history::{ConversationHistory, HistoryError};
-use crate::domain::model::{ContentItem, MessageRole, ModelInputIR};
+use crate::domain::model::{ContentItem, MessageRole, ModelInputIR, OpaqueContinuationScope};
 use crate::domain::profile::{AgentModelProfile, AgentModelProfileError};
 use crate::domain::request_audit::{
     RequestAuditAttempt, RequestAuditError, RequestAuditRunContext,
@@ -470,11 +471,13 @@ where
             .map(|compaction| compaction.summary().clone());
         self.pending_session_summary = None;
         self.applied_compaction = applied_compaction;
-        let composition = self
+        let mut composition = self
             .pending_prompt_composition
             .take()
-            .unwrap_or_else(|| self.prompt_composition.clone())
-            .with_research_phase(session.effective_research_phase());
+            .unwrap_or_else(|| self.prompt_composition.clone());
+        if composition.research_enabled() {
+            composition = composition.with_research_phase(session.effective_research_phase());
+        }
         self.pending_prompt_composition = Some(composition);
         self.clear_committed_primary_delivery_state();
         self.last_sampling_step_plan = None;
@@ -563,8 +566,7 @@ where
         current: CurrentContextState,
     ) -> Result<(), AgentLoopError> {
         self.apply_pending_configuration()?;
-        self.prompt_composition = current.apply_prompt_sources(self.prompt_composition.clone())?;
-        self.world_state = Some(current.world_state().clone());
+        self.world_state = current.world_state().cloned();
         self.project_snapshot = Some(current.project_snapshot().clone());
         self.project_memory_core = current.project_memory_core().cloned();
         Ok(())
@@ -873,8 +875,12 @@ where
                 format!("{}:step:{request_index}", turn_id),
                 TurnConfigurationSnapshot::new(
                     turn.clone(),
-                    self.prompt_composition.domain_profile(),
-                    self.prompt_composition.research_phase(),
+                    self.prompt_composition
+                        .research_enabled()
+                        .then(|| self.prompt_composition.domain_profile()),
+                    self.prompt_composition
+                        .research_enabled()
+                        .then(|| self.prompt_composition.research_phase()),
                     self.active_agent_model_profile.clone(),
                 ),
                 plan,
@@ -896,10 +902,12 @@ where
                 .provider_session
                 .assess_delivery(&full_snapshot, capabilities.incremental_input);
             let retains_reasoning = self.committed_delivery_input.as_ref().is_some_and(|input| {
-                input
-                    .content_items
-                    .iter()
-                    .any(|item| matches!(item, ContentItem::Reasoning { .. }))
+                input.content_items.iter().any(|item| {
+                    matches!(
+                        item,
+                        ContentItem::Reasoning { .. } | ContentItem::OpaqueContinuation { .. }
+                    )
+                })
             });
             let (mut delivery_input, mut delivery_map, mut snapshot, assessment) =
                 if retains_reasoning
@@ -1072,11 +1080,13 @@ where
                             reason: BaselineInvalidationReason::ProviderRejected,
                         };
                         self.last_baseline_assessment = Some(fallback_assessment.clone());
-                        if !delivery_input
-                            .content_items
-                            .iter()
-                            .any(|item| matches!(item, ContentItem::Reasoning { .. }))
-                        {
+                        if !delivery_input.content_items.iter().any(|item| {
+                            matches!(
+                                item,
+                                ContentItem::Reasoning { .. }
+                                    | ContentItem::OpaqueContinuation { .. }
+                            )
+                        }) {
                             delivery_input = full_input.clone();
                             delivery_map = full_delivery_map.clone();
                             snapshot = StepSnapshot::capture_with_renderer(
@@ -1091,7 +1101,12 @@ where
                         request_budget
                             .admit(ProviderSessionRole::Primary)
                             .map_err(|limit| AgentLoopError::ModelRequestLimit { limit })?;
-                        let fallback_request = ModelRequest::full(delivery_input.clone());
+                        let fallback_request = ModelRequest::full(delivery_input.clone())
+                            .with_opaque_continuation_scope(
+                                OpaqueContinuationScope::for_provider_session(
+                                    self.provider_session.reference(),
+                                ),
+                            );
                         delivery_map.validate_against(&delivery_input)?;
                         self.record_request_audit_attempt(
                             &mut audit,
@@ -1303,9 +1318,7 @@ where
             }
         }
         if let Some(composition) = pending_composition {
-            let exposure = composition
-                .tool_exposure()
-                .restricted_to_catalog(&self.tools.catalog());
+            let exposure = composition.tool_exposure_for_catalog(&self.tools.catalog())?;
             if self.active_tool_exposure_plan != exposure {
                 self.tools
                     .resolve_tool_plan(&exposure, &DeferredActivationSet::default())?;
@@ -1368,7 +1381,11 @@ where
         full_delivery_map.validate_against(full_input)?;
         Ok(match assessment {
             BaselineAssessment::FullRequest { .. } => (
-                ModelRequest::full(full_input.clone()),
+                ModelRequest::full(full_input.clone()).with_opaque_continuation_scope(
+                    OpaqueContinuationScope::for_provider_session(
+                        self.provider_session.reference(),
+                    ),
+                ),
                 full_delivery_map.clone(),
             ),
             BaselineAssessment::AppendOnlyCandidate { delta_items } => {
@@ -1381,7 +1398,14 @@ where
                 let mut delta = full_input.clone();
                 delta.content_items = delta_items.clone();
                 let delivery_map = full_delivery_map.for_incremental_delta(full_input, &delta)?;
-                (ModelRequest::incremental(delta, continuation), delivery_map)
+                (
+                    ModelRequest::incremental(delta, continuation).with_opaque_continuation_scope(
+                        OpaqueContinuationScope::for_provider_session(
+                            self.provider_session.reference(),
+                        ),
+                    ),
+                    delivery_map,
+                )
             }
         })
     }

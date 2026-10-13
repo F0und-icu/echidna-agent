@@ -35,6 +35,8 @@ struct SessionListEntry {
     session_id: String,
     status: &'static str,
     lifecycle: Option<&'static str>,
+    agent_id: Option<String>,
+    definition_digest: Option<String>,
     domain: Option<&'static str>,
     phase: Option<&'static str>,
     history_items: Option<usize>,
@@ -50,9 +52,11 @@ struct SessionShowReport {
     status: &'static str,
     session_id: String,
     lifecycle: &'static str,
-    domain: &'static str,
+    agent_id: Option<String>,
+    definition_digest: Option<String>,
+    domain: Option<&'static str>,
     domain_selection_recorded: bool,
-    phase: &'static str,
+    phase: Option<&'static str>,
     phase_selection_recorded: bool,
     history_items: usize,
     requests: usize,
@@ -79,8 +83,9 @@ struct SessionExport<'state> {
     schema_version: u16,
     session_id: &'state str,
     lifecycle: &'static str,
-    domain_profile: &'static str,
-    research_phase: &'static str,
+    agent_binding: Option<&'state crate::domain::agent_definition::AgentDefinitionBinding>,
+    domain_profile: Option<&'static str>,
+    research_phase: Option<&'static str>,
     authority_boundary: ExportAuthorityBoundary,
     transcript: &'state [ContentItem],
     execution_receipts: Vec<ExecutionReceiptExport<'state>>,
@@ -153,8 +158,10 @@ pub(crate) fn print_list() -> Result<(), CliError> {
                 session_id: session_id.as_str().to_owned(),
                 status: "ok",
                 lifecycle: Some(lifecycle(state.lifecycle())),
-                domain: Some(state.effective_domain_profile().id()),
-                phase: Some(state.effective_research_phase().id()),
+                agent_id: agent_id(&state),
+                definition_digest: definition_digest(&state),
+                domain: research_domain(&state),
+                phase: research_phase(&state),
                 history_items: Some(state.history().items().len()),
                 requests: Some(state.request_audits().len()),
                 receipts: Some(state.execution_receipt_count()),
@@ -167,6 +174,8 @@ pub(crate) fn print_list() -> Result<(), CliError> {
                 session_id: session_id.as_str().to_owned(),
                 status: "corrupt",
                 lifecycle: None,
+                agent_id: None,
+                definition_digest: None,
                 domain: None,
                 phase: None,
                 history_items: None,
@@ -193,9 +202,11 @@ pub(crate) fn print_show(requested: &str) -> Result<(), CliError> {
         status: "ok",
         session_id: session_id.as_str().to_owned(),
         lifecycle: lifecycle(state.lifecycle()),
-        domain: state.effective_domain_profile().id(),
+        agent_id: agent_id(&state),
+        definition_digest: definition_digest(&state),
+        domain: research_domain(&state),
         domain_selection_recorded: state.domain_profile_selection().is_some(),
-        phase: state.effective_research_phase().id(),
+        phase: research_phase(&state),
         phase_selection_recorded: state.research_phase_selection().is_some(),
         history_items: state.history().items().len(),
         requests: state.request_audits().len(),
@@ -292,11 +303,12 @@ fn build_export<'state>(
     state: &'state SessionState,
 ) -> SessionExport<'state> {
     SessionExport {
-        schema_version: 1,
+        schema_version: 2,
         session_id,
         lifecycle: lifecycle(state.lifecycle()),
-        domain_profile: state.effective_domain_profile().id(),
-        research_phase: state.effective_research_phase().id(),
+        agent_binding: state.agent_definition_binding(),
+        domain_profile: research_domain(state),
+        research_phase: research_phase(state),
         authority_boundary: ExportAuthorityBoundary {
             transcript: "durable Session History facts",
             receipts: "authoritative execution Receipt facts with original Event IDs",
@@ -322,8 +334,17 @@ fn build_export<'state>(
 
 fn render_markdown(export: &SessionExport<'_>) -> Result<String, CliError> {
     let mut output = format!(
-        "# Cyber Agent Session {}\n\n- Lifecycle: `{}`\n- Domain: `{}`\n- Phase: `{}`\n\n> Research references remain authoritative only in the Research stream. Vision observations and Summary narrative are derived non-evidence.\n\n## Transcript\n",
-        export.session_id, export.lifecycle, export.domain_profile, export.research_phase
+        "# Echidna Session {}\n\n- Lifecycle: `{}`\n- Agent: `{}`\n- Domain: `{}`\n- Phase: `{}`\n\n> Research references remain authoritative only in the Research stream. Vision observations and Summary narrative are derived non-evidence.\n\n## Transcript\n",
+        export.session_id,
+        export.lifecycle,
+        export
+            .agent_binding
+            .map_or("legacy research", |binding| binding
+                .definition()
+                .id()
+                .as_str()),
+        export.domain_profile.unwrap_or("disabled"),
+        export.research_phase.unwrap_or("disabled")
     );
     for item in export.transcript {
         match item {
@@ -357,7 +378,7 @@ fn render_markdown(export: &SessionExport<'_>) -> Result<String, CliError> {
                     indent(&serde_json::to_string_pretty(&result.output)?)
                 ));
             }
-            ContentItem::Reasoning { .. } => output.push_str(
+            ContentItem::Reasoning { .. } | ContentItem::OpaqueContinuation { .. } => output.push_str(
                 "\n### Unsupported transcript item\n\nProvider reasoning is not exported as Conversation History.\n",
             ),
             ContentItem::Unsupported { content_kind } => output.push_str(&format!(
@@ -389,6 +410,32 @@ fn render_markdown(export: &SessionExport<'_>) -> Result<String, CliError> {
     )?));
     output.push('\n');
     Ok(output)
+}
+
+fn agent_id(state: &SessionState) -> Option<String> {
+    state
+        .agent_definition_binding()
+        .map(|binding| binding.definition().id().as_str().to_owned())
+}
+
+fn definition_digest(state: &SessionState) -> Option<String> {
+    state
+        .agent_definition_binding()
+        .map(|binding| binding.definition().digest().as_str().to_owned())
+}
+
+fn research_enabled(state: &SessionState) -> bool {
+    state
+        .agent_definition_binding()
+        .is_none_or(|binding| binding.definition().research().is_some())
+}
+
+fn research_domain(state: &SessionState) -> Option<&'static str> {
+    research_enabled(state).then(|| state.effective_domain_profile().id())
+}
+
+fn research_phase(state: &SessionState) -> Option<&'static str> {
+    research_enabled(state).then(|| state.effective_research_phase().id())
 }
 
 fn indent(value: &str) -> String {

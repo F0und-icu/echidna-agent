@@ -6,10 +6,14 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::domain::model::{
-    ModelEvent, ModelUsage, ToolArgumentDiagnostic, ToolArgumentErrorCategory,
+    ModelEvent, ModelUsage, OpaqueContinuationReference, OpaqueContinuationScope,
+    ToolArgumentDiagnostic, ToolArgumentErrorCategory,
 };
 use crate::domain::tools::{ToolCall, ToolCallId, ToolName};
 use crate::ports::model::{ModelProviderError, ModelResponseCompletion, ProviderResponseId};
+
+use super::ResponsesWireProfile;
+use super::request::{ECHIDNA_TOOL_NAMESPACE, SubscriptionOpaqueReasoning};
 
 const PREVIOUS_RESPONSE_NOT_FOUND_CODE: &str = "previous_response_not_found";
 
@@ -17,6 +21,13 @@ const PREVIOUS_RESPONSE_NOT_FOUND_CODE: &str = "previous_response_not_found";
 pub(super) struct DecodedResponsesEvent {
     pub events: Vec<ModelEvent>,
     pub completion: Option<ModelResponseCompletion>,
+    pub opaque_continuations: Vec<DecodedOpaqueContinuation>,
+}
+
+#[derive(Debug)]
+pub(super) struct DecodedOpaqueContinuation {
+    pub reference: OpaqueContinuationReference,
+    pub item: SubscriptionOpaqueReasoning,
 }
 
 #[derive(Debug, Deserialize)]
@@ -41,13 +52,26 @@ struct ResponsesStreamEvent {
     part: Option<Value>,
 }
 
-#[derive(Default)]
 pub(super) struct ResponseDecoder {
     text: text::TextOutput,
     completed_items: Vec<(Option<usize>, Vec<ModelEvent>)>,
+    profile: ResponsesWireProfile,
+    opaque_scope: Option<OpaqueContinuationScope>,
 }
 
 impl ResponseDecoder {
+    pub(super) fn new(
+        profile: ResponsesWireProfile,
+        opaque_scope: Option<OpaqueContinuationScope>,
+    ) -> Self {
+        Self {
+            text: text::TextOutput::default(),
+            completed_items: Vec::new(),
+            profile,
+            opaque_scope,
+        }
+    }
+
     pub(super) fn decode_stream_event(
         &mut self,
         data: &str,
@@ -118,7 +142,12 @@ impl ResponseDecoder {
                 if item.get("type").and_then(Value::as_str) == Some("message") {
                     Ok(decoded(self.text.message(event.output_index, &item)?))
                 } else {
-                    let decoded = decode_output_item(item)?;
+                    let decoded = decode_output_item(
+                        item,
+                        self.profile,
+                        self.opaque_scope.as_ref(),
+                        CompletedItemSource::OutputItemDone,
+                    )?;
                     if !decoded.events.is_empty() {
                         self.text.barrier(event.output_index);
                     }
@@ -143,7 +172,12 @@ impl ResponseDecoder {
                         if item.get("type").and_then(Value::as_str) == Some("message") {
                             text_events.extend(self.text.message(Some(index), item)?);
                         } else {
-                            let decoded = decode_output_item(item.clone())?;
+                            let decoded = decode_output_item(
+                                item.clone(),
+                                self.profile,
+                                self.opaque_scope.as_ref(),
+                                CompletedItemSource::CompletedSnapshot,
+                            )?;
                             if !completed_items.next().is_some_and(|(prior_index, prior)| {
                                 prior_index.is_none_or(|prior| prior == index)
                                     && prior == &decoded.events
@@ -188,14 +222,19 @@ impl ResponseDecoder {
     }
 }
 
-fn decode_output_item(item: Value) -> Result<DecodedResponsesEvent, ModelProviderError> {
-    if item.get("status").is_some_and(|status| {
-        status != "completed"
-            && !(status.is_null() && item.get("type").and_then(Value::as_str) == Some("reasoning"))
-    }) {
-        return Err(protocol_error(
-            "completed output item has non-completed status",
-        ));
+fn decode_output_item(
+    item: Value,
+    profile: ResponsesWireProfile,
+    opaque_scope: Option<&OpaqueContinuationScope>,
+    source: CompletedItemSource,
+) -> Result<DecodedResponsesEvent, ModelProviderError> {
+    if let Some((item_family, status_class)) = invalid_completed_item_status(&item) {
+        return Err(protocol_error(format!(
+            "completed output item has non-completed status (source={} item_family={} status_class={})",
+            source.label(),
+            item_family.label(),
+            status_class.label(),
+        )));
     }
     let item_kind = item
         .get("type")
@@ -208,6 +247,13 @@ fn decode_output_item(item: Value) -> Result<DecodedResponsesEvent, ModelProvide
                 serde_json::from_value(item).map_err(|error| {
                     protocol_error(format!("invalid completed function call: {error}"))
                 })?;
+            if profile == ResponsesWireProfile::ChatGptSubscription
+                && function_call.namespace.as_deref() != Some(ECHIDNA_TOOL_NAMESPACE)
+            {
+                return Err(protocol_error(
+                    "subscription function call omitted the advertised `echidna` namespace",
+                ));
+            }
             if function_call.call_id.is_empty() || function_call.name.is_empty() {
                 return Err(protocol_error(
                     "completed function call requires non-empty `call_id` and `name`",
@@ -243,15 +289,97 @@ fn decode_output_item(item: Value) -> Result<DecodedResponsesEvent, ModelProvide
                 ),
             }]))
         }
-        "reasoning" => decode_reasoning_item(item),
+        "reasoning" => decode_reasoning_item(item, profile, opaque_scope),
         unknown => Err(protocol_error(format!(
             "unsupported completed output item `{unknown}`"
         ))),
     }
 }
 
-fn decode_reasoning_item(item: Value) -> Result<DecodedResponsesEvent, ModelProviderError> {
-    let reasoning: ReasoningItem = serde_json::from_value(item)
+#[derive(Clone, Copy)]
+enum CompletedItemSource {
+    OutputItemDone,
+    CompletedSnapshot,
+}
+
+impl CompletedItemSource {
+    fn label(self) -> &'static str {
+        match self {
+            Self::OutputItemDone => "output_item_done",
+            Self::CompletedSnapshot => "completed_snapshot",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum CompletedItemFamily {
+    Reasoning,
+    FunctionCall,
+    Other,
+}
+
+impl CompletedItemFamily {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Reasoning => "reasoning",
+            Self::FunctionCall => "function_call",
+            Self::Other => "other",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CompletedItemStatusClass {
+    KnownNonCompleted,
+    NullOutsideReasoning,
+    UnknownString,
+    NonString,
+}
+
+impl CompletedItemStatusClass {
+    fn label(self) -> &'static str {
+        match self {
+            Self::KnownNonCompleted => "known_non_completed",
+            Self::NullOutsideReasoning => "null_outside_reasoning",
+            Self::UnknownString => "unknown_string",
+            Self::NonString => "non_string",
+        }
+    }
+}
+
+fn invalid_completed_item_status(
+    item: &Value,
+) -> Option<(CompletedItemFamily, CompletedItemStatusClass)> {
+    let item_family = match item.get("type").and_then(Value::as_str) {
+        Some("reasoning") => CompletedItemFamily::Reasoning,
+        Some("function_call") => CompletedItemFamily::FunctionCall,
+        _ => CompletedItemFamily::Other,
+    };
+    let status_class = match item.get("status") {
+        None => return None,
+        Some(Value::String(status)) if status == "completed" => return None,
+        Some(Value::Null) if item_family == CompletedItemFamily::Reasoning => return None,
+        Some(Value::String(status))
+            if matches!(
+                status.as_str(),
+                "in_progress" | "incomplete" | "failed" | "cancelled"
+            ) =>
+        {
+            CompletedItemStatusClass::KnownNonCompleted
+        }
+        Some(Value::String(_)) => CompletedItemStatusClass::UnknownString,
+        Some(Value::Null) => CompletedItemStatusClass::NullOutsideReasoning,
+        Some(_) => CompletedItemStatusClass::NonString,
+    };
+    Some((item_family, status_class))
+}
+
+fn decode_reasoning_item(
+    item: Value,
+    profile: ResponsesWireProfile,
+    opaque_scope: Option<&OpaqueContinuationScope>,
+) -> Result<DecodedResponsesEvent, ModelProviderError> {
+    let reasoning: ReasoningItem = serde_json::from_value(item.clone())
         .map_err(|error| protocol_error(format!("invalid completed reasoning item: {error}")))?;
     let has_encrypted_content = reasoning
         .encrypted_content
@@ -274,6 +402,32 @@ fn decode_reasoning_item(item: Value) -> Result<DecodedResponsesEvent, ModelProv
             .and_then(Value::as_str)
             .ok_or_else(|| protocol_error("reasoning text content omitted string `text`"))?;
         text.push_str(part);
+    }
+
+    if profile == ResponsesWireProfile::ChatGptSubscription && has_encrypted_content {
+        let opaque = SubscriptionOpaqueReasoning::from_completed_item(&item).map_err(|error| {
+            protocol_error(format!(
+                "invalid subscription encrypted reasoning item: {error}"
+            ))
+        })?;
+        let scope = opaque_scope
+            .cloned()
+            .ok_or_else(|| protocol_error("subscription reasoning item omitted delivery scope"))?;
+        let reference = opaque.reference(scope).map_err(|error| {
+            protocol_error(format!(
+                "invalid subscription encrypted reasoning item: {error}"
+            ))
+        })?;
+        return Ok(DecodedResponsesEvent {
+            events: vec![ModelEvent::OpaqueContinuation {
+                reference: reference.clone(),
+            }],
+            completion: None,
+            opaque_continuations: vec![DecodedOpaqueContinuation {
+                reference,
+                item: opaque,
+            }],
+        });
     }
 
     if text.is_empty() {
@@ -351,6 +505,7 @@ fn decode_completed(
     Ok(DecodedResponsesEvent {
         events,
         completion: Some(completion),
+        opaque_continuations: Vec::new(),
     })
 }
 
@@ -407,6 +562,20 @@ fn decoded(events: Vec<ModelEvent>) -> DecodedResponsesEvent {
     DecodedResponsesEvent {
         events,
         completion: None,
+        opaque_continuations: Vec::new(),
+    }
+}
+
+/// Subscription admission failures expose only an HTTP status and a parsed
+/// machine code. The remote body can contain account or routing diagnostics.
+pub(super) fn subscription_http_failure(status: u16, body: &str) -> ModelProviderError {
+    let code = serde_json::from_str::<HttpErrorEnvelope>(body)
+        .ok()
+        .and_then(|envelope| envelope.error)
+        .and_then(|error| error.code);
+    ModelProviderError::ProviderFailure {
+        code,
+        message: format!("ChatGPT subscription Responses request failed with HTTP {status}"),
     }
 }
 
@@ -421,6 +590,8 @@ struct FunctionCallItem {
     call_id: String,
     name: String,
     arguments: String,
+    #[serde(default)]
+    namespace: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

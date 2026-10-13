@@ -229,9 +229,25 @@ fn environment_guidance_delivers_actual_dialect_observations_and_versioned_promp
     let state = projection.state();
     assert_eq!(state.request_audits().len(), 3);
     assert_audits_reconstruct(root.path(), state);
+    let definition = state.agent_definition_binding().unwrap().definition();
+    let research = definition.research().unwrap();
     for audit in state.request_audits() {
         let audit = serde_json::to_string(audit).unwrap();
-        assert!(audit.contains("prompt:domain:binary:2"));
-        assert!(audit.contains("prompt:phase:mapping:3"));
+        assert!(audit.contains(&format!(
+            "prompt:agent:{}:domain:binary:{}",
+            definition.id().as_str(),
+            research
+                .domain_prompt(echidna::domain::domain_profile::DomainProfile::Binary)
+                .digest()
+                .as_str()
+        )));
+        assert!(audit.contains(&format!(
+            "prompt:agent:{}:phase:mapping:{}",
+            definition.id().as_str(),
+            research
+                .phase_prompt(echidna::domain::research_control::ResearchPhase::Mapping)
+                .digest()
+                .as_str()
+        )));
     }
 }

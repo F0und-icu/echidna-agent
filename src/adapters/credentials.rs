@@ -2,6 +2,7 @@
 
 use std::env;
 
+use futures_util::future::BoxFuture;
 use thiserror::Error;
 
 /// Injected source for resolving one configured Cyber Agent credential
@@ -9,6 +10,19 @@ use thiserror::Error;
 /// inspect Codex or generic Provider login state.
 pub trait CredentialSource: Send + Sync {
     fn read(&self, reference: &str) -> Result<Option<String>, CredentialSourceError>;
+
+    /// Static credentials retain their immediate validation. Sources that
+    /// maintain rotating credentials may defer resolution until stream polling.
+    fn resolve(&self, reference: &str) -> CredentialResolution {
+        CredentialResolution::Ready(self.read(reference))
+    }
+}
+
+/// An owned pending resolution never borrows a Provider request or starts a
+/// second runtime. Awaiting it is credential maintenance, not request retry.
+pub enum CredentialResolution {
+    Ready(Result<Option<String>, CredentialSourceError>),
+    Pending(BoxFuture<'static, Result<Option<String>, CredentialSourceError>>),
 }
 
 /// Reads only the exact environment reference selected by configuration.

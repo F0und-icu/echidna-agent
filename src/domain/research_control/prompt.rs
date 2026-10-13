@@ -1,5 +1,6 @@
 use thiserror::Error;
 
+use crate::domain::agent_definition::{AgentDefinitionBinding, InstructionSnapshot};
 use crate::domain::context::{
     ContextContentHash, ContextFragment, ContextFragmentContent, ContextFragmentId,
     ContextFragmentPriority, ContextFragmentSource, FragmentCachePolicy,
@@ -18,6 +19,7 @@ pub struct PromptComposition {
     project: Option<String>,
     domain: DomainProfile,
     phase: ResearchPhase,
+    binding: Option<AgentDefinitionBinding>,
     /// Exact historical bytes used only by the fixed mechanical Replay path.
     /// It is not serializable configuration and cannot enter ordinary model
     /// sampling or introduce a second renderer.
@@ -39,6 +41,7 @@ impl PromptComposition {
             project: None,
             domain: DomainProfile::Source,
             phase: ResearchPhase::Mapping,
+            binding: None,
             legacy_replay_instructions: None,
         }
     }
@@ -59,15 +62,44 @@ impl PromptComposition {
         })
     }
 
+    /// Builds the current Prompt from a durable resolved binding. The binding
+    /// has already captured instruction bytes, so this path never rereads the
+    /// definition or configured Personal/Project files.
+    pub(crate) fn from_binding(
+        binding: AgentDefinitionBinding,
+    ) -> Result<Self, ResearchControlError> {
+        binding.validate()?;
+        let (domain, phase) = binding.definition().research().map_or(
+            (DomainProfile::Source, ResearchPhase::Mapping),
+            |research| (research.domain(), research.phase()),
+        );
+        Ok(Self {
+            domain,
+            phase,
+            binding: Some(binding),
+            ..Self::current()
+        })
+    }
+
     pub fn with_personal(
         mut self,
         prompt: impl Into<String>,
     ) -> Result<Self, ResearchControlError> {
+        if self.binding.is_some() {
+            return Err(ResearchControlError::BoundPromptOverride {
+                prompt_source: "personal",
+            });
+        }
         self.personal = Some(non_empty_prompt(prompt.into(), "personal")?);
         Ok(self)
     }
 
     pub fn with_project(mut self, prompt: impl Into<String>) -> Result<Self, ResearchControlError> {
+        if self.binding.is_some() {
+            return Err(ResearchControlError::BoundPromptOverride {
+                prompt_source: "project",
+            });
+        }
         self.project = Some(non_empty_prompt(prompt.into(), "project")?);
         Ok(self)
     }
@@ -94,8 +126,45 @@ impl PromptComposition {
         self.phase
     }
 
+    /// Legacy compositions are always Research. Bound generic definitions
+    /// intentionally have no synthetic DomainProfile or ResearchPhase.
+    pub fn research_enabled(&self) -> bool {
+        self.binding
+            .as_ref()
+            .is_none_or(|binding| binding.definition().research().is_some())
+    }
+
     pub fn tool_exposure(&self) -> ToolExposurePlan {
         ToolExposurePlan::layered([self.domain.tool_exposure(), self.phase.tool_exposure()])
+    }
+
+    /// Bound generic definitions are their complete Tool layer. Bound Research
+    /// definitions supply the base layer, then retain the established
+    /// Domain/Phase overlays. The immutable catalog is an input so omitted
+    /// definition entries become explicit Hidden overrides for every actual
+    /// Tool; Hidden remains terminal in `ToolExposurePlan::layered`.
+    pub(crate) fn tool_exposure_for_catalog(
+        &self,
+        catalog: &[crate::domain::tools::ToolSpec],
+    ) -> Result<ToolExposurePlan, ResearchControlError> {
+        match &self.binding {
+            Some(binding) => {
+                let definition = binding
+                    .definition()
+                    .tool_exposure_for(catalog)
+                    .map_err(ResearchControlError::AgentDefinition)?;
+                if binding.definition().research().is_some() {
+                    Ok(ToolExposurePlan::layered([
+                        definition,
+                        self.domain.tool_exposure(),
+                        self.phase.tool_exposure(),
+                    ]))
+                } else {
+                    Ok(definition)
+                }
+            }
+            None => Ok(self.tool_exposure().restricted_to_catalog(catalog)),
+        }
     }
 
     pub fn fragments(&self) -> Result<Vec<ContextFragment>, ResearchControlError> {
@@ -106,6 +175,9 @@ impl PromptComposition {
                 ContextFragmentPriority::Required,
                 rendered_instructions,
             )?]);
+        }
+        if let Some(binding) = &self.binding {
+            return self.bound_fragments(binding);
         }
         let mut fragments = vec![instruction_fragment(
             &format!(
@@ -155,6 +227,132 @@ impl PromptComposition {
         )?);
         Ok(fragments)
     }
+
+    fn bound_fragments(
+        &self,
+        binding: &AgentDefinitionBinding,
+    ) -> Result<Vec<ContextFragment>, ResearchControlError> {
+        const GENERIC_CORE: &str = "Follow the current operator task, preserve durable facts and runtime boundaries, and state uncertainty rather than inventing results.";
+
+        let definition = binding.definition();
+        let id = definition.id().as_str();
+        let mut fragments = vec![instruction_fragment(
+            "prompt:agent:00:generic-core:1",
+            ContextFragmentSource::BasePrompt,
+            ContextFragmentPriority::Required,
+            GENERIC_CORE,
+        )?];
+        let (memory_scope, binding_facts) = runtime_binding_facts(binding);
+        fragments.push(instruction_fragment(
+            &format!("prompt:agent:00:runtime-binding:1:{id}:{memory_scope}"),
+            ContextFragmentSource::BasePrompt,
+            ContextFragmentPriority::Required,
+            &binding_facts,
+        )?);
+        fragments.push(bound_instruction_fragment(
+            &format!(
+                "prompt:agent:01:{id}:persona:{}",
+                definition.instructions().persona().digest().as_str()
+            ),
+            ContextFragmentSource::BasePrompt,
+            definition.instructions().persona(),
+        )?);
+        fragments.push(bound_instruction_fragment(
+            &format!(
+                "prompt:agent:02:{id}:work:{}",
+                definition.instructions().work().digest().as_str()
+            ),
+            ContextFragmentSource::BasePrompt,
+            definition.instructions().work(),
+        )?);
+        for (index, method) in definition.instructions().methods().iter().enumerate() {
+            fragments.push(bound_instruction_fragment(
+                &format!(
+                    "prompt:agent:03:{index:04}:{id}:method:{}",
+                    method.digest().as_str()
+                ),
+                ContextFragmentSource::BasePrompt,
+                method,
+            )?);
+        }
+        if let Some(personal) = binding.personal() {
+            fragments.push(bound_instruction_fragment(
+                &format!("prompt:agent:{id}:personal:{}", personal.digest().as_str()),
+                ContextFragmentSource::PersonalPreferences,
+                personal,
+            )?);
+        }
+        if let Some(project) = binding.project() {
+            fragments.push(bound_instruction_fragment(
+                &format!("prompt:agent:{id}:project:{}", project.digest().as_str()),
+                ContextFragmentSource::ProjectPrompt,
+                project,
+            )?);
+        }
+        if let Some(research) = definition.research() {
+            let domain = research.domain_prompt(self.domain);
+            fragments.push(bound_instruction_fragment(
+                &format!(
+                    "prompt:agent:{id}:domain:{}:{}",
+                    self.domain.id(),
+                    domain.digest().as_str()
+                ),
+                ContextFragmentSource::DomainPrompt,
+                domain,
+            )?);
+            let phase = research.phase_prompt(self.phase);
+            fragments.push(bound_instruction_fragment(
+                &format!(
+                    "prompt:agent:{id}:phase:{}:{}",
+                    self.phase.id(),
+                    phase.digest().as_str()
+                ),
+                ContextFragmentSource::PhasePrompt,
+                phase,
+            )?);
+        }
+        Ok(fragments)
+    }
+}
+
+fn runtime_binding_facts(binding: &AgentDefinitionBinding) -> (&'static str, String) {
+    let definition = binding.definition();
+    let id = definition.id().as_str();
+    let (scope, path_meaning) = match definition.context().memory() {
+        crate::domain::agent_definition::AgentMemoryScope::None => (
+            "none",
+            "Logical Memory path `core.md` is unavailable because Memory is disabled.".to_owned(),
+        ),
+        crate::domain::agent_definition::AgentMemoryScope::Project => (
+            "project",
+            "Logical Memory path `core.md` is in the shared project Memory namespace.".to_owned(),
+        ),
+        crate::domain::agent_definition::AgentMemoryScope::Agent => (
+            "agent",
+            format!(
+                "Logical Memory path `core.md` is in the Agent Memory namespace for Agent ID `{id}`."
+            ),
+        ),
+    };
+    (
+        scope,
+        format!(
+            "Runtime binding facts: stable Agent ID `{id}`. Configured Memory scope: `{scope}`. {path_meaning} This scope is a logical Memory namespace, not a filesystem sandbox."
+        ),
+    )
+}
+
+fn bound_instruction_fragment(
+    id: &str,
+    source: ContextFragmentSource,
+    snapshot: &InstructionSnapshot,
+) -> Result<ContextFragment, ResearchControlError> {
+    instruction_fragment(
+        id,
+        source,
+        ContextFragmentPriority::Required,
+        snapshot.content(),
+    )
 }
 
 fn non_empty_prompt(prompt: String, source: &str) -> Result<String, ResearchControlError> {
@@ -208,6 +406,8 @@ pub enum ResearchControlError {
     EmptyPrompt { prompt_source: String },
     #[error("ResearchPhase selection source/reason/phase combination is invalid")]
     InvalidPhaseSelection,
+    #[error("a bound Agent definition does not permit a live {prompt_source} prompt override")]
+    BoundPromptOverride { prompt_source: &'static str },
     #[error("ResearchPhase {phase:?} generation must be {expected}, received {received}")]
     PhaseGenerationMismatch {
         phase: ResearchPhase,
@@ -216,4 +416,6 @@ pub enum ResearchControlError {
     },
     #[error(transparent)]
     Context(#[from] crate::domain::context::ContextPlannerError),
+    #[error(transparent)]
+    AgentDefinition(#[from] crate::domain::agent_definition::AgentDefinitionError),
 }
