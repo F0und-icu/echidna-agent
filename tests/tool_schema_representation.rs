@@ -76,9 +76,23 @@ fn complete_catalog_preserves_baseline_outside_explicit_file_contract_additions(
             "{:x}",
             Sha256::digest(serde_json::to_vec(&expanded).unwrap())
         );
-        assert_eq!(hash, original["expanded_sha256"], "{}", spec.name);
         let old_size = original["input_bytes"].as_u64().unwrap() as usize;
         let size = serde_json::to_vec(&schema).unwrap().len();
+        if spec.name.as_str() == "research_get" {
+            assert_eq!(spec.version, "2");
+            assert_eq!(
+                original["expanded_sha256"],
+                json!("d12b99d4d23a26c49f74040f41a5004299df59a4eed146f6b5ad657aae7c4b78")
+            );
+            assert_eq!(old_size, 373, "historical v1 fixture must stay frozen");
+            assert_eq!(
+                hash,
+                "589a8bc61f482a741da61facbd4bd29e816f43ae7424de1072925099464abbc7"
+            );
+            assert_eq!(size, 585);
+            continue;
+        }
+        assert_eq!(hash, original["expanded_sha256"], "{}", spec.name);
         if spec.name.as_str() == "research_update" {
             assert_eq!(old_size, 9711);
             assert_eq!(size, 8690);

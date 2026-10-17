@@ -162,6 +162,9 @@ impl ToolRegistry {
         ) {
             builtin_spec.version = "2".to_owned();
         }
+        if matches!(tool, BuiltinTool::ResearchGet | BuiltinTool::ResearchUpdate) {
+            builtin_spec.version = "2".to_owned();
+        }
         debug_assert_eq!(&builtin_spec.name, name);
         builtin_spec.exposure = tool.default_exposure();
         builtin_spec
@@ -1392,12 +1395,12 @@ fn canonical_description(name: &str) -> String {
         ),
         "research_get" => (
             "a mutation or transition is needed.",
-            "reuse current delivered Research facts; fetch only to fill a concrete state/reference gap.",
-            "typed Research state.",
+            "reuse current delivered Research facts; fetch only to fill a concrete state/reference gap. Request receipts only to discover bounded, real Receipt Event IDs; filter by an exact execution_id when known. Paths and execution IDs are not receipt IDs.",
+            "typed Research state and, when explicitly requested, a bounded receipt page sorted by receipt_id.",
         ),
         "research_update" => (
             "the source is unbacked.",
-            "typed facts with real references. Establish the actual TargetSnapshot before dependent records; keep tentative analysis out of verified facts. Do not manufacture research records for routine progress narration.",
+            "typed facts with real references. Reuse the exact target_id/version from research_get, create a missing record before updating it, and discover real Receipt Event IDs through research_get.receipts. A Receipt becomes target-scoped evidence only after an explicit Experiment and ExperimentCapsule bind its receipt_id and matching execution_id to that TargetSnapshot. Keep tentative analysis out of verified facts and do not manufacture records for routine progress narration.",
             "record status.",
         ),
         "tool_search" => (

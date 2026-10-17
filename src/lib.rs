@@ -20,6 +20,7 @@ pub mod ports;
 pub mod provider_composition;
 pub mod trace_eval_runtime;
 
+mod cli_auth;
 mod cli_chat;
 mod cli_inspection;
 mod cli_session;
@@ -66,6 +67,11 @@ enum CliCommand {
     },
     /// Inspect local configuration and runtime readiness.
     Doctor,
+    /// Manage the explicitly configured Echidna subscription account.
+    Auth {
+        #[command(subcommand)]
+        command: cli_auth::AuthCommand,
+    },
     /// Inspect the most recently committed audited request.
     Prompt {
         #[command(subcommand)]
@@ -241,6 +247,14 @@ pub enum CliError {
     ProviderComposition(#[from] ProviderCompositionError),
     #[error("chat requires one explicit --config <path> Provider configuration")]
     ChatConfigurationRequired,
+    #[error("auth requires one explicit --config <path> Provider configuration")]
+    AuthConfigurationRequired,
+    #[error("failed to build the local authentication runtime: {0}")]
+    AuthRuntime(#[source] io::Error),
+    #[error("subscription authentication failed: {message}")]
+    SubscriptionAuthentication { message: String },
+    #[error("model selection failed: {message}")]
+    ModelSelection { message: String },
     #[error("failed to build the local chat runtime: {0}")]
     ChatRuntime(#[source] io::Error),
     #[error("chat failed: {message}")]
@@ -424,6 +438,7 @@ where
             let composition = load_provider_composition(cli.config.as_deref())?;
             print_json(&doctor_report(composition.as_ref()))
         }
+        Some(CliCommand::Auth { command }) => cli_auth::run(cli.config.as_deref(), command),
         Some(CliCommand::Prompt {
             inspection: PromptCommand::Inspect { session },
         }) => cli_inspection::print_prompt_inspection(session.as_deref()),

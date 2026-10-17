@@ -161,6 +161,8 @@ impl ContextPlanner {
         let fixed_input_tokens = fixed_input_tokens(&canonical_tools);
         let mut requirements =
             requirements.normalized_for_tool_specs(!canonical_tools.ordered_specs.is_empty());
+        requirements.reasoning_effort =
+            capabilities.resolve_reasoning_effort(requirements.reasoning_effort)?;
         requirements.max_output_tokens =
             capabilities.resolve_output_token_limit(requirements.max_output_tokens)?;
         if let Some(requested) = requirements.max_output_tokens

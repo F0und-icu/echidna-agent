@@ -27,7 +27,7 @@ use crate::domain::context::{
 use crate::domain::domain_profile::DomainProfile;
 use crate::domain::events::{EventId, StreamId};
 use crate::domain::history::{ConversationHistory, HistoryError};
-use crate::domain::model::{ContentItem, MessageRole, ModelInputIR};
+use crate::domain::model::{ContentItem, MessageRole, ModelInputIR, OpaqueContinuationScope};
 use crate::domain::profile::{AgentModelProfile, AgentModelProfileError};
 use crate::domain::request_audit::{
     RequestAuditAttempt, RequestAuditError, RequestAuditRunContext,
@@ -896,10 +896,12 @@ where
                 .provider_session
                 .assess_delivery(&full_snapshot, capabilities.incremental_input);
             let retains_reasoning = self.committed_delivery_input.as_ref().is_some_and(|input| {
-                input
-                    .content_items
-                    .iter()
-                    .any(|item| matches!(item, ContentItem::Reasoning { .. }))
+                input.content_items.iter().any(|item| {
+                    matches!(
+                        item,
+                        ContentItem::Reasoning { .. } | ContentItem::OpaqueContinuation { .. }
+                    )
+                })
             });
             let (mut delivery_input, mut delivery_map, mut snapshot, assessment) =
                 if retains_reasoning
@@ -1072,11 +1074,13 @@ where
                             reason: BaselineInvalidationReason::ProviderRejected,
                         };
                         self.last_baseline_assessment = Some(fallback_assessment.clone());
-                        if !delivery_input
-                            .content_items
-                            .iter()
-                            .any(|item| matches!(item, ContentItem::Reasoning { .. }))
-                        {
+                        if !delivery_input.content_items.iter().any(|item| {
+                            matches!(
+                                item,
+                                ContentItem::Reasoning { .. }
+                                    | ContentItem::OpaqueContinuation { .. }
+                            )
+                        }) {
                             delivery_input = full_input.clone();
                             delivery_map = full_delivery_map.clone();
                             snapshot = StepSnapshot::capture_with_renderer(
@@ -1091,7 +1095,12 @@ where
                         request_budget
                             .admit(ProviderSessionRole::Primary)
                             .map_err(|limit| AgentLoopError::ModelRequestLimit { limit })?;
-                        let fallback_request = ModelRequest::full(delivery_input.clone());
+                        let fallback_request = ModelRequest::full(delivery_input.clone())
+                            .with_opaque_continuation_scope(
+                                OpaqueContinuationScope::for_provider_session(
+                                    self.provider_session.reference(),
+                                ),
+                            );
                         delivery_map.validate_against(&delivery_input)?;
                         self.record_request_audit_attempt(
                             &mut audit,
@@ -1368,7 +1377,11 @@ where
         full_delivery_map.validate_against(full_input)?;
         Ok(match assessment {
             BaselineAssessment::FullRequest { .. } => (
-                ModelRequest::full(full_input.clone()),
+                ModelRequest::full(full_input.clone()).with_opaque_continuation_scope(
+                    OpaqueContinuationScope::for_provider_session(
+                        self.provider_session.reference(),
+                    ),
+                ),
                 full_delivery_map.clone(),
             ),
             BaselineAssessment::AppendOnlyCandidate { delta_items } => {
@@ -1381,7 +1394,14 @@ where
                 let mut delta = full_input.clone();
                 delta.content_items = delta_items.clone();
                 let delivery_map = full_delivery_map.for_incremental_delta(full_input, &delta)?;
-                (ModelRequest::incremental(delta, continuation), delivery_map)
+                (
+                    ModelRequest::incremental(delta, continuation).with_opaque_continuation_scope(
+                        OpaqueContinuationScope::for_provider_session(
+                            self.provider_session.reference(),
+                        ),
+                    ),
+                    delivery_map,
+                )
             }
         })
     }

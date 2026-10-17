@@ -138,6 +138,86 @@ export CYBER_AGENT_VISION_API_KEY='replace-with-your-vision-key'
 也可以在本地 TOML 中用 `api_key = "…"` 替换 `credential_ref`；每个 Provider 必须且只能选择一种。
 真实密钥及配置保存在仓库之外，不要提交到 Git。
 
+#### ChatGPT 订阅登录
+
+使用 [订阅模板](examples/provider-chatgpt-subscription.toml)，在仓库外保存自己的配置。
+将 `auth_store` 改成不经过符号链接的绝对路径私有目录（父目录须已存在），并保留订阅配置中的官方 API 地址。
+`chatgpt_subscription` 与 `api_key`、`credential_ref` 互斥。Echidna 自己发起 OAuth
+授权，不读取 Codex 或浏览器已有的登录凭据。
+
+```sh
+echidna --config /absolute/path/subscription.toml auth login --provider chatgpt
+echidna --config /absolute/path/subscription.toml auth status --provider chatgpt
+echidna --config /absolute/path/subscription.toml auth models --provider chatgpt
+```
+
+登录会打开浏览器；加 `--no-browser` 可改为手动打开输出的授权链接。
+浏览器须能访问运行 Echidna 的回环回调地址；跨机器使用时需要转发对应端口。
+`status` 只检查本地状态；`models` 使用该账户向服务端查询模型。把返回的模型 slug
+填入 `model`，核实并填写能力及窗口后，即可用同一配置运行 `doctor` 和 `chat`。
+模板的 32K 窗口只是显式示例。HTTP 订阅路径要求 `incremental_input = false`，
+不能设置 `max_output_tokens`。登录成功和离线 doctor 不代表账户已获模型使用资格。
+
+```sh
+echidna --config /absolute/path/subscription.toml auth logout --provider chatgpt
+```
+
+访问令牌在调用前按需刷新；注销会尝试撤销授权并清除本地令牌，结果会说明远端撤销
+是否确认。请将认证目录保存在仓库和研究项目之外，目录/文件仅允许当前用户访问。
+订阅额度与服务端授权受 [官方预览限制](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations)
+约束，失败不会自动切换为付费 API 或重跑工具。其它供应商的非 API Key 订阅尚未接入。
+
+#### Codex 兼容订阅登录
+
+使用 [Codex 兼容模板](examples/provider-codex-subscription.toml)，显式选择
+`codex_subscription` 并保留 `https://chatgpt.com/backend-api/codex` 地址。
+它与上述 SIWC 以及两种 API Key 配置互斥。请使用独立的私有 `auth_store`，
+不要与 SIWC 共用；原有 API Key、Qwen、DeepSeek 配置无需修改。
+
+如需声明目录兼容版本，可在 `codex_subscription` 内设置
+`catalog_client_version = "major.minor.patch"`。缺省值保持现有 `0.144.0`；
+显式值只会同时改变目录请求的 `client_version` 查询参数和 `version` 请求头，
+不是已安装 Codex 版本声明，也不保证返回新模型 ID 或账户访问资格。
+
+沿用上面的 `auth login/status/models/logout` 命令，将配置路径与 `--provider`
+改成新模板中的值。Echidna 自行完成浏览器授权，使用自己的令牌存储；不读取
+Codex 已有登录。回调使用本机端口 1455，端口占用时使用 1457。
+若目录返回 HTTP 401，即使本地状态显示尚未到期，也可显式刷新这份自有授权：
+
+```sh
+echidna --config /absolute/path/codex.toml auth refresh --provider codex
+```
+
+此命令仅刷新 Codex 订阅凭据，返回本地状态，不打开浏览器或重发目录/模型请求。
+刷新成功后再显式执行选择命令；若刷新被永久拒绝，需要重新登录。
+`status` 只报告本地记录，不保证服务端仍接受授权。SIWC 和 API Key 保持原有流程。
+
+可用交互选择器查看目录、选择模型与推理强度，并保存到当前配置：
+
+```sh
+echidna --config /absolute/path/codex.toml auth select-model --provider codex
+```
+
+也可指定目录返回的模型和该模型支持的强度：
+
+```sh
+echidna --config /absolute/path/codex.toml auth select-model --provider codex \
+  --model gpt-6-astra --reasoning-effort xhigh
+```
+
+支持的执行强度为 `low`、`medium`、`high`、`xhigh`、`max`，实际可选项以目录为准。
+省略强度时使用服务端默认行为；不会自动发送目录中的默认值。
+保存会为该 Provider 复制独立能力映射，保留其他模型、注释和凭据。
+配置锁协调同时运行的 Echidna 选择命令；保存期间请勿用其他编辑器同时修改该配置。
+图像、工具及窗口等能力仍须显式核实；选择器不会按模型名推断。
+`doctor` 可离线查看生效的强度，下一次启动 `chat` 使用保存的设置。
+该兼容链路依据固定版本 Codex 源码实现，实际账号和服务端支持须通过实测确认。
+失败不会切换模型、付费 API 或自动重跑工具。
+
+Codex 链路默认请求服务端可用的推理摘要，在 stderr 上标注“推理摘要”，包括 release
+构建。这是提供方返回的摘要，不是完整内部推理；摘要为空时不会补造内容。摘要不进入
+对话正文，也不替代加密续接。推理强度与摘要展示独立，设置 `high` 不保证返回摘要。
+
 #### 单个多模态模型
 
 使用 [多模态模板](examples/provider-multimodal.toml)，由同一个主模型处理文本、工具调用和图像。

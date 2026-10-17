@@ -88,11 +88,28 @@ pub(super) fn truncate_content_to_token_limit(
 }
 
 fn estimate_content_items_tokens(items: &[ContentItem]) -> Result<u32, ContextPlannerError> {
-    serde_json::to_vec(items)
-        .map(|encoded| estimate_encoded_tokens(encoded.len()))
-        .map_err(|error| ContextPlannerError::CanonicalEncoding {
+    let encoded =
+        serde_json::to_vec(items).map_err(|error| ContextPlannerError::CanonicalEncoding {
             message: error.to_string(),
-        })
+        })?;
+    let charged_bytes = items.iter().try_fold(
+        encoded.len(),
+        |total, item| -> Result<usize, ContextPlannerError> {
+            let ContentItem::OpaqueContinuation { reference } = item else {
+                return Ok(total);
+            };
+            let reference_bytes = serde_json::to_vec(item).map_err(|error| {
+                ContextPlannerError::CanonicalEncoding {
+                    message: error.to_string(),
+                }
+            })?;
+            let replacement = reference.encoded_byte_length() as usize;
+            Ok(total
+                .saturating_sub(reference_bytes.len())
+                .saturating_add(replacement))
+        },
+    )?;
+    Ok(estimate_encoded_tokens(charged_bytes))
 }
 
 fn truncate_text_to_token_limit(

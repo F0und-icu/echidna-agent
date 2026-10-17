@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::domain::context::{ModelIdentity, ModelProfile};
-use crate::domain::model::{CapabilityMappingVersion, ModelCapabilities};
+use crate::domain::model::{CapabilityMappingVersion, ModelCapabilities, ReasoningEffort};
 use crate::domain::profile::{AgentModelProfile, ProviderProfile, VisionMode};
 
 use super::ProviderCompositionError;
@@ -179,6 +179,8 @@ pub(super) struct ProviderDefinition {
     pub(super) model: String,
     pub(super) credential_ref: Option<String>,
     pub(super) api_key: Option<InlineApiKey>,
+    pub(super) chatgpt_subscription: Option<ChatGptSubscription>,
+    pub(super) codex_subscription: Option<CodexSubscription>,
     pub(super) capability_mapping: String,
     pub(super) generation: u64,
     #[serde(default = "default_connect_timeout_ms")]
@@ -197,9 +199,20 @@ const fn default_read_timeout_ms() -> u64 {
 
 impl ProviderDefinition {
     pub(super) fn credential(&self) -> ProviderCredential<'_> {
-        match (self.credential_ref.as_deref(), self.api_key.as_ref()) {
-            (Some(reference), None) => ProviderCredential::Reference(reference),
-            (None, Some(api_key)) => ProviderCredential::Inline(api_key.expose()),
+        match (
+            self.credential_ref.as_deref(),
+            self.api_key.as_ref(),
+            self.chatgpt_subscription.as_ref(),
+            self.codex_subscription.as_ref(),
+        ) {
+            (Some(reference), None, None, None) => ProviderCredential::Reference(reference),
+            (None, Some(api_key), None, None) => ProviderCredential::Inline(api_key.expose()),
+            (None, None, Some(subscription), None) => {
+                ProviderCredential::ChatGptSubscription(subscription)
+            }
+            (None, None, None, Some(subscription)) => {
+                ProviderCredential::CodexSubscription(subscription)
+            }
             _ => unreachable!("validated Provider configuration has exactly one credential"),
         }
     }
@@ -208,6 +221,23 @@ impl ProviderDefinition {
 pub(super) enum ProviderCredential<'a> {
     Reference(&'a str),
     Inline(&'a str),
+    ChatGptSubscription(&'a ChatGptSubscription),
+    CodexSubscription(&'a CodexSubscription),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ChatGptSubscription {
+    pub(super) account: String,
+    pub(super) auth_store: PathBuf,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct CodexSubscription {
+    pub(super) account: String,
+    pub(super) auth_store: PathBuf,
+    pub(super) catalog_client_version: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -241,6 +271,8 @@ pub(super) struct CapabilityMappingDefinition {
     pub(super) context_window: u32,
     #[serde(default)]
     max_output_tokens: Option<u32>,
+    #[serde(default)]
+    reasoning_effort: Option<ReasoningEffort>,
 }
 
 impl CapabilityMappingDefinition {
@@ -255,6 +287,7 @@ impl CapabilityMappingDefinition {
             usage_reporting: self.usage_reporting,
             context_window: self.context_window,
             max_output_tokens: self.max_output_tokens,
+            reasoning_effort: self.reasoning_effort,
             capability_mapping_version: CapabilityMappingVersion::new(self.version),
         }
     }

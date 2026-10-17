@@ -1,11 +1,14 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Cursor;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use base64::Engine;
-use echidna::adapters::credentials::{CredentialSource, CredentialSourceError};
+use echidna::adapters::credentials::{
+    AccountBoundCredential, CredentialResolution, CredentialSource, CredentialSourceError,
+};
 use echidna::adapters::project_event_store::Project;
 use echidna::adapters::responses::{ResponsesHttpAdapter, ResponsesHttpConfig};
 use echidna::adapters::tools::ToolRegistry;
@@ -15,22 +18,28 @@ use echidna::app::model_streaming::{
     ModelStreamCancellation, ModelStreamOutcome, ModelStreamingError, ModelStreamingService,
 };
 use echidna::domain::artifacts::ArtifactId;
-use echidna::domain::events::StreamId;
+use echidna::domain::context::{
+    ProviderSession, ProviderSessionId, ProviderSessionRef, ProviderSessionRole,
+};
+use echidna::domain::events::{EventId, EventSequence, OccurredAt, StreamId};
 use echidna::domain::model::{
-    CapabilityMappingVersion, ContentItem, MessageRole, ModelCapabilities, ModelEvent,
-    ModelInputIR, ModelRequestRequirements, ModelUsage,
+    CapabilityMappingVersion, ContentItem, MessageRole, ModelCapabilities, ModelCapabilityError,
+    ModelEvent, ModelInputIR, ModelRequestRequirements, ModelUsage, ReasoningEffort,
 };
 use echidna::domain::project::ProjectId;
 use echidna::domain::request_audit::{
     RequestAdapterVersion, RequestAuditBinding, RequestAuditRunContext,
 };
+use echidna::domain::session::{SessionEvent, SessionReducer};
 use echidna::domain::tools::{
     ExecutionId, ToolCall, ToolCallId, ToolExecutionOutcome, ToolName, ToolResult, ToolResultStatus,
 };
 use echidna::ports::model::{
-    ModelProvider, ModelProviderError, ModelRequest, ModelResponseCompletion, ProviderResponseId,
+    ModelProvider, ModelProviderError, ModelRequest, ModelResponseCompletion, ModelStreamEvent,
+    ProviderResponseId,
 };
 use echidna::ports::tool::ToolExecutor;
+use futures_util::StreamExt;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -47,6 +56,7 @@ const FIXTURE_SECRET: &str = "fixture-secret";
 #[path = "responses_cases/text_finalization.rs"]
 mod text_finalization;
 const FIXTURE_CREDENTIAL_REFERENCE: &str = "CYBER_AGENT_FIXTURE_API_KEY";
+type CredentialReadResult = Result<Option<String>, CredentialSourceError>;
 
 #[derive(Clone)]
 enum FakeCredentialResult {
@@ -58,6 +68,88 @@ enum FakeCredentialResult {
 struct FakeCredentialSource {
     result: FakeCredentialResult,
     references: Mutex<Vec<String>>,
+}
+
+struct PendingCredentialSource {
+    polls: Arc<AtomicUsize>,
+    receiver: Mutex<Option<oneshot::Receiver<CredentialReadResult>>>,
+}
+
+struct AccountBoundCredentialSource {
+    reference: String,
+    bearer: String,
+    account_id: String,
+    resolutions: AtomicUsize,
+}
+
+impl AccountBoundCredentialSource {
+    fn new(reference: &str, bearer: &str, account_id: &str) -> Arc<Self> {
+        Arc::new(Self {
+            reference: reference.to_owned(),
+            bearer: bearer.to_owned(),
+            account_id: account_id.to_owned(),
+            resolutions: AtomicUsize::new(0),
+        })
+    }
+
+    fn resolutions(&self) -> usize {
+        self.resolutions.load(Ordering::SeqCst)
+    }
+}
+
+impl CredentialSource for AccountBoundCredentialSource {
+    fn read(&self, _: &str) -> Result<Option<String>, CredentialSourceError> {
+        panic!("an account-bound credential source must not use the synchronous reader")
+    }
+
+    fn resolve(&self, reference: &str) -> CredentialResolution {
+        assert_eq!(reference, self.reference);
+        self.resolutions.fetch_add(1, Ordering::SeqCst);
+        let bearer = self.bearer.clone();
+        let account_id = self.account_id.clone();
+        CredentialResolution::PendingAccountBound(Box::pin(async move {
+            Ok(AccountBoundCredential::new(bearer, account_id))
+        }))
+    }
+}
+
+impl PendingCredentialSource {
+    fn new() -> (Arc<Self>, oneshot::Sender<CredentialReadResult>) {
+        let (sender, receiver) = oneshot::channel();
+        (
+            Arc::new(Self {
+                polls: Arc::new(AtomicUsize::new(0)),
+                receiver: Mutex::new(Some(receiver)),
+            }),
+            sender,
+        )
+    }
+
+    fn polls(&self) -> usize {
+        self.polls.load(Ordering::SeqCst)
+    }
+}
+
+impl CredentialSource for PendingCredentialSource {
+    fn read(&self, _: &str) -> Result<Option<String>, CredentialSourceError> {
+        panic!("a pending credential source must not use the synchronous reader")
+    }
+
+    fn resolve(&self, _: &str) -> CredentialResolution {
+        let receiver = self
+            .receiver
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+            .expect("each fixture adapter has one model request");
+        let polls = Arc::clone(&self.polls);
+        CredentialResolution::Pending(Box::pin(async move {
+            polls.fetch_add(1, Ordering::SeqCst);
+            receiver
+                .await
+                .expect("fixture credential sender remains alive")
+        }))
+    }
 }
 
 impl FakeCredentialSource {
@@ -120,6 +212,7 @@ fn capabilities() -> ModelCapabilities {
         incremental_input: true,
         usage_reporting: true,
         max_output_tokens: None,
+        reasoning_effort: None,
         context_window: 128_000,
         capability_mapping_version: CapabilityMappingVersion::new(1),
     }
@@ -152,6 +245,51 @@ fn adapter(
             capabilities(),
         ),
         credential_source,
+    )
+}
+
+fn subscription_capabilities() -> ModelCapabilities {
+    let mut capabilities = capabilities();
+    capabilities.incremental_input = false;
+    capabilities.usage_reporting = false;
+    capabilities
+}
+
+fn subscription_adapter(
+    base_url: impl Into<String>,
+    credential_source: Arc<dyn CredentialSource>,
+) -> ResponsesHttpAdapter {
+    ResponsesHttpAdapter::new(
+        ResponsesHttpConfig::new(
+            base_url,
+            "fixture-subscription-model",
+            "chatgpt_subscription:fixture",
+            subscription_capabilities(),
+        )
+        .with_chatgpt_subscription_profile(),
+        credential_source,
+    )
+}
+
+fn codex_subscription_adapter(
+    base_url: impl Into<String>,
+    credential_source: Arc<dyn CredentialSource>,
+) -> ResponsesHttpAdapter {
+    ResponsesHttpAdapter::new(
+        ResponsesHttpConfig::new(
+            base_url,
+            "fixture-codex-model",
+            "codex_subscription:fixture",
+            subscription_capabilities(),
+        )
+        .with_codex_subscription_profile(),
+        credential_source,
+    )
+}
+
+fn subscription_full(input: ModelInputIR, scope: &str) -> ModelRequest {
+    ModelRequest::full(input).with_opaque_continuation_scope(
+        serde_json::from_value(json!(scope)).expect("fixture scope serializes"),
     )
 }
 
@@ -400,6 +538,23 @@ async fn spawn_sse_server(
     status: u16,
     body: &str,
 ) -> (String, oneshot::Receiver<CapturedRequest>, JoinHandle<()>) {
+    spawn_sse_server_chunked(status, body, 17).await
+}
+
+async fn spawn_sse_server_chunked(
+    status: u16,
+    body: &str,
+    chunk_bytes: usize,
+) -> (String, oneshot::Receiver<CapturedRequest>, JoinHandle<()>) {
+    spawn_sse_server_chunked_with_declared_length(status, body, chunk_bytes, body.len()).await
+}
+
+async fn spawn_sse_server_chunked_with_declared_length(
+    status: u16,
+    body: &str,
+    chunk_bytes: usize,
+    declared_body_bytes: usize,
+) -> (String, oneshot::Receiver<CapturedRequest>, JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let response_body = body.as_bytes().to_vec();
@@ -412,12 +567,12 @@ async fn spawn_sse_server(
         let reason = if status == 200 { "OK" } else { "Unauthorized" };
         let headers = format!(
             "HTTP/1.1 {status} {reason}\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            response_body.len()
+            declared_body_bytes
         );
         if socket.write_all(headers.as_bytes()).await.is_err() {
             return;
         }
-        for chunk in response_body.chunks(17) {
+        for chunk in response_body.chunks(chunk_bytes) {
             if socket.write_all(chunk).await.is_err() {
                 return;
             }
@@ -584,10 +739,12 @@ async fn full_request_and_chunked_sse_decode_to_ordered_model_events() {
         request.headers.get("accept").map(String::as_str),
         Some("text/event-stream")
     );
+    assert!(!request.headers.contains_key("chatgpt-account-id"));
     let actual: Value = serde_json::from_str(&request.body).unwrap();
     let expected: Value =
         serde_json::from_str(include_str!("fixtures/responses/full_request.json")).unwrap();
     assert_eq!(actual, expected);
+    assert!(actual.get("reasoning").is_none());
 }
 
 #[tokio::test]
@@ -658,6 +815,1978 @@ async fn reasoning_extension_tool_usage_and_full_only_completion_share_one_decod
     let actual: Value = serde_json::from_str(&request.body).unwrap();
     assert_eq!(actual["model"], json!("fixture-reasoning-model"));
     assert!(actual.get("previous_response_id").is_none());
+}
+
+#[tokio::test]
+async fn subscription_profile_encodes_full_stateless_request_and_namespace_tools() {
+    let (base_url, request_receiver, server) = spawn_sse_server(
+        200,
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"subscription-request\",\"status\":\"completed\"}}\n\n",
+    )
+    .await;
+    let provider =
+        subscription_adapter(base_url, FakeCredentialSource::value(Some(FIXTURE_SECRET)));
+    let read_file = ToolRegistry::for_project(env!("CARGO_MANIFEST_DIR"))
+        .specs()
+        .into_iter()
+        .find(|spec| spec.name.as_str() == "read_file")
+        .expect("fixture registry supplies read_file");
+    let input =
+        fixture_input(ModelRequestRequirements::default()).with_tool_specs(vec![read_file.clone()]);
+
+    assert!(matches!(
+        ModelStreamingService::new(&provider)
+            .consume(
+                subscription_full(input, "subscription-request-scope"),
+                ModelStreamCancellation::new(),
+            )
+            .await,
+        Ok(ModelStreamOutcome::Completed { .. })
+    ));
+
+    let request = request_receiver.await.unwrap();
+    server.await.unwrap();
+    assert!(!request.headers.contains_key("chatgpt-account-id"));
+    let wire: Value = serde_json::from_str(&request.body).unwrap();
+    assert_eq!(wire["model"], json!("fixture-subscription-model"));
+    assert_eq!(wire["store"], json!(false));
+    assert_eq!(wire["stream"], json!(true));
+    assert_eq!(wire["include"], json!(["reasoning.encrypted_content"]));
+    assert!(wire.get("previous_response_id").is_none());
+    assert!(wire.get("max_output_tokens").is_none());
+    assert!(wire.get("reasoning").is_none());
+    assert_eq!(
+        wire["input"],
+        json!([{
+            "type": "message",
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "Inspect the target manifest."},
+                {"type": "input_text", "text": "Report only reproducible impact."},
+            ],
+        }])
+    );
+    let tools = wire["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 1);
+    let namespace = &tools[0];
+    assert_eq!(namespace["type"], json!("namespace"));
+    assert_eq!(namespace["name"], json!("echidna"));
+    assert_eq!(
+        namespace["description"],
+        json!("Echidna local vulnerability research tools.")
+    );
+    assert_eq!(namespace["tools"][0]["type"], json!("function"));
+    assert_eq!(
+        namespace["tools"][0]["name"],
+        json!(read_file.name.as_str())
+    );
+    assert_eq!(namespace["tools"][0]["parameters"], read_file.input_schema);
+}
+
+#[tokio::test]
+async fn codex_subscription_profile_sends_verified_account_header_and_plain_functions() {
+    let (base_url, request_receiver, server) = spawn_sse_server(
+        200,
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"codex-request\",\"status\":\"completed\"}}\n\n",
+    )
+    .await;
+    let credentials = AccountBoundCredentialSource::new(
+        "codex_subscription:fixture",
+        "codex-bearer-fixture",
+        "workspace-fixture",
+    );
+    let provider = codex_subscription_adapter(base_url, credentials.clone());
+    let read_file = ToolRegistry::for_project(env!("CARGO_MANIFEST_DIR"))
+        .specs()
+        .into_iter()
+        .find(|spec| spec.name.as_str() == "read_file")
+        .expect("fixture registry supplies read_file");
+    let input =
+        fixture_input(ModelRequestRequirements::default()).with_tool_specs(vec![read_file.clone()]);
+
+    assert!(matches!(
+        ModelStreamingService::new(&provider)
+            .consume(full(input), ModelStreamCancellation::new(),)
+            .await,
+        Ok(ModelStreamOutcome::Completed { .. })
+    ));
+
+    let request = request_receiver.await.unwrap();
+    server.await.unwrap();
+    assert_eq!(request.request_line, "POST /v1/responses HTTP/1.1");
+    assert_eq!(
+        request.headers.get("authorization").map(String::as_str),
+        Some("Bearer codex-bearer-fixture")
+    );
+    assert_eq!(
+        request
+            .headers
+            .get("chatgpt-account-id")
+            .map(String::as_str),
+        Some("workspace-fixture")
+    );
+    assert_eq!(credentials.resolutions(), 1);
+
+    let wire: Value = serde_json::from_str(&request.body).unwrap();
+    assert_eq!(wire["model"], json!("fixture-codex-model"));
+    assert_eq!(
+        wire["instructions"],
+        json!("Keep evidence and hypotheses separate.")
+    );
+    assert_eq!(wire["store"], json!(false));
+    assert_eq!(wire["stream"], json!(true));
+    assert_eq!(wire["include"], json!(["reasoning.encrypted_content"]));
+    assert!(wire.get("previous_response_id").is_none());
+    assert!(wire.get("max_output_tokens").is_none());
+    assert_eq!(wire["reasoning"], json!({"summary": "auto"}));
+    assert_eq!(wire["tools"][0]["type"], json!("function"));
+    assert_eq!(wire["tools"][0]["name"], json!(read_file.name.as_str()));
+    assert_eq!(wire["tools"][0]["parameters"], read_file.input_schema);
+    assert!(wire["tools"][0].get("namespace").is_none());
+}
+
+#[tokio::test]
+async fn explicit_reasoning_effort_uses_the_same_nested_wire_field_for_all_profiles() {
+    for profile in ["standard", "siwc", "codex"] {
+        let (base_url, request_receiver, server) = spawn_sse_server(
+            200,
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"reasoning-effort\",\"status\":\"completed\"}}\n\n",
+        )
+        .await;
+        let mut capabilities = capabilities();
+        if profile != "standard" {
+            capabilities.incremental_input = false;
+            capabilities.usage_reporting = false;
+        }
+        capabilities.reasoning_effort = Some(ReasoningEffort::XHigh);
+        let provider = match profile {
+            "standard" => ResponsesHttpAdapter::new(
+                ResponsesHttpConfig::new(
+                    base_url,
+                    "fixture-reasoning-standard",
+                    FIXTURE_CREDENTIAL_REFERENCE,
+                    capabilities,
+                ),
+                FakeCredentialSource::value(Some(FIXTURE_SECRET)),
+            ),
+            "siwc" => ResponsesHttpAdapter::new(
+                ResponsesHttpConfig::new(
+                    base_url,
+                    "fixture-reasoning-siwc",
+                    "chatgpt_subscription:fixture",
+                    capabilities,
+                )
+                .with_chatgpt_subscription_profile(),
+                FakeCredentialSource::value(Some(FIXTURE_SECRET)),
+            ),
+            "codex" => ResponsesHttpAdapter::new(
+                ResponsesHttpConfig::new(
+                    base_url,
+                    "fixture-reasoning-codex",
+                    "codex_subscription:fixture",
+                    capabilities,
+                )
+                .with_codex_subscription_profile(),
+                AccountBoundCredentialSource::new(
+                    "codex_subscription:fixture",
+                    "codex-bearer-fixture",
+                    "workspace-fixture",
+                ),
+            ),
+            _ => unreachable!(),
+        };
+        let input = fixture_input(ModelRequestRequirements {
+            reasoning_effort: Some(ReasoningEffort::XHigh),
+            ..ModelRequestRequirements::default()
+        });
+        let request = if profile == "siwc" {
+            subscription_full(input, "reasoning-effort-siwc")
+        } else {
+            full(input)
+        };
+
+        assert!(matches!(
+            ModelStreamingService::new(&provider)
+                .consume(request, ModelStreamCancellation::new())
+                .await,
+            Ok(ModelStreamOutcome::Completed { .. })
+        ));
+        let request = request_receiver.await.unwrap();
+        server.await.unwrap();
+        let wire: Value = serde_json::from_str(&request.body).unwrap();
+        let expected = if profile == "codex" {
+            json!({"effort": "xhigh", "summary": "auto"})
+        } else {
+            json!({"effort": "xhigh"})
+        };
+        assert_eq!(wire["reasoning"], expected, "{profile}");
+    }
+}
+
+#[tokio::test]
+async fn codex_summary_events_require_a_valid_summary_index_while_other_profiles_ignore_it() {
+    let body = [
+        json!({
+            "type": "response.reasoning_summary_text.delta",
+            "output_index": 0,
+            "item_id": "summary-index-fixture",
+            "summary_index": "invalid",
+            "delta": "must stay ignored outside Codex",
+        }),
+        json!({
+            "type": "response.completed",
+            "response": {"id": "summary-index-response", "status": "completed"},
+        }),
+    ]
+    .into_iter()
+    .map(|event| format!("data: {event}\n\n"))
+    .collect::<String>();
+
+    for profile in ["standard", "siwc", "codex"] {
+        let (base_url, request, server) = spawn_sse_server(200, &body).await;
+        let provider = match profile {
+            "standard" => adapter(base_url, FakeCredentialSource::value(Some(FIXTURE_SECRET))),
+            "siwc" => {
+                subscription_adapter(base_url, FakeCredentialSource::value(Some(FIXTURE_SECRET)))
+            }
+            "codex" => codex_subscription_adapter(
+                base_url,
+                AccountBoundCredentialSource::new(
+                    "codex_subscription:fixture",
+                    "codex-summary-index-bearer",
+                    "workspace-summary-index",
+                ),
+            ),
+            _ => unreachable!("the fixed profiles are exhaustive"),
+        };
+        let model_request = match profile {
+            "siwc" => subscription_full(
+                fixture_input(ModelRequestRequirements::default()),
+                "siwc-summary-index-scope",
+            ),
+            _ => full(fixture_input(ModelRequestRequirements::default())),
+        };
+        let result = ModelStreamingService::new(&provider)
+            .consume(model_request, ModelStreamCancellation::new())
+            .await;
+
+        if profile == "codex" {
+            assert!(matches!(
+                result,
+                Err(ModelStreamingError::Provider(ModelProviderError::ProtocolFailure { message }))
+                    if message.contains("valid `summary_index`")
+            ));
+        } else {
+            assert_eq!(
+                result,
+                Ok(ModelStreamOutcome::Completed {
+                    events: Vec::new(),
+                    completion: ModelResponseCompletion::new(ProviderResponseId::new(
+                        "summary-index-response"
+                    )),
+                }),
+                "{profile} must retain its ignored-summary behavior"
+            );
+        }
+        request.await.unwrap();
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn codex_summary_events_require_explicit_output_and_item_identity() {
+    let cases = [
+        (
+            "missing-output-index",
+            json!({
+                "type": "response.reasoning_summary_text.delta",
+                "item_id": "summary-identity-item",
+                "summary_index": 0,
+                "delta": "missing output index",
+            }),
+            "omitted `output_index`",
+        ),
+        (
+            "missing-item-id",
+            json!({
+                "type": "response.reasoning_summary_text.done",
+                "output_index": 0,
+                "summary_index": 0,
+                "text": "missing item id",
+            }),
+            "omitted non-empty `item_id`",
+        ),
+    ];
+
+    for (case, event, expected) in cases {
+        let body = format!("data: {event}\n\n");
+        let (base_url, request, server) = spawn_sse_server(200, &body).await;
+        let provider = codex_subscription_adapter(
+            base_url,
+            AccountBoundCredentialSource::new(
+                "codex_subscription:fixture",
+                &format!("codex-summary-{case}-bearer"),
+                &format!("workspace-summary-{case}"),
+            ),
+        );
+
+        assert!(matches!(
+            ModelStreamingService::new(&provider)
+                .consume(
+                    full(fixture_input(ModelRequestRequirements::default())),
+                    ModelStreamCancellation::new(),
+                )
+                .await,
+            Err(ModelStreamingError::Provider(ModelProviderError::ProtocolFailure { message }))
+                if message.contains(expected)
+        ));
+        request.await.unwrap();
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn codex_completed_summary_items_reject_invalid_parts() {
+    let cases = [
+        (
+            "wrong-type",
+            json!({"type": "output_text", "text": "not a summary"}),
+            "unsupported content",
+        ),
+        (
+            "missing-text",
+            json!({"type": "summary_text"}),
+            "omitted string `text`",
+        ),
+        (
+            "non-string-text",
+            json!({"type": "summary_text", "text": 7}),
+            "omitted string `text`",
+        ),
+    ];
+
+    for (case, part, expected) in cases {
+        let item = json!({
+            "type": "reasoning",
+            "id": format!("summary-invalid-part-{case}"),
+            "status": "completed",
+            "content": [],
+            "summary": [part],
+        });
+        let body = format!(
+            "data: {}\n\n",
+            json!({"type": "response.output_item.done", "output_index": 0, "item": item})
+        );
+        let (base_url, request, server) = spawn_sse_server(200, &body).await;
+        let provider = codex_subscription_adapter(
+            base_url,
+            AccountBoundCredentialSource::new(
+                "codex_subscription:fixture",
+                &format!("codex-summary-invalid-part-{case}-bearer"),
+                &format!("workspace-summary-invalid-part-{case}"),
+            ),
+        );
+
+        assert!(matches!(
+            ModelStreamingService::new(&provider)
+                .consume(
+                    full(fixture_input(ModelRequestRequirements::default())),
+                    ModelStreamCancellation::new(),
+                )
+                .await,
+            Err(ModelStreamingError::Provider(ModelProviderError::ProtocolFailure { message }))
+                if message.contains(expected)
+        ));
+        request.await.unwrap();
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn codex_summary_events_reject_conflicting_identity_and_order() {
+    let cases = [
+        (
+            "identity",
+            vec![
+                json!({
+                    "type": "response.reasoning_summary_text.delta",
+                    "output_index": 0,
+                    "item_id": "summary-first-item",
+                    "summary_index": 0,
+                    "delta": "first",
+                }),
+                json!({
+                    "type": "response.reasoning_summary_text.done",
+                    "output_index": 0,
+                    "item_id": "summary-second-item",
+                    "summary_index": 0,
+                    "text": "first",
+                }),
+            ],
+            "text item identity changed",
+        ),
+        (
+            "order",
+            vec![
+                json!({
+                    "type": "response.reasoning_summary_text.delta",
+                    "output_index": 0,
+                    "item_id": "summary-order-item",
+                    "summary_index": 1,
+                    "delta": "later",
+                }),
+                json!({
+                    "type": "response.reasoning_summary_text.delta",
+                    "output_index": 0,
+                    "item_id": "summary-order-item",
+                    "summary_index": 0,
+                    "delta": "earlier",
+                }),
+            ],
+            "final text would reorder prior output",
+        ),
+    ];
+
+    for (case, events, expected) in cases {
+        let body = events
+            .into_iter()
+            .map(|event| format!("data: {event}\n\n"))
+            .collect::<String>();
+        let (base_url, request, server) = spawn_sse_server(200, &body).await;
+        let provider = codex_subscription_adapter(
+            base_url,
+            AccountBoundCredentialSource::new(
+                "codex_subscription:fixture",
+                &format!("codex-summary-{case}-bearer"),
+                &format!("workspace-summary-{case}"),
+            ),
+        );
+
+        assert!(matches!(
+            ModelStreamingService::new(&provider)
+                .consume(
+                    full(fixture_input(ModelRequestRequirements::default())),
+                    ModelStreamCancellation::new(),
+                )
+                .await,
+            Err(ModelStreamingError::Provider(ModelProviderError::ProtocolFailure { message }))
+                if message.contains(expected)
+        ));
+        request.await.unwrap();
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn codex_summary_finalization_rejects_a_conflicting_completed_item() {
+    let first = json!({
+        "type": "reasoning",
+        "id": "summary-conflict-item",
+        "status": "completed",
+        "content": [],
+        "summary": [{"type": "summary_text", "text": "first"}],
+    });
+    let second = json!({
+        "type": "reasoning",
+        "id": "summary-conflict-item",
+        "status": "completed",
+        "content": [],
+        "summary": [{"type": "summary_text", "text": "second"}],
+    });
+    let body = [
+        json!({"type": "response.output_item.done", "output_index": 0, "item": first}),
+        json!({
+            "type": "response.completed",
+            "response": {
+                "id": "summary-conflict-response",
+                "status": "completed",
+                "output": [second],
+            },
+        }),
+    ]
+    .into_iter()
+    .map(|event| format!("data: {event}\n\n"))
+    .collect::<String>();
+    let (base_url, request, server) = spawn_sse_server(200, &body).await;
+    let provider = codex_subscription_adapter(
+        base_url,
+        AccountBoundCredentialSource::new(
+            "codex_subscription:fixture",
+            "codex-summary-conflict-bearer",
+            "workspace-summary-conflict",
+        ),
+    );
+    let result = ModelStreamingService::new(&provider)
+        .consume(
+            full(fixture_input(ModelRequestRequirements::default())),
+            ModelStreamCancellation::new(),
+        )
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(ModelStreamingError::Provider(ModelProviderError::ProtocolFailure { message }))
+            if message.contains("final text changed after finalization")
+    ));
+    request.await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn codex_final_snapshot_summary_preserves_prior_completed_item_proof() {
+    let prior = json!({
+        "type": "reasoning",
+        "id": "summary-final-only-item",
+        "status": "completed",
+        "content": [],
+        "summary": [],
+    });
+    let completed = json!({
+        "type": "reasoning",
+        "id": "summary-final-only-item",
+        "status": "completed",
+        "content": [],
+        "summary": [{"type": "summary_text", "text": "final-only summary"}],
+    });
+    let body = [
+        json!({"type": "response.output_item.done", "output_index": 0, "item": prior}),
+        json!({
+            "type": "response.completed",
+            "response": {
+                "id": "summary-final-only-response",
+                "status": "completed",
+                "output": [completed],
+            },
+        }),
+    ]
+    .into_iter()
+    .map(|event| format!("data: {event}\n\n"))
+    .collect::<String>();
+    let (base_url, request, server) = spawn_sse_server(200, &body).await;
+    let provider = codex_subscription_adapter(
+        base_url,
+        AccountBoundCredentialSource::new(
+            "codex_subscription:fixture",
+            "codex-summary-final-only-bearer",
+            "workspace-summary-final-only",
+        ),
+    );
+
+    assert_eq!(
+        ModelStreamingService::new(&provider)
+            .consume(
+                full(fixture_input(ModelRequestRequirements::default())),
+                ModelStreamCancellation::new(),
+            )
+            .await,
+        Ok(ModelStreamOutcome::Completed {
+            events: Vec::new(),
+            completion: ModelResponseCompletion::new(ProviderResponseId::new(
+                "summary-final-only-response"
+            )),
+        })
+    );
+    request.await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn codex_completed_reasoning_item_summary_succeeds_without_a_final_snapshot() {
+    let item = json!({
+        "type": "reasoning",
+        "id": "summary-item-only-item",
+        "status": "completed",
+        "content": [],
+        "summary": [{"type": "summary_text", "text": "item-only summary"}],
+    });
+    let body = [
+        json!({"type": "response.output_item.done", "output_index": 0, "item": item}),
+        json!({
+            "type": "response.completed",
+            "response": {"id": "summary-item-only-response", "status": "completed"},
+        }),
+    ]
+    .into_iter()
+    .map(|event| format!("data: {event}\n\n"))
+    .collect::<String>();
+    let (base_url, request, server) = spawn_sse_server(200, &body).await;
+    let provider = codex_subscription_adapter(
+        base_url,
+        AccountBoundCredentialSource::new(
+            "codex_subscription:fixture",
+            "codex-summary-item-only-bearer",
+            "workspace-summary-item-only",
+        ),
+    );
+
+    assert_eq!(
+        ModelStreamingService::new(&provider)
+            .consume(
+                full(fixture_input(ModelRequestRequirements::default())),
+                ModelStreamCancellation::new(),
+            )
+            .await,
+        Ok(ModelStreamOutcome::Completed {
+            events: Vec::new(),
+            completion: ModelResponseCompletion::new(ProviderResponseId::new(
+                "summary-item-only-response"
+            )),
+        })
+    );
+    request.await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn codex_final_snapshot_summary_does_not_synthesize_a_completed_reasoning_item() {
+    let body = format!(
+        "data: {}\n\n",
+        json!({
+            "type": "response.completed",
+            "response": {
+                "id": "summary-no-prior-response",
+                "status": "completed",
+                "output": [{
+                    "type": "reasoning",
+                    "id": "summary-no-prior-item",
+                    "status": "completed",
+                    "content": [],
+                    "summary": [{"type": "summary_text", "text": "unproven"}],
+                }],
+            },
+        })
+    );
+    let (base_url, request, server) = spawn_sse_server(200, &body).await;
+    let provider = codex_subscription_adapter(
+        base_url,
+        AccountBoundCredentialSource::new(
+            "codex_subscription:fixture",
+            "codex-summary-no-prior-bearer",
+            "workspace-summary-no-prior",
+        ),
+    );
+    let result = ModelStreamingService::new(&provider)
+        .consume(
+            full(fixture_input(ModelRequestRequirements::default())),
+            ModelStreamCancellation::new(),
+        )
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(ModelStreamingError::Provider(ModelProviderError::ProtocolFailure { message }))
+            if message.contains("completed output disagrees with completed non-text items")
+    ));
+    request.await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn codex_metadata_annotation_is_ignored_until_response_completed() {
+    let metadata_canary = "codex-metadata-must-not-become-output";
+    let body = [
+        json!({
+            "type": "response.output_text.delta",
+            "delta": "Codex answer",
+        }),
+        json!({
+            "type": "response.metadata",
+            "metadata": {"canary": metadata_canary},
+        }),
+        json!({
+            "type": "response.completed",
+            "response": {"id": "codex-metadata-response", "status": "completed"},
+        }),
+    ]
+    .into_iter()
+    .map(|event| format!("data: {event}\n\n"))
+    .collect::<String>();
+    let (base_url, request, server) = spawn_sse_server(200, &body).await;
+    let provider = codex_subscription_adapter(
+        base_url,
+        AccountBoundCredentialSource::new(
+            "codex_subscription:fixture",
+            "codex-metadata-bearer",
+            "workspace-metadata",
+        ),
+    );
+
+    let outcome = ModelStreamingService::new(&provider)
+        .consume(
+            full(fixture_input(ModelRequestRequirements::default())),
+            ModelStreamCancellation::new(),
+        )
+        .await
+        .expect("Codex metadata must not terminate a completed response");
+
+    assert_eq!(
+        outcome,
+        ModelStreamOutcome::Completed {
+            events: vec![ModelEvent::TextDelta {
+                text: "Codex answer".to_owned(),
+            }],
+            completion: ModelResponseCompletion::new(ProviderResponseId::new(
+                "codex-metadata-response",
+            )),
+        }
+    );
+    assert!(!format!("{outcome:?}").contains(metadata_canary));
+    request.await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn codex_metadata_annotation_does_not_complete_or_mask_later_stream_errors() {
+    let metadata_canary = "codex-metadata-terminal-canary";
+    let summary_canary = "codex-summary-terminal-canary";
+    let terminals = [
+        (
+            "eof",
+            String::new(),
+            "response stream ended before `response.completed`",
+        ),
+        (
+            "malformed",
+            "data: {not-json}\n\n".to_owned(),
+            "invalid Responses event JSON",
+        ),
+        (
+            "unknown",
+            "data: {\"type\":\"response.future\"}\n\n".to_owned(),
+            "unsupported Responses event `response.future`",
+        ),
+        (
+            "failed",
+            format!(
+                "data: {}\n\n",
+                json!({"type": "response.failed", "response": {"error": {
+                    "code": "metadata-terminal-failure", "message": "metadata terminal failure"
+                }}})
+            ),
+            "Codex subscription Responses stream reported response.failed",
+        ),
+        (
+            "incomplete",
+            format!(
+                "data: {}\n\n",
+                json!({"type": "response.incomplete", "response": {
+                    "incomplete_details": {"reason": "metadata terminal limit"}
+                }})
+            ),
+            "Codex subscription Responses stream reported response.incomplete",
+        ),
+    ];
+
+    for (case, terminal, expected_error) in terminals {
+        let body = format!(
+            "data: {}\n\ndata: {}\n\n{terminal}",
+            json!({
+                "type": "response.reasoning_summary_text.delta",
+                "output_index": 0,
+                "item_id": "codex-summary-terminal-item",
+                "summary_index": 0,
+                "delta": summary_canary,
+            }),
+            json!({"type": "response.metadata", "metadata": {"canary": metadata_canary}})
+        );
+        let (base_url, request, server) = spawn_sse_server(200, &body).await;
+        let provider = codex_subscription_adapter(
+            base_url,
+            AccountBoundCredentialSource::new(
+                "codex_subscription:fixture",
+                "codex-metadata-terminal-bearer",
+                "workspace-metadata-terminal",
+            ),
+        );
+
+        let error = ModelStreamingService::new(&provider)
+            .consume(
+                full(fixture_input(ModelRequestRequirements::default())),
+                ModelStreamCancellation::new(),
+            )
+            .await
+            .expect_err("{case}: metadata must not fabricate a completed response");
+        let visible_error = error.to_string();
+        assert!(
+            visible_error.contains(expected_error),
+            "{case}: {visible_error}"
+        );
+        assert!(
+            !visible_error.contains(metadata_canary),
+            "{case}: metadata must not enter the protocol error"
+        );
+        assert!(
+            !visible_error.contains(summary_canary),
+            "{case}: summary presentation must not enter the protocol error"
+        );
+        request.await.unwrap();
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn standard_and_siwc_profiles_reject_codex_metadata_annotations() {
+    for profile in ["standard", "siwc"] {
+        let body = format!(
+            "data: {}\n\n",
+            json!({"type": "response.metadata", "metadata": {"canary": profile}})
+        );
+        let (base_url, request, server) = spawn_sse_server(200, &body).await;
+        let provider = match profile {
+            "standard" => adapter(base_url, FakeCredentialSource::value(Some(FIXTURE_SECRET))),
+            "siwc" => {
+                subscription_adapter(base_url, FakeCredentialSource::value(Some(FIXTURE_SECRET)))
+            }
+            _ => unreachable!("the fixed profiles are exhaustive"),
+        };
+        let model_request = match profile {
+            "standard" => full(fixture_input(ModelRequestRequirements::default())),
+            "siwc" => subscription_full(
+                fixture_input(ModelRequestRequirements::default()),
+                "siwc-metadata-rejection-scope",
+            ),
+            _ => unreachable!("the fixed profiles are exhaustive"),
+        };
+
+        let result = ModelStreamingService::new(&provider)
+            .consume(model_request, ModelStreamCancellation::new())
+            .await;
+        assert!(
+            matches!(
+                result,
+                Err(ModelStreamingError::Provider(ModelProviderError::ProtocolFailure { message }))
+                    if message.contains("unsupported Responses event `response.metadata`")
+            ),
+            "{profile} must retain the explicit metadata rejection"
+        );
+        request.await.unwrap();
+        server.await.unwrap();
+    }
+}
+
+#[test]
+fn account_bound_credentials_are_rejected_by_standard_and_siwc_profiles_before_transport() {
+    for (profile, provider) in [
+        (
+            "standard",
+            adapter(
+                "http://127.0.0.1:1/v1",
+                AccountBoundCredentialSource::new(
+                    FIXTURE_CREDENTIAL_REFERENCE,
+                    "bound-standard",
+                    "workspace-standard",
+                ),
+            ),
+        ),
+        (
+            "siwc",
+            subscription_adapter(
+                "http://127.0.0.1:1/v1",
+                AccountBoundCredentialSource::new(
+                    "chatgpt_subscription:fixture",
+                    "bound-siwc",
+                    "workspace-siwc",
+                ),
+            ),
+        ),
+    ] {
+        assert!(
+            matches!(
+                provider.stream(full(fixture_input(ModelRequestRequirements::default()))),
+                Err(ModelProviderError::RequestEncodingFailure { message })
+                    if message.contains("account-bound credentials require the explicit Codex subscription")
+            ),
+            "{profile} must reject a Codex account-bound credential before transport"
+        );
+    }
+}
+
+#[tokio::test]
+async fn codex_account_credentials_reject_empty_or_oversized_header_values_before_transport() {
+    for account_id in [
+        String::new(),
+        "x".repeat(257),
+        "workspace-fixture\r\nforged-header: value".to_owned(),
+    ] {
+        let credentials = AccountBoundCredentialSource::new(
+            "codex_subscription:fixture",
+            "bound-codex",
+            &account_id,
+        );
+        let provider = codex_subscription_adapter("http://127.0.0.1:1/v1", credentials.clone());
+        let mut stream = provider
+            .stream(full(fixture_input(ModelRequestRequirements::default())))
+            .expect("the credential resolves only when the stream is polled");
+        assert!(matches!(
+            stream.next().await,
+            Some(Err(ModelProviderError::CredentialInvalid { credential_ref }))
+                if credential_ref == "codex_subscription:fixture"
+        ));
+        assert_eq!(
+            credentials.resolutions(),
+            1,
+            "the account-bound credential must be validated only while the Codex stream is polled"
+        );
+    }
+}
+
+#[test]
+fn codex_subscription_rejects_unbound_ready_and_pending_credentials_before_transport() {
+    let ready = FakeCredentialSource::value(Some(FIXTURE_SECRET));
+    let ready_provider = codex_subscription_adapter("http://127.0.0.1:1/v1", ready.clone());
+    assert!(matches!(
+        ready_provider.stream(full(fixture_input(ModelRequestRequirements::default()))),
+        Err(ModelProviderError::RequestEncodingFailure { message })
+            if message.contains("Codex subscription Responses requires an account-bound credential")
+    ));
+    assert_eq!(ready.references(), vec!["codex_subscription:fixture"]);
+
+    let (pending, _release) = PendingCredentialSource::new();
+    let pending_provider = codex_subscription_adapter("http://127.0.0.1:1/v1", pending.clone());
+    assert!(matches!(
+        pending_provider.stream(full(fixture_input(ModelRequestRequirements::default()))),
+        Err(ModelProviderError::RequestEncodingFailure { message })
+            if message.contains("Codex subscription Responses requires an account-bound credential")
+    ));
+    assert_eq!(
+        pending.polls(),
+        0,
+        "Codex must reject an unbound pending credential without polling it"
+    );
+}
+
+#[tokio::test]
+async fn subscription_tool_loop_replays_opaque_reasoning_without_disclosure() {
+    for profile in ["siwc", "codex"] {
+        let metadata_canary = format!("subscription-metadata-canary-{profile}");
+        let summary_text = format!("subscription-summary-canary-{profile}");
+        let summary = json!([{"type": "summary_text", "text": summary_text}]);
+        let reasoning = json!({
+            "type": "reasoning",
+            "id": "rsn-sub",
+            "status": "completed",
+            "content": [],
+            "encrypted_content": "ciphertext-canary",
+            "summary": summary.clone(),
+        });
+        let mut call = json!({
+            "type": "function_call",
+            "call_id": "call-subscription",
+            "name": "search_files",
+            "arguments": "{\"pattern\":\"echidna\",\"paths\":[\"Cargo.toml\"]}",
+        });
+        if profile == "siwc" {
+            call["namespace"] = json!("echidna");
+        }
+        let mut first_events = vec![
+            json!({"type": "response.output_item.done", "output_index": 0, "item": reasoning}),
+            json!({"type": "response.output_item.done", "output_index": 1, "item": call}),
+        ];
+        if profile == "codex" {
+            first_events.push(json!({
+                "type": "response.metadata",
+                "metadata": {"canary": metadata_canary},
+            }));
+        }
+        first_events.push(json!({"type": "response.completed", "response": {
+            "id": "response-subscription", "status": "completed", "output": [reasoning, call],
+        }}));
+        let first = first_events
+            .into_iter()
+            .map(|event| format!("data: {event}\n\n"))
+            .collect::<String>();
+        let second = concat!(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"subscription search complete\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response-subscription-final\",\"status\":\"completed\"}}\n\n",
+        );
+        let (base_url, mut requests, server) =
+            spawn_sse_sequence_server(vec![first, second.to_owned()]).await;
+        let provider = match profile {
+            "siwc" => {
+                subscription_adapter(base_url, FakeCredentialSource::value(Some(FIXTURE_SECRET)))
+            }
+            "codex" => codex_subscription_adapter(
+                base_url,
+                AccountBoundCredentialSource::new(
+                    "codex_subscription:fixture",
+                    "codex-opaque-bearer",
+                    "workspace-opaque",
+                ),
+            ),
+            _ => unreachable!("the fixed profiles are exhaustive"),
+        };
+        let tools = ToolRegistry::for_project(env!("CARGO_MANIFEST_DIR"));
+        let mut agent = AgentLoop::new(&provider, &tools);
+        let audit_context = RequestAuditRunContext::new(
+            RequestAuditBinding::new(
+                ProjectId::new(format!("project-{profile}-opaque")),
+                StreamId::new(format!("session:{profile}-opaque")),
+            )
+            .unwrap(),
+            ResponsesHttpAdapter::request_adapter_version(),
+        );
+        let mut audits = Vec::new();
+
+        let outcome = agent
+            .run_turn_audited(
+                "inspect the package manifest",
+                AgentCancellation::new(),
+                &audit_context,
+                &mut |attempt| {
+                    audits.push(attempt);
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            AgentTurnOutcome::Completed {
+                assistant_text,
+                model_requests: 2,
+                executions,
+            } if assistant_text == "subscription search complete" && executions.len() == 1
+        ));
+        assert!(agent.history().items().iter().all(|item| {
+            !matches!(
+                item,
+                ContentItem::Reasoning { .. } | ContentItem::OpaqueContinuation { .. }
+            )
+        }));
+        assert!(!format!("{:?}", agent.history()).contains("ciphertext-canary"));
+        assert!(!format!("{audits:?}").contains("ciphertext-canary"));
+        assert!(!format!("{:?}", agent.history()).contains(&summary_text));
+        assert!(!format!("{audits:?}").contains(&summary_text));
+        assert!(!format!("{:?}", agent.history()).contains(&metadata_canary));
+        assert!(!format!("{audits:?}").contains(&metadata_canary));
+
+        let first_request = requests.recv().await.unwrap();
+        let second_request = requests.recv().await.unwrap();
+        server.await.unwrap();
+        let first_wire: Value = serde_json::from_str(&first_request.body).unwrap();
+        let second_wire: Value = serde_json::from_str(&second_request.body).unwrap();
+        match profile {
+            "siwc" => {
+                assert!(!first_request.headers.contains_key("chatgpt-account-id"));
+                assert!(!second_request.headers.contains_key("chatgpt-account-id"));
+                assert_eq!(first_wire["tools"][0]["type"], json!("namespace"));
+                assert_eq!(first_wire["tools"][0]["name"], json!("echidna"));
+            }
+            "codex" => {
+                assert_eq!(
+                    first_request
+                        .headers
+                        .get("chatgpt-account-id")
+                        .map(String::as_str),
+                    Some("workspace-opaque")
+                );
+                assert_eq!(
+                    second_request
+                        .headers
+                        .get("chatgpt-account-id")
+                        .map(String::as_str),
+                    Some("workspace-opaque")
+                );
+                let search_files = first_wire["tools"]
+                    .as_array()
+                    .expect("Codex request advertises a tool array")
+                    .iter()
+                    .find(|tool| tool["name"] == json!("search_files"))
+                    .expect("Codex request advertises search_files");
+                assert_eq!(search_files["type"], json!("function"));
+                assert!(search_files.get("namespace").is_none());
+            }
+            _ => unreachable!("the fixed profiles are exhaustive"),
+        }
+        assert!(second_wire.get("previous_response_id").is_none());
+        let input = second_wire["input"].as_array().unwrap();
+        assert_eq!(input.len(), 4);
+        assert_eq!(input[0]["type"], json!("message"));
+        assert_eq!(input[1]["type"], json!("reasoning"));
+        assert_eq!(input[1]["id"], json!("rsn-sub"));
+        assert_eq!(input[1]["encrypted_content"], json!("ciphertext-canary"));
+        assert_eq!(input[1]["summary"], summary);
+        assert_eq!(input[2]["type"], json!("function_call"));
+        assert_eq!(input[2]["name"], json!("search_files"));
+        match profile {
+            "siwc" => assert_eq!(input[2]["namespace"], json!("echidna")),
+            "codex" => assert!(input[2].get("namespace").is_none()),
+            _ => unreachable!("the fixed profiles are exhaustive"),
+        }
+        assert_eq!(input[3]["type"], json!("function_call_output"));
+        assert_eq!(input[3]["call_id"], input[2]["call_id"]);
+    }
+}
+
+#[tokio::test]
+async fn subscription_decoder_enforces_siwc_and_codex_namespaces_but_preserves_standard_calls() {
+    for (case, namespace) in [("missing", None), ("foreign", Some("other"))] {
+        let mut call = json!({
+            "type": "function_call",
+            "call_id": format!("call-{case}"),
+            "name": "search_files",
+            "arguments": "{\"pattern\":\"Cargo.toml\",\"paths\":[\".\"]}",
+        });
+        if let Some(namespace) = namespace {
+            call["namespace"] = json!(namespace);
+        }
+        let body = [
+            json!({"type": "response.output_item.done", "output_index": 0, "item": call}),
+            json!({"type": "response.completed", "response": {
+                "id": format!("response-{case}"), "status": "completed", "output": [call],
+            }}),
+        ]
+        .into_iter()
+        .map(|event| format!("data: {event}\n\n"))
+        .collect::<String>();
+        let (base_url, request, server) = spawn_sse_server(200, &body).await;
+        let provider =
+            subscription_adapter(base_url, FakeCredentialSource::value(Some(FIXTURE_SECRET)));
+        let result = ModelStreamingService::new(&provider)
+            .consume(
+                subscription_full(
+                    fixture_input(ModelRequestRequirements::default()),
+                    "subscription-namespace-scope",
+                ),
+                ModelStreamCancellation::new(),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(ModelStreamingError::Provider(ModelProviderError::ProtocolFailure { message }))
+                if message.contains("advertised `echidna` namespace")
+        ));
+        request.await.unwrap();
+        server.await.unwrap();
+    }
+
+    let codex_call = json!({
+        "type": "function_call",
+        "call_id": "call-codex-foreign-namespace",
+        "namespace": "foreign",
+        "name": "search_files",
+        "arguments": "{\"pattern\":\"Cargo.toml\",\"paths\":[\".\"]}",
+    });
+    let codex_body = [
+        json!({"type": "response.output_item.done", "output_index": 0, "item": codex_call}),
+        json!({"type": "response.completed", "response": {
+            "id": "response-codex-foreign-namespace", "status": "completed", "output": [codex_call],
+        }}),
+    ]
+    .into_iter()
+    .map(|event| format!("data: {event}\n\n"))
+    .collect::<String>();
+    let (base_url, request, server) = spawn_sse_server(200, &codex_body).await;
+    let provider = codex_subscription_adapter(
+        base_url,
+        AccountBoundCredentialSource::new(
+            "codex_subscription:fixture",
+            "codex-namespace-bearer",
+            "workspace-namespace",
+        ),
+    );
+    let result = ModelStreamingService::new(&provider)
+        .consume(
+            subscription_full(
+                fixture_input(ModelRequestRequirements::default()),
+                "codex-namespace-scope",
+            ),
+            ModelStreamCancellation::new(),
+        )
+        .await;
+    assert!(matches!(
+        result,
+        Err(ModelStreamingError::Provider(ModelProviderError::ProtocolFailure { message }))
+            if message.contains("Codex subscription function call included an unsupported namespace")
+    ));
+    request.await.unwrap();
+    server.await.unwrap();
+
+    let call = json!({
+        "type": "function_call",
+        "call_id": "call-standard-namespaced",
+        "namespace": "foreign",
+        "name": "search_files",
+        "arguments": "{\"pattern\":\"Cargo.toml\",\"paths\":[\".\"]}",
+    });
+    let body = [
+        json!({"type": "response.output_item.done", "output_index": 0, "item": call}),
+        json!({"type": "response.completed", "response": {
+            "id": "response-standard-namespaced", "status": "completed", "output": [call],
+        }}),
+    ]
+    .into_iter()
+    .map(|event| format!("data: {event}\n\n"))
+    .collect::<String>();
+    let (base_url, request, server) = spawn_sse_server(200, &body).await;
+    let provider = adapter(base_url, FakeCredentialSource::value(Some(FIXTURE_SECRET)));
+    assert!(matches!(
+        ModelStreamingService::new(&provider)
+            .consume(
+                full(fixture_input(ModelRequestRequirements::default())),
+                ModelStreamCancellation::new(),
+            )
+            .await,
+        Ok(ModelStreamOutcome::Completed { events, .. })
+            if matches!(events.as_slice(), [ModelEvent::ToolCall { call }]
+                if call.name.as_str() == "search_files")
+    ));
+    request.await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn subscription_opaque_references_require_the_owning_adapter_and_scope() {
+    let opaque = json!({
+        "type": "reasoning",
+        "id": "rsn-closure",
+        "status": "completed",
+        "content": [],
+        "encrypted_content": "closure-ciphertext",
+        "summary": [],
+    });
+    let completed = [
+        json!({"type": "response.output_item.done", "output_index": 0, "item": opaque}),
+        json!({"type": "response.completed", "response": {
+            "id": "response-closure", "status": "completed", "output": [opaque],
+        }}),
+    ]
+    .into_iter()
+    .map(|event| format!("data: {event}\n\n"))
+    .collect::<String>();
+    let (base_url, request, server) = spawn_sse_server(200, &completed).await;
+    let source = FakeCredentialSource::value(Some(FIXTURE_SECRET));
+    let provider = subscription_adapter(base_url, source.clone());
+    let outcome = ModelStreamingService::new(&provider)
+        .consume(
+            subscription_full(
+                fixture_input(ModelRequestRequirements::default()),
+                "subscription-closure-scope",
+            ),
+            ModelStreamCancellation::new(),
+        )
+        .await
+        .unwrap();
+    request.await.unwrap();
+    server.await.unwrap();
+    let reference = match outcome {
+        ModelStreamOutcome::Completed { events, .. } => events
+            .into_iter()
+            .find_map(|event| match event {
+                ModelEvent::OpaqueContinuation { reference } => Some(reference),
+                _ => None,
+            })
+            .expect("completed subscription response exposes an opaque reference"),
+        ModelStreamOutcome::Cancelled { .. } => panic!("fixture response must complete"),
+    };
+    assert_eq!(source.references(), vec!["chatgpt_subscription:fixture"]);
+
+    let retained = ModelInputIR::current(
+        "Keep opaque continuation bounded.",
+        vec![ContentItem::OpaqueContinuation {
+            reference: reference.clone(),
+        }],
+        ModelRequestRequirements::default(),
+    );
+    let fresh_source = FakeCredentialSource::value(Some(FIXTURE_SECRET));
+    let fresh_adapter = subscription_adapter("http://127.0.0.1:1/v1", fresh_source.clone());
+    assert!(matches!(
+        fresh_adapter.stream(subscription_full(
+            retained.clone(),
+            "subscription-closure-scope",
+        )),
+        Err(ModelProviderError::RequestEncodingFailure { message })
+            if message.contains("unavailable in this Adapter")
+    ));
+    assert!(fresh_source.references().is_empty());
+
+    assert!(matches!(
+        provider.stream(subscription_full(retained, "different-delivery-scope")),
+        Err(ModelProviderError::RequestEncodingFailure { message })
+            if message.contains("belongs to another delivery session")
+    ));
+    assert_eq!(source.references(), vec!["chatgpt_subscription:fixture"]);
+}
+
+#[tokio::test]
+async fn incomplete_subscription_stream_does_not_commit_opaque_references() {
+    let body = concat!(
+        "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{",
+        "\"type\":\"reasoning\",\"id\":\"rsn-incomplete\",\"status\":\"completed\",",
+        "\"content\":[],\"encrypted_content\":\"incomplete-ciphertext\",\"summary\":[]}}\n\n",
+    );
+    let (base_url, request, server) = spawn_sse_server(200, body).await;
+    let source = FakeCredentialSource::value(Some(FIXTURE_SECRET));
+    let provider = subscription_adapter(base_url, source.clone());
+    let mut stream = provider
+        .stream(subscription_full(
+            fixture_input(ModelRequestRequirements::default()),
+            "subscription-incomplete-scope",
+        ))
+        .unwrap();
+    let reference = match stream.next().await.unwrap().unwrap() {
+        ModelStreamEvent::Event(ModelEvent::OpaqueContinuation { reference }) => reference,
+        other => panic!("expected opaque continuation event, got {other:?}"),
+    };
+    assert!(matches!(
+        stream.next().await,
+        Some(Err(ModelProviderError::ProtocolFailure { message }))
+            if message.contains("ended before `response.completed`")
+    ));
+    request.await.unwrap();
+    server.await.unwrap();
+
+    let retained = ModelInputIR::current(
+        "Keep opaque continuation bounded.",
+        vec![ContentItem::OpaqueContinuation { reference }],
+        ModelRequestRequirements::default(),
+    );
+    assert!(matches!(
+        provider.stream(subscription_full(retained, "subscription-incomplete-scope")),
+        Err(ModelProviderError::RequestEncodingFailure { message })
+            if message.contains("unavailable in this Adapter")
+    ));
+    assert_eq!(source.references(), vec!["chatgpt_subscription:fixture"]);
+}
+
+#[tokio::test]
+async fn subscription_opaque_store_rejects_cumulative_payloads_without_commit_or_retry() {
+    let encrypted_content = "x".repeat(3_400_000);
+    let one_reasoning = json!({
+        "type": "reasoning",
+        "id": "rsn-cumulative-0",
+        "status": "completed",
+        "content": [],
+        "encrypted_content": encrypted_content,
+        "summary": [],
+    });
+    assert!(
+        serde_json::to_vec(&one_reasoning).unwrap().len() < 4 * 1024 * 1024,
+        "each staged reasoning item remains below the four-MiB item limit"
+    );
+    let body = (0..5)
+        .map(|index| {
+            let mut reasoning = one_reasoning.clone();
+            reasoning["id"] = json!(format!("rsn-cumulative-{index}"));
+            format!(
+                "data: {}\n\n",
+                json!({
+                    "type": "response.output_item.done",
+                    "output_index": index,
+                    "item": reasoning,
+                })
+            )
+        })
+        .collect::<String>();
+    let (base_url, request, server) = spawn_sse_server_chunked(200, &body, 64 * 1024).await;
+    let credentials = FakeCredentialSource::value(Some(FIXTURE_SECRET));
+    let provider = subscription_adapter(base_url, credentials.clone());
+    let scope = "subscription-cumulative-scope";
+    let mut stream = provider
+        .stream(subscription_full(
+            fixture_input(ModelRequestRequirements::default()),
+            scope,
+        ))
+        .unwrap();
+
+    let first_reference = match stream.next().await.unwrap().unwrap() {
+        ModelStreamEvent::Event(ModelEvent::OpaqueContinuation { reference }) => reference,
+        other => panic!("expected the first staged opaque continuation, got {other:?}"),
+    };
+    for _ in 1..4 {
+        assert!(matches!(
+            stream.next().await.unwrap().unwrap(),
+            ModelStreamEvent::Event(ModelEvent::OpaqueContinuation { .. })
+        ));
+    }
+    assert!(matches!(
+        stream.next().await,
+        Some(Err(ModelProviderError::ProtocolFailure { message }))
+            if message.contains("bounded byte limit")
+    ));
+    request.await.unwrap();
+    server.await.unwrap();
+
+    let retained = ModelInputIR::current(
+        "A failed sample cannot retain opaque delivery state.",
+        vec![ContentItem::OpaqueContinuation {
+            reference: first_reference,
+        }],
+        ModelRequestRequirements::default(),
+    );
+    assert!(matches!(
+        provider.stream(subscription_full(retained, scope)),
+        Err(ModelProviderError::RequestEncodingFailure { message })
+            if message.contains("unavailable in this Adapter")
+    ));
+    assert_eq!(
+        credentials.references(),
+        vec!["chatgpt_subscription:fixture"],
+        "the rejected sample cannot commit a reference or trigger a retry"
+    );
+}
+
+#[tokio::test]
+async fn subscription_failed_or_incomplete_opaque_tool_samples_are_atomic_and_not_retried() {
+    for profile in ["siwc", "codex"] {
+        for case in ["failed", "incomplete", "unknown"] {
+            let expected = match (profile, case) {
+                ("siwc", "failed") => {
+                    "ChatGPT subscription Responses stream reported response.failed"
+                }
+                ("siwc", "incomplete") => {
+                    "ChatGPT subscription Responses stream reported response.incomplete"
+                }
+                ("codex", "failed") => {
+                    "Codex subscription Responses stream reported response.failed"
+                }
+                ("codex", "incomplete") => {
+                    "Codex subscription Responses stream reported response.incomplete"
+                }
+                (_, "unknown") => "unsupported Responses event `response.future`",
+                _ => unreachable!("the fixed profiles and cases are exhaustive"),
+            };
+            let metadata_canary = format!("subscription-atomic-metadata-canary-{profile}-{case}");
+            let summary_text = format!("subscription-atomic-summary-canary-{profile}-{case}");
+            let summary = json!([{"type": "summary_text", "text": summary_text}]);
+            let code_secret = format!("subscription-terminal-code-secret-{profile}-{case}");
+            let detail_secret = format!("subscription-terminal-detail-secret-{profile}-{case}");
+            let large_secret = format!("subscription-terminal-large-secret-{profile}-{case}");
+            let terminal = match case {
+                "failed" => json!({"type": "response.failed", "response": {
+                    "error": {
+                        "code": code_secret,
+                        "message": detail_secret,
+                        "irrelevant": format!("{large_secret}{}", "x".repeat(64 * 1024)),
+                    },
+                }}),
+                "incomplete" => json!({"type": "response.incomplete", "response": {
+                    "incomplete_details": {
+                        "reason": detail_secret,
+                        "irrelevant": format!("{large_secret}{}", "x".repeat(64 * 1024)),
+                    },
+                }}),
+                "unknown" => json!({"type": "response.future"}),
+                _ => unreachable!("fixture case is fixed"),
+            };
+            let opaque = json!({
+                "type": "reasoning",
+                "id": format!("rsn-atomic-{profile}-{case}"),
+                "status": "completed",
+                "content": [],
+                "encrypted_content": format!("atomic-ciphertext-{profile}-{case}"),
+                "summary": summary,
+            });
+            let mut call = json!({
+                "type": "function_call",
+                "call_id": format!("call-atomic-{profile}-{case}"),
+                "name": "write_file",
+                "arguments": "{\"path\":\"must-not-exist.txt\",\"content\":\"must not execute\\n\",\"expected_hash\":null}",
+            });
+            if profile == "siwc" {
+                call["namespace"] = json!("echidna");
+            }
+            let mut events = vec![
+                json!({"type": "response.output_item.done", "output_index": 0, "item": opaque}),
+                json!({"type": "response.output_item.done", "output_index": 1, "item": call}),
+            ];
+            if profile == "codex" {
+                events.push(json!({
+                    "type": "response.metadata",
+                    "metadata": {"canary": metadata_canary},
+                }));
+            }
+            events.push(terminal);
+            let body = events
+                .into_iter()
+                .map(|event| format!("data: {event}\n\n"))
+                .collect::<String>();
+            let (base_url, request, server) = spawn_sse_server_chunked(200, &body, 64 * 1024).await;
+            let siwc_credentials = FakeCredentialSource::value(Some(FIXTURE_SECRET));
+            let codex_credentials = AccountBoundCredentialSource::new(
+                "codex_subscription:fixture",
+                "codex-atomic-bearer",
+                "workspace-atomic",
+            );
+            let provider = match profile {
+                "siwc" => subscription_adapter(base_url, siwc_credentials.clone()),
+                "codex" => codex_subscription_adapter(base_url, codex_credentials.clone()),
+                _ => unreachable!("the fixed profiles are exhaustive"),
+            };
+            let directory =
+                support::TemporaryDirectory::new(&format!("subscription-atomic-{profile}-{case}"));
+            let tools = ToolRegistry::for_project(directory.path());
+            let mut agent = AgentLoop::new(&provider, &tools);
+
+            let error = agent
+                .run_turn(
+                    "reject the staged subscription sample",
+                    AgentCancellation::new(),
+                )
+                .await
+                .unwrap_err();
+            let visible_error = error.to_string();
+            assert!(
+                visible_error.contains(expected),
+                "{profile}/{case}: {visible_error}"
+            );
+            for secret in [&code_secret, &detail_secret, &large_secret] {
+                assert!(
+                    !visible_error.contains(secret),
+                    "{profile}/{case}: terminal provider values must not enter the error: {visible_error}"
+                );
+            }
+            assert_eq!(
+                agent.history().items(),
+                &[ContentItem::user_text(
+                    "reject the staged subscription sample"
+                )],
+                "{profile}/{case}: opaque reasoning and ToolCall must not commit to History"
+            );
+            assert!(
+                !format!("{:?}", agent.history()).contains(&metadata_canary),
+                "{profile}/{case}: metadata must not enter History"
+            );
+            assert!(
+                !format!("{:?}", agent.history()).contains(&summary_text),
+                "{profile}/{case}: summary presentation must not enter History"
+            );
+            assert!(
+                !directory.path().join("must-not-exist.txt").exists(),
+                "{profile}/{case}: the staged ToolCall must not execute"
+            );
+            match profile {
+                "siwc" => assert_eq!(
+                    siwc_credentials.references(),
+                    vec!["chatgpt_subscription:fixture"],
+                    "{profile}/{case}: terminal subscription failure must not retry"
+                ),
+                "codex" => assert_eq!(
+                    codex_credentials.resolutions(),
+                    1,
+                    "{profile}/{case}: terminal subscription failure must not retry"
+                ),
+                _ => unreachable!("the fixed profiles are exhaustive"),
+            }
+            request.await.unwrap();
+            server.await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn subscription_http_quota_error_is_structured_safe_and_not_retried() {
+    let body = r#"{"error":{"code":"insufficient_quota","message":"account-routing-secret"}}"#;
+    let (base_url, request, server) = spawn_sse_server(429, body).await;
+    let credentials = FakeCredentialSource::value(Some(FIXTURE_SECRET));
+    let provider = subscription_adapter(base_url, credentials.clone());
+    let result = ModelStreamingService::new(&provider)
+        .consume(
+            subscription_full(
+                fixture_input(ModelRequestRequirements::default()),
+                "subscription-quota-scope",
+            ),
+            ModelStreamCancellation::new(),
+        )
+        .await;
+    assert_eq!(
+        result,
+        Err(ModelStreamingError::Provider(
+            ModelProviderError::ProviderFailure {
+                code: Some("insufficient_quota".to_owned()),
+                message: "ChatGPT subscription Responses request failed with HTTP 429".to_owned(),
+            }
+        ))
+    );
+    assert!(!format!("{result:?}").contains("account-routing-secret"));
+    assert_eq!(
+        credentials.references(),
+        vec!["chatgpt_subscription:fixture"]
+    );
+    request.await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn subscription_failed_event_keeps_only_the_allowlisted_quota_code() {
+    let secret = "subscription-failed-event-secret";
+    let body = format!(
+        "data: {}\n\n",
+        json!({"type": "response.failed", "response": {
+            "error": {"code": "insufficient_quota", "message": secret},
+        }})
+    );
+    let (base_url, request, server) = spawn_sse_server(200, &body).await;
+    let credentials = FakeCredentialSource::value(Some(FIXTURE_SECRET));
+    let provider = subscription_adapter(base_url, credentials.clone());
+    let result = ModelStreamingService::new(&provider)
+        .consume(
+            subscription_full(
+                fixture_input(ModelRequestRequirements::default()),
+                "subscription-failed-quota-scope",
+            ),
+            ModelStreamCancellation::new(),
+        )
+        .await;
+    assert_eq!(
+        result,
+        Err(ModelStreamingError::Provider(
+            ModelProviderError::ProviderFailure {
+                code: Some("insufficient_quota".to_owned()),
+                message: "ChatGPT subscription Responses stream reported response.failed"
+                    .to_owned(),
+            }
+        ))
+    );
+    assert!(!format!("{result:?}").contains(secret));
+    assert_eq!(
+        credentials.references(),
+        vec!["chatgpt_subscription:fixture"]
+    );
+    request.await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn subscription_http_error_omits_unrecognized_remote_code() {
+    let code_secret = "subscription-http-code-secret";
+    let message_secret = "subscription-http-message-secret";
+    let body = format!(r#"{{"error":{{"code":"{code_secret}","message":"{message_secret}"}}}}"#);
+    let (base_url, request, server) = spawn_sse_server(403, &body).await;
+    let credentials = FakeCredentialSource::value(Some(FIXTURE_SECRET));
+    let provider = subscription_adapter(base_url, credentials.clone());
+    let result = ModelStreamingService::new(&provider)
+        .consume(
+            subscription_full(
+                fixture_input(ModelRequestRequirements::default()),
+                "subscription-http-unrecognized-scope",
+            ),
+            ModelStreamCancellation::new(),
+        )
+        .await;
+    assert_eq!(
+        result,
+        Err(ModelStreamingError::Provider(
+            ModelProviderError::ProviderFailure {
+                code: None,
+                message: "ChatGPT subscription Responses request failed with HTTP 403: unrecognized error code".to_owned(),
+            }
+        ))
+    );
+    let visible = format!("{result:?}");
+    assert!(!visible.contains(code_secret));
+    assert!(!visible.contains(message_secret));
+    assert_eq!(
+        credentials.references(),
+        vec!["chatgpt_subscription:fixture"]
+    );
+    request.await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn subscription_http_error_classifies_malformed_and_missing_codes() {
+    for (case, body, suffix, secret) in [
+        (
+            "malformed",
+            r#"{"error":"subscription-malformed-secret""#,
+            "malformed error body",
+            "subscription-malformed-secret",
+        ),
+        (
+            "missing",
+            r#"{"error":{"message":"subscription-missing-secret"}}"#,
+            "missing error code",
+            "subscription-missing-secret",
+        ),
+    ] {
+        let (base_url, request, server) = spawn_sse_server(400, body).await;
+        let credentials = FakeCredentialSource::value(Some(FIXTURE_SECRET));
+        let provider = subscription_adapter(base_url, credentials.clone());
+        let result = ModelStreamingService::new(&provider)
+            .consume(
+                subscription_full(
+                    fixture_input(ModelRequestRequirements::default()),
+                    &format!("subscription-http-{case}-scope"),
+                ),
+                ModelStreamCancellation::new(),
+            )
+            .await;
+        assert_eq!(
+            result,
+            Err(ModelStreamingError::Provider(
+                ModelProviderError::ProviderFailure {
+                    code: None,
+                    message: format!(
+                        "ChatGPT subscription Responses request failed with HTTP 400: {suffix}"
+                    ),
+                }
+            ))
+        );
+        assert!(!format!("{result:?}").contains(secret));
+        assert_eq!(
+            credentials.references(),
+            vec!["chatgpt_subscription:fixture"],
+            "{case}: the failure must not retry"
+        );
+        request.await.unwrap();
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn subscription_http_error_rejects_oversized_body_without_disclosure() {
+    let secret = "subscription-http-oversized-secret";
+    let body = format!(
+        r#"{{"error":{{"code":"{secret}","message":"{}"}}}}"#,
+        "x".repeat(64 * 1024)
+    );
+    let (base_url, request, server) = spawn_sse_server_chunked(502, &body, 64 * 1024).await;
+    let credentials = FakeCredentialSource::value(Some(FIXTURE_SECRET));
+    let provider = subscription_adapter(base_url, credentials.clone());
+    let result = ModelStreamingService::new(&provider)
+        .consume(
+            subscription_full(
+                fixture_input(ModelRequestRequirements::default()),
+                "subscription-http-oversized-scope",
+            ),
+            ModelStreamCancellation::new(),
+        )
+        .await;
+    assert_eq!(
+        result,
+        Err(ModelStreamingError::Provider(
+            ModelProviderError::ProviderFailure {
+                code: None,
+                message: "ChatGPT subscription Responses request failed with HTTP 502: error body exceeds 65536 bytes".to_owned(),
+            }
+        ))
+    );
+    assert!(!format!("{result:?}").contains(secret));
+    assert_eq!(
+        credentials.references(),
+        vec!["chatgpt_subscription:fixture"]
+    );
+    request.await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn subscription_http_error_classifies_truncated_body_as_unreadable() {
+    let secret = "subscription-http-truncated-secret";
+    let body = format!(r#"{{"error":{{"code":"{secret}"}}}}"#);
+    let (base_url, request, server) =
+        spawn_sse_server_chunked_with_declared_length(503, &body, 64 * 1024, body.len() + 1).await;
+    let credentials = FakeCredentialSource::value(Some(FIXTURE_SECRET));
+    let provider = subscription_adapter(base_url, credentials.clone());
+    let result = ModelStreamingService::new(&provider)
+        .consume(
+            subscription_full(
+                fixture_input(ModelRequestRequirements::default()),
+                "subscription-http-truncated-scope",
+            ),
+            ModelStreamCancellation::new(),
+        )
+        .await;
+    assert_eq!(
+        result,
+        Err(ModelStreamingError::Provider(
+            ModelProviderError::ProviderFailure {
+                code: None,
+                message: "ChatGPT subscription Responses request failed with HTTP 503: error body unavailable".to_owned(),
+            }
+        ))
+    );
+    assert!(!format!("{result:?}").contains(secret));
+    assert_eq!(
+        credentials.references(),
+        vec!["chatgpt_subscription:fixture"]
+    );
+    request.await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn explicit_resume_discards_opaque_delivery_state_before_the_next_subscription_request() {
+    let opaque = json!({
+        "type": "reasoning",
+        "id": "rsn-before-resume",
+        "status": "completed",
+        "content": [],
+        "encrypted_content": "resume-ciphertext",
+        "summary": [],
+    });
+    let first = [
+        json!({"type": "response.output_item.done", "output_index": 0, "item": opaque}),
+        json!({"type": "response.output_text.delta", "delta": "opaque state committed"}),
+        json!({"type": "response.completed", "response": {
+            "id": "response-before-resume", "status": "completed",
+        }}),
+    ]
+    .into_iter()
+    .map(|event| format!("data: {event}\n\n"))
+    .collect::<String>();
+    let second = concat!(
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"fresh after resume\"}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response-after-resume\",\"status\":\"completed\"}}\n\n",
+    );
+    let (base_url, mut requests, server) =
+        spawn_sse_sequence_server(vec![first, second.to_owned()]).await;
+    let provider =
+        subscription_adapter(base_url, FakeCredentialSource::value(Some(FIXTURE_SECRET)));
+    let tools = ToolRegistry::for_project(env!("CARGO_MANIFEST_DIR"));
+    let mut agent = AgentLoop::new(&provider, &tools);
+    agent
+        .run_turn("create opaque delivery state", AgentCancellation::new())
+        .await
+        .unwrap();
+
+    let stream = StreamId::new("session:subscription-resume");
+    let resumed_primary = ProviderSessionRef {
+        id: ProviderSessionId::new("primary-subscription-resumed"),
+        role: ProviderSessionRole::Primary,
+        generation: 2,
+    };
+    let session = SessionReducer
+        .reduce([
+            SessionEvent::Started {
+                primary_provider_session: ProviderSessionRef {
+                    id: ProviderSessionId::new("primary-subscription-initial"),
+                    role: ProviderSessionRole::Primary,
+                    generation: 1,
+                },
+            }
+            .into_envelope(
+                EventId::new("subscription-resume-started"),
+                stream.clone(),
+                EventSequence::new(1),
+                OccurredAt::new("2026-10-12T00:00:00Z"),
+            )
+            .unwrap(),
+            SessionEvent::Resumed {
+                primary_provider_session: resumed_primary.clone(),
+            }
+            .into_envelope(
+                EventId::new("subscription-resume-resumed"),
+                stream,
+                EventSequence::new(2),
+                OccurredAt::new("2026-10-12T00:00:01Z"),
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+    agent
+        .resume_from_session(
+            &session,
+            ProviderSession::new(
+                resumed_primary.id,
+                ProviderSessionRole::Primary,
+                resumed_primary.generation,
+            ),
+            None,
+        )
+        .unwrap();
+    assert!(agent.history().items().is_empty());
+
+    let outcome = agent
+        .run_turn("continue after explicit Resume", AgentCancellation::new())
+        .await
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        AgentTurnOutcome::Completed { assistant_text, .. } if assistant_text == "fresh after resume"
+    ));
+    let first_request = requests.recv().await.unwrap();
+    let resumed_request = requests.recv().await.unwrap();
+    server.await.unwrap();
+    assert!(first_request.body.contains("create opaque delivery state"));
+    let resumed_wire: Value = serde_json::from_str(&resumed_request.body).unwrap();
+    assert!(resumed_wire.get("previous_response_id").is_none());
+    assert!(
+        resumed_wire["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| { item.get("type").and_then(Value::as_str) != Some("reasoning") })
+    );
+    assert!(!resumed_request.body.contains("resume-ciphertext"));
+}
+
+#[tokio::test]
+async fn pending_credentials_wait_until_first_poll_and_never_fallback() {
+    let (base_url, mut request_receiver, server) = spawn_sse_server(
+        200,
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"pending-credential\",\"status\":\"completed\"}}\n\n",
+    )
+    .await;
+    let (source, release) = PendingCredentialSource::new();
+    let provider = adapter(base_url, source.clone());
+    let mut stream = provider
+        .stream(full(fixture_input(ModelRequestRequirements::default())))
+        .unwrap();
+    assert_eq!(source.polls(), 0);
+    let poll = tokio::spawn(async move { stream.next().await });
+    timeout(Duration::from_secs(1), async {
+        while source.polls() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("first stream poll must begin credential resolution");
+    assert_eq!(source.polls(), 1);
+    assert!(
+        timeout(Duration::from_millis(50), &mut request_receiver)
+            .await
+            .is_err(),
+        "the request must wait for the pending credential"
+    );
+    release.send(Ok(Some(FIXTURE_SECRET.to_owned()))).unwrap();
+    let request = request_receiver.await.unwrap();
+    assert_eq!(request.request_line, "POST /v1/responses HTTP/1.1");
+    assert!(matches!(
+        poll.await.unwrap(),
+        Some(Ok(ModelStreamEvent::Completed(_)))
+    ));
+    server.await.unwrap();
+
+    let (failed_source, failed_release) = PendingCredentialSource::new();
+    let failed_provider = adapter("http://127.0.0.1:1/v1", failed_source.clone());
+    let mut failed_stream = failed_provider
+        .stream(full(fixture_input(ModelRequestRequirements::default())))
+        .unwrap();
+    let failed_poll = tokio::spawn(async move { failed_stream.next().await });
+    timeout(Duration::from_secs(1), async {
+        while failed_source.polls() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("failed fixture must begin credential resolution once");
+    failed_release
+        .send(Err(CredentialSourceError::ReadFailed {
+            message: "pending fixture failed".to_owned(),
+        }))
+        .unwrap();
+    assert_eq!(
+        failed_poll.await.unwrap(),
+        Some(Err(ModelProviderError::CredentialSourceFailure {
+            credential_ref: FIXTURE_CREDENTIAL_REFERENCE.to_owned(),
+            message: "credential source failed: pending fixture failed".to_owned(),
+        }))
+    );
+    assert_eq!(failed_source.polls(), 1);
+
+    let (subscription_source, _subscription_release) = PendingCredentialSource::new();
+    let subscription_provider =
+        subscription_adapter("http://127.0.0.1:1/v1", subscription_source.clone());
+    assert_stream_error(
+        subscription_provider.stream(ModelRequest::incremental(
+            fixture_input(ModelRequestRequirements::default()),
+            ProviderResponseId::new("unsupported-incremental"),
+        )),
+        ModelProviderError::Capability(ModelCapabilityError::IncrementalInputUnsupported),
+    );
+    assert_eq!(subscription_source.polls(), 0);
 }
 
 #[tokio::test]

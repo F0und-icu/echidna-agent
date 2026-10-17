@@ -104,6 +104,15 @@ impl ResearchReferenceCatalog {
     pub(super) fn execution_receipt(&self, id: &ExecutionReceiptId) -> Option<&ExecutionReceipt> {
         self.execution_receipts.get(id)
     }
+
+    /// Ordered existing Receipt facts for the bounded Research discovery view.
+    /// The catalog remains ephemeral and Project-scoped; callers receive no
+    /// mutation or persistence authority.
+    pub(crate) fn execution_receipts(
+        &self,
+    ) -> impl Iterator<Item = (&ExecutionReceiptId, &ExecutionReceipt)> {
+        self.execution_receipts.iter()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

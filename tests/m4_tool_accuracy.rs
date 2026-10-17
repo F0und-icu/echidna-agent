@@ -450,7 +450,7 @@ async fn only_changed_arguments_in_the_immediately_following_sample_count_as_a_c
             | ContentItem::ImageArtifact { .. }
             | ContentItem::ToolCall { .. }
             | ContentItem::Unsupported { .. } => None,
-            ContentItem::Reasoning { .. } => {
+            ContentItem::Reasoning { .. } | ContentItem::OpaqueContinuation { .. } => {
                 panic!("provider reasoning must not enter Conversation History")
             }
         })
@@ -635,7 +635,7 @@ async fn controlled_accuracy_fixture() -> ToolAccuracyFixture {
             | ContentItem::ToolCall { .. }
             | ContentItem::ToolResult { .. }
             | ContentItem::Unsupported { .. } => None,
-            ContentItem::Reasoning { .. } => {
+            ContentItem::Reasoning { .. } | ContentItem::OpaqueContinuation { .. } => {
                 panic!("provider reasoning must not enter Conversation History")
             }
         })
@@ -650,7 +650,7 @@ async fn controlled_accuracy_fixture() -> ToolAccuracyFixture {
             | ContentItem::ImageArtifact { .. }
             | ContentItem::ToolCall { .. }
             | ContentItem::Unsupported { .. } => None,
-            ContentItem::Reasoning { .. } => {
+            ContentItem::Reasoning { .. } | ContentItem::OpaqueContinuation { .. } => {
                 panic!("provider reasoning must not enter Conversation History")
             }
         })
@@ -811,7 +811,10 @@ fn model_events(items: &[ContentItem]) -> Vec<ModelEvent> {
             | ContentItem::ImageArtifact { .. }
             | ContentItem::ToolResult { .. }
             | ContentItem::Unsupported { .. }
-            | ContentItem::Reasoning { .. } => panic!("fixture sample must be model output"),
+            | ContentItem::Reasoning { .. }
+            | ContentItem::OpaqueContinuation { .. } => {
+                panic!("fixture sample must be model output")
+            }
         })
         .collect()
 }
@@ -849,6 +852,7 @@ fn capabilities() -> ModelCapabilities {
         incremental_input: false,
         usage_reporting: true,
         max_output_tokens: None,
+        reasoning_effort: None,
         context_window: 32_768,
         capability_mapping_version: CapabilityMappingVersion::new(1),
     }

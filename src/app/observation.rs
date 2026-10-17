@@ -117,6 +117,7 @@ fn validate_external_command_source(
             ContentItem::Text { .. }
             | ContentItem::ImageArtifact { .. }
             | ContentItem::Reasoning { .. }
+            | ContentItem::OpaqueContinuation { .. }
             | ContentItem::ToolCall { .. }
             | ContentItem::ToolResult { .. }
             | ContentItem::Unsupported { .. } => None,
@@ -174,6 +175,7 @@ fn validate_paired_success(
             ContentItem::Text { .. }
             | ContentItem::ImageArtifact { .. }
             | ContentItem::Reasoning { .. }
+            | ContentItem::OpaqueContinuation { .. }
             | ContentItem::ToolCall { .. }
             | ContentItem::ToolResult { .. }
             | ContentItem::Unsupported { .. } => None,

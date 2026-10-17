@@ -357,7 +357,7 @@ fn render_markdown(export: &SessionExport<'_>) -> Result<String, CliError> {
                     indent(&serde_json::to_string_pretty(&result.output)?)
                 ));
             }
-            ContentItem::Reasoning { .. } => output.push_str(
+            ContentItem::Reasoning { .. } | ContentItem::OpaqueContinuation { .. } => output.push_str(
                 "\n### Unsupported transcript item\n\nProvider reasoning is not exported as Conversation History.\n",
             ),
             ContentItem::Unsupported { content_kind } => output.push_str(&format!(

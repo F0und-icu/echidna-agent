@@ -1,14 +1,18 @@
 //! Provider-neutral model request, capability, and stream-event contracts.
 
+use std::str::FromStr;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::artifacts::ArtifactId;
+use super::context::{ProviderSessionRef, ProviderSessionRole};
 use super::tools::{ToolCall, ToolResult, ToolSpec};
 
 /// The current version of the semantic model input representation.
-pub const MODEL_INPUT_IR_SCHEMA_VERSION: u16 = 3;
+pub const MODEL_INPUT_IR_SCHEMA_VERSION: u16 = 4;
 pub(crate) const MODEL_INPUT_IR_V2_SCHEMA_VERSION: u16 = 2;
+pub(crate) const MODEL_INPUT_IR_V3_SCHEMA_VERSION: u16 = 3;
 pub(crate) const MAX_TOOL_ARGUMENT_CORRECTIONS_PER_TURN: u8 = 2;
 
 /// A version for the provider-neutral input representation.
@@ -25,6 +29,63 @@ impl ModelInputIrSchemaVersion {
     /// Returns the serialized schema version.
     pub const fn get(self) -> u16 {
         self.0
+    }
+}
+
+/// The delivery session which owns an opaque provider continuation reference.
+/// It is a local binding, never a credential or Provider wire identity.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
+pub struct OpaqueContinuationScope(String);
+
+impl OpaqueContinuationScope {
+    /// Derives the stable, local continuation scope for one exact Provider
+    /// session. This is a Core binding only; it is neither a wire ID nor a
+    /// credential.
+    pub(crate) fn for_provider_session(session: &ProviderSessionRef) -> Self {
+        let role = match session.role {
+            ProviderSessionRole::Primary => "primary",
+            ProviderSessionRole::Vision => "vision",
+        };
+        Self(format!(
+            "provider-session:{}:{role}:{}",
+            session.id, session.generation
+        ))
+    }
+}
+
+/// An auditable reference to Adapter-local opaque continuation data.
+///
+/// The encrypted replay value never crosses this Domain boundary. The content
+/// identity and encoded length bind Context/Audit while the scope prevents
+/// reuse across delivery sessions.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpaqueContinuationReference {
+    scope: OpaqueContinuationScope,
+    content_identity: String,
+    encoded_byte_length: u32,
+}
+
+impl OpaqueContinuationReference {
+    pub(crate) fn new(
+        scope: OpaqueContinuationScope,
+        content_identity: String,
+        encoded_byte_length: u32,
+    ) -> Self {
+        Self {
+            scope,
+            content_identity,
+            encoded_byte_length,
+        }
+    }
+
+    pub(crate) fn scope(&self) -> &OpaqueContinuationScope {
+        &self.scope
+    }
+
+    pub(crate) const fn encoded_byte_length(&self) -> u32 {
+        self.encoded_byte_length
     }
 }
 
@@ -67,6 +128,11 @@ pub enum ContentItem {
     /// continuation. This is never ordinary Conversation History.
     Reasoning {
         text: String,
+    },
+    /// An Adapter-local opaque reasoning item retained for the current
+    /// provider delivery only. Its reference is never Conversation History.
+    OpaqueContinuation {
+        reference: OpaqueContinuationReference,
     },
     /// Preserves an unsupported item so it can fail explicitly at the Port.
     Unsupported {
@@ -115,6 +181,47 @@ pub enum ToolArgumentErrorCategory {
     Eof,
 }
 
+/// A bounded, provider-neutral reasoning setting explicitly selected in a
+/// capability mapping. Provider metadata may advertise other values, but they
+/// are not executable until this contract gains a corresponding variant.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    Low,
+    Medium,
+    High,
+    #[serde(rename = "xhigh")]
+    XHigh,
+    Max,
+}
+
+impl ReasoningEffort {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+}
+
+impl FromStr for ReasoningEffort {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "low" => Ok(Self::Low),
+            "medium" => Ok(Self::Medium),
+            "high" => Ok(Self::High),
+            "xhigh" => Ok(Self::XHigh),
+            "max" => Ok(Self::Max),
+            _ => Err(()),
+        }
+    }
+}
+
 /// Explicit request requirements that later Slices can derive from tools and
 /// output contracts without guessing capability from a model name.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -123,6 +230,9 @@ pub struct ModelRequestRequirements {
     pub structured_output: bool,
     pub incremental_input: bool,
     pub usage_reporting: bool,
+    /// Explicit capability-mapping setting resolved before Context/audit capture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<ReasoningEffort>,
     /// Total generated tokens, including reasoning; not a billing limit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
@@ -180,7 +290,12 @@ impl ModelInputIR {
             && self
                 .content_items
                 .iter()
-                .filter(|item| !matches!(item, ContentItem::Reasoning { .. }))
+                .filter(|item| {
+                    !matches!(
+                        item,
+                        ContentItem::Reasoning { .. } | ContentItem::OpaqueContinuation { .. }
+                    )
+                })
                 .eq(logical_input.content_items.iter())
     }
 
@@ -191,10 +306,12 @@ impl ModelInputIR {
             && self.instructions == logical_input.instructions
             && self.tool_specs == logical_input.tool_specs
             && self.requirements == logical_input.requirements
-            && self
-                .content_items
-                .iter()
-                .any(|item| matches!(item, ContentItem::Reasoning { .. }))
+            && self.content_items.iter().any(|item| {
+                matches!(
+                    item,
+                    ContentItem::Reasoning { .. } | ContentItem::OpaqueContinuation { .. }
+                )
+            })
     }
 }
 
@@ -214,10 +331,28 @@ pub struct ModelCapabilities {
     /// legacy requests without output controls; no model-name inference.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
+    /// Explicitly selected reasoning setting. None preserves the provider's
+    /// existing behavior and does not infer support from a model name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<ReasoningEffort>,
     pub capability_mapping_version: CapabilityMappingVersion,
 }
 
 impl ModelCapabilities {
+    /// Resolve the selected mapping setting before Context/audit capture. A
+    /// request may repeat that exact setting, but may not override or invent it.
+    pub(crate) fn resolve_reasoning_effort(
+        &self,
+        requested: Option<ReasoningEffort>,
+    ) -> Result<Option<ReasoningEffort>, ModelCapabilityError> {
+        if let Some(requested) = requested
+            && self.reasoning_effort != Some(requested)
+        {
+            return Err(ModelCapabilityError::ReasoningEffortUnsupported);
+        }
+        Ok(requested.or(self.reasoning_effort))
+    }
+
     /// Resolve the declared ceiling before Context/audit capture. A smaller
     /// explicit request is allowed; adapters must never inject a missing cap.
     pub(crate) fn resolve_output_token_limit(
@@ -254,6 +389,11 @@ impl ModelCapabilities {
 
     /// Validates every semantic requirement without inferring from model names.
     pub fn validate_input(&self, input: &ModelInputIR) -> Result<(), ModelCapabilityError> {
+        if self.resolve_reasoning_effort(input.requirements.reasoning_effort)?
+            != input.requirements.reasoning_effort
+        {
+            return Err(ModelCapabilityError::ReasoningEffortRequired);
+        }
         if self.resolve_output_token_limit(input.requirements.max_output_tokens)?
             != input.requirements.max_output_tokens
         {
@@ -293,7 +433,8 @@ impl ModelCapabilities {
                 | ContentItem::ImageArtifact { .. }
                 | ContentItem::ToolCall { .. }
                 | ContentItem::ToolResult { .. }
-                | ContentItem::Reasoning { .. } => {}
+                | ContentItem::Reasoning { .. }
+                | ContentItem::OpaqueContinuation { .. } => {}
             }
         }
 
@@ -318,6 +459,12 @@ impl ModelCapabilities {
 #[allow(clippy::enum_variant_names)]
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum ModelCapabilityError {
+    #[error("reasoning effort is not supported by the explicit capability mapping")]
+    ReasoningEffortUnsupported,
+    #[error(
+        "request omitted the configured reasoning effort; resolve it before Context and audit capture"
+    )]
+    ReasoningEffortRequired,
     #[error("output token limit must be positive and smaller than the declared context window")]
     InvalidOutputTokenLimit,
     #[error("output token limit is not supported by the explicit capability mapping")]
@@ -355,9 +502,22 @@ pub struct ModelUsage {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ModelEvent {
-    TextDelta { text: String },
-    ReasoningDelta { text: String },
-    ReasoningItem { text: String },
-    ToolCall { call: ToolCall },
-    Usage { usage: ModelUsage },
+    TextDelta {
+        text: String,
+    },
+    ReasoningDelta {
+        text: String,
+    },
+    ReasoningItem {
+        text: String,
+    },
+    OpaqueContinuation {
+        reference: OpaqueContinuationReference,
+    },
+    ToolCall {
+        call: ToolCall,
+    },
+    Usage {
+        usage: ModelUsage,
+    },
 }

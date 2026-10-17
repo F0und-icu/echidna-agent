@@ -12,4 +12,5 @@ pub(crate) mod project_snapshot;
 pub mod replay;
 pub(crate) mod research_projection;
 pub mod responses;
+pub(crate) mod subscription_auth;
 pub mod tools;

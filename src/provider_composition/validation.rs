@@ -96,12 +96,59 @@ impl ProviderDefinition {
             });
         }
         validate_base_url(name, &self.base_url)?;
-        match (self.credential_ref.as_deref(), self.api_key.as_ref()) {
-            (Some(reference), None) => validate_credential_reference(name, reference),
-            (None, Some(api_key)) if !api_key.expose().trim().is_empty() => Ok(()),
-            (None, Some(_)) => Err(ProviderCompositionError::EmptyInlineApiKey {
+        match (
+            self.credential_ref.as_deref(),
+            self.api_key.as_ref(),
+            self.chatgpt_subscription.as_ref(),
+            self.codex_subscription.as_ref(),
+        ) {
+            (Some(reference), None, None, None) => validate_credential_reference(name, reference),
+            (None, Some(api_key), None, None) if !api_key.expose().trim().is_empty() => Ok(()),
+            (None, Some(_), None, None) => Err(ProviderCompositionError::EmptyInlineApiKey {
                 provider: name.to_owned(),
             }),
+            (None, None, Some(subscription), None) => {
+                // The authentication owner validates label/path syntax. This
+                // constructor is pure: doctor never touches the private store.
+                super::subscription_service(subscription)?;
+                if self.base_url.trim_end_matches('/')
+                    != crate::adapters::subscription_auth::API_BASE_URL
+                {
+                    return Err(ProviderCompositionError::InvalidSubscription {
+                        provider: name.to_owned(),
+                        message: "subscription credentials require the official public HTTPS API audience".to_owned(),
+                    });
+                }
+                let mapping = mappings[&self.capability_mapping].to_domain();
+                if mapping.incremental_input || mapping.max_output_tokens.is_some() {
+                    return Err(ProviderCompositionError::InvalidSubscription {
+                        provider: name.to_owned(),
+                        message: "subscription HTTP requires incremental_input=false and no max_output_tokens".to_owned(),
+                    });
+                }
+                Ok(())
+            }
+            (None, None, None, Some(subscription)) => {
+                // The authentication owner validates label/path syntax. This
+                // constructor is pure: doctor never touches the private store.
+                super::codex_subscription_service(subscription)?;
+                if self.base_url.trim_end_matches('/')
+                    != crate::adapters::subscription_auth::CODEX_API_BASE_URL
+                {
+                    return Err(ProviderCompositionError::InvalidSubscription {
+                        provider: name.to_owned(),
+                        message: "Codex subscription credentials require the fixed ChatGPT backend audience".to_owned(),
+                    });
+                }
+                let mapping = mappings[&self.capability_mapping].to_domain();
+                if mapping.incremental_input || mapping.max_output_tokens.is_some() {
+                    return Err(ProviderCompositionError::InvalidSubscription {
+                        provider: name.to_owned(),
+                        message: "Codex subscription HTTP requires incremental_input=false and no max_output_tokens".to_owned(),
+                    });
+                }
+                Ok(())
+            }
             _ => Err(ProviderCompositionError::CredentialSelection {
                 provider: name.to_owned(),
             }),
@@ -254,8 +301,14 @@ pub enum ProviderCompositionError {
         "Provider `{provider}` credential reference `{reference}` must be a dedicated CYBER_AGENT_*_API_KEY name"
     )]
     InvalidCredentialReference { provider: String, reference: String },
-    #[error("Provider `{provider}` must configure exactly one of `api_key` or `credential_ref`")]
+    #[error(
+        "Provider `{provider}` must configure exactly one of `api_key`, `credential_ref`, `chatgpt_subscription`, or `codex_subscription`"
+    )]
     CredentialSelection { provider: String },
+    #[error("Provider `{provider}` subscription configuration is invalid: {message}")]
+    InvalidSubscription { provider: String, message: String },
+    #[error("subscription authentication setup failed: {message}")]
+    SubscriptionAuthentication { message: String },
     #[error("Provider `{provider}` inline `api_key` must not be empty")]
     EmptyInlineApiKey { provider: String },
     #[error("Agent profile `{profile}` is invalid: {source}")]

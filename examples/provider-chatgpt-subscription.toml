@@ -1,0 +1,32 @@
+# ChatGPT subscription preview; this file contains no credentials.
+# Replace the absolute private store path and choose an account model via auth models.
+# The store's parent directory must already exist; no ancestor may be a symlink.
+schema_version = 1
+active_agent_profile = "subscription"
+
+[providers.chatgpt]
+binding = "http_sse"
+wire_api = "responses"
+base_url = "https://api.openai.com/v1"
+model = "REPLACE_WITH_ACCOUNT_MODEL_SLUG"
+chatgpt_subscription = { account = "personal", auth_store = "/REPLACE_WITH_PRIVATE_DIRECTORY/echidna-auth" }
+capability_mapping = "subscription-text-v1"
+generation = 1
+
+[capability_mappings.subscription-text-v1]
+version = 1
+text_input = true
+image_input = false
+streaming = true
+tool_call = true
+structured_output = false
+incremental_input = false
+usage_reporting = true
+# Explicit conservative example, not an inferred account/model limit.
+context_window = 32768
+# Do not set max_output_tokens: this subscription HTTP route does not support it.
+
+[agent_profiles.subscription]
+primary = "chatgpt"
+vision_mode = "disabled"
+generation = 1

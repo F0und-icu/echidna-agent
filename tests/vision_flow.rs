@@ -69,6 +69,7 @@ fn capabilities(image_input: bool, incremental_input: bool) -> ModelCapabilities
         incremental_input,
         usage_reporting: false,
         max_output_tokens: None,
+        reasoning_effort: None,
         context_window: 128_000,
         capability_mapping_version: CapabilityMappingVersion::new(1),
     }

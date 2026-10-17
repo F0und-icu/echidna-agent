@@ -33,6 +33,7 @@ fn all_capabilities() -> ModelCapabilities {
         incremental_input: true,
         usage_reporting: true,
         max_output_tokens: None,
+        reasoning_effort: None,
         context_window: 128_000,
         capability_mapping_version: CapabilityMappingVersion::new(7),
     }

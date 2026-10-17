@@ -604,7 +604,7 @@ impl SessionReducer {
     {
         let mut state = SessionState::default();
         for event in events {
-            self.apply(&mut state, event)?;
+            self.apply_in_place(&mut state, event)?;
         }
         Ok(state)
     }
@@ -616,15 +616,31 @@ impl SessionReducer {
         state: &mut SessionState,
         event: EventEnvelope<Value>,
     ) -> Result<ApplyOutcome, SessionError> {
+        let mut next = state.clone();
+        let outcome = self.apply_in_place(&mut next, event)?;
+        *state = next;
+        Ok(outcome)
+    }
+
+    /// Applies one transition to state exclusively owned by the caller.
+    /// Full replay owns a fresh state and discards it on any error; public
+    /// incremental apply stages a clone before entering this owner.
+    fn apply_in_place(
+        &self,
+        state: &mut SessionState,
+        event: EventEnvelope<Value>,
+    ) -> Result<ApplyOutcome, SessionError> {
         let event = EventUpcaster::upcast(&CurrentEventUpcaster, event)?;
         validate_session_stream(state, &event.stream_id)?;
         let session_event = SessionEvent::decode(&event.event_type, event.payload.clone())?;
         let stream_id = event.stream_id.clone();
         let sequence = event.sequence;
         let event_id = event.event_id.clone();
+        let source_event_sequence = state
+            .stream_id()
+            .and_then(|stream_id| state.event_state.last_sequence_for(stream_id));
 
-        let mut next = state.clone();
-        let outcome = EventReducer.apply(&mut next.event_state, event)?;
+        let outcome = EventReducer.apply(&mut state.event_state, event)?;
         if outcome == ApplyOutcome::DuplicateIgnored {
             if let SessionEvent::RequestAuditRecorded { manifest } = session_event {
                 let exact_existing = state.request_audits.iter().any(|existing| {
@@ -636,13 +652,9 @@ impl SessionReducer {
             }
             return Ok(outcome);
         }
-        require_next_sequence(state, &stream_id, sequence)?;
-        next.stream_id = Some(stream_id);
-        let source_event_sequence = state
-            .stream_id()
-            .and_then(|stream_id| state.event_state.last_sequence_for(stream_id));
-        apply_session_event(&mut next, session_event, source_event_sequence, &event_id)?;
-        *state = next;
+        require_next_sequence(source_event_sequence, &stream_id, sequence)?;
+        state.stream_id = Some(stream_id);
+        apply_session_event(state, session_event, source_event_sequence, &event_id)?;
         Ok(outcome)
     }
 }
@@ -666,11 +678,11 @@ fn decode_execution_receipt(
 }
 
 fn require_next_sequence(
-    state: &SessionState,
+    previous: Option<EventSequence>,
     stream_id: &StreamId,
     received: EventSequence,
 ) -> Result<(), SessionError> {
-    let expected = match state.event_state.last_sequence_for(stream_id) {
+    let expected = match previous {
         Some(last) => EventSequence::new(last.get().checked_add(1).ok_or_else(|| {
             SessionError::Event(EventError::SequenceOverflow {
                 stream_id: stream_id.clone(),

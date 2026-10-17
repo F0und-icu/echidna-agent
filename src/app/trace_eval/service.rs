@@ -470,6 +470,7 @@ where
                         ContentItem::Text { .. }
                         | ContentItem::ImageArtifact { .. }
                         | ContentItem::Reasoning { .. }
+                        | ContentItem::OpaqueContinuation { .. }
                         | ContentItem::ToolCall { .. }
                         | ContentItem::ToolResult { .. }
                         | ContentItem::Unsupported { .. } => None,
@@ -535,6 +536,7 @@ fn model_event_from_history(
         ContentItem::Text { .. }
         | ContentItem::ImageArtifact { .. }
         | ContentItem::Reasoning { .. }
+        | ContentItem::OpaqueContinuation { .. }
         | ContentItem::ToolResult { .. }
         | ContentItem::Unsupported { .. } => {
             Err(TraceFixtureError::ProviderHistoryNotModelOutput {

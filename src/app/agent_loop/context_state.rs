@@ -281,10 +281,12 @@ pub(super) fn state_diff_delivery_input(
     let Some(committed_input) = committed_input else {
         return Ok(None);
     };
-    let retains_reasoning = committed_input
-        .content_items
-        .iter()
-        .any(|item| matches!(item, ContentItem::Reasoning { .. }));
+    let retains_reasoning = committed_input.content_items.iter().any(|item| {
+        matches!(
+            item,
+            ContentItem::Reasoning { .. } | ContentItem::OpaqueContinuation { .. }
+        )
+    });
     let Some(committed_delivery_map) = committed_delivery_map else {
         return continuation_unavailable_or_none(
             retains_reasoning,

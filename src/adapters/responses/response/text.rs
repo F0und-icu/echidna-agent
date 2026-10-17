@@ -22,36 +22,106 @@ struct Part {
     sealed: bool,
 }
 
+#[derive(Clone, Copy)]
+enum SnapshotKind {
+    OutputText,
+    ReasoningSummary,
+}
+
+impl SnapshotKind {
+    fn item_type(self) -> &'static str {
+        match self {
+            Self::OutputText => "message",
+            Self::ReasoningSummary => "reasoning",
+        }
+    }
+
+    fn parts_field(self) -> &'static str {
+        match self {
+            Self::OutputText => "content",
+            Self::ReasoningSummary => "summary",
+        }
+    }
+
+    fn part_type(self) -> &'static str {
+        match self {
+            Self::OutputText => "output_text",
+            Self::ReasoningSummary => "summary_text",
+        }
+    }
+
+    fn missing_position(self) -> &'static str {
+        match self {
+            Self::OutputText => "completed output did not identify streamed text",
+            Self::ReasoningSummary => {
+                "completed output did not identify streamed reasoning summary"
+            }
+        }
+    }
+
+    fn missing_part(self) -> &'static str {
+        match self {
+            Self::OutputText => "completed output omitted streamed text",
+            Self::ReasoningSummary => "completed output omitted streamed reasoning summary",
+        }
+    }
+
+    fn changed_identity(self) -> &'static str {
+        match self {
+            Self::OutputText => "completed output changed text item identity",
+            Self::ReasoningSummary => "completed output changed reasoning summary item identity",
+        }
+    }
+
+    fn changed_text(self) -> &'static str {
+        match self {
+            Self::OutputText => "completed output changed streamed text",
+            Self::ReasoningSummary => "completed output changed streamed reasoning summary",
+        }
+    }
+}
+
 impl TextOutput {
     pub(super) fn validate_snapshot(&self, output: &[Value]) -> Result<(), ModelProviderError> {
+        self.validate_snapshot_kind(output, SnapshotKind::OutputText)
+    }
+
+    pub(super) fn validate_reasoning_summary_snapshot(
+        &self,
+        output: &[Value],
+    ) -> Result<(), ModelProviderError> {
+        self.validate_snapshot_kind(output, SnapshotKind::ReasoningSummary)
+    }
+
+    fn validate_snapshot_kind(
+        &self,
+        output: &[Value],
+        kind: SnapshotKind,
+    ) -> Result<(), ModelProviderError> {
         for part in &self.parts {
-            let Some((index, content)) = part.position else {
-                return Err(protocol_error(
-                    "completed output did not identify streamed text",
-                ));
+            let Some((index, part_index)) = part.position else {
+                return Err(protocol_error(kind.missing_position()));
             };
             let item = output
                 .get(index)
-                .ok_or_else(|| protocol_error("completed output omitted streamed text"))?;
-            if item.get("type").and_then(Value::as_str) != Some("message")
+                .ok_or_else(|| protocol_error(kind.missing_part()))?;
+            if item.get("type").and_then(Value::as_str) != Some(kind.item_type())
                 || part
                     .item_id
                     .as_deref()
                     .is_some_and(|id| item.get("id").and_then(Value::as_str) != Some(id))
             {
-                return Err(protocol_error(
-                    "completed output changed text item identity",
-                ));
+                return Err(protocol_error(kind.changed_identity()));
             }
-            let content = item
-                .get("content")
+            let snapshot_part = item
+                .get(kind.parts_field())
                 .and_then(Value::as_array)
-                .and_then(|parts| parts.get(content))
-                .ok_or_else(|| protocol_error("completed output omitted streamed text"))?;
-            if content.get("type").and_then(Value::as_str) != Some("output_text")
-                || content.get("text").and_then(Value::as_str) != Some(part.text.as_str())
+                .and_then(|parts| parts.get(part_index))
+                .ok_or_else(|| protocol_error(kind.missing_part()))?;
+            if snapshot_part.get("type").and_then(Value::as_str) != Some(kind.part_type())
+                || snapshot_part.get("text").and_then(Value::as_str) != Some(part.text.as_str())
             {
-                return Err(protocol_error("completed output changed streamed text"));
+                return Err(protocol_error(kind.changed_text()));
             }
         }
         Ok(())
@@ -76,6 +146,22 @@ impl TextOutput {
         text: &str,
         final_text: bool,
     ) -> Result<Vec<ModelEvent>, ModelProviderError> {
+        self.text_suffix(output, content, item_id, text, final_text)
+            .map(|suffix| {
+                suffix
+                    .map(|text| vec![ModelEvent::TextDelta { text }])
+                    .unwrap_or_default()
+            })
+    }
+
+    pub(super) fn text_suffix(
+        &mut self,
+        output: Option<usize>,
+        content: Option<usize>,
+        item_id: Option<&str>,
+        text: &str,
+        final_text: bool,
+    ) -> Result<Option<String>, ModelProviderError> {
         let position = match (output, content) {
             (Some(o), Some(c)) => Some((o, c)),
             (None, None) => None,
@@ -140,13 +226,7 @@ impl TextOutput {
         if !suffix.is_empty() && part.sealed {
             return Err(protocol_error("final text would reorder prior output"));
         }
-        let events = if suffix.is_empty() {
-            Vec::new()
-        } else {
-            vec![ModelEvent::TextDelta {
-                text: suffix.to_owned(),
-            }]
-        };
+        let suffix = (!suffix.is_empty()).then(|| suffix.to_owned());
         if final_text {
             part.text = text.to_owned();
             part.finalized = true;
@@ -156,7 +236,7 @@ impl TextOutput {
         if let Some(position) = position {
             self.frontier = Some(self.frontier.unwrap_or_default().max(position));
         }
-        Ok(events)
+        Ok(suffix)
     }
 
     pub(super) fn part(

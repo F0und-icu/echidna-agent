@@ -8,8 +8,8 @@ use echidna::domain::context::{ProviderSessionId, ProviderSessionRef, ProviderSe
 use echidna::domain::events::{
     EventEnvelope, EventId, EventSequence, EventType, OccurredAt, StreamId,
 };
-use echidna::domain::history::normalize_content_items;
-use echidna::domain::model::ContentItem;
+use echidna::domain::history::{HistoryError, normalize_content_items};
+use echidna::domain::model::{ContentItem, MessageRole};
 use echidna::domain::session::{
     SessionError, SessionEvent, SessionLifecycle, SessionReducer, SessionState,
 };
@@ -52,6 +52,99 @@ fn session_started(sequence: u64) -> EventEnvelope<Value> {
         OccurredAt::new("2026-08-23T00:00:00Z"),
     )
     .unwrap()
+}
+
+#[test]
+fn full_replay_matches_atomic_apply_and_discards_a_late_sequence_gap() {
+    let reducer = SessionReducer;
+    let mut events = vec![session_started(1)];
+    for sequence in 2..=97 {
+        events.push(
+            SessionEvent::HistoryItemRecorded {
+                item: ContentItem::Text {
+                    role: if sequence % 2 == 0 {
+                        MessageRole::User
+                    } else {
+                        MessageRole::Assistant
+                    },
+                    text: format!("history-{sequence}-{}", "x".repeat(2_048)),
+                },
+            }
+            .into_envelope(
+                EventId::new(format!("history-{sequence}")),
+                session_stream(),
+                EventSequence::new(sequence),
+                OccurredAt::new("2026-08-23T00:00:00Z"),
+            )
+            .unwrap(),
+        );
+    }
+    events.push(event(
+        "receipt-98",
+        98,
+        "tool.execution_receipt_recorded",
+        json!({"schema_version":2,"receipt":{
+            "execution_id":"execution:replay-equivalence",
+            "plan_fingerprint":"replay-equivalence-plan",
+            "status":"succeeded","exit_reason":null,"output_artifact_ids":[],
+            "output_captures":[],"environment_change":null
+        }}),
+    ));
+
+    let full = reducer.reduce(events.clone()).unwrap();
+    let mut incremental = SessionState::default();
+    for event in events.clone() {
+        reducer.apply(&mut incremental, event).unwrap();
+    }
+    assert_eq!(full, incremental);
+
+    let gap = event(
+        "late-gap",
+        100,
+        "session.history_item_recorded",
+        json!({"schema_version":1,"item":ContentItem::Text {
+            role: MessageRole::User,
+            text: "must not be committed".to_owned(),
+        }}),
+    );
+    assert!(
+        reducer
+            .reduce(events.into_iter().chain([gap.clone()]))
+            .is_err()
+    );
+    let before = incremental.clone();
+    assert!(reducer.apply(&mut incremental, gap).is_err());
+    assert_eq!(incremental, before);
+}
+
+#[test]
+fn session_rejects_an_opaque_continuation_before_resume_or_compaction() {
+    let opaque: ContentItem = serde_json::from_value(json!({
+        "kind": "opaque_continuation",
+        "reference": {
+            "scope": "provider-session:primary:fixture:1",
+            "content_identity": "b".repeat(64),
+            "encoded_byte_length": 128,
+        },
+    }))
+    .expect("opaque fixture has the current Domain shape");
+    let result = SessionReducer.reduce([
+        session_started(1),
+        SessionEvent::HistoryItemRecorded { item: opaque }
+            .into_envelope(
+                EventId::new("opaque-history"),
+                session_stream(),
+                EventSequence::new(2),
+                OccurredAt::new("2026-10-12T00:00:00Z"),
+            )
+            .unwrap(),
+    ]);
+    assert!(matches!(
+        result,
+        Err(SessionError::History(
+            HistoryError::ProviderContinuationItem
+        ))
+    ));
 }
 
 #[test]

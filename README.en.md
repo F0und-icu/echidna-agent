@@ -149,6 +149,104 @@ load it in your shell and export its variables before starting. Alternatively, r
 `credential_ref` with `api_key = "…"` in your local TOML; each provider must use exactly one.
 Keep real keys and configuration outside the repository and out of Git.
 
+#### ChatGPT subscription sign-in
+
+Use the [subscription template](examples/provider-chatgpt-subscription.toml) and save your
+configuration outside the repository. Set `auth_store` to an absolute private directory without symlinks and with an existing parent
+and retain the official API URL. `chatgpt_subscription` is mutually exclusive with
+`api_key` and `credential_ref`. Echidna performs its own OAuth authorization; it does not
+read existing Codex or browser credentials.
+
+```sh
+echidna --config /absolute/path/subscription.toml auth login --provider chatgpt
+echidna --config /absolute/path/subscription.toml auth status --provider chatgpt
+echidna --config /absolute/path/subscription.toml auth models --provider chatgpt
+```
+
+Login opens a browser. Use `--no-browser` to open the printed authorization URL manually.
+The browser must reach the loopback callback on the machine running Echidna; using a
+different machine requires forwarding the callback port.
+`status` checks local state only; `models` queries the server with the selected account.
+Put a returned model slug in `model`, verify its capabilities and context window, then use
+the same configuration for `doctor` and `chat`. The template's 32K window is an explicit
+example. Subscription HTTP requires `incremental_input = false` and does not accept
+`max_output_tokens`. Successful login and offline doctor do not prove model eligibility.
+
+```sh
+echidna --config /absolute/path/subscription.toml auth logout --provider chatgpt
+```
+
+Access tokens refresh on demand before use. Logout attempts revocation and removes local
+tokens, reporting whether remote revocation was confirmed. Keep the authentication
+directory outside repositories and research projects with owner-only directory/file access.
+Account eligibility and usage follow the [official preview limitations](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations).
+Failures do not switch to paid API access or replay tools. Other vendors' non-key
+subscriptions are not yet supported.
+
+#### Codex-compatible subscription sign-in
+
+Use the [Codex-compatible template](examples/provider-codex-subscription.toml) with
+explicit `codex_subscription` and `https://chatgpt.com/backend-api/codex`.
+This choice is exclusive with SIWC and both API-key forms. Use a separate private
+`auth_store` for this profile. Existing API-key, Qwen and DeepSeek configurations
+need no changes.
+
+To declare a catalog compatibility version, set
+`catalog_client_version = "major.minor.patch"` inside `codex_subscription`. Its
+default remains `0.144.0`; an explicit value changes only the catalog request's
+`client_version` query and `version` header. It does not claim an installed Codex
+release or guarantee new model IDs or account access.
+
+Use the same `auth login/status/models/logout` commands above with the new config
+path and its provider ID. Echidna performs its own browser authorization and owns
+its token store; it does not read an existing Codex login. The loopback callback
+uses port 1455, or 1457 when that port is occupied. If the catalog returns HTTP401
+while local status still reports future expiry, explicitly refresh the own grant:
+
+```sh
+echidna --config /absolute/path/codex.toml auth refresh --provider codex
+```
+
+This Codex-only command refreshes credentials and returns local status. It opens
+no browser and repeats no catalog/model request. After success, explicitly run
+selection again; a permanently rejected refresh requires a new login. Local
+`status` does not prove the backend still accepts the grant. SIWC and API-key
+flows remain unchanged.
+
+Discover models, choose one and its reasoning effort, and save the choice with
+the terminal picker:
+
+```sh
+echidna --config /absolute/path/codex.toml auth select-model --provider codex
+```
+
+For noninteractive selection, use a model returned by the catalog and an effort
+advertised for that model:
+
+```sh
+echidna --config /absolute/path/codex.toml auth select-model --provider codex \
+  --model gpt-6-astra --reasoning-effort xhigh
+```
+
+Executable effort levels are `low`, `medium`, `high`, `xhigh` and `max`; available
+choices depend on the returned catalog. Omitting effort keeps service-default
+behavior without sending the advertised default. Saving clones an isolated
+capability mapping for the provider and preserves other providers, comments and
+credentials. The configuration lock coordinates Echidna selection commands, so
+avoid editing the file externally while a selection is being saved.
+Image, tool and window declarations still require explicit review;
+the picker does not infer them from model names. Offline `doctor` shows the
+configured effort; a new `chat` uses the saved settings. The protocol
+is based on a pinned Codex source version; actual account/server compatibility
+requires live verification. Failures do not switch models or paid APIs or replay
+tools automatically.
+
+The Codex path requests available reasoning summaries and labels them
+`推理摘要` on stderr in debug and release builds. These are provider summaries,
+not full internal reasoning. Empty summaries stay empty. They do not enter
+conversation text or replace encrypted continuation. Reasoning effort is
+independent of presentation; selecting `high` does not guarantee a summary.
+
 #### One multimodal model
 
 Use the [multimodal template](examples/provider-multimodal.toml) for one primary model that

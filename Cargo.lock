@@ -303,28 +303,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "echidna"
-version = "0.0.1"
-dependencies = [
- "async-stream",
- "base64",
- "blake3",
- "clap",
- "eventsource-stream",
- "futures-core",
- "futures-util",
- "image",
- "portable-pty",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "thiserror 2.0.18",
- "tokio",
- "toml",
-]
-
-[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -350,6 +328,30 @@ name = "downcast-rs"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
+
+[[package]]
+name = "echidna"
+version = "0.0.1"
+dependencies = [
+ "async-stream",
+ "base64",
+ "blake3",
+ "clap",
+ "eventsource-stream",
+ "futures-core",
+ "futures-util",
+ "image",
+ "portable-pty",
+ "reqwest",
+ "ring",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+ "toml_edit",
+]
 
 [[package]]
 name = "equivalent"

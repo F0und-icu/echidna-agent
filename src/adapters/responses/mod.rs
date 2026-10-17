@@ -5,18 +5,23 @@ mod cli_output;
 mod request;
 mod response;
 
-use std::sync::Arc;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use async_stream::try_stream;
 use eventsource_stream::Eventsource;
 use futures_util::StreamExt;
-use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderValue};
+use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderName, HeaderValue};
 
-use crate::adapters::credentials::CredentialSource;
+use crate::adapters::credentials::{
+    AccountBoundCredential, CredentialResolution, CredentialSource, CredentialSourceError,
+};
 use crate::adapters::image::resolve_project_image_artifact;
 use crate::domain::artifacts::ArtifactId;
-use crate::domain::model::ModelCapabilities;
+use crate::domain::model::{
+    ContentItem, ModelCapabilities, OpaqueContinuationReference, OpaqueContinuationScope,
+};
 use crate::domain::request_audit::RequestAdapterVersion;
 use crate::ports::model::{
     ModelEventStream, ModelProvider, ModelProviderError, ModelRequest, ModelStreamEvent,
@@ -24,8 +29,48 @@ use crate::ports::model::{
 
 pub(crate) const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 30_000;
 pub(crate) const DEFAULT_READ_TIMEOUT_MS: u64 = 300_000;
-#[cfg(debug_assertions)]
-const MAX_DEBUG_ERROR_BODY_BYTES: usize = 64 * 1024;
+/// Four encoded MiB is the largest continuation item that can enter the
+/// Adapter-local store. The Context estimator still rejects it when it cannot
+/// fit the configured model window.
+pub(crate) const MAX_OPAQUE_CONTINUATION_ITEM_BYTES: usize = 4 * 1024 * 1024;
+const MAX_OPAQUE_CONTINUATION_ITEMS: usize = 512;
+const MAX_OPAQUE_CONTINUATION_STORE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_HTTP_ERROR_BODY_BYTES: usize = 64 * 1024;
+const MAX_CHATGPT_ACCOUNT_ID_BYTES: usize = 256;
+const CHATGPT_ACCOUNT_ID: HeaderName = HeaderName::from_static("chatgpt-account-id");
+
+/// The explicit wire contract selected by Config. Provider names, endpoints
+/// and model slugs never select this profile implicitly.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ResponsesWireProfile {
+    Standard,
+    ChatGptSubscription,
+    CodexSubscription,
+}
+
+impl ResponsesWireProfile {
+    pub(crate) fn request_adapter_version(self) -> RequestAdapterVersion {
+        let version = match self {
+            Self::Standard => "responses-http-sse-v1",
+            Self::ChatGptSubscription => "responses-http-sse-chatgpt-subscription-v1",
+            Self::CodexSubscription => "responses-http-sse-codex-subscription-v2",
+        };
+        RequestAdapterVersion::new(version)
+            .expect("the fixed Responses HTTP/SSE Adapter version is non-empty")
+    }
+
+    pub(super) const fn is_subscription(self) -> bool {
+        matches!(self, Self::ChatGptSubscription | Self::CodexSubscription)
+    }
+
+    pub(super) const fn subscription_label(self) -> &'static str {
+        match self {
+            Self::ChatGptSubscription => "ChatGPT subscription",
+            Self::CodexSubscription => "Codex subscription",
+            Self::Standard => "Responses provider",
+        }
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResponsesHttpConfig {
@@ -35,6 +80,7 @@ pub struct ResponsesHttpConfig {
     capabilities: ModelCapabilities,
     connect_timeout: Duration,
     read_timeout: Duration,
+    wire_profile: ResponsesWireProfile,
 }
 
 impl ResponsesHttpConfig {
@@ -51,12 +97,27 @@ impl ResponsesHttpConfig {
             capabilities,
             connect_timeout: Duration::from_millis(DEFAULT_CONNECT_TIMEOUT_MS),
             read_timeout: Duration::from_millis(DEFAULT_READ_TIMEOUT_MS),
+            wire_profile: ResponsesWireProfile::Standard,
         }
     }
 
     pub(crate) fn with_timeouts(mut self, connect_ms: u64, read_ms: u64) -> Self {
         self.connect_timeout = Duration::from_millis(connect_ms);
         self.read_timeout = Duration::from_millis(read_ms);
+        self
+    }
+
+    /// Selects the explicit ChatGPT subscription Responses wire contract.
+    /// This remains opt-in; [`Self::new`] preserves the standard profile.
+    pub fn with_chatgpt_subscription_profile(mut self) -> Self {
+        self.wire_profile = ResponsesWireProfile::ChatGptSubscription;
+        self
+    }
+
+    /// Selects the explicit Codex subscription Responses wire contract.
+    /// This remains opt-in; [`Self::new`] preserves the standard profile.
+    pub fn with_codex_subscription_profile(mut self) -> Self {
+        self.wire_profile = ResponsesWireProfile::CodexSubscription;
         self
     }
 
@@ -72,6 +133,7 @@ pub struct ResponsesHttpAdapter {
     credential_source: Arc<dyn CredentialSource>,
     image_resolver: Option<Arc<ImageArtifactResolver>>,
     cli_role: Option<&'static str>,
+    opaque_continuations: Arc<OpaqueContinuationStore>,
     #[cfg(debug_assertions)]
     debug: bool,
 }
@@ -84,8 +146,7 @@ impl ResponsesHttpAdapter {
     /// implementation. Runtime consumers receive it from ProviderComposition
     /// instead of encoding protocol knowledge themselves.
     pub fn request_adapter_version() -> RequestAdapterVersion {
-        RequestAdapterVersion::new("responses-http-sse-v1")
-            .expect("the fixed Responses HTTP/SSE Adapter version is non-empty")
+        ResponsesWireProfile::Standard.request_adapter_version()
     }
 
     pub fn new(config: ResponsesHttpConfig, credential_source: Arc<dyn CredentialSource>) -> Self {
@@ -93,12 +154,14 @@ impl ResponsesHttpAdapter {
             client: reqwest::Client::builder()
                 .connect_timeout(config.connect_timeout)
                 .read_timeout(config.read_timeout)
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("Responses HTTP client initialization failed"),
             config,
             credential_source,
             image_resolver: None,
             cli_role: None,
+            opaque_continuations: Arc::new(OpaqueContinuationStore::default()),
             #[cfg(debug_assertions)]
             debug: false,
         }
@@ -143,31 +206,45 @@ impl ModelProvider for ResponsesHttpAdapter {
         request.validate_capabilities(&self.config.capabilities)?;
 
         let credential_reference = self.config.credential_reference.clone();
-        let api_key = self
-            .credential_source
-            .read(&credential_reference)
-            .map_err(|error| ModelProviderError::CredentialSourceFailure {
-                credential_ref: credential_reference.clone(),
-                message: error.to_string(),
-            })?
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| ModelProviderError::CredentialUnavailable {
-                credential_ref: credential_reference.clone(),
-            })?;
-        let authorization = HeaderValue::from_str(&format!("Bearer {api_key}")).map_err(|_| {
-            ModelProviderError::CredentialInvalid {
-                credential_ref: credential_reference,
-            }
-        })?;
-
         let usage_required = request.input().requirements.usage_reporting;
         let continuation_required = self.config.capabilities.incremental_input;
         let continuation_requested = request.is_incremental();
+        let opaque_scope = request.opaque_continuation_scope().cloned();
+        let retained_opaque = OpaqueContinuationStore::references_in(request.input());
+        let opaque_continuations = self.opaque_continuations.clone();
+        let profile = self.config.wire_profile;
         let request = request::encode_request(
             request,
             self.config.model.clone(),
             self.image_resolver.as_deref(),
+            profile,
+            &|reference, scope| opaque_continuations.resolve(reference, scope),
         )?;
+        let credential = match (
+            profile,
+            self.credential_source.resolve(&credential_reference),
+        ) {
+            (
+                ResponsesWireProfile::CodexSubscription,
+                CredentialResolution::PendingAccountBound(resolution),
+            ) => CredentialForStream::PendingAccountBound(resolution),
+            (ResponsesWireProfile::CodexSubscription, _) => {
+                return Err(request_encoding_error(
+                    "Codex subscription Responses requires an account-bound credential",
+                ));
+            }
+            (_, CredentialResolution::PendingAccountBound(_)) => {
+                return Err(request_encoding_error(
+                    "account-bound credentials require the explicit Codex subscription Responses profile",
+                ));
+            }
+            (_, CredentialResolution::Ready(result)) => {
+                CredentialForStream::Ready(validate_credential(result, &credential_reference)?)
+            }
+            (_, CredentialResolution::Pending(resolution)) => {
+                CredentialForStream::Pending(resolution)
+            }
+        };
         let endpoint = self.config.endpoint();
         let client = self.client.clone();
         let cli_role = self.cli_role;
@@ -175,7 +252,21 @@ impl ModelProvider for ResponsesHttpAdapter {
         let full_debug = self.debug;
 
         let stream = try_stream! {
-            let mut diagnostics = cli_role.map(|role| cli_output::RequestOutput::new(role, api_key,
+            let credential = match credential {
+                CredentialForStream::Ready(credential) => credential,
+                CredentialForStream::Pending(resolution) => {
+                    validate_credential(resolution.await, &credential_reference)?
+                }
+                CredentialForStream::PendingAccountBound(resolution) => {
+                    validate_account_bound_credential(resolution.await, &credential_reference)?
+                }
+            };
+            let StreamCredential {
+                bearer,
+                authorization,
+                account_id,
+            } = credential;
+            let mut diagnostics = cli_role.map(|role| cli_output::RequestOutput::new(role, bearer,
                 #[cfg(debug_assertions)]
                 full_debug,
             ));
@@ -183,10 +274,15 @@ impl ModelProvider for ResponsesHttpAdapter {
             if let Some(diagnostics) = &diagnostics {
                 diagnostics.request(&request);
             }
-            let response = client
+            let request_builder = client
                 .post(endpoint)
                 .header(ACCEPT, "text/event-stream")
-                .header(AUTHORIZATION, authorization)
+                .header(AUTHORIZATION, authorization);
+            let request_builder = match account_id {
+                Some(account_id) => request_builder.header(CHATGPT_ACCOUNT_ID, account_id),
+                None => request_builder,
+            };
+            let response = request_builder
                 .json(&request)
                 .send()
                 .await
@@ -199,10 +295,14 @@ impl ModelProvider for ResponsesHttpAdapter {
             if let Some(diagnostics) = &diagnostics {
                 diagnostics.status(status.as_u16());
             }
-            let mut response_events = if status.is_success() {
-                response.bytes_stream().eventsource()
-            } else {
-                if continuation_requested {
+            let mut response_events = match (status.is_success(), profile, continuation_requested) {
+                (true, _, _) => response.bytes_stream().eventsource(),
+                (false, profile, _) if profile.is_subscription() => {
+                    let body = read_bounded_http_error_body(response).await;
+                    Err(response::subscription_http_failure(profile, status.as_u16(), &body))?;
+                    unreachable!("an HTTP failure is returned through the stream")
+                }
+                (false, _, true) => {
                     let body = response.text().await.unwrap_or_default();
                     #[cfg(debug_assertions)]
                     if let Some(diagnostics) = &diagnostics {
@@ -213,24 +313,40 @@ impl ModelProvider for ResponsesHttpAdapter {
                             code: "previous_response_not_found".to_owned(),
                         })?;
                     }
-                } else {
+                    Err(ModelProviderError::HttpFailure {
+                        status: status.as_u16(),
+                    })?;
+                    unreachable!("an HTTP failure is returned through the stream")
+                }
+                (false, _, false) => {
                     #[cfg(debug_assertions)]
                     if full_debug {
-                        let body = read_debug_error_body(response).await;
+                        let body = read_bounded_http_error_body(response).await;
                         if let Some(diagnostics) = &diagnostics {
-                            match &body {
-                                Ok(body) => diagnostics.http_error_body(body),
-                                Err(reason) => diagnostics.response_omitted(reason),
+                            match body {
+                                response::BoundedHttpErrorBody::Complete(body) => {
+                                    diagnostics.http_error_body(&body)
+                                }
+                                response::BoundedHttpErrorBody::Unreadable => {
+                                    diagnostics.response_omitted("HTTP error body unavailable")
+                                }
+                                response::BoundedHttpErrorBody::Oversized => diagnostics
+                                    .response_omitted("HTTP error body omitted: exceeds 65536 bytes"),
                             }
                         }
+                        Err(ModelProviderError::HttpFailure {
+                            status: status.as_u16(),
+                        })?;
+                        unreachable!("an HTTP failure is returned through the stream")
                     }
+                    Err(ModelProviderError::HttpFailure {
+                        status: status.as_u16(),
+                    })?;
+                    unreachable!("an HTTP failure is returned through the stream")
                 }
-                Err(ModelProviderError::HttpFailure {
-                    status: status.as_u16(),
-                })?;
-                unreachable!("an HTTP failure is returned through the stream")
             };
-            let mut decoder = response::ResponseDecoder::default();
+            let mut decoder = response::ResponseDecoder::new(profile, opaque_scope);
+            let mut staged_opaque = BTreeMap::new();
             loop {
                 let event = response_events
                     .next()
@@ -247,7 +363,9 @@ impl ModelProvider for ResponsesHttpAdapter {
                 }
 
                 #[cfg(debug_assertions)]
-                if let Some(diagnostics) = &diagnostics {
+                if !profile.is_subscription()
+                    && let Some(diagnostics) = &diagnostics
+                {
                     diagnostics.response(&event.data);
                 }
 
@@ -261,13 +379,33 @@ impl ModelProvider for ResponsesHttpAdapter {
                         diagnostics.rejected(error);
                     }
                 })?;
-                for model_event in decoded.events {
+                let response::DecodedResponsesEvent {
+                    events,
+                    reasoning_summaries,
+                    completion,
+                    opaque_continuations: decoded_opaque,
+                } = decoded;
+                for opaque in decoded_opaque {
+                    opaque_continuations.stage(
+                        &retained_opaque,
+                        &mut staged_opaque,
+                        opaque.reference,
+                        opaque.item,
+                    )?;
+                }
+                for summary in reasoning_summaries {
+                    if let Some(diagnostics) = &mut diagnostics {
+                        diagnostics.reasoning_summary(&summary.text, summary.starts_part);
+                    }
+                }
+                for model_event in events {
                     if let Some(diagnostics) = &mut diagnostics {
                         diagnostics.model_event(&model_event);
                     }
                     yield ModelStreamEvent::Event(model_event);
                 }
-                if let Some(completion) = decoded.completion {
+                if let Some(completion) = completion {
+                    opaque_continuations.commit(&retained_opaque, staged_opaque)?;
                     if let Some(diagnostics) = &mut diagnostics {
                         diagnostics.completed();
                     }
@@ -281,20 +419,226 @@ impl ModelProvider for ResponsesHttpAdapter {
     }
 }
 
-/// Bound only the extra diagnostic read; existing continuation classification
-/// retains its complete-body behavior independently of presentation.
-#[cfg(debug_assertions)]
-async fn read_debug_error_body(mut response: reqwest::Response) -> Result<String, &'static str> {
+enum CredentialForStream {
+    Ready(StreamCredential),
+    Pending(
+        futures_util::future::BoxFuture<'static, Result<Option<String>, CredentialSourceError>>,
+    ),
+    PendingAccountBound(
+        futures_util::future::BoxFuture<
+            'static,
+            Result<AccountBoundCredential, CredentialSourceError>,
+        >,
+    ),
+}
+
+struct StreamCredential {
+    bearer: String,
+    authorization: HeaderValue,
+    account_id: Option<HeaderValue>,
+}
+
+fn validate_credential(
+    result: Result<Option<String>, CredentialSourceError>,
+    credential_reference: &str,
+) -> Result<StreamCredential, ModelProviderError> {
+    let credential = result
+        .map_err(|error| ModelProviderError::CredentialSourceFailure {
+            credential_ref: credential_reference.to_owned(),
+            message: error.to_string(),
+        })?
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| ModelProviderError::CredentialUnavailable {
+            credential_ref: credential_reference.to_owned(),
+        })?;
+    let mut authorization =
+        HeaderValue::from_str(&format!("Bearer {credential}")).map_err(|_| {
+            ModelProviderError::CredentialInvalid {
+                credential_ref: credential_reference.to_owned(),
+            }
+        })?;
+    authorization.set_sensitive(true);
+    Ok(StreamCredential {
+        bearer: credential,
+        authorization,
+        account_id: None,
+    })
+}
+
+fn validate_account_bound_credential(
+    result: Result<AccountBoundCredential, CredentialSourceError>,
+    credential_reference: &str,
+) -> Result<StreamCredential, ModelProviderError> {
+    let (bearer, account_id) = result
+        .map_err(|error| ModelProviderError::CredentialSourceFailure {
+            credential_ref: credential_reference.to_owned(),
+            message: error.to_string(),
+        })?
+        .into_parts();
+    let mut credential = validate_credential(Ok(Some(bearer)), credential_reference)?;
+    if account_id.is_empty() || account_id.len() > MAX_CHATGPT_ACCOUNT_ID_BYTES {
+        return Err(ModelProviderError::CredentialInvalid {
+            credential_ref: credential_reference.to_owned(),
+        });
+    }
+    let mut account_id =
+        HeaderValue::from_str(&account_id).map_err(|_| ModelProviderError::CredentialInvalid {
+            credential_ref: credential_reference.to_owned(),
+        })?;
+    account_id.set_sensitive(true);
+    credential.account_id = Some(account_id);
+    Ok(credential)
+}
+
+#[derive(Default)]
+struct OpaqueContinuationStore {
+    items: Mutex<BTreeMap<OpaqueContinuationReference, request::SubscriptionOpaqueReasoning>>,
+}
+
+impl OpaqueContinuationStore {
+    fn references_in(
+        input: &crate::domain::model::ModelInputIR,
+    ) -> BTreeSet<OpaqueContinuationReference> {
+        input
+            .content_items
+            .iter()
+            .filter_map(|item| match item {
+                ContentItem::OpaqueContinuation { reference } => Some(reference.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn resolve(
+        &self,
+        reference: &OpaqueContinuationReference,
+        scope: &OpaqueContinuationScope,
+    ) -> Result<request::SubscriptionOpaqueReasoning, ModelProviderError> {
+        if reference.scope() != scope {
+            return Err(request_encoding_error(
+                "opaque provider continuation belongs to another delivery session",
+            ));
+        }
+        let items = self.lock_items()?;
+        let item = items.get(reference).ok_or_else(|| {
+            request_encoding_error("opaque provider continuation is unavailable in this Adapter")
+        })?;
+        if !item.validates_reference(reference)? {
+            return Err(request_encoding_error(
+                "opaque provider continuation identity does not match retained content",
+            ));
+        }
+        Ok(item.clone())
+    }
+
+    fn stage(
+        &self,
+        retained: &BTreeSet<OpaqueContinuationReference>,
+        staged: &mut BTreeMap<OpaqueContinuationReference, request::SubscriptionOpaqueReasoning>,
+        reference: OpaqueContinuationReference,
+        item: request::SubscriptionOpaqueReasoning,
+    ) -> Result<(), ModelProviderError> {
+        if let Some(prior) = staged.get(&reference) {
+            if prior != &item {
+                return Err(ModelProviderError::ProtocolFailure {
+                    message: "subscription reasoning reference changed within one response"
+                        .to_owned(),
+                });
+            }
+            return Ok(());
+        }
+        let mut candidate = staged.clone();
+        candidate.insert(reference, item);
+        let items = self.lock_items()?;
+        Self::next_items(&items, retained, candidate.clone())?;
+        *staged = candidate;
+        Ok(())
+    }
+
+    fn commit(
+        &self,
+        retained: &BTreeSet<OpaqueContinuationReference>,
+        staged: BTreeMap<OpaqueContinuationReference, request::SubscriptionOpaqueReasoning>,
+    ) -> Result<(), ModelProviderError> {
+        let mut items = self.lock_items()?;
+        let next = Self::next_items(&items, retained, staged)?;
+        *items = next;
+        Ok(())
+    }
+
+    fn lock_items(
+        &self,
+    ) -> Result<
+        MutexGuard<'_, BTreeMap<OpaqueContinuationReference, request::SubscriptionOpaqueReasoning>>,
+        ModelProviderError,
+    > {
+        self.items
+            .lock()
+            .map_err(|_| ModelProviderError::ProtocolFailure {
+                message: "subscription opaque continuation store lock is poisoned".to_owned(),
+            })
+    }
+
+    fn next_items(
+        items: &BTreeMap<OpaqueContinuationReference, request::SubscriptionOpaqueReasoning>,
+        retained: &BTreeSet<OpaqueContinuationReference>,
+        staged: BTreeMap<OpaqueContinuationReference, request::SubscriptionOpaqueReasoning>,
+    ) -> Result<
+        BTreeMap<OpaqueContinuationReference, request::SubscriptionOpaqueReasoning>,
+        ModelProviderError,
+    > {
+        let mut next = items
+            .iter()
+            .filter(|(reference, _)| retained.contains(*reference))
+            .map(|(reference, item)| (reference.clone(), item.clone()))
+            .collect::<BTreeMap<_, _>>();
+        for (reference, item) in staged {
+            if !item.validates_reference(&reference)? {
+                return Err(request_encoding_error(
+                    "opaque provider continuation identity does not match completed content",
+                ));
+            }
+            next.insert(reference, item);
+        }
+        if next.len() > MAX_OPAQUE_CONTINUATION_ITEMS {
+            return Err(ModelProviderError::ProtocolFailure {
+                message: "subscription opaque continuation store reached its bounded item limit"
+                    .to_owned(),
+            });
+        }
+        let encoded_bytes = next.values().try_fold(0usize, |total, item| {
+            item.encoded_byte_length()
+                .map(|item_bytes| total.saturating_add(item_bytes))
+        })?;
+        if encoded_bytes > MAX_OPAQUE_CONTINUATION_STORE_BYTES {
+            return Err(ModelProviderError::ProtocolFailure {
+                message: "subscription opaque continuation store reached its bounded byte limit"
+                    .to_owned(),
+            });
+        }
+        Ok(next)
+    }
+}
+
+async fn read_bounded_http_error_body(
+    mut response: reqwest::Response,
+) -> response::BoundedHttpErrorBody {
     let mut body = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|_| "HTTP error body unavailable")?
-    {
-        if chunk.len() > MAX_DEBUG_ERROR_BODY_BYTES - body.len() {
-            return Err("HTTP error body omitted: exceeds 65536 bytes");
+    loop {
+        let chunk = match response.chunk().await {
+            Ok(chunk) => chunk,
+            Err(_) => return response::BoundedHttpErrorBody::Unreadable,
+        };
+        let Some(chunk) = chunk else {
+            break;
+        };
+        if chunk.len() > MAX_HTTP_ERROR_BODY_BYTES.saturating_sub(body.len()) {
+            return response::BoundedHttpErrorBody::Oversized;
         }
         body.extend_from_slice(&chunk);
     }
-    String::from_utf8(body).map_err(|_| "HTTP error body is not UTF-8")
+    match String::from_utf8(body) {
+        Ok(body) => response::BoundedHttpErrorBody::Complete(body),
+        Err(_) => response::BoundedHttpErrorBody::Unreadable,
+    }
 }

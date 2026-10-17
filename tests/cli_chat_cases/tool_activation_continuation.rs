@@ -93,7 +93,15 @@ fn activation_case(change: Option<&str>) {
         requests,
         thread,
     };
-    let output = f2a_wait_child(
+    // This positive fixture's initial child makes five loopback samples across
+    // two Turns and three Tool deliveries. The negative two-sample cases and
+    // the explicit Resume child retain the shared 15-second deadline.
+    let initial_child_timeout = if change.is_none() {
+        Duration::from_secs(45)
+    } else {
+        F2A_WAIT
+    };
+    let output = wait_child_before_deadline(
         spawn_f2a_chat(
             root.path(),
             &config,
@@ -105,6 +113,7 @@ fn activation_case(change: Option<&str>) {
             &[],
         ),
         "activation continuation",
+        initial_child_timeout,
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     if let Some(change) = change {

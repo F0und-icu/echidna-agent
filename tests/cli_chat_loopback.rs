@@ -678,15 +678,21 @@ fn wait_child_before_deadline(
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                if let Some(reader) = stdout {
-                    let _ = reader.join();
-                }
-                if let Some(reader) = stderr {
-                    let _ = reader.join();
-                }
+                // Preserve the already-drained fixture output only for the
+                // existing deadline panic, so a future timeout identifies the
+                // last observed child progress without changing its deadline
+                // or cleanup sequence.
+                let stdout = stdout
+                    .map(|reader| reader.join().unwrap())
+                    .unwrap_or_default();
+                let stderr = stderr
+                    .map(|reader| reader.join().unwrap())
+                    .unwrap_or_default();
                 panic!(
-                    "F2a {label} child did not exit within {} seconds",
-                    timeout.as_secs()
+                    "F2a {label} child did not exit within {} seconds\nstdout:\n{}\nstderr:\n{}",
+                    timeout.as_secs(),
+                    String::from_utf8_lossy(&stdout),
+                    String::from_utf8_lossy(&stderr),
                 );
             }
             Err(error) => panic!("failed to poll F2a {label} child: {error}"),
@@ -3212,7 +3218,7 @@ fn m5_context_pressure_uses_only_planner_manifest_and_never_auto_compacts() {
     // Keep this fixture inside the warning band with headroom for canonical
     // ToolSpec guidance; the separate critical lane still proves truncation.
     let warning_config =
-        write_context_window_config(warning.path(), &warning_server.base_url, 22_000);
+        write_context_window_config(warning.path(), &warning_server.base_url, 24_000);
     let warning_output = run_chat(
         warning.path(),
         &warning_config,
@@ -3266,7 +3272,7 @@ fn m5_context_pressure_uses_only_planner_manifest_and_never_auto_compacts() {
     // Leave required fragments room while keeping the bounded Research
     // projection above the input budget; critical must not be a stopped Turn.
     let critical_config =
-        write_context_window_config(critical.path(), &critical_server.base_url, 20_000);
+        write_context_window_config(critical.path(), &critical_server.base_url, 22_000);
     let critical_output = run_chat(
         critical.path(),
         &critical_config,
@@ -3336,6 +3342,11 @@ fn m5_cli_reports_real_tool_start_and_persisted_terminal_receipt() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("┌ 工具 #1 · read_file · 执行中"));
     assert!(stderr.contains("└ 工具 #1 · read_file · 完成"));
+    assert!(stderr.contains("deadline 配置"), "{stderr}");
+    assert!(
+        stderr.contains("总耗时") && stderr.contains("含保存"),
+        "{stderr}"
+    );
     assert!(stderr.contains("path: target.txt"));
     assert!(stderr.contains("content: bounded fixture\n"));
     assert!(!stderr.contains("execution:m5-read"));
@@ -3347,6 +3358,71 @@ fn m5_cli_reports_real_tool_start_and_persisted_terminal_receipt() {
             .count(),
         1
     );
+}
+
+#[test]
+fn ec_r3_cli_shows_the_typed_research_rejection_reason_after_receipt_persistence() {
+    let project = TemporaryDirectory::new("ec-r3-research-rejection-visibility");
+    initialize_project(project.path());
+    let rejected = json!({
+        "event_id": "ec-r3-rejected-hypothesis",
+        "occurred_at": "2026-09-29T12:00:00Z",
+        "operation": {
+            "kind": "record_hypothesis",
+            "record": {
+                "id": "hypothesis-ec-r3-rejected",
+                "title": "Missing experiment evidence",
+                "target_id": "fixture.ec-r3",
+                "attack_surface": "parser",
+                "vulnerability_class": "memory safety",
+                "entry_point": "parse_input",
+                "sensitive_sink": "copy_bytes",
+                "rationale": "controlled CLI rejection fixture",
+                "status": "active",
+                "priority": 10,
+                "evidence_links": [{
+                    "relation": "supports",
+                    "evidence": {"kind": "experiment", "id": "experiment-missing"}
+                }]
+            }
+        }
+    });
+    let server = spawn_responses_server(vec![
+        (
+            200,
+            m4_long_flow_tool_response(
+                "ec-r3-rejected",
+                "research_update",
+                rejected,
+                "ec-r3-rejected-step",
+            ),
+        ),
+        (
+            200,
+            text_response("rejection observed", "ec-r3-rejected-final"),
+        ),
+    ]);
+    let config = write_config(project.path(), &server.base_url);
+    let output = run_chat(
+        project.path(),
+        &config,
+        "record the controlled invalid research reference\n/exit\n",
+        &["--domain", "source", "--phase", "experiment"],
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("· research_update · 失败 · 原因 research_transition_rejected"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("deadline 配置"), "{stderr}");
+    assert!(
+        stderr.contains("总耗时") && stderr.contains("含保存"),
+        "{stderr}"
+    );
+    server.requests.recv().unwrap();
+    server.requests.recv().unwrap();
+    server.join();
 }
 
 #[test]
@@ -3509,7 +3585,15 @@ fn f3_graceful_interrupt_never_fabricates_a_receipt_for_unobserved_external_effe
     );
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert_eq!(stderr.matches("· 执行中").count(), 2, "{stderr}");
-    assert!(stderr.contains("· run_command · 失败"));
+    assert!(
+        stderr.contains("· run_command · 失败 · 原因 command_failed"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("deadline 配置"), "{stderr}");
+    assert!(
+        stderr.contains("总耗时") && stderr.contains("含保存"),
+        "{stderr}"
+    );
     assert!(!stderr.contains("· 取消"));
     assert!(stderr.contains("external effects are unknown"));
     assert!(stderr.contains("状态未知（未观察到批次终态）"));

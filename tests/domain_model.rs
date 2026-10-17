@@ -1,7 +1,7 @@
 use echidna::domain::artifacts::ArtifactId;
 use echidna::domain::model::{
     CapabilityMappingVersion, ContentItem, MessageRole, ModelCapabilities, ModelCapabilityError,
-    ModelInputIR, ModelRequestRequirements,
+    ModelInputIR, ModelRequestRequirements, ReasoningEffort,
 };
 use echidna::domain::tools::ToolCallId;
 use serde_json::json;
@@ -16,6 +16,7 @@ fn capabilities() -> ModelCapabilities {
         incremental_input: true,
         usage_reporting: true,
         max_output_tokens: None,
+        reasoning_effort: None,
         context_window: 128_000,
         capability_mapping_version: CapabilityMappingVersion::new(1),
     }
@@ -81,6 +82,45 @@ fn declared_output_limits_preserve_legacy_shapes_and_reject_missing_or_unsupport
 }
 
 #[test]
+fn declared_reasoning_effort_preserves_absence_and_rejects_missing_or_mismatched_values() {
+    let legacy = capabilities();
+    assert!(
+        serde_json::to_value(&legacy)
+            .unwrap()
+            .get("reasoning_effort")
+            .is_none()
+    );
+    assert!(
+        serde_json::to_value(ModelRequestRequirements::default())
+            .unwrap()
+            .get("reasoning_effort")
+            .is_none()
+    );
+
+    let mut configured = legacy.clone();
+    configured.reasoning_effort = Some(ReasoningEffort::XHigh);
+    assert_ne!(configured.semantic_hash(), legacy.semantic_hash());
+    assert_eq!(
+        configured.validate_input(&text_input(Default::default())),
+        Err(ModelCapabilityError::ReasoningEffortRequired)
+    );
+
+    let matching = text_input(ModelRequestRequirements {
+        reasoning_effort: Some(ReasoningEffort::XHigh),
+        ..Default::default()
+    });
+    assert_eq!(configured.validate_input(&matching), Ok(()));
+    assert_eq!(
+        legacy.validate_input(&matching),
+        Err(ModelCapabilityError::ReasoningEffortUnsupported)
+    );
+    assert_eq!(
+        serde_json::to_value(&matching).unwrap()["requirements"]["reasoning_effort"],
+        json!("xhigh")
+    );
+}
+
+#[test]
 fn capabilities_deserialize_from_a_complete_versioned_fixture() {
     let fixture: ModelCapabilities = serde_json::from_value(json!({
         "text_input": true,
@@ -106,6 +146,7 @@ fn capabilities_deserialize_from_a_complete_versioned_fixture() {
             incremental_input: false,
             usage_reporting: true,
             max_output_tokens: None,
+            reasoning_effort: None,
             context_window: 65_536,
             capability_mapping_version: CapabilityMappingVersion::new(17),
         }
@@ -131,6 +172,7 @@ fn model_input_ir_json_has_a_stable_current_version_and_content_shape() {
             structured_output: true,
             incremental_input: false,
             usage_reporting: true,
+            reasoning_effort: None,
             max_output_tokens: None,
         },
     );
@@ -138,7 +180,7 @@ fn model_input_ir_json_has_a_stable_current_version_and_content_shape() {
     assert_eq!(
         serde_json::to_value(input).expect("ModelInputIR should serialize"),
         json!({
-            "schema_version": 3,
+            "schema_version": 4,
             "instructions": "test instructions",
             "content_items": [
                 {"kind": "text", "role": "user", "text": "test input"},

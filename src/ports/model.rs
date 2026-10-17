@@ -5,7 +5,9 @@ use std::pin::Pin;
 use futures_core::Stream;
 use thiserror::Error;
 
-use crate::domain::model::{ModelCapabilities, ModelCapabilityError, ModelEvent, ModelInputIR};
+use crate::domain::model::{
+    ModelCapabilities, ModelCapabilityError, ModelEvent, ModelInputIR, OpaqueContinuationScope,
+};
 
 /// An opaque Provider-issued identity for one completed response.
 ///
@@ -37,6 +39,7 @@ pub enum ModelRequestDelivery {
 pub struct ModelRequest {
     input: ModelInputIR,
     delivery: ModelRequestDelivery,
+    opaque_continuation_scope: Option<OpaqueContinuationScope>,
 }
 
 impl ModelRequest {
@@ -44,6 +47,7 @@ impl ModelRequest {
         Self {
             input,
             delivery: ModelRequestDelivery::Full,
+            opaque_continuation_scope: None,
         }
     }
 
@@ -51,6 +55,7 @@ impl ModelRequest {
         Self {
             input,
             delivery: ModelRequestDelivery::Incremental { continuation },
+            opaque_continuation_scope: None,
         }
     }
 
@@ -66,8 +71,25 @@ impl ModelRequest {
         matches!(self.delivery, ModelRequestDelivery::Incremental { .. })
     }
 
-    pub fn into_parts(self) -> (ModelInputIR, ModelRequestDelivery) {
-        (self.input, self.delivery)
+    /// Binds Adapter-local opaque continuation references to the current
+    /// provider delivery session. Normal providers leave this absent.
+    pub fn with_opaque_continuation_scope(mut self, scope: OpaqueContinuationScope) -> Self {
+        self.opaque_continuation_scope = Some(scope);
+        self
+    }
+
+    pub fn opaque_continuation_scope(&self) -> Option<&OpaqueContinuationScope> {
+        self.opaque_continuation_scope.as_ref()
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        ModelInputIR,
+        ModelRequestDelivery,
+        Option<OpaqueContinuationScope>,
+    ) {
+        (self.input, self.delivery, self.opaque_continuation_scope)
     }
 
     /// Validates semantic input and the selected delivery against one explicit

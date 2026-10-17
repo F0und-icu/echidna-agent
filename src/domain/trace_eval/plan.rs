@@ -4,8 +4,8 @@ use thiserror::Error;
 
 use crate::domain::events::EventId;
 use crate::domain::model::{
-    MODEL_INPUT_IR_SCHEMA_VERSION, MODEL_INPUT_IR_V2_SCHEMA_VERSION, ModelEvent, ModelInputIR,
-    ModelInputIrSchemaVersion,
+    MODEL_INPUT_IR_SCHEMA_VERSION, MODEL_INPUT_IR_V2_SCHEMA_VERSION,
+    MODEL_INPUT_IR_V3_SCHEMA_VERSION, ModelEvent, ModelInputIR, ModelInputIrSchemaVersion,
 };
 use crate::domain::tools::{ExecutionReceipt, ToolCall, ToolResult, ToolSpec};
 
@@ -84,10 +84,13 @@ impl TraceReplayModelStep {
         }) {
             return Err(TraceReplayPlanError::ModelStepHasNoSemanticOutput);
         }
-        if expected_input.schema_version.get() == MODEL_INPUT_IR_V2_SCHEMA_VERSION {
-            // ModelInputIR v3 only adds the Reasoning variant. Historical v2
-            // requests therefore upcast losslessly for current Mechanical
-            // Replay while their exact v2 RequestAudit remains immutable.
+        if matches!(
+            expected_input.schema_version.get(),
+            MODEL_INPUT_IR_V2_SCHEMA_VERSION | MODEL_INPUT_IR_V3_SCHEMA_VERSION
+        ) {
+            // ModelInputIR v3 adds plaintext reasoning; v4 adds opaque
+            // provider continuation. Historical v2/v3 requests cannot contain
+            // the new variant, so this is a lossless Replay-only upcast.
             expected_input.schema_version =
                 ModelInputIrSchemaVersion::new(MODEL_INPUT_IR_SCHEMA_VERSION);
         }

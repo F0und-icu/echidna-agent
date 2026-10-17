@@ -9,7 +9,7 @@ use crate::domain::context::{
 use crate::domain::events::{EventId, StreamId};
 use crate::domain::model::{
     CapabilityMappingVersion, MODEL_INPUT_IR_SCHEMA_VERSION, MODEL_INPUT_IR_V2_SCHEMA_VERSION,
-    ModelCapabilities, ModelInputIR, ModelInputIrSchemaVersion,
+    MODEL_INPUT_IR_V3_SCHEMA_VERSION, ModelCapabilities, ModelInputIR, ModelInputIrSchemaVersion,
 };
 use crate::domain::project::ProjectId;
 use crate::domain::sampling::SamplingStepPlan;
@@ -356,7 +356,9 @@ impl RequestAuditModelInput {
     ) -> Result<(), RequestAuditError> {
         if !matches!(
             self.schema_version.get(),
-            MODEL_INPUT_IR_V2_SCHEMA_VERSION | MODEL_INPUT_IR_SCHEMA_VERSION
+            MODEL_INPUT_IR_V2_SCHEMA_VERSION
+                | MODEL_INPUT_IR_V3_SCHEMA_VERSION
+                | MODEL_INPUT_IR_SCHEMA_VERSION
         ) {
             return Err(RequestAuditError::UnsupportedModelInputIrSchema {
                 input_field,

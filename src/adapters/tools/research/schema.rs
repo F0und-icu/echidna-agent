@@ -5,7 +5,17 @@ use serde_json::{Value, json};
 pub(super) fn get_input_schema() -> Value {
     json!({
         "type": "object",
-        "properties": {},
+        "properties": {
+            "receipts": {
+                "type": "object",
+                "properties": {
+                    "offset": {"type": "integer", "minimum": 0},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 32},
+                    "execution_id": string_schema()
+                },
+                "additionalProperties": false
+            }
+        },
         "additionalProperties": false
     })
 }
@@ -55,7 +65,8 @@ pub(super) fn get_output_schema() -> Value {
             "evidence_gap_reports": {
                 "type": "array",
                 "items": {"$ref": "#/$defs/evidence_gap_report"}
-            }
+            },
+            "receipt_page": {"$ref": "#/$defs/receipt_page"}
         },
         "required": ["status", "state", "stream_event_count", "evidence_gap_reports"],
         "additionalProperties": false
@@ -144,7 +155,37 @@ fn research_output_defs() -> Value {
         "capsule": capsule_record_schema(),
         "finding": finding_record_schema(),
         "next_action": next_action_record_schema(),
-        "artifact": artifact_record_schema()
+        "artifact": artifact_record_schema(),
+        "receipt_page": receipt_page_schema()
+    })
+}
+
+fn receipt_page_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "receipt_id": string_schema(),
+                        "execution_id": string_schema(),
+                        "status": {
+                            "type": "string",
+                            "enum": ["succeeded", "failed", "cancelled"]
+                        }
+                    },
+                    "required": ["receipt_id", "execution_id", "status"],
+                    "additionalProperties": false
+                }
+            },
+            "total": {"type": "integer", "minimum": 0},
+            "offset": {"type": "integer", "minimum": 0},
+            "next_offset": {"type": ["integer", "null"], "minimum": 0}
+        },
+        "required": ["items", "total", "offset", "next_offset"],
+        "additionalProperties": false
     })
 }
 

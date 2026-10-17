@@ -19,6 +19,7 @@ use crate::domain::context::{
 use crate::domain::events::EventId;
 use crate::domain::model::{
     ContentItem, MessageRole, ModelCapabilityError, ModelEvent, ModelRequestRequirements,
+    OpaqueContinuationScope,
 };
 use crate::domain::request_audit::{
     RequestAuditAttempt, RequestAuditDelivery, RequestAuditManifest, RequestAuditRunContext,
@@ -296,7 +297,12 @@ where
             ));
         }
         let outcome = ModelStreamingService::new(self.provider)
-            .consume(ModelRequest::full(model_input), cancellation)
+            .consume(
+                ModelRequest::full(model_input).with_opaque_continuation_scope(
+                    OpaqueContinuationScope::for_provider_session(&input.provider_session),
+                ),
+                cancellation,
+            )
             .await
             .map_err(|error| {
                 attempt_failed(
@@ -417,6 +423,7 @@ fn collect_json_response(events: Vec<ModelEvent>) -> Result<String, VisionAnalys
             ModelEvent::TextDelta { text } => response.push_str(&text),
             ModelEvent::ReasoningDelta { .. } => {}
             ModelEvent::ReasoningItem { .. } => {}
+            ModelEvent::OpaqueContinuation { .. } => {}
             ModelEvent::Usage { .. } => {}
             ModelEvent::ToolCall { .. } => return Err(VisionAnalysisError::ToolCallRejected),
         }
