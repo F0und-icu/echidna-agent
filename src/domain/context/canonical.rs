@@ -151,6 +151,8 @@ struct RequestProperties {
     tool_call: bool,
     incremental_input: bool,
     usage_reporting: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<crate::domain::model::ReasoningEffort>,
 }
 
 impl RequestProperties {
@@ -159,6 +161,7 @@ impl RequestProperties {
             tool_call: input.requirements.tool_call,
             incremental_input: input.requirements.incremental_input,
             usage_reporting: input.requirements.usage_reporting,
+            reasoning_effort: input.requirements.reasoning_effort,
         }
     }
 }

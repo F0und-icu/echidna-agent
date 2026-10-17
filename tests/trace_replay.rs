@@ -162,6 +162,7 @@ fn capabilities() -> ModelCapabilities {
         incremental_input: false,
         usage_reporting: true,
         max_output_tokens: None,
+        reasoning_effort: None,
         context_window: 32_768,
         capability_mapping_version: CapabilityMappingVersion::new(1),
     }

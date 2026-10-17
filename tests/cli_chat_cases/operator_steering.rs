@@ -144,17 +144,7 @@ fn terminal_eof_during_sampling_finishes_the_response_without_cancelling() {
     let (seen_tx, seen) = mpsc::channel();
     let (release, released) = mpsc::channel();
     let server = thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(15);
-        let mut socket = loop {
-            match listener.accept() {
-                Ok((socket, _)) => break socket,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    assert!(Instant::now() < deadline);
-                    thread::sleep(Duration::from_millis(10));
-                }
-                Err(error) => panic!("{error}"),
-            }
-        };
+        let mut socket = f3_context::accept_before_deadline(&listener, "terminal EOF");
         socket
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();

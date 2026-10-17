@@ -107,13 +107,14 @@ impl ProviderDefinition {
             self.credential_ref.as_deref(),
             self.api_key.as_ref(),
             self.chatgpt_subscription.as_ref(),
+            self.codex_subscription.as_ref(),
         ) {
-            (Some(reference), None, None) => validate_credential_reference(name, reference),
-            (None, Some(api_key), None) if !api_key.expose().trim().is_empty() => Ok(()),
-            (None, Some(_), None) => Err(ProviderCompositionError::EmptyInlineApiKey {
+            (Some(reference), None, None, None) => validate_credential_reference(name, reference),
+            (None, Some(api_key), None, None) if !api_key.expose().trim().is_empty() => Ok(()),
+            (None, Some(_), None, None) => Err(ProviderCompositionError::EmptyInlineApiKey {
                 provider: name.to_owned(),
             }),
-            (None, None, Some(subscription)) => {
+            (None, None, Some(subscription), None) => {
                 // The authentication owner validates label/path syntax. This
                 // constructor is pure: doctor never touches the private store.
                 super::subscription_service(subscription)?;
@@ -130,6 +131,27 @@ impl ProviderDefinition {
                     return Err(ProviderCompositionError::InvalidSubscription {
                         provider: name.to_owned(),
                         message: "subscription HTTP requires incremental_input=false and no max_output_tokens".to_owned(),
+                    });
+                }
+                Ok(())
+            }
+            (None, None, None, Some(subscription)) => {
+                // The authentication owner validates label/path syntax. This
+                // constructor is pure: doctor never touches the private store.
+                super::codex_subscription_service(subscription)?;
+                if self.base_url.trim_end_matches('/')
+                    != crate::adapters::subscription_auth::CODEX_API_BASE_URL
+                {
+                    return Err(ProviderCompositionError::InvalidSubscription {
+                        provider: name.to_owned(),
+                        message: "Codex subscription credentials require the fixed ChatGPT backend audience".to_owned(),
+                    });
+                }
+                let mapping = mappings[&self.capability_mapping].to_domain();
+                if mapping.incremental_input || mapping.max_output_tokens.is_some() {
+                    return Err(ProviderCompositionError::InvalidSubscription {
+                        provider: name.to_owned(),
+                        message: "Codex subscription HTTP requires incremental_input=false and no max_output_tokens".to_owned(),
                     });
                 }
                 Ok(())
@@ -291,7 +313,7 @@ pub enum ProviderCompositionError {
     )]
     InvalidCredentialReference { provider: String, reference: String },
     #[error(
-        "Provider `{provider}` must configure exactly one of `api_key`, `credential_ref`, or `chatgpt_subscription`"
+        "Provider `{provider}` must configure exactly one of `api_key`, `credential_ref`, `chatgpt_subscription`, or `codex_subscription`"
     )]
     CredentialSelection { provider: String },
     #[error("Provider `{provider}` subscription configuration is invalid: {message}")]

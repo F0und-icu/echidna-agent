@@ -264,6 +264,8 @@ pub enum CliError {
     AuthRuntime(#[source] io::Error),
     #[error("subscription authentication failed: {message}")]
     SubscriptionAuthentication { message: String },
+    #[error("model selection failed: {message}")]
+    ModelSelection { message: String },
     #[error("failed to build the local chat runtime: {0}")]
     ChatRuntime(#[source] io::Error),
     #[error("chat failed: {message}")]

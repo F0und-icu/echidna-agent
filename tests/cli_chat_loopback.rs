@@ -680,15 +680,21 @@ fn wait_child_before_deadline(
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                if let Some(reader) = stdout {
-                    let _ = reader.join();
-                }
-                if let Some(reader) = stderr {
-                    let _ = reader.join();
-                }
+                // Preserve the already-drained fixture output only for the
+                // existing deadline panic, so a future timeout identifies the
+                // last observed child progress without changing its deadline
+                // or cleanup sequence.
+                let stdout = stdout
+                    .map(|reader| reader.join().unwrap())
+                    .unwrap_or_default();
+                let stderr = stderr
+                    .map(|reader| reader.join().unwrap())
+                    .unwrap_or_default();
                 panic!(
-                    "F2a {label} child did not exit within {} seconds",
-                    timeout.as_secs()
+                    "F2a {label} child did not exit within {} seconds\nstdout:\n{}\nstderr:\n{}",
+                    timeout.as_secs(),
+                    String::from_utf8_lossy(&stdout),
+                    String::from_utf8_lossy(&stderr),
                 );
             }
             Err(error) => panic!("failed to poll F2a {label} child: {error}"),

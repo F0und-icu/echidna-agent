@@ -5,6 +5,13 @@ use thiserror::Error;
 
 /// The fixed resource audience used by the ChatGPT subscription profile.
 pub(crate) const API_BASE_URL: &str = "https://api.openai.com/v1";
+pub(crate) const CODEX_API_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
+/// Declared catalog compatibility is intentionally distinct from Echidna's
+/// package version and application identity. It comes from the highest
+/// `minimal_client_version` in the pinned Codex model catalog recorded by
+/// EC-A3; it does not claim to be an installed Codex release.
+pub(crate) const CODEX_CATALOG_COMPATIBILITY_VERSION: &str = "0.144.0";
+pub(super) const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 pub(super) const DIRECT_USE_SCOPE: &str = "chatgpt.tokens.use.direct";
 pub(super) const AUTHORIZE_URL: &str = "https://auth.openai.com/api/accounts/authorize";
 pub(super) const TOKEN_URL: &str = "https://auth.openai.com/api/accounts/oauth/token";
@@ -30,10 +37,40 @@ pub(crate) struct SubscriptionAuthStatus {
     pub(crate) earliest_refresh_at_unix: Option<u64>,
 }
 
+/// Codex access has a signed workspace identity instead of SIWC's direct-use
+/// scope. Keeping its CLI result separate preserves the SIWC JSON contract.
+#[derive(Clone, Debug, Serialize, Eq, PartialEq)]
+pub(crate) struct CodexSubscriptionAuthStatus {
+    pub(crate) account: String,
+    pub(crate) state: SubscriptionConnectionState,
+    pub(crate) verified_identity: bool,
+    pub(crate) account_header_ready: bool,
+    pub(crate) access_token_expires_at_unix: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SubscriptionAuthProtocol {
+    SiwcDirect,
+    Codex,
+}
+
 #[derive(Clone, Debug, Serialize, Eq, PartialEq)]
 pub(crate) struct SubscriptionModel {
     pub(crate) slug: String,
     pub(crate) display_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) default_reasoning_level: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) supported_reasoning_levels: Vec<SubscriptionReasoningLevel>,
+}
+
+/// Bounded catalog metadata returned by the Codex `/models` endpoint. Unknown
+/// effort names remain visible to the operator but cannot become configured
+/// execution settings until the domain contract accepts them.
+#[derive(Clone, Debug, Serialize, Eq, PartialEq)]
+pub(crate) struct SubscriptionReasoningLevel {
+    pub(crate) effort: String,
+    pub(crate) description: String,
 }
 
 #[derive(Clone, Debug, Serialize, Eq, PartialEq)]
@@ -44,12 +81,35 @@ pub(crate) enum SubscriptionLogoutOutcome {
     RemoteUnconfirmedCleared,
 }
 
+/// Fixed subscription requests whose HTTP status may safely identify a failed
+/// operation without retaining a remote response body.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SubscriptionAuthHttpOperation {
+    TokenExchange,
+    OpenIdDiscovery,
+    JsonWebKeySet,
+    ModelCatalog,
+}
+
+impl std::fmt::Display for SubscriptionAuthHttpOperation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::TokenExchange => "token exchange",
+            Self::OpenIdDiscovery => "OpenID discovery",
+            Self::JsonWebKeySet => "JWKS retrieval",
+            Self::ModelCatalog => "model catalog",
+        })
+    }
+}
+
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub(crate) enum SubscriptionAuthError {
     #[error("subscription authentication store path must be an absolute private path")]
     InvalidStorePath,
     #[error("subscription account label is invalid")]
     InvalidAccount,
+    #[error("subscription catalog compatibility version is invalid")]
+    InvalidCatalogCompatibilityVersion,
     #[error("subscription authentication storage is unavailable")]
     StorageUnavailable,
     #[error("subscription authentication storage is not private")]
@@ -58,6 +118,10 @@ pub(crate) enum SubscriptionAuthError {
     SymlinkStorage,
     #[error("subscription authentication storage is malformed")]
     MalformedStorage,
+    #[error("subscription authentication storage belongs to another protocol")]
+    StoreProtocolMismatch,
+    #[error("explicit credential refresh requires a Codex subscription Provider")]
+    ExplicitCodexRefreshRequired,
     #[error("subscription authentication storage lock timed out")]
     StorageLockTimedOut,
     #[error("subscription login URL could not be presented")]
@@ -76,14 +140,42 @@ pub(crate) enum SubscriptionAuthError {
     AccountMismatch,
     #[error("subscription direct token permission was not granted")]
     DirectTokenScopeMissing,
+    #[error("subscription authentication {operation} request failed with HTTP {status}")]
+    AuthHttpFailure {
+        operation: SubscriptionAuthHttpOperation,
+        status: u16,
+    },
     #[error("subscription authentication service is temporarily unavailable")]
     TemporarilyUnavailable,
     #[error("subscription credentials require login")]
     LoginRequired,
     #[error("subscription credentials cannot yet be refreshed")]
     RefreshNotYetAllowed,
+    #[error("subscription access token has expired")]
+    AccessTokenExpired,
     #[error("subscription response is invalid")]
     InvalidResponse,
+}
+
+pub(super) fn resolve_catalog_client_version(
+    value: Option<&str>,
+) -> Result<String, SubscriptionAuthError> {
+    let Some(value) = value else {
+        return Ok(CODEX_CATALOG_COMPATIBILITY_VERSION.to_owned());
+    };
+    let components = value.split('.').collect::<Vec<_>>();
+    if !value.is_ascii()
+        || components.len() != 3
+        || components.iter().any(|component| {
+            component.is_empty()
+                || (component.len() > 1 && component.starts_with('0'))
+                || !component.bytes().all(|byte| byte.is_ascii_digit())
+                || component.parse::<u32>().is_err()
+        })
+    {
+        return Err(SubscriptionAuthError::InvalidCatalogCompatibilityVersion);
+    }
+    Ok(value.to_owned())
 }
 
 /// Internal endpoint set. `new` always supplies the fixed production values;

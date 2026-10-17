@@ -2,22 +2,26 @@
 //! diagnostics, interactive runtime entrypoints, and generic Live Smokes.
 
 mod config;
+mod selection;
 mod validation;
 
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::adapters::credentials::{CredentialResolution, CredentialSource, CredentialSourceError};
+use crate::adapters::credentials::{
+    AccountBoundCredential, CredentialResolution, CredentialSource, CredentialSourceError,
+};
 use crate::adapters::project_event_store::Project;
 use crate::adapters::responses::{ResponsesHttpAdapter, ResponsesHttpConfig, ResponsesWireProfile};
 use crate::adapters::subscription_auth::SubscriptionAuthService;
-use crate::domain::model::ModelCapabilities;
+use crate::domain::model::{ModelCapabilities, ReasoningEffort};
 use crate::domain::profile::AgentModelProfile;
 use crate::domain::request_audit::RequestAdapterVersion;
 use crate::ports::model::ModelProvider;
 
 pub(crate) use config::{PromptSources, RuntimeSettings};
 use config::{ProviderBinding, ProviderConfigV1, ProviderCredential, ProviderDefinition, WireApi};
+pub(crate) use selection::ModelSelectionError;
 pub use validation::ProviderCompositionError;
 
 /// One validated Agent profile and the exact Provider instances selected for
@@ -78,13 +82,35 @@ impl ProviderComposition {
                 message: "unknown Provider profile".to_owned(),
             }
         })?;
-        let subscription = definition.chatgpt_subscription.as_ref().ok_or_else(|| {
-            ProviderCompositionError::InvalidSubscription {
+        match (
+            definition.chatgpt_subscription.as_ref(),
+            definition.codex_subscription.as_ref(),
+        ) {
+            (Some(subscription), None) => subscription_service(subscription),
+            (None, Some(subscription)) => codex_subscription_service(subscription),
+            _ => Err(ProviderCompositionError::InvalidSubscription {
                 provider: provider_id.to_owned(),
-                message: "this Provider does not select chatgpt_subscription".to_owned(),
-            }
-        })?;
-        subscription_service(subscription)
+                message: "this Provider does not select a subscription credential".to_owned(),
+            }),
+        }
+    }
+
+    /// Saves an explicit catalog choice through the one configuration-edit
+    /// owner. The candidate is reloaded through the normal Config owner before
+    /// the original file is atomically replaced.
+    pub(crate) fn select_codex_model(
+        path: impl AsRef<Path>,
+        provider_id: &str,
+        model: &str,
+        reasoning_effort: Option<ReasoningEffort>,
+    ) -> Result<(), ModelSelectionError> {
+        selection::publish_model_selection(
+            path.as_ref(),
+            provider_id,
+            model,
+            reasoning_effort.map(ReasoningEffort::as_str),
+            |candidate| Self::load_config(candidate).map(|_| ()).map_err(|_| ()),
+        )
     }
 
     /// Binds one validated configuration to an already-discovered Project.
@@ -223,11 +249,19 @@ fn compose_provider(
             });
             (reference, source)
         }
-        ProviderCredential::Subscription(subscription) => {
+        ProviderCredential::ChatGptSubscription(subscription) => {
             let reference = format!("chatgpt_subscription:{provider_id}");
             let source: Arc<dyn CredentialSource> = Arc::new(SubscriptionCredentialSource {
                 reference: reference.clone(),
                 service: Arc::new(subscription_service(subscription)?),
+            });
+            (reference, source)
+        }
+        ProviderCredential::CodexSubscription(subscription) => {
+            let reference = format!("codex_subscription:{provider_id}");
+            let source: Arc<dyn CredentialSource> = Arc::new(CodexSubscriptionCredentialSource {
+                reference: reference.clone(),
+                service: Arc::new(codex_subscription_service(subscription)?),
             });
             (reference, source)
         }
@@ -246,6 +280,7 @@ fn compose_provider(
                 ResponsesWireProfile::ChatGptSubscription => {
                     config.with_chatgpt_subscription_profile()
                 }
+                ResponsesWireProfile::CodexSubscription => config.with_codex_subscription_profile(),
             };
             let adapter = ResponsesHttpAdapter::new(config, credential_source);
             let adapter = match project {
@@ -263,10 +298,14 @@ fn compose_provider(
 }
 
 fn wire_profile(definition: &ProviderDefinition) -> ResponsesWireProfile {
-    if definition.chatgpt_subscription.is_some() {
-        ResponsesWireProfile::ChatGptSubscription
-    } else {
-        ResponsesWireProfile::Standard
+    match (
+        definition.chatgpt_subscription.is_some(),
+        definition.codex_subscription.is_some(),
+    ) {
+        (true, false) => ResponsesWireProfile::ChatGptSubscription,
+        (false, true) => ResponsesWireProfile::CodexSubscription,
+        (false, false) => ResponsesWireProfile::Standard,
+        (true, true) => unreachable!("validated Provider configuration has exactly one credential"),
     }
 }
 
@@ -276,6 +315,21 @@ fn subscription_service(
     SubscriptionAuthService::new(
         subscription.auth_store.clone(),
         subscription.account.clone(),
+    )
+    .map_err(
+        |error| ProviderCompositionError::SubscriptionAuthentication {
+            message: error.to_string(),
+        },
+    )
+}
+
+fn codex_subscription_service(
+    subscription: &config::CodexSubscription,
+) -> Result<SubscriptionAuthService, ProviderCompositionError> {
+    SubscriptionAuthService::new_codex(
+        subscription.auth_store.clone(),
+        subscription.account.clone(),
+        subscription.catalog_client_version.as_deref(),
     )
     .map_err(
         |error| ProviderCompositionError::SubscriptionAuthentication {
@@ -307,6 +361,38 @@ impl CredentialSource for SubscriptionCredentialSource {
                     message: error.to_string(),
                 }
             })
+        }))
+    }
+}
+
+struct CodexSubscriptionCredentialSource {
+    reference: String,
+    service: Arc<SubscriptionAuthService>,
+}
+
+impl CredentialSource for CodexSubscriptionCredentialSource {
+    fn read(&self, _reference: &str) -> Result<Option<String>, CredentialSourceError> {
+        Err(CredentialSourceError::ReadFailed {
+            message: "Codex subscription credentials require asynchronous resolution".to_owned(),
+        })
+    }
+
+    fn resolve(&self, reference: &str) -> CredentialResolution {
+        if reference != self.reference {
+            return CredentialResolution::Ready(Ok(None));
+        }
+        let service = Arc::clone(&self.service);
+        CredentialResolution::PendingAccountBound(Box::pin(async move {
+            service
+                .access_codex_credential()
+                .await
+                .map(|credential| {
+                    let (bearer, account_id) = credential.into_parts();
+                    AccountBoundCredential::new(bearer, account_id)
+                })
+                .map_err(|error| CredentialSourceError::ReadFailed {
+                    message: error.to_string(),
+                })
         }))
     }
 }

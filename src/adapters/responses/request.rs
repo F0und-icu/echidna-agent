@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use crate::domain::model::{
     ContentItem, MODEL_INPUT_IR_SCHEMA_VERSION, MessageRole, OpaqueContinuationReference,
-    OpaqueContinuationScope,
+    OpaqueContinuationScope, ReasoningEffort,
 };
 use crate::domain::tools::{ToolCall, ToolResult, ToolResultStatus, ToolSpec};
 use crate::ports::model::{ModelProviderError, ModelRequest, ModelRequestDelivery};
@@ -35,6 +35,8 @@ pub(super) struct ResponsesRequest {
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_output_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<ResponsesReasoningConfiguration>,
     #[serde(skip_serializing_if = "Option::is_none")]
     include: Option<Vec<&'static str>>,
 }
@@ -91,6 +93,14 @@ struct ResponsesTextConfiguration {
 struct ResponsesTextFormat {
     #[serde(rename = "type")]
     kind: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct ResponsesReasoningConfiguration {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effort: Option<ReasoningEffort>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -152,14 +162,15 @@ pub(super) fn encode_request(
             input.schema_version.get()
         )));
     }
-    if profile == ResponsesWireProfile::ChatGptSubscription
+    if profile.is_subscription()
         && (!matches!(delivery, ModelRequestDelivery::Full)
             || input.requirements.incremental_input
             || input.requirements.max_output_tokens.is_some())
     {
-        return Err(request_encoding_error(
-            "ChatGPT subscription Responses requires Full input without incremental or output-token controls",
-        ));
+        return Err(request_encoding_error(format!(
+            "{} Responses requires Full input without incremental or output-token controls",
+            profile.subscription_label()
+        )));
     }
     let mut items = Vec::with_capacity(input.content_items.len());
     for item in input.content_items {
@@ -187,9 +198,9 @@ pub(super) fn encode_request(
                 });
             }
             ContentItem::OpaqueContinuation { reference } => {
-                if profile != ResponsesWireProfile::ChatGptSubscription {
+                if !profile.is_subscription() {
                     return Err(request_encoding_error(
-                        "opaque provider continuation requires the explicit ChatGPT subscription Responses profile",
+                        "opaque provider continuation requires an explicit subscription Responses profile",
                     ));
                 }
                 let scope = opaque_scope.as_ref().ok_or_else(|| {
@@ -215,7 +226,7 @@ pub(super) fn encode_request(
         .collect::<Vec<_>>();
     let exposes_tools = !function_tools.is_empty();
     let tools = match profile {
-        ResponsesWireProfile::Standard => function_tools
+        ResponsesWireProfile::Standard | ResponsesWireProfile::CodexSubscription => function_tools
             .into_iter()
             .map(ResponsesTool::Function)
             .collect(),
@@ -258,7 +269,21 @@ pub(super) fn encode_request(
         max_output_tokens: (profile == ResponsesWireProfile::Standard)
             .then_some(input.requirements.max_output_tokens)
             .flatten(),
-        include: (profile == ResponsesWireProfile::ChatGptSubscription)
+        reasoning: match profile {
+            ResponsesWireProfile::CodexSubscription => Some(ResponsesReasoningConfiguration {
+                effort: input.requirements.reasoning_effort,
+                summary: Some("auto"),
+            }),
+            ResponsesWireProfile::Standard | ResponsesWireProfile::ChatGptSubscription => input
+                .requirements
+                .reasoning_effort
+                .map(|effort| ResponsesReasoningConfiguration {
+                    effort: Some(effort),
+                    summary: None,
+                }),
+        },
+        include: profile
+            .is_subscription()
             .then_some(vec!["reasoning.encrypted_content"]),
     })
 }

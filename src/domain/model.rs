@@ -1,5 +1,7 @@
 //! Provider-neutral model request, capability, and stream-event contracts.
 
+use std::str::FromStr;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -179,6 +181,47 @@ pub enum ToolArgumentErrorCategory {
     Eof,
 }
 
+/// A bounded, provider-neutral reasoning setting explicitly selected in a
+/// capability mapping. Provider metadata may advertise other values, but they
+/// are not executable until this contract gains a corresponding variant.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    Low,
+    Medium,
+    High,
+    #[serde(rename = "xhigh")]
+    XHigh,
+    Max,
+}
+
+impl ReasoningEffort {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+}
+
+impl FromStr for ReasoningEffort {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "low" => Ok(Self::Low),
+            "medium" => Ok(Self::Medium),
+            "high" => Ok(Self::High),
+            "xhigh" => Ok(Self::XHigh),
+            "max" => Ok(Self::Max),
+            _ => Err(()),
+        }
+    }
+}
+
 /// Explicit request requirements that later Slices can derive from tools and
 /// output contracts without guessing capability from a model name.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -187,6 +230,9 @@ pub struct ModelRequestRequirements {
     pub structured_output: bool,
     pub incremental_input: bool,
     pub usage_reporting: bool,
+    /// Explicit capability-mapping setting resolved before Context/audit capture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<ReasoningEffort>,
     /// Total generated tokens, including reasoning; not a billing limit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
@@ -285,10 +331,28 @@ pub struct ModelCapabilities {
     /// legacy requests without output controls; no model-name inference.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
+    /// Explicitly selected reasoning setting. None preserves the provider's
+    /// existing behavior and does not infer support from a model name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<ReasoningEffort>,
     pub capability_mapping_version: CapabilityMappingVersion,
 }
 
 impl ModelCapabilities {
+    /// Resolve the selected mapping setting before Context/audit capture. A
+    /// request may repeat that exact setting, but may not override or invent it.
+    pub(crate) fn resolve_reasoning_effort(
+        &self,
+        requested: Option<ReasoningEffort>,
+    ) -> Result<Option<ReasoningEffort>, ModelCapabilityError> {
+        if let Some(requested) = requested
+            && self.reasoning_effort != Some(requested)
+        {
+            return Err(ModelCapabilityError::ReasoningEffortUnsupported);
+        }
+        Ok(requested.or(self.reasoning_effort))
+    }
+
     /// Resolve the declared ceiling before Context/audit capture. A smaller
     /// explicit request is allowed; adapters must never inject a missing cap.
     pub(crate) fn resolve_output_token_limit(
@@ -325,6 +389,11 @@ impl ModelCapabilities {
 
     /// Validates every semantic requirement without inferring from model names.
     pub fn validate_input(&self, input: &ModelInputIR) -> Result<(), ModelCapabilityError> {
+        if self.resolve_reasoning_effort(input.requirements.reasoning_effort)?
+            != input.requirements.reasoning_effort
+        {
+            return Err(ModelCapabilityError::ReasoningEffortRequired);
+        }
         if self.resolve_output_token_limit(input.requirements.max_output_tokens)?
             != input.requirements.max_output_tokens
         {
@@ -390,6 +459,12 @@ impl ModelCapabilities {
 #[allow(clippy::enum_variant_names)]
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum ModelCapabilityError {
+    #[error("reasoning effort is not supported by the explicit capability mapping")]
+    ReasoningEffortUnsupported,
+    #[error(
+        "request omitted the configured reasoning effort; resolve it before Context and audit capture"
+    )]
+    ReasoningEffortRequired,
     #[error("output token limit must be positive and smaller than the declared context window")]
     InvalidOutputTokenLimit,
     #[error("output token limit is not supported by the explicit capability mapping")]

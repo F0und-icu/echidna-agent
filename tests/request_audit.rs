@@ -8,6 +8,7 @@ use echidna::domain::context::{ProviderSessionId, ProviderSessionRef, ProviderSe
 use echidna::domain::events::{EventEnvelope, EventId, EventSequence, OccurredAt, StreamId};
 use echidna::domain::model::{
     ModelCapabilities, ModelInputIR, ModelInputIrSchemaVersion, ModelRequestRequirements,
+    ReasoningEffort,
 };
 use echidna::domain::project::ProjectId;
 use echidna::domain::request_audit::{
@@ -126,6 +127,7 @@ fn capabilities() -> ModelCapabilities {
         incremental_input: true,
         usage_reporting: true,
         max_output_tokens: None,
+        reasoning_effort: None,
         context_window: 32_768,
         capability_mapping_version: echidna::domain::model::CapabilityMappingVersion::new(7),
     }
@@ -446,6 +448,63 @@ fn request_audit_reconstructs_exact_rendered_input_after_source_mutation_and_ded
 }
 
 #[test]
+fn request_audit_preserves_explicit_reasoning_effort_and_legacy_absence() {
+    let blobs = MemoryBlobStore::default();
+    let service = service(&blobs);
+    let mut session = projection();
+    let mut sink = RecordingSink::default();
+    let mut configured = input("instructions", "user input");
+    configured.requirements.reasoning_effort = Some(ReasoningEffort::High);
+
+    let manifest = record(
+        &service,
+        configured.clone(),
+        &mut session,
+        &mut sink,
+        "request-audit-reasoning-effort",
+    );
+    assert_eq!(service.reconstruct(&manifest).unwrap(), configured);
+    let requirements = manifest
+        .components()
+        .iter()
+        .find(|component| {
+            matches!(
+                component.identity(),
+                echidna::domain::request_audit::RequestAuditComponentIdentity::RequestRequirements
+            )
+        })
+        .expect("the rendered requirements component is required");
+    let rendered_requirements: Value =
+        serde_json::from_slice(&blobs.read_blob(requirements.blob_id()).unwrap()).unwrap();
+    assert_eq!(rendered_requirements["reasoning_effort"], json!("high"));
+
+    let legacy = input("legacy instructions", "legacy user input");
+    let legacy_manifest = record(
+        &service,
+        legacy.clone(),
+        &mut session,
+        &mut sink,
+        "request-audit-legacy-reasoning-effort",
+    );
+    assert_eq!(service.reconstruct(&legacy_manifest).unwrap(), legacy);
+    let legacy_requirements = legacy_manifest
+        .components()
+        .iter()
+        .find(|component| {
+            matches!(
+                component.identity(),
+                echidna::domain::request_audit::RequestAuditComponentIdentity::RequestRequirements
+            )
+        })
+        .expect("the rendered legacy requirements component is required");
+    assert!(
+        !std::str::from_utf8(&blobs.read_blob(legacy_requirements.blob_id()).unwrap())
+            .unwrap()
+            .contains("reasoning_effort")
+    );
+}
+
+#[test]
 fn request_audit_rejects_unknown_schema_reordered_duplicate_and_mismatched_content() {
     let blobs = MemoryBlobStore::default();
     let service = service(&blobs);
@@ -475,10 +534,14 @@ fn request_audit_rejects_unknown_schema_reordered_duplicate_and_mismatched_conte
         historical_manifest
             .validate()
             .unwrap_or_else(|error| panic!("historical ModelInputIR v{schema_version}: {error}"));
+        let reconstructed = service.reconstruct(&historical_manifest).unwrap();
         assert_eq!(
-            service.reconstruct(&historical_manifest).unwrap(),
-            historical_input,
+            reconstructed, historical_input,
             "historical ModelInputIR v{schema_version} must reconstruct exactly"
+        );
+        assert_eq!(
+            reconstructed.requirements.reasoning_effort, None,
+            "historical ModelInputIR v{schema_version} retains absent reasoning effort"
         );
     }
 

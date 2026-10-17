@@ -2,6 +2,7 @@
 
 use serde::Serialize;
 
+use crate::domain::model::ReasoningEffort;
 use crate::domain::profile::AgentModelProfile;
 
 /// A credential-free diagnostic for an explicitly selected Agent profile.
@@ -16,6 +17,10 @@ pub struct AgentProfileDoctorReport {
     pub primary_max_output_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vision_max_output_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary_reasoning_effort: Option<ReasoningEffort>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vision_reasoning_effort: Option<ReasoningEffort>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -46,5 +51,9 @@ pub fn inspect_agent_model_profile(profile: &AgentModelProfile) -> AgentProfileD
         vision_max_output_tokens: profile
             .vision()
             .and_then(|vision| vision.capabilities().max_output_tokens),
+        primary_reasoning_effort: profile.primary().capabilities().reasoning_effort,
+        vision_reasoning_effort: profile
+            .vision()
+            .and_then(|vision| vision.capabilities().reasoning_effort),
     }
 }

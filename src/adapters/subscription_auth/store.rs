@@ -57,6 +57,42 @@ pub(super) struct ConnectionRecord {
     pub(super) tokens: Option<TokenRecord>,
 }
 
+/// The SIWC record deliberately has no profile tag because its v1 bytes are a
+/// compatibility contract. Codex records are tagged so a shared store root is
+/// rejected instead of being silently repurposed.
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct CodexConnectionRecord {
+    pub(super) version: u8,
+    pub(super) protocol: String,
+    pub(super) account: String,
+    pub(super) identity: CodexIdentityRecord,
+    pub(super) tokens: Option<CodexTokenRecord>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct CodexIdentityRecord {
+    pub(super) client_id: String,
+    pub(super) subject: String,
+    pub(super) issuer: String,
+    pub(super) id_token_expires_at_unix: u64,
+    pub(super) chatgpt_account_id: String,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct CodexTokenRecord {
+    pub(super) access_token: String,
+    pub(super) refresh_token: String,
+    pub(super) access_token_expires_at_unix: u64,
+}
+
+enum StoredConnection {
+    Siwc(ConnectionRecord),
+    Codex(CodexConnectionRecord),
+}
+
 pub(super) struct StoreLock(File);
 
 impl Drop for StoreLock {
@@ -84,10 +120,21 @@ impl AuthStore {
     pub(super) fn read_connection(
         &self,
     ) -> Result<Option<ConnectionRecord>, SubscriptionAuthError> {
-        if !self.check_existing_directory()? {
-            return Ok(None);
+        match self.read_stored_connection()? {
+            Some(StoredConnection::Siwc(connection)) => Ok(Some(connection)),
+            Some(StoredConnection::Codex(_)) => Err(SubscriptionAuthError::StoreProtocolMismatch),
+            None => Ok(None),
         }
-        self.read_json(&self.path("connection"))
+    }
+
+    pub(super) fn read_codex_connection(
+        &self,
+    ) -> Result<Option<CodexConnectionRecord>, SubscriptionAuthError> {
+        match self.read_stored_connection()? {
+            Some(StoredConnection::Codex(connection)) => Ok(Some(connection)),
+            Some(StoredConnection::Siwc(_)) => Err(SubscriptionAuthError::StoreProtocolMismatch),
+            None => Ok(None),
+        }
     }
 
     pub(super) fn load_or_create_host(&self) -> Result<HostRecord, SubscriptionAuthError> {
@@ -112,6 +159,26 @@ impl AuthStore {
         connection: &ConnectionRecord,
     ) -> Result<(), SubscriptionAuthError> {
         self.ensure_directory()?;
+        if matches!(
+            self.read_stored_connection()?,
+            Some(StoredConnection::Codex(_))
+        ) {
+            return Err(SubscriptionAuthError::StoreProtocolMismatch);
+        }
+        self.write_json(&self.path("connection"), connection)
+    }
+
+    pub(super) fn write_codex_connection(
+        &self,
+        connection: &CodexConnectionRecord,
+    ) -> Result<(), SubscriptionAuthError> {
+        self.ensure_directory()?;
+        if matches!(
+            self.read_stored_connection()?,
+            Some(StoredConnection::Siwc(_))
+        ) {
+            return Err(SubscriptionAuthError::StoreProtocolMismatch);
+        }
         self.write_json(&self.path("connection"), connection)
     }
 
@@ -121,6 +188,14 @@ impl AuthStore {
         };
         connection.tokens = None;
         self.write_connection(&connection)
+    }
+
+    pub(super) fn clear_codex_tokens(&self) -> Result<(), SubscriptionAuthError> {
+        let Some(mut connection) = self.read_codex_connection()? else {
+            return Ok(());
+        };
+        connection.tokens = None;
+        self.write_codex_connection(&connection)
     }
 
     pub(super) async fn lock(&self) -> Result<StoreLock, SubscriptionAuthError> {
@@ -144,6 +219,28 @@ impl AuthStore {
 
     fn path(&self, name: &str) -> PathBuf {
         account_path(&self.root, &self.account, name)
+    }
+
+    fn read_stored_connection(&self) -> Result<Option<StoredConnection>, SubscriptionAuthError> {
+        if !self.check_existing_directory()? {
+            return Ok(None);
+        }
+        let Some(value) = self.read_json::<serde_json::Value>(&self.path("connection"))? else {
+            return Ok(None);
+        };
+        match value.get("protocol") {
+            None => serde_json::from_value(value)
+                .map(StoredConnection::Siwc)
+                .map(Some)
+                .map_err(|_| SubscriptionAuthError::MalformedStorage),
+            Some(serde_json::Value::String(protocol)) if protocol == "codex" => {
+                serde_json::from_value(value)
+                    .map(StoredConnection::Codex)
+                    .map(Some)
+                    .map_err(|_| SubscriptionAuthError::MalformedStorage)
+            }
+            Some(_) => Err(SubscriptionAuthError::MalformedStorage),
+        }
     }
 
     fn ensure_directory(&self) -> Result<(), SubscriptionAuthError> {

@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use echidna::adapters::credentials::{CredentialSource, CredentialSourceError};
 use echidna::app::doctor::{AgentProfileDoctorStatus, inspect_agent_model_profile};
 use echidna::domain::model::{
-    ContentItem, ModelCapabilityError, ModelInputIR, ModelRequestRequirements,
+    ContentItem, ModelCapabilityError, ModelInputIR, ModelRequestRequirements, ReasoningEffort,
 };
 use echidna::domain::profile::{VisionMode, VisionRoute};
 use echidna::ports::model::{ModelProviderError, ModelRequest, ProviderResponseId};
@@ -101,6 +101,76 @@ fn output_limit_config_is_explicit_role_scoped_and_offline_validated() {
         missing_limit,
         Err(ModelProviderError::Capability(
             ModelCapabilityError::OutputTokenLimitRequired
+        ))
+    ));
+    assert!(credentials.references().is_empty());
+}
+
+#[test]
+fn reasoning_effort_config_is_role_scoped_audited_and_validated_before_credentials() {
+    let credentials = Arc::new(RecordingCredentialSource::default());
+    let config = valid_config()
+        .replacen(
+            "[capability_mappings.text-v1]",
+            "[capability_mappings.text-v1]\nreasoning_effort = \"xhigh\"",
+            1,
+        )
+        .replacen(
+            "[capability_mappings.vision-v1]",
+            "[capability_mappings.vision-v1]\nreasoning_effort = \"high\"",
+            1,
+        );
+    let composition = load("configured-reasoning-effort", &config, credentials.clone()).unwrap();
+    assert_eq!(
+        composition
+            .primary_provider()
+            .capabilities()
+            .reasoning_effort,
+        Some(ReasoningEffort::XHigh)
+    );
+    assert_eq!(
+        composition
+            .vision_provider()
+            .unwrap()
+            .capabilities()
+            .reasoning_effort,
+        Some(ReasoningEffort::High)
+    );
+    let report = inspect_agent_model_profile(composition.agent_profile());
+    assert_eq!(
+        report.primary_reasoning_effort,
+        Some(ReasoningEffort::XHigh)
+    );
+    assert_eq!(report.vision_reasoning_effort, Some(ReasoningEffort::High));
+
+    let missing = composition
+        .primary_provider()
+        .stream(ModelRequest::full(ModelInputIR::current(
+            "fixture",
+            vec![ContentItem::user_text("fixture")],
+            ModelRequestRequirements::default(),
+        )));
+    assert!(matches!(
+        missing,
+        Err(ModelProviderError::Capability(
+            ModelCapabilityError::ReasoningEffortRequired
+        ))
+    ));
+    let mismatched =
+        composition
+            .primary_provider()
+            .stream(ModelRequest::full(ModelInputIR::current(
+                "fixture",
+                vec![ContentItem::user_text("fixture")],
+                ModelRequestRequirements {
+                    reasoning_effort: Some(ReasoningEffort::High),
+                    ..ModelRequestRequirements::default()
+                },
+            )));
+    assert!(matches!(
+        mismatched,
+        Err(ModelProviderError::Capability(
+            ModelCapabilityError::ReasoningEffortUnsupported
         ))
     ));
     assert!(credentials.references().is_empty());
@@ -278,9 +348,21 @@ fn one_composition_compiles_primary_vision_and_doctor_without_reading_credential
             .get(),
         3
     );
-    assert_eq!(
-        inspect_agent_model_profile(composition.agent_profile()).status,
-        AgentProfileDoctorStatus::Ready
+    let report = inspect_agent_model_profile(composition.agent_profile());
+    assert_eq!(report.status, AgentProfileDoctorStatus::Ready);
+    assert_eq!(report.primary_reasoning_effort, None);
+    assert_eq!(report.vision_reasoning_effort, None);
+    assert!(
+        serde_json::to_value(&report)
+            .unwrap()
+            .get("primary_reasoning_effort")
+            .is_none()
+    );
+    assert!(
+        serde_json::to_value(&report)
+            .unwrap()
+            .get("vision_reasoning_effort")
+            .is_none()
     );
     assert!(credentials.references().is_empty());
 
@@ -378,12 +460,12 @@ fn config_is_strict_and_rejects_unsafe_or_dangling_bindings() {
                 "credential_ref = \"CYBER_AGENT_PRIMARY_API_KEY\"\napi_key = \"fixture-inline\"",
                 1,
             ),
-            "exactly one of `api_key`, `credential_ref`, or `chatgpt_subscription`",
+            "exactly one of `api_key`, `credential_ref`, `chatgpt_subscription`, or `codex_subscription`",
         ),
         (
             "credential-missing",
             valid_config().replacen("credential_ref = \"CYBER_AGENT_PRIMARY_API_KEY\"\n", "", 1),
-            "exactly one of `api_key`, `credential_ref`, or `chatgpt_subscription`",
+            "exactly one of `api_key`, `credential_ref`, `chatgpt_subscription`, or `codex_subscription`",
         ),
         (
             "credential-empty-inline",

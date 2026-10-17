@@ -9,5 +9,11 @@ mod oauth;
 mod store;
 mod types;
 
+#[allow(unused_imports)]
+pub(crate) use oauth::CodexAuthEndpoints;
 pub(crate) use oauth::SubscriptionAuthService;
-pub(crate) use types::{API_BASE_URL, AuthEndpoints};
+#[allow(unused_imports)]
+pub(crate) use types::{
+    API_BASE_URL, AuthEndpoints, CODEX_API_BASE_URL, CODEX_CATALOG_COMPATIBILITY_VERSION,
+    SubscriptionAuthProtocol, SubscriptionModel, SubscriptionReasoningLevel,
+};

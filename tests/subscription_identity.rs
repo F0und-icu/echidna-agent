@@ -60,6 +60,19 @@ fn verify(token: &str) -> Result<String, types::SubscriptionAuthError> {
     )
 }
 
+fn verify_codex(token: &str) -> Result<jwt::CodexIdentity, types::SubscriptionAuthError> {
+    let discovery = serde_json::from_value(json!({
+        "issuer":"https://issuer.test", "jwks_uri":"https://issuer.test/jwks"
+    }))
+    .unwrap();
+    let keys = serde_json::from_value(json!({"keys":[{
+        "kid":"synthetic", "kty":"RSA", "n":MODULUS, "e":"AQAB",
+        "alg":"RS256", "use":"sig"
+    }]}))
+    .unwrap();
+    jwt::verify_codex_identity_token(token, &discovery, &keys, "issued-client", 1000)
+}
+
 #[test]
 fn signed_identity_accepts_single_audience_and_explicit_multiple_audience_party() {
     for audience in [json!("issued-client"), json!(["issued-client", "other"])] {
@@ -138,4 +151,42 @@ fn identity_rejects_tampering_unknown_keys_algorithms_and_extra_segments() {
         verify(&format!("{token}.extra")),
         Err(types::SubscriptionAuthError::InvalidIdentityToken)
     );
+}
+
+#[test]
+fn siwc_identity_ignores_an_irrelevant_malformed_codex_claim() {
+    let mut malformed = claims();
+    malformed["https://api.openai.com/auth"] = json!("not-an-object");
+    let token = signed(json!({"alg":"RS256", "kid":"synthetic"}), malformed);
+    assert_eq!(verify(&token).unwrap(), "account-subject");
+}
+
+#[test]
+fn codex_identity_requires_a_signed_bounded_account_claim_without_a_nonce() {
+    let mut valid = claims();
+    valid.as_object_mut().unwrap().remove("nonce");
+    valid["https://api.openai.com/auth"] = json!({
+        "chatgpt_account_id": "workspace-synthetic"
+    });
+    let token = signed(json!({"alg":"RS256", "kid":"synthetic"}), valid);
+    let identity = verify_codex(&token).unwrap();
+    assert_eq!(identity.subject, "account-subject");
+    assert_eq!(identity.chatgpt_account_id, "workspace-synthetic");
+
+    for account_claim in [
+        Value::Null,
+        json!({}),
+        json!({"chatgpt_account_id": ""}),
+        json!({"chatgpt_account_id": "x".repeat(257)}),
+        json!({"chatgpt_account_id": "workspace\ninvalid"}),
+    ] {
+        let mut invalid = claims();
+        invalid.as_object_mut().unwrap().remove("nonce");
+        invalid["https://api.openai.com/auth"] = account_claim;
+        let token = signed(json!({"alg":"RS256", "kid":"synthetic"}), invalid);
+        assert!(matches!(
+            verify_codex(&token),
+            Err(types::SubscriptionAuthError::InvalidIdentityToken)
+        ));
+    }
 }

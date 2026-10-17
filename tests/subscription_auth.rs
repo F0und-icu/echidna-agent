@@ -95,7 +95,7 @@ async fn signed_loopback_login_uses_pkce_and_models_preserve_server_order() {
         );
         respond(
             model_stream,
-            "{\"models\":[{\"slug\":\"hidden\",\"display_name\":\"Hidden\",\"visibility\":\"hidden\"},{\"slug\":\"first\",\"display_name\":\"First\",\"visibility\":\"list\"},{\"slug\":\"second\",\"display_name\":\"Second\",\"visibility\":\"list\"}]}",
+            "{\"models\":[{\"slug\":\"hidden\",\"display_name\":\"Hidden\",\"visibility\":\"hidden\"},{\"slug\":\"first\",\"display_name\":\"First\",\"visibility\":\"list\",\"default_reasoning_level\":\"high\",\"supported_reasoning_levels\":[{\"effort\":\"high\",\"description\":\"Ignored by SIWC\"}]},{\"slug\":\"second\",\"display_name\":\"Second\",\"visibility\":\"list\"}]}",
         );
     });
 
@@ -132,6 +132,13 @@ async fn signed_loopback_login_uses_pkce_and_models_preserve_server_order() {
     assert!(status.direct_access_granted);
     let models = auth.models().await.unwrap();
     assert_eq!(
+        serde_json::to_value(&models).unwrap(),
+        serde_json::json!([
+            {"slug": "first", "display_name": "First"},
+            {"slug": "second", "display_name": "Second"}
+        ])
+    );
+    assert_eq!(
         models
             .into_iter()
             .map(|model| model.slug)
@@ -159,6 +166,34 @@ async fn signed_loopback_login_uses_pkce_and_models_preserve_server_order() {
             0
         );
     }
+}
+
+#[tokio::test]
+async fn siwc_models_reject_missing_visibility_instead_of_silently_filtering_it() {
+    let directory = TemporaryDirectory::new("subscription-models-missing-visibility");
+    let store = canonical_temp_path(directory.path().join("auth-store"));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let expires_at = now_unix() + 3600;
+    seed_connection(&store, expires_at, expires_at);
+    let server = thread::spawn(move || {
+        let (request, stream) = receive_request(&listener);
+        assert!(request.starts_with("GET /v1/models HTTP/1.1"));
+        respond(
+            stream,
+            r#"{"models":[{"slug":"missing","display_name":"Missing"}]}"#,
+        );
+    });
+
+    assert_eq!(
+        service(&store, &base)
+            .models()
+            .await
+            .unwrap_err()
+            .to_string(),
+        "subscription response is invalid"
+    );
+    server.join().unwrap();
 }
 
 #[tokio::test]
@@ -255,6 +290,103 @@ async fn signed_identity_without_direct_scope_is_rejected_without_persisting_a_c
         "subscription direct token permission was not granted"
     );
     assert!(!store.join("personal.connection").exists());
+}
+
+#[tokio::test]
+async fn login_http_failures_identify_the_safe_operation_and_status_without_persisting() {
+    #[derive(Clone, Copy)]
+    enum FailureStage {
+        TokenExchange,
+        Discovery,
+        Jwks,
+    }
+
+    for (label, stage, status, operation) in [
+        (
+            "token-400",
+            FailureStage::TokenExchange,
+            400,
+            "token exchange",
+        ),
+        (
+            "discovery-401",
+            FailureStage::Discovery,
+            401,
+            "OpenID discovery",
+        ),
+        ("jwks-403", FailureStage::Jwks, 403, "JWKS retrieval"),
+        (
+            "token-429",
+            FailureStage::TokenExchange,
+            429,
+            "token exchange",
+        ),
+    ] {
+        let directory = TemporaryDirectory::new(label);
+        let store = canonical_temp_path(directory.path().join("auth-store"));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let (presented_sender, presented_receiver) = mpsc::channel();
+        let server_base = base.clone();
+        let server = thread::spawn(move || {
+            let presented = presented_receiver.recv().unwrap();
+            send_callback(&presented, "issued-client", false);
+
+            let (token_request, token_stream) = receive_request(&listener);
+            assert!(token_request.starts_with("POST /token HTTP/1.1"));
+            if matches!(stage, FailureStage::TokenExchange) {
+                respond_with_status(token_stream, status, "oauth-stage-secret");
+                return;
+            }
+            respond(
+                token_stream,
+                "{\"access_token\":\"synthetic-access\",\"refresh_token\":\"synthetic-refresh\",\"expires_in\":3600,\"scope\":\"chatgpt.tokens.use.direct\",\"id_token\":\"synthetic-id-token\"}",
+            );
+
+            let (discovery_request, discovery_stream) = receive_request(&listener);
+            assert!(discovery_request.starts_with("GET /discovery HTTP/1.1"));
+            if matches!(stage, FailureStage::Discovery) {
+                respond_with_status(discovery_stream, status, "oauth-stage-secret");
+                return;
+            }
+            respond(
+                discovery_stream,
+                &format!(
+                    "{{\"issuer\":\"{server_base}/issuer\",\"jwks_uri\":\"{server_base}/jwks\"}}"
+                ),
+            );
+
+            let (jwks_request, jwks_stream) = receive_request(&listener);
+            assert!(jwks_request.starts_with("GET /jwks HTTP/1.1"));
+            respond_with_status(jwks_stream, status, "oauth-stage-secret");
+        });
+
+        let auth = service(&store, &base);
+        let error = auth
+            .login(|url| {
+                let values = query(url);
+                presented_sender
+                    .send(PresentedLogin {
+                        redirect_uri: values.get("redirect_uri").unwrap().to_owned(),
+                        state: values.get("state").unwrap().to_owned(),
+                        nonce: values.get("nonce").unwrap().to_owned(),
+                    })
+                    .unwrap();
+                Ok(())
+            })
+            .await
+            .unwrap_err();
+        server.join().unwrap();
+
+        let message = error.to_string();
+        assert_eq!(
+            message,
+            format!("subscription authentication {operation} request failed with HTTP {status}")
+        );
+        assert!(!message.contains("oauth-stage-secret"));
+        assert!(!format!("{error:?}").contains("oauth-stage-secret"));
+        assert!(!store.join("personal.connection").exists());
+    }
 }
 
 #[tokio::test]
@@ -970,13 +1102,11 @@ fn send_callback(presented: &PresentedLogin, client_id: &str, denied: bool) {
     stream
         .set_read_timeout(Some(std::time::Duration::from_secs(5)))
         .unwrap();
-    let mut response = [0_u8; 128];
-    let count = stream.read(&mut response).unwrap();
-    assert!(
-        std::str::from_utf8(&response[..count])
-            .unwrap()
-            .starts_with("HTTP/1.1 200")
-    );
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 200"));
+    assert!(response.contains("Echidna authorization callback received."));
+    assert!(!response.contains("Echidna sign-in complete."));
 }
 
 fn send_callback_without_client(presented: &PresentedLogin) {

@@ -7,7 +7,7 @@ use echidna::domain::context::{
 };
 use echidna::domain::model::{
     CapabilityMappingVersion, ContentItem, MODEL_INPUT_IR_SCHEMA_VERSION, ModelCapabilities,
-    ModelInputIR, ModelInputIrSchemaVersion, ModelRequestRequirements,
+    ModelInputIR, ModelInputIrSchemaVersion, ModelRequestRequirements, ReasoningEffort,
 };
 use echidna::domain::tools::{
     ToolCachePolicy, ToolCall, ToolCallId, ToolDeterminism, ToolEffect, ToolExposure, ToolName,
@@ -27,6 +27,7 @@ fn capabilities() -> ModelCapabilities {
         incremental_input: true,
         usage_reporting: true,
         max_output_tokens: None,
+        reasoning_effort: None,
         context_window: 128_000,
         capability_mapping_version: CapabilityMappingVersion::new(1),
     }
@@ -178,6 +179,42 @@ fn output_limit_changes_invalidate_the_output_contract_without_rewriting_history
         session.assess_delivery(&capture(&next), true),
         BaselineAssessment::FullRequest {
             reason: BaselineInvalidationReason::OutputContractChanged,
+        }
+    );
+}
+
+#[test]
+fn reasoning_effort_changes_request_properties_without_changing_the_capability_mapping() {
+    let (baseline_request, output) = baseline_input();
+    let caps = capabilities();
+    let baseline_snapshot = snapshot(
+        ModelIdentity::new("primary", "model-v1"),
+        ModelProfile::new("research", 1),
+        "primary-1",
+        ProviderSessionRole::Primary,
+        &baseline_request,
+        &caps,
+        InternalRequestMetadata::default(),
+    );
+    let mut session = primary_session();
+    establish(&mut session, &baseline_snapshot, output.clone());
+
+    let mut candidate_request = append_input(&baseline_request, &output);
+    candidate_request.requirements.reasoning_effort = Some(ReasoningEffort::High);
+    let candidate = snapshot(
+        ModelIdentity::new("primary", "model-v1"),
+        ModelProfile::new("research", 1),
+        "primary-1",
+        ProviderSessionRole::Primary,
+        &candidate_request,
+        &caps,
+        InternalRequestMetadata::default(),
+    );
+
+    assert_eq!(
+        session.assess_delivery(&candidate, true),
+        BaselineAssessment::FullRequest {
+            reason: BaselineInvalidationReason::RequestPropertiesChanged,
         }
     );
 }

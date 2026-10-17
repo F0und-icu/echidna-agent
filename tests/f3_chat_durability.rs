@@ -62,6 +62,9 @@ fn spawn_tool_then_pending_server(first_response: String) -> ToolThenPendingServ
             match listener.accept() {
                 Ok((mut socket, _)) => {
                     socket
+                        .set_nonblocking(false)
+                        .expect("accepted loopback socket should restore blocking reads");
+                    socket
                         .set_read_timeout(Some(WAIT))
                         .expect("loopback socket should accept a read timeout");
                     request_sender.send(read_http_request(&mut socket)).unwrap();

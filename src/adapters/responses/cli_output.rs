@@ -22,6 +22,8 @@ pub(super) struct RequestOutput {
     saw_reasoning: bool,
     pending_reasoning_deltas: String,
     reasoning_line_open: bool,
+    saw_reasoning_summary: bool,
+    reasoning_summary_line_open: bool,
     completed: bool,
     rejected: bool,
     #[cfg(debug_assertions)]
@@ -43,6 +45,8 @@ impl RequestOutput {
             saw_reasoning: false,
             pending_reasoning_deltas: String::new(),
             reasoning_line_open: false,
+            saw_reasoning_summary: false,
+            reasoning_summary_line_open: false,
             completed: false,
             rejected: false,
             #[cfg(debug_assertions)]
@@ -131,7 +135,7 @@ impl RequestOutput {
 
     #[cfg(debug_assertions)]
     pub(super) fn http_error_body(&self, data: &str) {
-        if data.len() > super::MAX_DEBUG_ERROR_BODY_BYTES {
+        if data.len() > super::MAX_HTTP_ERROR_BODY_BYTES {
             self.response_omitted("HTTP error body omitted: exceeds 65536 bytes");
         } else if self.full {
             match serde_json::from_str(data) {
@@ -151,6 +155,7 @@ impl RequestOutput {
     }
 
     pub(super) fn model_event(&mut self, event: &ModelEvent) {
+        self.end_reasoning_summary_line();
         match event {
             ModelEvent::ReasoningDelta { text } => {
                 self.pending_reasoning_deltas.push_str(text);
@@ -199,9 +204,37 @@ impl RequestOutput {
         }
     }
 
+    pub(super) fn reasoning_summary(&mut self, text: &str, starts_part: bool) {
+        if text.is_empty() {
+            return;
+        }
+        self.end_reasoning_line();
+        if starts_part && self.saw_reasoning_summary {
+            self.end_reasoning_summary_line();
+        }
+        let mut stderr = io::stderr().lock();
+        if !self.saw_reasoning_summary {
+            let _ = writeln!(
+                stderr,
+                "[推理摘要 {} #{} · 未完成]",
+                self.role, self.request_id
+            );
+            self.saw_reasoning_summary = true;
+        }
+        let text = redact_text(text, &self.credential);
+        let rendered = escaped_text(&text);
+        let _ = stderr.write_all(rendered.as_bytes());
+        self.reasoning_summary_line_open = !text.ends_with('\n');
+        let _ = stderr.flush();
+    }
+
     pub(super) fn completed(&mut self) {
         self.completed = true;
         self.end_reasoning_line();
+        self.end_reasoning_summary_line();
+        if self.saw_reasoning_summary {
+            let _ = writeln!(io::stderr().lock(), "[推理摘要已完成]");
+        }
         if self.full_debug() {
             #[cfg(debug_assertions)]
             self.emit("响应已完成", Value::Null);
@@ -214,11 +247,23 @@ impl RequestOutput {
     pub(super) fn rejected(&mut self, error: &crate::ports::model::ModelProviderError) {
         self.rejected = true;
         self.end_reasoning_line();
+        self.end_reasoning_summary_line();
         let protocol_error = matches!(
             error,
             crate::ports::model::ModelProviderError::ProtocolFailure { .. }
                 | crate::ports::model::ModelProviderError::InvalidToolArguments { .. }
         );
+        if self.saw_reasoning_summary {
+            let _ = writeln!(
+                io::stderr().lock(),
+                "[推理摘要未提交：{}]",
+                if protocol_error {
+                    "协议解码失败"
+                } else {
+                    "Provider 返回停止状态"
+                }
+            );
+        }
         #[cfg(debug_assertions)]
         if self.full {
             self.emit(
@@ -268,6 +313,13 @@ impl RequestOutput {
         }
     }
 
+    fn end_reasoning_summary_line(&mut self) {
+        if self.reasoning_summary_line_open {
+            let _ = writeln!(io::stderr().lock());
+            self.reasoning_summary_line_open = false;
+        }
+    }
+
     fn full_debug(&self) -> bool {
         #[cfg(debug_assertions)]
         {
@@ -303,6 +355,10 @@ impl Drop for RequestOutput {
     fn drop(&mut self) {
         if self.completed || self.rejected {
             return;
+        }
+        self.end_reasoning_summary_line();
+        if self.saw_reasoning_summary {
+            let _ = writeln!(io::stderr().lock(), "[推理摘要中断：响应未完成]");
         }
         if self.full_debug() {
             self.end_reasoning_line();

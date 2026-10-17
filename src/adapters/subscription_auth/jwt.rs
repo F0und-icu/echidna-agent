@@ -2,6 +2,7 @@ use base64::Engine;
 use ring::hmac;
 use ring::signature::{RSA_PKCS1_2048_8192_SHA256, RsaPublicKeyComponents};
 use serde::Deserialize;
+use serde_json::Value;
 
 use super::types::SubscriptionAuthError;
 
@@ -44,8 +45,14 @@ struct IdentityClaims {
     nbf: Option<u64>,
     iat: Option<u64>,
     azp: Option<String>,
-    nonce: String,
     sub: String,
+}
+
+pub(super) struct CodexIdentity {
+    pub(super) subject: String,
+    pub(super) issuer: String,
+    pub(super) expires_at_unix: u64,
+    pub(super) chatgpt_account_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -76,6 +83,48 @@ pub(super) fn verify_identity_token(
     expected_nonce: &str,
     now_unix: u64,
 ) -> Result<String, SubscriptionAuthError> {
+    let (claims, payload) = verify_signed_identity(token, discovery, keys, client_id, now_unix)?;
+    let nonce = payload
+        .get("nonce")
+        .and_then(Value::as_str)
+        .ok_or(SubscriptionAuthError::InvalidIdentityToken)?;
+    if !constant_time_equal(nonce.as_bytes(), expected_nonce.as_bytes()) {
+        return Err(SubscriptionAuthError::InvalidIdentityToken);
+    }
+    Ok(claims.sub)
+}
+
+pub(super) fn verify_codex_identity_token(
+    token: &str,
+    discovery: &OpenIdDiscovery,
+    keys: &JsonWebKeySet,
+    client_id: &str,
+    now_unix: u64,
+) -> Result<CodexIdentity, SubscriptionAuthError> {
+    let (claims, payload) = verify_signed_identity(token, discovery, keys, client_id, now_unix)?;
+    let chatgpt_account_id = payload
+        .get("https://api.openai.com/auth")
+        .and_then(Value::as_object)
+        .and_then(|auth| auth.get("chatgpt_account_id"))
+        .and_then(Value::as_str)
+        .filter(|account| valid_chatgpt_account_id(account))
+        .map(str::to_owned)
+        .ok_or(SubscriptionAuthError::InvalidIdentityToken)?;
+    Ok(CodexIdentity {
+        subject: claims.sub,
+        issuer: claims.iss,
+        expires_at_unix: claims.exp,
+        chatgpt_account_id,
+    })
+}
+
+fn verify_signed_identity(
+    token: &str,
+    discovery: &OpenIdDiscovery,
+    keys: &JsonWebKeySet,
+    client_id: &str,
+    now_unix: u64,
+) -> Result<(IdentityClaims, Value), SubscriptionAuthError> {
     let mut segments = token.split('.');
     let header_segment = segments
         .next()
@@ -124,11 +173,13 @@ pub(super) fn verify_identity_token(
     .verify(&RSA_PKCS1_2048_8192_SHA256, signed.as_bytes(), &signature)
     .map_err(|_| SubscriptionAuthError::InvalidIdentityToken)?;
 
-    let claims: IdentityClaims = decode_json(claims_segment)?;
+    let payload: Value = decode_json(claims_segment)?;
+    let claims: IdentityClaims = serde_json::from_value(payload.clone())
+        .map_err(|_| SubscriptionAuthError::InvalidIdentityToken)?;
     if claims.iss != discovery.issuer
         || !claims.aud.includes(client_id)
-        || (claims.aud.has_multiple() && claims.azp.as_deref() != Some(client_id))
         || claims.azp.as_deref().is_some_and(|azp| azp != client_id)
+        || (claims.aud.has_multiple() && claims.azp.as_deref() != Some(client_id))
         || claims.exp <= now_unix
         || claims.nbf.is_some_and(|not_before| not_before > now_unix)
         || claims
@@ -136,11 +187,16 @@ pub(super) fn verify_identity_token(
             .is_some_and(|issued_at| issued_at > now_unix.saturating_add(60))
         || claims.sub.is_empty()
         || claims.sub.len() > 512
-        || !constant_time_equal(claims.nonce.as_bytes(), expected_nonce.as_bytes())
     {
         return Err(SubscriptionAuthError::InvalidIdentityToken);
     }
-    Ok(claims.sub)
+    Ok((claims, payload))
+}
+
+pub(super) fn valid_chatgpt_account_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
 }
 
 pub(super) fn constant_time_equal(expected: &[u8], candidate: &[u8]) -> bool {
