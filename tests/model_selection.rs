@@ -10,7 +10,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use echidna::adapters::credentials::{CredentialSource, CredentialSourceError};
 use echidna::provider_composition::ProviderComposition;
-use selection::{ModelSelectionError, edit_model_selection, publish_model_selection};
+use selection::{
+    CatalogCapabilityImport, ModelSelectionError, edit_model_selection, publish_model_selection,
+};
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
@@ -99,7 +101,8 @@ generation = 1
 #[test]
 fn selected_provider_gets_isolated_mapping_and_comments_and_other_provider_survive() {
     let before = source();
-    let after = edit_model_selection(&before, "codex", "returned-model", Some("xhigh")).unwrap();
+    let after =
+        edit_model_selection(&before, "codex", "returned-model", Some("xhigh"), None).unwrap();
     assert!(after.starts_with("# Operator notes must survive.\n"));
     assert!(after.contains("# Keep this model comment."));
     // The new mapping is inserted between existing tables. Each untouched
@@ -164,7 +167,7 @@ fn selected_provider_gets_isolated_mapping_and_comments_and_other_provider_survi
 #[test]
 fn service_default_removes_effort_only_in_the_new_mapping_and_avoids_collisions() {
     let before = source() + "\n[capability_mappings.codex-selection-2]\nversion = 1\n";
-    let after = edit_model_selection(&before, "codex", "returned-model", None).unwrap();
+    let after = edit_model_selection(&before, "codex", "returned-model", None, None).unwrap();
     let parsed: toml::Value = toml::from_str(&after).unwrap();
     assert_eq!(
         parsed["providers"]["codex"]["generation"].as_integer(),
@@ -190,6 +193,103 @@ fn service_default_removes_effort_only_in_the_new_mapping_and_avoids_collisions(
 }
 
 #[test]
+fn explicit_capability_import_updates_only_advertised_selection_fields() {
+    let before = source();
+    let after = edit_model_selection(
+        &before,
+        "codex",
+        "returned-model",
+        Some("future"),
+        Some(&CatalogCapabilityImport {
+            context_window: Some(128_000),
+            input_modalities: Some(vec!["image".to_owned(), "unknown".to_owned()]),
+            supports_reasoning_summary_parameter: Some(false),
+        }),
+    )
+    .unwrap();
+    let parsed: toml::Value = toml::from_str(&after).unwrap();
+    let mapping = parsed["providers"]["codex"]["capability_mapping"]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        parsed["capability_mappings"][mapping]["context_window"].as_integer(),
+        Some(128_000)
+    );
+    assert_eq!(
+        parsed["capability_mappings"][mapping]["text_input"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        parsed["capability_mappings"][mapping]["image_input"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        parsed["providers"]["codex"]["codex_subscription"]["supports_reasoning_summary_parameter"]
+            .as_bool(),
+        Some(false)
+    );
+    assert!(
+        parsed["capability_mappings"][mapping]
+            .get("max_context_window")
+            .is_none()
+    );
+    assert_eq!(
+        parsed["capability_mappings"]["shared"]["context_window"].as_integer(),
+        Some(32_768)
+    );
+}
+
+#[test]
+fn explicit_capability_import_preserves_the_existing_window_when_catalog_metadata_is_unknown() {
+    let before = source();
+    let after = edit_model_selection(
+        &before,
+        "codex",
+        "returned-model",
+        Some("future"),
+        Some(&CatalogCapabilityImport {
+            context_window: None,
+            input_modalities: None,
+            supports_reasoning_summary_parameter: None,
+        }),
+    )
+    .unwrap();
+    let parsed: toml::Value = toml::from_str(&after).unwrap();
+    let mapping = parsed["providers"]["codex"]["capability_mapping"]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        parsed["capability_mappings"][mapping]["context_window"].as_integer(),
+        Some(32_768)
+    );
+}
+
+#[test]
+fn invalid_combined_capability_import_does_not_publish_any_source_bytes() {
+    let directory = FixtureDirectory::new();
+    let path = directory.config();
+    let before = source().replace(
+        "context_window = 32768",
+        "context_window = 32768\nmax_output_tokens = 32767",
+    );
+    fs::write(&path, &before).unwrap();
+    let result = publish_model_selection(
+        &path,
+        "codex",
+        "returned-model",
+        Some("future"),
+        Some(&CatalogCapabilityImport {
+            context_window: Some(1),
+            input_modalities: None,
+            supports_reasoning_summary_parameter: None,
+        }),
+        validate,
+    );
+    assert!(matches!(result, Err(ModelSelectionError::InvalidCandidate)));
+    assert_eq!(fs::read_to_string(&path).unwrap(), before);
+}
+
+#[test]
 fn publication_validates_through_existing_composition_and_preserves_permissions() {
     let directory = FixtureDirectory::new();
     let path = directory.config();
@@ -200,7 +300,15 @@ fn publication_validates_through_existing_composition_and_preserves_permissions(
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
     }
     let before_mode = fs::metadata(&path).unwrap().permissions();
-    publish_model_selection(&path, "codex", "returned-model", Some("xhigh"), validate).unwrap();
+    publish_model_selection(
+        &path,
+        "codex",
+        "returned-model",
+        Some("xhigh"),
+        None,
+        validate,
+    )
+    .unwrap();
     let composition = ProviderComposition::load(&path, Arc::new(NoCredentials)).unwrap();
     assert_eq!(
         composition.agent_profile().primary().profile().generation,
@@ -249,6 +357,7 @@ fn relative_config_filename_publishes_successfully_without_changing_working_dire
         "codex",
         "returned-model",
         Some("xhigh"),
+        None,
         validate,
     )
     .unwrap();
@@ -271,7 +380,8 @@ fn invalid_candidate_and_generation_overflow_leave_original_bytes_untouched() {
             &path,
             "codex",
             "returned-model",
-            Some("future-unknown"),
+            Some("future unknown"),
+            None,
             validate
         ),
         Err(ModelSelectionError::InvalidCandidate)
@@ -281,7 +391,7 @@ fn invalid_candidate_and_generation_overflow_leave_original_bytes_untouched() {
     let overflow = before.replace("generation = 1", "generation = 9223372036854775807");
     fs::write(&path, &overflow).unwrap();
     assert!(matches!(
-        publish_model_selection(&path, "codex", "returned-model", None, validate),
+        publish_model_selection(&path, "codex", "returned-model", None, None, validate),
         Err(ModelSelectionError::GenerationOverflow)
     ));
     assert_eq!(fs::read_to_string(&path).unwrap(), overflow);
@@ -293,11 +403,12 @@ fn intervening_edit_is_retained_instead_of_overwritten() {
     let path = directory.config();
     fs::write(&path, source()).unwrap();
     let external = source() + "\n# Concurrent operator change.\n";
-    let result = publish_model_selection(&path, "codex", "returned-model", None, |candidate| {
-        validate(candidate)?;
-        fs::write(&path, &external).unwrap();
-        Ok(())
-    });
+    let result =
+        publish_model_selection(&path, "codex", "returned-model", None, None, |candidate| {
+            validate(candidate)?;
+            fs::write(&path, &external).unwrap();
+            Ok(())
+        });
     assert!(matches!(
         result,
         Err(ModelSelectionError::StaleConfiguration)
@@ -317,7 +428,7 @@ fn existing_temporary_file_is_never_deleted_or_replaced() {
         .join(format!(".provider.toml.{}.tmp", std::process::id()));
     fs::write(&collision, "another operation's data").unwrap();
     assert!(matches!(
-        publish_model_selection(&path, "codex", "returned-model", None, validate),
+        publish_model_selection(&path, "codex", "returned-model", None, None, validate),
         Err(ModelSelectionError::PublicationFailed)
     ));
     assert_eq!(fs::read_to_string(&path).unwrap(), before);
@@ -337,6 +448,7 @@ fn cooperating_publishers_cannot_overlap_and_stable_lock_releases_after_commit()
         "codex",
         "first-selection",
         Some("xhigh"),
+        None,
         |candidate| {
             validate(candidate)?;
             let child = std::process::Command::new(std::env::current_exe().unwrap())
@@ -370,7 +482,7 @@ fn cooperating_publishers_cannot_overlap_and_stable_lock_releases_after_commit()
         let metadata = fs::metadata(&lock).unwrap();
         metadata.ino()
     };
-    publish_model_selection(&path, "codex", "later-selection", None, validate).unwrap();
+    publish_model_selection(&path, "codex", "later-selection", None, None, validate).unwrap();
     let parsed: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
     assert_eq!(
         parsed["providers"]["codex"]["generation"].as_integer(),
@@ -397,6 +509,7 @@ fn lock_child_observes_busy_before_candidate_validation() {
         "codex",
         "overlapping-selection",
         None,
+        None,
         |_| panic!("a competing process must fail before candidate validation"),
     );
     assert!(matches!(result, Err(ModelSelectionError::PublicationBusy)));
@@ -415,7 +528,7 @@ fn lock_symlink_is_rejected_and_does_not_change_either_file() {
     fs::write(&target, "unrelated data").unwrap();
     symlink(&target, directory.0.join(".provider.toml.selection.lock")).unwrap();
     assert!(matches!(
-        publish_model_selection(&path, "codex", "returned-model", None, validate),
+        publish_model_selection(&path, "codex", "returned-model", None, None, validate),
         Err(ModelSelectionError::UnsafeConfigurationPath)
     ));
     assert_eq!(fs::read_to_string(path).unwrap(), before);
@@ -428,11 +541,12 @@ fn failed_atomic_publication_retains_original_without_secret_diagnostics() {
     let path = directory.config();
     let before = source();
     fs::write(&path, &before).unwrap();
-    let result = publish_model_selection(&path, "codex", "returned-model", None, |candidate| {
-        validate(candidate)?;
-        fs::remove_file(candidate).unwrap();
-        Ok(())
-    });
+    let result =
+        publish_model_selection(&path, "codex", "returned-model", None, None, |candidate| {
+            validate(candidate)?;
+            fs::remove_file(candidate).unwrap();
+            Ok(())
+        });
     let error = result.unwrap_err();
     assert!(matches!(error, ModelSelectionError::PublicationFailed));
     assert!(!error.to_string().contains("fixture-inline-key"));
@@ -450,7 +564,7 @@ fn final_symlink_is_rejected_without_touching_its_target() {
     fs::write(&target, &before).unwrap();
     symlink(&target, &path).unwrap();
     assert!(matches!(
-        publish_model_selection(&path, "codex", "returned-model", None, validate),
+        publish_model_selection(&path, "codex", "returned-model", None, None, validate),
         Err(ModelSelectionError::UnsafeConfigurationPath)
     ));
     assert_eq!(fs::read_to_string(target).unwrap(), before);

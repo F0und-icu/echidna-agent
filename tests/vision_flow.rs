@@ -1068,7 +1068,7 @@ impl ToolExecutor for FixedViewImageExecutor {
 
     fn execute(&self, plan: ToolExecutionPlan) -> ToolExecutionFuture<'_> {
         let output = self.output.clone();
-        Box::pin(async move { ToolExecutionOutcome::succeeded(plan, output) })
+        Box::pin(async move { Ok(ToolExecutionOutcome::succeeded(plan, output)) })
     }
 }
 

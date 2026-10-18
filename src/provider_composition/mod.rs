@@ -11,6 +11,7 @@ use std::sync::Arc;
 use crate::adapters::credentials::{
     AccountBoundCredential, CredentialResolution, CredentialSource, CredentialSourceError,
 };
+use crate::adapters::mcp_http::{McpCatalogTool, McpError, McpRuntime};
 use crate::adapters::project_event_store::Project;
 use crate::adapters::responses::{ResponsesHttpAdapter, ResponsesHttpConfig, ResponsesWireProfile};
 use crate::adapters::subscription_auth::SubscriptionAuthService;
@@ -21,7 +22,7 @@ use crate::ports::model::ModelProvider;
 
 pub(crate) use config::{PromptSources, RuntimeSettings};
 use config::{ProviderBinding, ProviderConfigV1, ProviderCredential, ProviderDefinition, WireApi};
-pub(crate) use selection::ModelSelectionError;
+pub(crate) use selection::{CatalogCapabilityImport, ModelSelectionError};
 pub use validation::ProviderCompositionError;
 
 /// One validated Agent profile and the exact Provider instances selected for
@@ -35,6 +36,7 @@ pub struct ProviderComposition {
     prompt_sources: PromptSources,
     agent_definition_path: Option<std::path::PathBuf>,
     runtime: RuntimeSettings,
+    mcp: McpRuntime,
 }
 
 /// One strictly decoded and validated Config v1 value awaiting runtime-only
@@ -103,12 +105,14 @@ impl ProviderComposition {
         provider_id: &str,
         model: &str,
         reasoning_effort: Option<ReasoningEffort>,
+        capabilities: Option<CatalogCapabilityImport>,
     ) -> Result<(), ModelSelectionError> {
         selection::publish_model_selection(
             path.as_ref(),
             provider_id,
             model,
-            reasoning_effort.map(ReasoningEffort::as_str),
+            reasoning_effort.as_ref().map(ReasoningEffort::as_str),
+            capabilities.as_ref(),
             |candidate| Self::load_config(candidate).map(|_| ()).map_err(|_| ()),
         )
     }
@@ -172,6 +176,12 @@ impl ProviderComposition {
         self.runtime
     }
 
+    /// Discovers configured MCP tools only for live Chat setup. Default
+    /// diagnostics remain offline and never resolve MCP credentials.
+    pub(crate) async fn discover_chat_mcp(&self) -> Result<Vec<McpCatalogTool>, McpError> {
+        self.mcp.discover().await
+    }
+
     fn compose(
         config: ValidatedProviderConfig,
         credential_source: Arc<dyn CredentialSource>,
@@ -181,10 +191,11 @@ impl ProviderComposition {
         let config = config.0;
         let prompt_sources = config.prompts.clone();
         let agent_definition_path = config.agent_definition_path().map(Path::to_path_buf);
+        let mcp = McpRuntime::new(config.mcp_servers.clone(), Arc::clone(&credential_source));
 
         let agent = config.active_agent_definition();
         let primary_definition = config.provider(&agent.primary);
-        let primary = compose_provider(
+        let (primary, primary_request_adapter_version) = compose_provider(
             &agent.primary,
             primary_definition,
             config.capabilities(primary_definition),
@@ -211,21 +222,22 @@ impl ProviderComposition {
                 )
             })
             .transpose()?;
+        let (vision, vision_request_adapter_version) = match vision {
+            Some((provider, version)) => (Some(provider), Some(version)),
+            None => (None, None),
+        };
         let agent_profile = config.active_agent_model_profile()?;
 
         Ok(Self {
             agent_profile,
             primary,
             vision,
-            primary_request_adapter_version: wire_profile(primary_definition)
-                .request_adapter_version(),
-            vision_request_adapter_version: agent
-                .vision
-                .as_deref()
-                .map(|id| wire_profile(config.provider(id)).request_adapter_version()),
+            primary_request_adapter_version,
+            vision_request_adapter_version,
             prompt_sources,
             agent_definition_path,
             runtime: config.runtime,
+            mcp,
         })
     }
 }
@@ -238,7 +250,7 @@ fn compose_provider(
     project: Option<&Project>,
     cli_role: Option<&'static str>,
     #[cfg(debug_assertions)] debug: bool,
-) -> Result<Arc<dyn ModelProvider>, ProviderCompositionError> {
+) -> Result<(Arc<dyn ModelProvider>, RequestAdapterVersion), ProviderCompositionError> {
     let (credential_reference, credential_source) = match definition.credential() {
         ProviderCredential::Reference(reference) => (reference.to_owned(), credential_source),
         ProviderCredential::Inline(value) => {
@@ -280,8 +292,18 @@ fn compose_provider(
                 ResponsesWireProfile::ChatGptSubscription => {
                     config.with_chatgpt_subscription_profile()
                 }
-                ResponsesWireProfile::CodexSubscription => config.with_codex_subscription_profile(),
+                ResponsesWireProfile::CodexSubscription => config
+                    .with_codex_subscription_profile()
+                    .with_codex_reasoning_summary_support(
+                        definition
+                            .codex_subscription
+                            .as_ref()
+                            .and_then(|subscription| {
+                                subscription.supports_reasoning_summary_parameter
+                            }),
+                    ),
             };
+            let request_adapter_version = config.request_adapter_version();
             let adapter = ResponsesHttpAdapter::new(config, credential_source);
             let adapter = match project {
                 Some(project) => adapter.with_project_image_resolver(project.clone()),
@@ -292,7 +314,7 @@ fn compose_provider(
                 #[cfg(debug_assertions)]
                 debug,
             );
-            Ok(Arc::new(adapter))
+            Ok((Arc::new(adapter), request_adapter_version))
         }
     }
 }

@@ -62,7 +62,7 @@ async fn inspect_environment_fixture_child() {
             ),
         )
         .expect("inspect_environment fixture arguments must be valid");
-    let outcome = tools.execute(plan).await;
+    let outcome = tools.execute(plan).await.expect("Tool execution completes");
     assert_eq!(
         outcome.result.status,
         ToolResultStatus::Succeeded,

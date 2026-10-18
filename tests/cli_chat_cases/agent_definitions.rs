@@ -117,6 +117,85 @@ fn generic_agent_omits_research_prompt_and_events() {
 }
 
 #[test]
+fn generic_agent_queues_two_session_images_and_blocks_binding_changes_until_submission() {
+    let root = TemporaryDirectory::new("agent-definition-generic-images");
+    initialize_project(root.path());
+    let definition = export_agent(root.path(), "writer", "technical-writing");
+    let replacement = export_agent(root.path(), "replacement", "technical-writing");
+    fs::write(root.path().join("first.png"), png_bytes(9, 7)).unwrap();
+    fs::write(root.path().join("second.png"), png_bytes(13, 5)).unwrap();
+    let server = spawn_responses_server(vec![(
+        200,
+        text_response("GENERIC_TWO_IMAGES", "generic-two-images"),
+    )]);
+    let config = write_direct_config(root.path(), &server.base_url);
+
+    let output = run_chat(
+        root.path(),
+        &config,
+        &format!(
+            "/image first.png\n/image second.png\n/agent reload\n/agent use {}\n/compact\nCompare the two session images.\n/exit\n",
+            replacement.display()
+        ),
+        &["--agent", definition.to_str().unwrap()],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout
+            .matches("Agent changes require no queued images")
+            .count(),
+        2
+    );
+    assert!(
+        stdout.contains("Compaction is unavailable while 2 image(s)"),
+        "{stdout}"
+    );
+    let request = f2a_request_body(&server.requests, "generic two-image Primary");
+    f2a_join_server(server, "generic two-image Primary");
+    assert_eq!(json_count_type(&request["input"], "input_image"), 2);
+    assert!(json_contains_text(
+        &request["input"],
+        "Compare the two session images."
+    ));
+
+    let session = session_id(root.path());
+    let project = Project::discover(root.path()).unwrap();
+    let state = reduced_session(&project, &session);
+    assert_eq!(state.vision_routes().len(), 2);
+    assert!(state.vision_observations().is_empty());
+    assert_eq!(state.execution_receipt_count(), 2);
+    assert_eq!(state.request_audits().len(), 1);
+    assert_eq!(
+        state
+            .history()
+            .items()
+            .iter()
+            .filter(|item| matches!(
+                item,
+                echidna::domain::model::ContentItem::ImageArtifact { .. }
+            ))
+            .count(),
+        2
+    );
+    let events = session_events(root.path(), &session);
+    assert!(events.iter().all(|event| {
+        !event["event_type"]
+            .as_str()
+            .is_some_and(|event_type| event_type.starts_with("research."))
+    }));
+    assert!(
+        events
+            .iter()
+            .all(|event| { event["event_type"] != "session.agent_definition_applied" })
+    );
+}
+
+#[test]
 fn memoryless_agent_reports_no_logical_memory_namespace() {
     let root = TemporaryDirectory::new("agent-definition-memoryless-loopback");
     initialize_project(root.path());

@@ -68,6 +68,7 @@ pub(crate) async fn run(
     mut requested_phase: Option<ResearchPhase>,
 ) -> Result<(), ChatError> {
     let _runtime_lease = project.acquire_chat_runtime_lease()?;
+    let discovered_mcp = composition.discover_chat_mcp().await?;
     let terminal_input = io::stdin().is_terminal();
     let mut input_closed = false;
     let mut pending_input = None;
@@ -87,6 +88,7 @@ pub(crate) async fn run(
                 explicit_resume,
                 requested_agent.take().as_deref(),
                 composition,
+                &discovered_mcp,
             )?,
         };
         let research_enabled = binding.definition().research().is_some();
@@ -97,7 +99,7 @@ pub(crate) async fn run(
         }
         let mut session = DurableChatSession::new(project.clone(), session_id.clone(), binding)?;
         let (session_state, provider_session, mut disposition, compaction_validation) =
-            session.start_or_resume(explicit_resume, composition, false)?;
+            session.start_or_resume(explicit_resume, composition, false, &discovered_mcp)?;
         let domain = requested_domain.unwrap_or_else(|| {
             session_state
                 .domain_profile_selection()
@@ -112,7 +114,7 @@ pub(crate) async fn run(
                 .unwrap_or(DomainProfile::Source)
         });
 
-        let tools = session.bound_tools();
+        let tools = session.bound_tools(&discovered_mcp)?;
         let mut context_cache = context::ChatContextCache::default();
         let mut agent = AgentLoop::with_primary_context(
             composition.primary_provider(),
@@ -167,7 +169,7 @@ pub(crate) async fn run(
         }
         let mut pending_domain = requested_domain.map(DomainProfileSelection::operator);
         let mut pending_phase = requested_phase.map(ResearchPhaseSelection::operator);
-        let mut pending_image: Option<vision::PendingImage> = None;
+        let mut pending_images: Vec<vision::PendingImage> = Vec::new();
         let mut recovery_required = false;
         let tool_output = std::cell::RefCell::new(tool_output::ToolOutput::default());
         loop {
@@ -275,7 +277,7 @@ pub(crate) async fn run(
                     continue;
                 }
                 let (state, provider_session, resumed, validation) =
-                    session.start_or_resume(true, composition, false)?;
+                    session.start_or_resume(true, composition, false, &discovered_mcp)?;
                 let validation = validation.as_ref().map(|facts| facts.context());
                 agent.resume_from_session(&state, provider_session, validation.as_ref())?;
                 disposition = resumed;
@@ -295,9 +297,9 @@ pub(crate) async fn run(
                 || line.starts_with("/agent reload ")
                 || line.starts_with("/agent use ")
             {
-                if pending_image.is_some() {
+                if !pending_images.is_empty() {
                     println!(
-                        "Agent changes require no queued image; submit it or use /image cancel."
+                        "Agent changes require no queued images; submit them or use /image cancel."
                     );
                     continue;
                 }
@@ -318,8 +320,10 @@ pub(crate) async fn run(
                         println!("Usage: /agent use <path>");
                         continue;
                     }
-                    let catalog =
-                        crate::adapters::tools::ToolRegistry::for_project(session.project.root());
+                    let catalog = crate::adapters::tools::ToolRegistry::for_project_with_mcp(
+                        session.project.root(),
+                        &discovered_mcp,
+                    )?;
                     let candidate = match crate::cli_agent::select_binding(
                         Some(Path::new(path)),
                         composition,
@@ -336,9 +340,11 @@ pub(crate) async fn run(
                         new_session_id(),
                         candidate.clone(),
                     )?;
-                    if let Err(error) =
-                        preview.preflight_binding(&SessionState::default(), composition)
-                    {
+                    if let Err(error) = preview.preflight_binding(
+                        &SessionState::default(),
+                        composition,
+                        &discovered_mcp,
+                    ) {
                         println!("Agent change rejected: {error}");
                         continue;
                     }
@@ -353,8 +359,10 @@ pub(crate) async fn run(
                     continue 'sessions;
                 }
                 let path = line.strip_prefix("/agent reload ").map(str::trim);
-                let catalog =
-                    crate::adapters::tools::ToolRegistry::for_project(session.project.root());
+                let catalog = crate::adapters::tools::ToolRegistry::for_project_with_mcp(
+                    session.project.root(),
+                    &discovered_mcp,
+                )?;
                 let candidate = match definition::reload_candidate(
                     &session.binding,
                     path.map(Path::new),
@@ -378,12 +386,14 @@ pub(crate) async fn run(
                 )
                 .map_err(definition::error)?;
                 let state = crate::domain::session::SessionReducer.reduce(durable)?;
-                if let Err(error) = candidate_session.preflight_binding(&state, composition) {
+                if let Err(error) =
+                    candidate_session.preflight_binding(&state, composition, &discovered_mcp)
+                {
                     println!("Agent reload rejected: {error}");
                     continue;
                 }
                 let (state, provider_session, resumed, facts) =
-                    candidate_session.start_or_resume(true, composition, true)?;
+                    candidate_session.start_or_resume(true, composition, true, &discovered_mcp)?;
                 let validation = facts.as_ref().map(|facts| facts.context());
                 agent.queue_prompt_composition(definition::prompt_for_state(
                     &candidate_session.binding,
@@ -405,20 +415,23 @@ pub(crate) async fn run(
                 continue;
             }
             if line == "/image cancel" {
+                let count = pending_images.len();
+                pending_images.clear();
                 println!(
                     "{}",
-                    if pending_image.take().is_some() {
-                        "Queued image detached; its durable Artifact remains available."
-                    } else {
+                    if count == 0 {
                         "No image is queued."
+                    } else {
+                        "Queued images detached; their durable Artifacts remain available."
                     }
                 );
                 continue;
             }
             if line == "/compact" {
-                if let Some(image) = &pending_image {
+                if let Some(image) = pending_images.first() {
                     println!(
-                        "Compaction is unavailable while image `{}` is queued; submit its Turn first.",
+                        "Compaction is unavailable while {} image(s), starting with `{}`, are queued; submit their Turn first.",
+                        pending_images.len(),
                         image.delivery_artifact_id()
                     );
                     continue;
@@ -433,13 +446,6 @@ pub(crate) async fn run(
                 continue;
             }
             if let Some(path) = line.strip_prefix("/image ") {
-                if let Some(image) = &pending_image {
-                    println!(
-                        "Image `{}` is already queued for the next Turn; submit a prompt before attaching another image.",
-                        image.delivery_artifact_id()
-                    );
-                    continue;
-                }
                 match vision::ingest_image(&session, &tools, composition, path).await {
                     Ok(image) => {
                         match image.target_snapshot_id() {
@@ -454,7 +460,7 @@ pub(crate) async fn run(
                                 session_id.as_str()
                             ),
                         }
-                        pending_image = Some(image);
+                        pending_images.push(image);
                     }
                     Err(error) => println!("Image rejected: {error}"),
                 }
@@ -499,58 +505,58 @@ pub(crate) async fn run(
             let request_budget = Arc::new(ModelRequestBudget::new(
                 composition.runtime().model_request_limit_per_turn,
             ));
-            let initial_image = match pending_image.take() {
-                Some(image) => {
-                    let preparation = vision::prepare_primary_context(
-                        &session,
-                        composition,
-                        image,
-                        &line,
-                        cancellation.clone(),
-                        Arc::clone(&request_budget),
-                    );
-                    let prepared = input::interruptible(
-                        preparation,
-                        &cancellation,
-                        &mut lines,
-                        terminal_input,
-                        &mut input_closed,
-                        &mut pending_input,
-                    )
-                    .await?;
-                    if cancellation.is_cancelled() {
-                        match prepared {
-                            Ok(_) | Err(ChatError::VisionCancelled) => {
-                                println!(
-                                    "\n[vision request cancelled; no Primary request was started]"
-                                );
-                                continue;
-                            }
-                            Err(error) => {
-                                input::reject_pending(&mut pending_input);
-                                return Err(error);
-                            }
-                        }
-                    }
+            let initial_images = if pending_images.is_empty() {
+                Vec::new()
+            } else {
+                let images = std::mem::take(&mut pending_images);
+                let preparation = vision::prepare_primary_contexts(
+                    &session,
+                    composition,
+                    images,
+                    &line,
+                    cancellation.clone(),
+                    Arc::clone(&request_budget),
+                );
+                let prepared = input::interruptible(
+                    preparation,
+                    &cancellation,
+                    &mut lines,
+                    terminal_input,
+                    &mut input_closed,
+                    &mut pending_input,
+                )
+                .await?;
+                if cancellation.is_cancelled() {
                     match prepared {
-                        Ok(prepared) => Some(prepared),
+                        Ok(_) | Err(ChatError::VisionCancelled) => {
+                            println!(
+                                "\n[vision request cancelled; no Primary request was started]"
+                            );
+                            continue;
+                        }
                         Err(error) => {
-                            let error = vision::follow_up_error(error);
-                            if agent.permits_explicit_recovery(&error) {
-                                session.validate_stopped_runtime(&agent)?;
-                                recovery_required = true;
-                                recovery::report_stop(&error, &request_budget);
-                                input::reject_pending(&mut pending_input);
-                                println!(
-                                    "Initial image/task was not submitted to Primary; reattach the image explicitly after /resume if needed."
-                                );
-                                continue;
-                            }
-                            return Err(ChatError::Agent(error));
+                            input::reject_pending(&mut pending_input);
+                            return Err(error);
                         }
                     }
                 }
-                None => None,
+                match prepared {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        let error = vision::follow_up_error(error);
+                        if agent.permits_explicit_recovery(&error) {
+                            session.validate_stopped_runtime(&agent)?;
+                            recovery_required = true;
+                            recovery::report_stop(&error, &request_budget);
+                            input::reject_pending(&mut pending_input);
+                            println!(
+                                "Initial images/task were not submitted to Primary; reattach each image explicitly after /resume if needed."
+                            );
+                            continue;
+                        }
+                        return Err(ChatError::Agent(error));
+                    }
+                }
             };
             let signal_cancellation = cancellation.clone();
             let answer_started = Cell::new(false);
@@ -662,7 +668,7 @@ pub(crate) async fn run(
             let outcome = {
                 let turn = agent.run_turn_audited_with_context_refresh_and_vision_stages(
                     line,
-                    initial_image,
+                    initial_images,
                     cancellation,
                     &audit_context,
                     &mut record_attempt,
@@ -764,6 +770,7 @@ impl DurableChatSession {
         explicit_resume: bool,
         composition: &ProviderComposition,
         replace_definition: bool,
+        discovered_mcp: &[crate::adapters::mcp_http::McpCatalogTool],
     ) -> Result<
         (
             SessionState,
@@ -786,7 +793,7 @@ impl DurableChatSession {
         }
 
         if !explicit_resume {
-            self.preflight_binding(&SessionState::default(), composition)?;
+            self.preflight_binding(&SessionState::default(), composition, discovered_mcp)?;
         }
 
         let mut writer = self.project.open_writer()?;
@@ -795,7 +802,7 @@ impl DurableChatSession {
         let mut projection =
             SessionProjection::replay(EventSource::read_events(&store, &stream_id)?)?;
         if explicit_resume {
-            self.preflight_binding(projection.state(), composition)?;
+            self.preflight_binding(projection.state(), composition, discovered_mcp)?;
         }
         let sequence = store.next_sequence()?;
         let provider_session = ProviderSession::new(
@@ -838,7 +845,13 @@ impl DurableChatSession {
                         compaction.validate_references(&historical.context())?;
                         facts = load_session_compaction_facts(&self.project, projection.state())
                             .map_err(ChatError::ResearchProjection)?;
-                        let rebuilt = self.rebuild_compaction(projection.state(), &facts, composition, provider_session.clone())?;
+                        let rebuilt = self.rebuild_compaction(
+                            projection.state(),
+                            &facts,
+                            composition,
+                            provider_session.clone(),
+                            discovered_mcp,
+                        )?;
                         let recovery_sequence = store.next_sequence()?;
                         let recovery = SessionEvent::CompactionCreated { compaction: rebuilt }.into_envelope(
                             event_id(self.project.project_id(), &self.session_id, recovery_sequence.get(), "compaction-rebuild"),
@@ -1301,6 +1314,10 @@ pub(crate) enum ChatError {
     AgentConfiguration(#[from] crate::app::agent_loop::AgentLoopConfigurationError),
     #[error(transparent)]
     Agent(#[from] AgentLoopError),
+    #[error(transparent)]
+    ToolExecution(#[from] crate::ports::tool::ToolExecutionError),
+    #[error(transparent)]
+    Mcp(#[from] crate::adapters::mcp_http::McpError),
     #[error(transparent)]
     RequestAudit(#[from] crate::domain::request_audit::RequestAuditError),
     #[error("rebuild Project Snapshot for Chat: {0}")]

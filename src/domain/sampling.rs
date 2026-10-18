@@ -111,8 +111,8 @@ impl SamplingStepPlan {
         &self.capabilities
     }
 
-    pub const fn requirements(&self) -> ModelRequestRequirements {
-        self.requirements
+    pub fn requirements(&self) -> ModelRequestRequirements {
+        self.requirements.clone()
     }
 
     pub fn prompt_renderer(&self) -> &PromptRendererIdentity {

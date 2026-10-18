@@ -49,14 +49,16 @@ pub(crate) enum ResponsesWireProfile {
 }
 
 impl ResponsesWireProfile {
-    pub(crate) fn request_adapter_version(self) -> RequestAdapterVersion {
+    pub(crate) fn request_adapter_version(self) -> Option<RequestAdapterVersion> {
         let version = match self {
             Self::Standard => "responses-http-sse-v1",
             Self::ChatGptSubscription => "responses-http-sse-chatgpt-subscription-v1",
-            Self::CodexSubscription => "responses-http-sse-codex-subscription-v2",
+            Self::CodexSubscription => return None,
         };
-        RequestAdapterVersion::new(version)
-            .expect("the fixed Responses HTTP/SSE Adapter version is non-empty")
+        Some(
+            RequestAdapterVersion::new(version)
+                .expect("the fixed Responses HTTP/SSE Adapter version is non-empty"),
+        )
     }
 
     pub(super) const fn is_subscription(self) -> bool {
@@ -81,6 +83,7 @@ pub struct ResponsesHttpConfig {
     connect_timeout: Duration,
     read_timeout: Duration,
     wire_profile: ResponsesWireProfile,
+    codex_reasoning_summary_supported: bool,
 }
 
 impl ResponsesHttpConfig {
@@ -98,6 +101,7 @@ impl ResponsesHttpConfig {
             connect_timeout: Duration::from_millis(DEFAULT_CONNECT_TIMEOUT_MS),
             read_timeout: Duration::from_millis(DEFAULT_READ_TIMEOUT_MS),
             wire_profile: ResponsesWireProfile::Standard,
+            codex_reasoning_summary_supported: true,
         }
     }
 
@@ -119,6 +123,34 @@ impl ResponsesHttpConfig {
     pub fn with_codex_subscription_profile(mut self) -> Self {
         self.wire_profile = ResponsesWireProfile::CodexSubscription;
         self
+    }
+
+    /// Binds the Codex summary wire option and its RequestAudit identity to
+    /// this explicit Responses configuration.
+    pub(crate) fn with_codex_reasoning_summary_support(mut self, supported: Option<bool>) -> Self {
+        self.codex_reasoning_summary_supported = supported.unwrap_or(true);
+        self
+    }
+
+    pub(crate) fn request_adapter_version(&self) -> RequestAdapterVersion {
+        self.wire_profile
+            .request_adapter_version()
+            .unwrap_or_else(|| {
+                Self::codex_subscription_request_adapter_version(
+                    self.codex_reasoning_summary_supported,
+                )
+            })
+    }
+
+    pub(crate) fn codex_subscription_request_adapter_version(
+        summary_supported: bool,
+    ) -> RequestAdapterVersion {
+        RequestAdapterVersion::new(if summary_supported {
+            "responses-http-sse-codex-subscription-v2"
+        } else {
+            "responses-http-sse-codex-subscription-no-summary-v1"
+        })
+        .expect("the fixed Codex Responses HTTP/SSE Adapter version is non-empty")
     }
 
     fn endpoint(&self) -> String {
@@ -146,7 +178,9 @@ impl ResponsesHttpAdapter {
     /// implementation. Runtime consumers receive it from ProviderComposition
     /// instead of encoding protocol knowledge themselves.
     pub fn request_adapter_version() -> RequestAdapterVersion {
-        ResponsesWireProfile::Standard.request_adapter_version()
+        ResponsesWireProfile::Standard
+            .request_adapter_version()
+            .expect("the standard Responses wire profile has a fixed identity")
     }
 
     pub fn new(config: ResponsesHttpConfig, credential_source: Arc<dyn CredentialSource>) -> Self {
@@ -218,6 +252,7 @@ impl ModelProvider for ResponsesHttpAdapter {
             self.config.model.clone(),
             self.image_resolver.as_deref(),
             profile,
+            self.config.codex_reasoning_summary_supported,
             &|reference, scope| opaque_continuations.resolve(reference, scope),
         )?;
         let credential = match (

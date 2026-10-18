@@ -34,7 +34,7 @@ async fn execute(
             call(id, name, arguments),
         )
         .unwrap();
-    tools.execute(plan).await
+    tools.execute(plan).await.expect("Tool execution completes")
 }
 
 fn hash(bytes: &[u8]) -> String {

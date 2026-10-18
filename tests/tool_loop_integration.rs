@@ -72,7 +72,8 @@ async fn exact_tool_name_discovery_ignores_extra_prose_but_preserves_eligibility
     ] {
         let outcome = tools
             .execute(search_plan("discover", json!({"query":query})))
-            .await;
+            .await
+            .expect("builtin Tool completes");
         let names: Vec<_> = outcome.result.output["matches"]
             .as_array()
             .unwrap()
@@ -93,14 +94,18 @@ async fn exact_tool_name_discovery_ignores_extra_prose_but_preserves_eligibility
     let execution_plan = tools
         .plan_model_call(&resolved, ExecutionId::new("hidden"), call)
         .unwrap();
-    let outcome = tools.execute(execution_plan).await;
+    let outcome = tools
+        .execute(execution_plan)
+        .await
+        .expect("builtin Tool completes");
     assert_eq!(outcome.result.output["matches"], json!([]));
     let outcome = tools
         .execute(search_plan(
             "limit",
             json!({"query":"read_output write_file", "max_results":1}),
         ))
-        .await;
+        .await
+        .expect("builtin Tool completes");
     assert_eq!(
         outcome.result.output["matches"].as_array().unwrap().len(),
         1
@@ -311,7 +316,8 @@ async fn builtin_tools_cover_files_search_argv_failures_and_bounded_output() {
             "read_file",
             json!({"path": "src/lib.rs"}),
         ))
-        .await;
+        .await
+        .expect("builtin Tool completes");
     assert_eq!(read.result.status, ToolResultStatus::Succeeded);
     assert_eq!(
         read.result.output["content"],
@@ -320,7 +326,8 @@ async fn builtin_tools_cover_files_search_argv_failures_and_bounded_output() {
 
     let listed = tools
         .execute(plan(&tools, "list", "list_files", json!({"path": "."})))
-        .await;
+        .await
+        .expect("builtin Tool completes");
     assert_eq!(listed.result.status, ToolResultStatus::Succeeded);
     assert!(
         listed.result.output["paths"]
@@ -336,7 +343,8 @@ async fn builtin_tools_cover_files_search_argv_failures_and_bounded_output() {
             "search_files",
             json!({"pattern": "path traversal", "paths": ["src"]}),
         ))
-        .await;
+        .await
+        .expect("builtin Tool completes");
     assert_eq!(found.result.status, ToolResultStatus::Succeeded);
     assert!(
         found.result.output["matches"]
@@ -352,7 +360,8 @@ async fn builtin_tools_cover_files_search_argv_failures_and_bounded_output() {
             "search_files",
             json!({"pattern": "not-present", "paths": ["src"]}),
         ))
-        .await;
+        .await
+        .expect("builtin Tool completes");
     assert_eq!(no_match.result.status, ToolResultStatus::Succeeded);
     assert_eq!(no_match.result.output["matches"], "");
 
@@ -363,7 +372,8 @@ async fn builtin_tools_cover_files_search_argv_failures_and_bounded_output() {
             "run_command",
             json!({"argv": ["rustc", "--version"]}),
         ))
-        .await;
+        .await
+        .expect("builtin Tool completes");
     assert_eq!(command.result.status, ToolResultStatus::Succeeded);
     assert!(
         command.result.output["stdout"]
@@ -379,7 +389,8 @@ async fn builtin_tools_cover_files_search_argv_failures_and_bounded_output() {
             "run_command",
             json!({"argv": ["rustc", "--definitely-invalid-cyber-agent-flag"]}),
         ))
-        .await;
+        .await
+        .expect("builtin Tool completes");
     assert_eq!(nonzero.result.status, ToolResultStatus::Failed);
     assert_ne!(nonzero.result.output["exit_code"], 0);
 
@@ -390,7 +401,8 @@ async fn builtin_tools_cover_files_search_argv_failures_and_bounded_output() {
             "read_file",
             json!({"path": "large.txt"}),
         ))
-        .await;
+        .await
+        .expect("builtin Tool completes");
     assert_eq!(large.result.status, ToolResultStatus::Succeeded);
     assert_eq!(large.result.output["truncated"], true);
     assert_eq!(
@@ -436,7 +448,8 @@ async fn builtin_tools_cover_files_search_argv_failures_and_bounded_output() {
                 ]
             }),
         ))
-        .await;
+        .await
+        .expect("builtin Tool completes");
     assert_eq!(read_batch.result.status, ToolResultStatus::Succeeded);
     assert_eq!(read_batch.result.output["partial_failure"], true);
     assert_eq!(read_batch.result.output["files"][0]["status"], "succeeded");
@@ -449,7 +462,8 @@ async fn builtin_tools_cover_files_search_argv_failures_and_bounded_output() {
             "search_files",
             json!({"patterns": ["path traversal", "not-present"], "paths": ["src"]}),
         ))
-        .await;
+        .await
+        .expect("builtin Tool completes");
     assert_eq!(search_batch.result.status, ToolResultStatus::Succeeded);
     assert_eq!(search_batch.result.output["partial_failure"], false);
     assert_eq!(
@@ -472,7 +486,8 @@ async fn builtin_tools_cover_files_search_argv_failures_and_bounded_output() {
                 ]
             }),
         ))
-        .await;
+        .await
+        .expect("builtin Tool completes");
     assert_eq!(command_batch.result.status, ToolResultStatus::Succeeded);
     assert_eq!(command_batch.result.output["partial_failure"], true);
     assert_eq!(
@@ -575,7 +590,8 @@ async fn run_commands_parallel_mode_uses_explicit_resource_waves() {
                     ]
                 }),
             ))
-            .await;
+            .await
+            .expect("builtin Tool completes");
 
         assert_eq!(outcome.result.status, ToolResultStatus::Succeeded);
         assert_eq!(
@@ -1096,7 +1112,8 @@ async fn agent_loop_executes_artifact_store_through_the_fixed_registry() {
                 }
             }),
         ))
-        .await;
+        .await
+        .expect("builtin Tool completes");
     assert_eq!(snapshot.result.status, ToolResultStatus::Succeeded);
 
     let requested_call = tool_call(
@@ -1988,7 +2005,7 @@ impl ToolExecutor for PendingToolExecutor {
     }
 
     fn execute(&self, _plan: ToolExecutionPlan) -> ToolExecutionFuture<'_> {
-        Box::pin(std::future::pending::<ToolExecutionOutcome>())
+        Box::pin(std::future::pending::<Result<ToolExecutionOutcome, _>>())
     }
 }
 

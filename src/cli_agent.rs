@@ -35,7 +35,12 @@ pub(crate) enum AgentCommand {
     /// Validate all resources and configured model context budgets offline.
     Check { path: PathBuf },
     /// Show resolved instruction snapshots, their sources, and effective tools.
-    Inspect { path: PathBuf },
+    Inspect {
+        path: PathBuf,
+        /// Discover configured MCP tools once and include their authoring specs.
+        #[arg(long)]
+        discover_mcp: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -92,23 +97,49 @@ pub(crate) fn run(config: Option<&Path>, command: AgentCommand) -> Result<(), Cl
         write_builtin_definition(template, &path, id.as_deref()).map_err(definition_error)?;
         return print_json(&json!({"status":"created", "path":path, "template":template}));
     }
-    let (path, inspect) = match command {
-        AgentCommand::Check { path } => (path, false),
-        AgentCommand::Inspect { path } => (path, true),
+    let (path, inspect, discover_mcp) = match command {
+        AgentCommand::Check { path } => (path, false, false),
+        AgentCommand::Inspect { path, discover_mcp } => (path, true, discover_mcp),
         AgentCommand::Init { .. } => unreachable!("init returns above"),
     };
     let composition = load_provider_composition(config)?.ok_or_else(|| {
         definition_error("check/inspect requires --config for model and context validation")
     })?;
     let root = std::env::current_dir().map_err(CliError::WorkingDirectory)?;
-    let tools = ToolRegistry::for_project(&root);
+    let discovered_mcp = if discover_mcp {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(definition_error)?;
+        runtime
+            .block_on(composition.discover_chat_mcp())
+            .map_err(definition_error)?
+    } else {
+        Vec::new()
+    };
+    let tools = if discover_mcp {
+        ToolRegistry::for_project_with_mcp(&root, &discovered_mcp).map_err(definition_error)?
+    } else {
+        ToolRegistry::for_project(&root)
+    };
     let binding = select_binding(Some(&path), &composition, &tools)?;
-    let tools = ToolRegistry::for_agent(
-        &root,
-        crate::domain::events::StreamId::new("definition-check"),
-        memory_scope(&binding),
-        binding.definition().research().is_some(),
-    );
+    let tools = if discover_mcp {
+        ToolRegistry::for_agent_with_mcp(
+            &root,
+            crate::domain::events::StreamId::new("definition-check"),
+            memory_scope(&binding),
+            binding.definition().research().is_some(),
+            &discovered_mcp,
+        )
+        .map_err(definition_error)?
+    } else {
+        ToolRegistry::for_agent(
+            &root,
+            crate::domain::events::StreamId::new("definition-check"),
+            memory_scope(&binding),
+            binding.definition().research().is_some(),
+        )
+    };
     let prompt = PromptComposition::from_binding(binding.clone()).map_err(definition_error)?;
     let preview = AgentLoop::with_primary_context(
         composition.primary_provider(),
@@ -138,7 +169,12 @@ pub(crate) fn run(config: Option<&Path>, command: AgentCommand) -> Result<(), Cl
             "status":"valid", "binding":binding,
             "instructions":plan.model_input().instructions,
             "tools":tool_plan.resolved_specs(),
-            "validation":"offline; static instructions and tools; task/history/current facts are checked at runtime"
+            "discovered_mcp_tools":tools.discovered_mcp_specs(),
+            "validation":if discover_mcp {
+                "MCP discovered once for authoring; static instructions and tools were then validated without a model request"
+            } else {
+                "offline; static instructions and tools; task/history/current facts are checked at runtime"
+            }
         }))
     } else {
         print_json(&json!({

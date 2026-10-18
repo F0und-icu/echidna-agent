@@ -319,8 +319,8 @@ impl ContextPlan {
         &self.model_input.tool_specs
     }
 
-    pub const fn requirements(&self) -> ModelRequestRequirements {
-        self.model_input.requirements
+    pub fn requirements(&self) -> ModelRequestRequirements {
+        self.model_input.requirements.clone()
     }
 
     pub fn model_input(&self) -> crate::domain::model::ModelInputIR {

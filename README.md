@@ -85,12 +85,21 @@ echidna agent init ./my-agent --id my-writer --from technical-writing
 # 编辑 my-agent/persona.md、work.md 和 methods/ 下的 Markdown。
 echidna --config /path/to/provider.toml agent check ./my-agent
 echidna --config /path/to/provider.toml agent inspect ./my-agent
+# 编写精确的 MCP Tool 名称时，显式允许一次目录发现。
+echidna --config /path/to/provider.toml agent inspect ./my-agent --discover-mcp
 echidna --config /path/to/provider.toml chat --agent ./my-agent
 ```
 
 `agent init --from builtin-research` 导出完整研究模板。`check` 离线验证资源、
 工具与静态上下文预算；任务历史和当前事实的预算在运行时继续检查。
 `inspect` 展示最终指令与工具，请留意其中可能包含你自己的指导文件内容。
+
+`check` 和默认 `inspect` 保持离线：不会连接 MCP 服务或读取 MCP 凭据。编写外接
+Tool 声明时，先对尚未声明该远程 Tool 的定义运行 `agent inspect --discover-mcp`。
+该命令只发现一次已配置的 MCP 目录，即使工具当前隐藏也会输出
+`discovered_mcp_tools`，随后继续进行原有静态绑定和预算验证；它不会发起模型请求或
+持久化目录。将输出中的精确本地名称写入 `[tools]`，例如
+`mcp__fixture__0123456789abcdef0123 = "deferred"`；不支持通配符或默认规则。
 
 定义目录的 `agent.toml` 使用 `schema_version = 1`：
 
@@ -100,7 +109,7 @@ echidna --config /path/to/provider.toml chat --agent ./my-agent
 | `instructions` | `persona_file`、`work_file`、有序 `method_files`；路径相对定义目录。 |
 | `context.personal` / `project` | `configured` 加载 Provider 配置指定的指导文件；`none` 不加载。 |
 | `context.memory` | `none`、`project` 或 `agent`；Agent 记忆按项目和稳定 `id` 隔离。 |
-| `tools` | 已知工具的 `direct`、`deferred`、`hidden`；省略即 Hidden，延迟工具要求直接提供 `tool_search`。 |
+| `tools` | 已知内置工具或精确发现的 MCP 名称的 `direct`、`deferred`、`hidden`；省略即 Hidden，延迟工具要求直接提供 `tool_search`。 |
 | 可选 `research` | 研究领域、阶段及完整的外部指导文件映射；省略后没有研究状态或默认研究事件。 |
 
 研究定义的 Direct/Deferred 是基础可见性，现有 Domain/Phase 规则可进一步调整；
@@ -152,6 +161,7 @@ ECHIDNA_BIN="$PWD/target/release/echidna"
 | 纯文本模型 | [provider.toml](examples/provider.toml) | `disabled`，不接收图像 |
 | 单个多模态模型 | [provider-multimodal.toml](examples/provider-multimodal.toml) | `primary_direct`，主模型直接接收图像 |
 | 文本主模型 + 独立视觉模型 | [provider-text-vision.toml](examples/provider-text-vision.toml) | `secondary_tool`，视觉模型分析图像，主模型使用其观察结果继续研究 |
+| 文本模型 + 远程 MCP 工具 | [provider-mcp.toml](examples/provider-mcp.toml) | `chat` 启动时发现延迟暴露的远程工具 |
 
 下面以纯文本模板为例；需要图像能力时，将复制命令的源文件换成对应模板：
 
@@ -187,6 +197,26 @@ export CYBER_AGENT_VISION_API_KEY='replace-with-your-vision-key'
 程序**不会自动加载 `.env` 文件**。如果使用自行维护的可信 env 文件，需先在 shell 中加载并导出变量。
 也可以在本地 TOML 中用 `api_key = "…"` 替换 `credential_ref`；每个 Provider 必须且只能选择一种。
 真实密钥及配置保存在仓库之外，不要提交到 Git。
+
+#### 可选远程 HTTP MCP 工具
+
+使用 [MCP 模板](examples/provider-mcp.toml)，在 `mcp_servers` 下声明一个或多个远程
+Streamable HTTP 工具服务器。每个服务器需要绝对 HTTP(S) `url`，以及
+`protocol_version = "2025-11-25"` 或 `protocol_version = "2026-07-28"` 之一。
+可选 `timeout_ms` 默认为 60000。
+
+如果服务器需要 Bearer 认证，只能使用专用引用，例如
+`CYBER_AGENT_MCP_EXAMPLE_API_KEY`；不得复用模型 Provider 密钥或订阅账户。在启动
+Chat 的同一个终端中导出它：
+
+```sh
+export CYBER_AGENT_MCP_EXAMPLE_API_KEY='replace-with-your-MCP-key'
+```
+
+`doctor` 不读取 MCP 凭据，也不会连接 MCP 服务器。Chat 启动时会按配置名顺序各解析
+一次凭据并发现有限工具目录；该目录在本进程内保持不变，压缩和 `/resume` 也复用它。
+远程工具初始为延迟项，通过已有工具搜索流程暴露。它们的 schema 与参数按值传给服务端，
+MCP 输出在核验前仍只是传输输出。远端断线或结果不完整会停止本轮，不会虚构收据或重放调用。
 
 #### ChatGPT 订阅登录
 
@@ -255,11 +285,15 @@ echidna --config /absolute/path/codex.toml auth select-model --provider codex \
   --model gpt-6-astra --reasoning-effort xhigh
 ```
 
-支持的执行强度为 `low`、`medium`、`high`、`xhigh`、`max`，实际可选项以目录为准。
-省略强度时使用服务端默认行为；不会自动发送目录中的默认值。
+执行强度支持目录声明的有效字符串，包括未来新增的值；交互选择以当前模型目录为准。
+直接配置的 `reasoning_effort` 接受 1–64 个 ASCII 字母、数字、下划线或连字符。
+省略强度时使用服务端默认行为；显式 `none` 是不同的请求值，不等于省略。
 保存会为该 Provider 复制独立能力映射，保留其他模型、注释和凭据。
 配置锁协调同时运行的 Echidna 选择命令；保存期间请勿用其他编辑器同时修改该配置。
-图像、工具及窗口等能力仍须显式核实；选择器不会按模型名推断。
+加上 `--apply-capabilities` 可同时导入该模型目录中存在的默认上下文窗口、文本/图像
+输入能力及摘要参数支持声明。缺失字段或未知窗口（包括 `null`）保留当前配置；`max_context_window` 仅展示为
+元数据，不会代替默认窗口。导入仍需通过现有配置和输出预算校验，失败不覆盖原文件。
+不加此选项保持原有选择行为；工具等其余能力仍须显式核实，不按模型名推断。
 `doctor` 可离线查看生效的强度，下一次启动 `chat` 使用保存的设置。
 该兼容链路依据固定版本 Codex 源码实现，实际账号和服务端支持须通过实测确认。
 失败不会切换模型、付费 API 或自动重跑工具。
@@ -267,6 +301,8 @@ echidna --config /absolute/path/codex.toml auth select-model --provider codex \
 Codex 链路默认请求服务端可用的推理摘要，在 stderr 上标注“推理摘要”，包括 release
 构建。这是提供方返回的摘要，不是完整内部推理；摘要为空时不会补造内容。摘要不进入
 对话正文，也不替代加密续接。推理强度与摘要展示独立，设置 `high` 不保证返回摘要。
+若服务端不接受摘要参数，可在 `codex_subscription` 中显式设置
+`supports_reasoning_summary_parameter = false`；省略或设为 `true` 保持默认请求。
 
 #### 单个多模态模型
 
@@ -307,6 +343,8 @@ generation = 1
 `context_window` 分别填写各模型的真实窗口；`[runtime].model_request_limit_per_turn`
 默认为 `32`，是每轮主模型与视觉模型共享的请求次数上限。
 
+在 Chat 中用 `/image PATH` 选择本地图片。可重复输入该命令；图片按输入顺序排队，下一条普通任务会将整队图片作为同一 Turn 的初始上下文。`primary_direct` 会将每张图片交给主模型，`secondary_tool` 会为每张图片单独保留观察后再请求主模型。后续图片的准备失败、取消或耗尽本轮请求预算时，已保留的图片事实不会丢失，但该任务和队列中的图片不会提交给主模型。队列只存在于当前 Chat 进程；重新启动或 `/resume` 不会自动重放图片处理。
+
 ### 3. 建立研究项目
 
 ```sh
@@ -339,7 +377,8 @@ cd ../echidna-research
 | --- | --- |
 | `/stop` 或 Ctrl+C | 请求停止当前 Turn；已执行操作不会被撤销，后台任务需要单独处理。 |
 | `/paste` | 按提示输入多行任务或补充材料。 |
-| `/compact` | 在具备目标与研究记录等前提时压缩上下文。 |
+| `/image PATH` | 将一张本地图片追加到下一轮队列；重复输入按顺序追加。 |
+| `/compact` | 在具备目标与研究记录等前提时压缩上下文；有待提交图片时不可用。 |
 | `/resume` | 在可恢复停止后显式重建模型会话，再输入任务。 |
 | `/exit` | 离开交互界面。 |
 
@@ -382,6 +421,7 @@ Echidna 将执行、预算、Session 和恢复留在一个内核中。模型、�
 | [纯文本配置](examples/provider.toml) | 主模型、能力声明与环境变量密钥引用 |
 | [单模型多模态配置](examples/provider-multimodal.toml) | 主模型直接处理文本与图像 |
 | [文本 + 视觉配置](examples/provider-text-vision.toml) | 两个模型的独立服务、能力与密钥配置 |
+| [远程 MCP 配置](examples/provider-mcp.toml) | 显式 Streamable HTTP 工具与专用 MCP 凭据引用 |
 | [原理图原图](assets/architecture-overview.svg) | 可放大的执行与持久化流程图 |
 | [更新记录](CHANGELOG.md) | 功能变化与兼容性说明 |
 

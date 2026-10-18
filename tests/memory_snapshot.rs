@@ -39,7 +39,7 @@ async fn execute(
             call(id, name, arguments),
         )
         .unwrap();
-    tools.execute(plan).await
+    tools.execute(plan).await.expect("Tool execution completes")
 }
 
 fn read_args(path: &str, event_id: &str) -> Value {

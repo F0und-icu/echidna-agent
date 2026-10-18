@@ -419,7 +419,7 @@ pub(super) fn state_diff_delivery_input(
     }
     candidate.instructions = full_input.instructions.clone();
     candidate.tool_specs = full_input.tool_specs.clone();
-    candidate.requirements = full_input.requirements;
+    candidate.requirements = full_input.requirements.clone();
     match planner.validate_rendered_model_input(&candidate, budget) {
         Ok(()) => {
             delivery_map.validate_against(&candidate)?;

@@ -33,7 +33,7 @@ async fn execute(
             ToolCall::new(ToolCallId::new(call_id), ToolName::new(name), arguments),
         )
         .unwrap();
-    tools.execute(plan).await
+    tools.execute(plan).await.expect("Tool execution completes")
 }
 
 async fn record_target_snapshot(tools: &ToolRegistry) {

@@ -44,7 +44,7 @@ async fn execute_named(
             ToolCall::new(ToolCallId::new(call_id), ToolName::new(name), arguments),
         )
         .unwrap();
-    tools.execute(plan).await
+    tools.execute(plan).await.expect("Tool execution completes")
 }
 
 async fn record_target_snapshot(tools: &ToolRegistry) {
@@ -68,7 +68,12 @@ async fn record_target_snapshot(tools: &ToolRegistry) {
         )
         .unwrap();
     assert_eq!(
-        tools.execute(plan).await.result.status,
+        tools
+            .execute(plan)
+            .await
+            .expect("Tool execution completes")
+            .result
+            .status,
         ToolResultStatus::Succeeded
     );
 }

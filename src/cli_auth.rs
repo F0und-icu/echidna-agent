@@ -11,6 +11,7 @@ use crate::adapters::subscription_auth::{
     SubscriptionAuthProtocol, SubscriptionModel, SubscriptionReasoningLevel,
 };
 use crate::domain::model::ReasoningEffort;
+use crate::provider_composition::CatalogCapabilityImport;
 use crate::provider_composition::ProviderComposition;
 use crate::terminal_content::escaped_text;
 use crate::{CliError, print_json};
@@ -55,6 +56,9 @@ pub(crate) enum AuthCommand {
         /// A supported, explicitly selectable effort from that same catalog.
         #[arg(long, value_name = "EFFORT")]
         reasoning_effort: Option<String>,
+        /// Import the selected catalog model's explicitly advertised capabilities.
+        #[arg(long)]
+        apply_capabilities: bool,
     },
 }
 
@@ -111,6 +115,7 @@ pub(crate) fn run(config: Option<&Path>, command: AuthCommand) -> Result<(), Cli
             AuthCommand::SelectModel {
                 model,
                 reasoning_effort,
+                apply_capabilities,
                 ..
             } => {
                 if service.protocol() != SubscriptionAuthProtocol::Codex {
@@ -121,12 +126,24 @@ pub(crate) fn run(config: Option<&Path>, command: AuthCommand) -> Result<(), Cli
                 let catalog = service.models().await.map_err(auth_error)?;
                 let (model, effort) =
                     select_catalog_model(&catalog, model.as_deref(), reasoning_effort.as_deref())?;
-                ProviderComposition::select_codex_model(&config, &provider, &model.slug, effort)
-                    .map_err(|error| selection_error(&error.to_string()))?;
+                let capabilities = apply_capabilities.then(|| CatalogCapabilityImport {
+                    context_window: model.context_window,
+                    input_modalities: model.input_modalities.clone(),
+                    supports_reasoning_summary_parameter: model
+                        .supports_reasoning_summary_parameter,
+                });
+                ProviderComposition::select_codex_model(
+                    &config,
+                    &provider,
+                    &model.slug,
+                    effort.clone(),
+                    capabilities,
+                )
+                .map_err(|error| selection_error(&error.to_string()))?;
                 print_json(&SavedModelSelection {
                     provider,
                     model: model.slug.clone(),
-                    reasoning_effort: effort.map(ReasoningEffort::as_str),
+                    reasoning_effort: effort.as_ref().map(ReasoningEffort::as_str),
                 })
             }
         }
@@ -134,11 +151,11 @@ pub(crate) fn run(config: Option<&Path>, command: AuthCommand) -> Result<(), Cli
 }
 
 #[derive(Serialize)]
-struct SavedModelSelection {
+struct SavedModelSelection<'a> {
     provider: String,
     model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    reasoning_effort: Option<&'static str>,
+    reasoning_effort: Option<&'a str>,
 }
 
 fn select_catalog_model<'a>(

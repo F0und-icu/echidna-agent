@@ -41,10 +41,11 @@ impl DurableChatSession {
         facts: &SessionCompactionFacts,
         composition: &crate::provider_composition::ProviderComposition,
         provider_session: crate::domain::context::ProviderSession,
+        discovered_mcp: &[crate::adapters::mcp_http::McpCatalogTool],
     ) -> Result<SessionCompaction, ChatError> {
         // A context-only preflight uses the same configured Provider and Tool
         // catalog, never `stream` or a second executing AgentLoop.
-        let tools = self.bound_tools();
+        let tools = self.bound_tools(discovered_mcp)?;
         let mut preview = AgentLoop::with_primary_context(
             composition.primary_provider(),
             &tools,

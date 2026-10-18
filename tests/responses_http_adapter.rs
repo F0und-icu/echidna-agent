@@ -305,7 +305,7 @@ async fn execute_tool(
         arguments,
     );
     let plan = tools.plan(ExecutionId::new(execution_id), call).unwrap();
-    tools.execute(plan).await
+    tools.execute(plan).await.expect("Tool execution completes")
 }
 
 async fn publish_image_fixture(project: &Project) -> (ArtifactId, Vec<u8>) {
@@ -1479,6 +1479,123 @@ async fn codex_final_snapshot_summary_does_not_synthesize_a_completed_reasoning_
     ));
     request.await.unwrap();
     server.await.unwrap();
+}
+
+#[tokio::test]
+async fn codex_keepalive_is_inert_and_preserves_response_completion_and_failure() {
+    let cases = [
+        (
+            "completed",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"keepalive-response\"}}\n\n",
+            None,
+        ),
+        (
+            "eof",
+            "",
+            Some("response stream ended before `response.completed`"),
+        ),
+        (
+            "malformed",
+            "data: {not-json}\n\n",
+            Some("invalid Responses event JSON"),
+        ),
+        (
+            "unknown",
+            "data: {\"type\":\"response.future\"}\n\n",
+            Some("unsupported Responses event `response.future`"),
+        ),
+        (
+            "failed",
+            "data: {\"type\":\"response.failed\"}\n\n",
+            Some("Codex subscription Responses stream reported response.failed"),
+        ),
+        (
+            "incomplete",
+            "data: {\"type\":\"response.incomplete\"}\n\n",
+            Some("Codex subscription Responses stream reported response.incomplete"),
+        ),
+    ];
+    for (case, terminal, expected_error) in cases {
+        let heartbeat = json!({
+            "type": "keepalive",
+            "delta": "keepalive-must-not-be-output",
+            "response": {"id": "keepalive-must-not-complete", "status": "completed"},
+        });
+        let body = format!(
+            "data: {heartbeat}\n\ndata: {{\"type\":\"response.output_text.delta\",\"delta\":\"answer\"}}\n\ndata: {heartbeat}\n\n{terminal}"
+        );
+        let (base_url, request, server) = spawn_sse_server(200, &body).await;
+        let provider = codex_subscription_adapter(
+            base_url,
+            AccountBoundCredentialSource::new(
+                "codex_subscription:fixture",
+                "keepalive-fixture-bearer",
+                "keepalive-fixture-account",
+            ),
+        );
+        let outcome = ModelStreamingService::new(&provider)
+            .consume(
+                full(fixture_input(ModelRequestRequirements::default())),
+                ModelStreamCancellation::new(),
+            )
+            .await;
+        if let Some(expected_error) = expected_error {
+            let error = outcome.expect_err("heartbeat must not complete a failed response");
+            assert!(
+                error.to_string().contains(expected_error),
+                "{case}: {error}"
+            );
+            assert!(!error.to_string().contains("keepalive-must-not"));
+        } else {
+            assert_eq!(
+                outcome.expect("heartbeat must not interrupt completed output"),
+                ModelStreamOutcome::Completed {
+                    events: vec![ModelEvent::TextDelta {
+                        text: "answer".to_owned()
+                    }],
+                    completion: ModelResponseCompletion::new(ProviderResponseId::new(
+                        "keepalive-response"
+                    )),
+                }
+            );
+        }
+        request.await.unwrap();
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn standard_and_siwc_profiles_retain_keepalive_rejection() {
+    for profile in ["standard", "siwc"] {
+        let (base_url, request, server) =
+            spawn_sse_server(200, "data: {\"type\":\"keepalive\"}\n\n").await;
+        let provider = match profile {
+            "standard" => adapter(base_url, FakeCredentialSource::value(Some(FIXTURE_SECRET))),
+            "siwc" => {
+                subscription_adapter(base_url, FakeCredentialSource::value(Some(FIXTURE_SECRET)))
+            }
+            _ => unreachable!("fixed profiles"),
+        };
+        let model_request = match profile {
+            "standard" => full(fixture_input(ModelRequestRequirements::default())),
+            "siwc" => subscription_full(
+                fixture_input(ModelRequestRequirements::default()),
+                "keepalive-siwc-rejection",
+            ),
+            _ => unreachable!("fixed profiles"),
+        };
+        let error = ModelStreamingService::new(&provider)
+            .consume(model_request, ModelStreamCancellation::new())
+            .await
+            .expect_err("unobserved profiles retain unknown-event rejection");
+        assert!(
+            matches!(error, ModelStreamingError::Provider(ModelProviderError::ProtocolFailure { message })
+            if message.contains("unsupported Responses event `keepalive`")),
+            "{profile}"
+        );
+        request.await.unwrap();
+        server.await.unwrap();
+    }
 }
 
 #[tokio::test]

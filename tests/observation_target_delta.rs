@@ -138,7 +138,8 @@ async fn record_external_batch(project: &Project, source: &Source<'_>, batch: &V
                 )
                 .unwrap(),
         )
-        .await;
+        .await
+        .expect("builtin Tool completes");
     assert_eq!(outcome.result.status, ToolResultStatus::Succeeded);
     assert_eq!(
         outcome.result.output["commands"][0]["result"]["stdout"],
@@ -168,7 +169,8 @@ async fn record_external_batch(project: &Project, source: &Source<'_>, batch: &V
                 )
                 .unwrap(),
         )
-        .await;
+        .await
+        .expect("builtin Tool completes");
     assert_eq!(artifact.result.status, ToolResultStatus::Succeeded);
 }
 

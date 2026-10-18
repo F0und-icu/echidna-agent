@@ -1,9 +1,12 @@
 //! Built-in Tool output policies and captured byte-offset views.
 
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
 use crate::domain::tools::{OutputStream, PendingOutputCapture};
 use serde_json::{Value, json};
+
+pub(super) const OUTPUT_DRAIN_GRACE: Duration = Duration::from_millis(100);
 
 pub(super) struct BoundedText {
     pub text: String,

@@ -9,6 +9,7 @@ use super::config::{
     AgentProfileDefinition, CapabilityMappingDefinition, PROVIDER_CONFIG_SCHEMA_VERSION,
     ProviderConfigV1, ProviderDefinition,
 };
+use crate::adapters::mcp_http::McpServerConfig;
 
 impl ProviderConfigV1 {
     pub(super) fn validate(&self) -> Result<(), ProviderCompositionError> {
@@ -69,8 +70,74 @@ impl ProviderConfigV1 {
         for name in self.agent_profiles.keys() {
             self.agent_model_profile(name)?;
         }
+        for (id, server) in &self.mcp_servers {
+            validate_mcp_server(id, server)?;
+        }
         Ok(())
     }
+}
+
+fn validate_mcp_server(id: &str, server: &McpServerConfig) -> Result<(), ProviderCompositionError> {
+    if !(1..=32).contains(&id.len())
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    {
+        return Err(ProviderCompositionError::InvalidMcpServer {
+            server: id.to_owned(),
+            message: "server id must contain 1..32 ASCII letters, digits, underscores, or hyphens"
+                .to_owned(),
+        });
+    }
+    let url = reqwest::Url::parse(&server.url).map_err(|error| {
+        ProviderCompositionError::InvalidMcpServer {
+            server: id.to_owned(),
+            message: error.to_string(),
+        }
+    })?;
+    if !matches!(url.scheme(), "http" | "https")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(ProviderCompositionError::InvalidMcpServer {
+            server: id.to_owned(),
+            message: "expected an absolute http(s) URL without credentials, query, or fragment"
+                .to_owned(),
+        });
+    }
+    if server.timeout_ms == 0 || server.timeout_ms > 86_400_000 {
+        return Err(ProviderCompositionError::InvalidTimeout {
+            field: "mcp_servers.timeout_ms",
+        });
+    }
+    if let Some(reference) = &server.credential_ref {
+        let Some(name) = reference
+            .strip_prefix("CYBER_AGENT_MCP_")
+            .and_then(|name| name.strip_suffix("_API_KEY"))
+        else {
+            return Err(ProviderCompositionError::InvalidMcpServer {
+                server: id.to_owned(),
+                message:
+                    "credential_ref must use the dedicated CYBER_AGENT_MCP_*_API_KEY namespace"
+                        .to_owned(),
+            });
+        };
+        if name.is_empty()
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+        {
+            return Err(ProviderCompositionError::InvalidMcpServer {
+                server: id.to_owned(),
+                message:
+                    "credential_ref must use the dedicated CYBER_AGENT_MCP_*_API_KEY namespace"
+                        .to_owned(),
+            });
+        }
+    }
+    Ok(())
 }
 
 impl ProviderDefinition {
@@ -260,6 +327,8 @@ fn validate_credential_reference(
 
 #[derive(Debug, Error)]
 pub enum ProviderCompositionError {
+    #[error("MCP server `{server}` is invalid: {message}")]
+    InvalidMcpServer { server: String, message: String },
     #[error("capability mapping `{mapping}` has an invalid Context/output budget: {source}")]
     InvalidContextBudget {
         mapping: String,

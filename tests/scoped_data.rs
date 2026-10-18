@@ -58,7 +58,10 @@ async fn execute(
             ToolCall::new(ToolCallId::new(call_id), ToolName::new(name), arguments),
         )
         .unwrap();
-    tools.execute(plan).await
+    tools
+        .execute(plan)
+        .await
+        .expect("known local Tool execution completes")
 }
 
 fn memory_write_args(event_id: &str, content: &str, expected_hash: Value) -> Value {

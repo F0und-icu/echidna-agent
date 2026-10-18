@@ -247,7 +247,7 @@ fn ctf_r2b_initial_vision_failure_is_durable_and_does_not_requeue_input() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("reattach the image explicitly"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("reattach each image explicitly"));
     let _ = f2a_request_body(&vision.requests, "failed Vision");
     let wire = f2a_request_body(&primary.requests, "new text");
     assert!(!wire.to_string().contains("FAILED_IMAGE_TASK"));

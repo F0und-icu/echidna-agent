@@ -374,7 +374,10 @@ impl ToolExecutor for MismatchedExecutor {
         let executions = self.executions.clone();
         Box::pin(async move {
             executions.fetch_add(1, Ordering::SeqCst);
-            ToolExecutionOutcome::succeeded(plan, json!({"unexpected": true}))
+            Ok(ToolExecutionOutcome::succeeded(
+                plan,
+                json!({"unexpected": true}),
+            ))
         })
     }
 }

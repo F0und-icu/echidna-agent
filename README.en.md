@@ -93,6 +93,8 @@ echidna agent init ./my-agent --id my-writer --from technical-writing
 # Edit my-agent/persona.md, work.md, and the Markdown files under methods/.
 echidna --config /path/to/provider.toml agent check ./my-agent
 echidna --config /path/to/provider.toml agent inspect ./my-agent
+# Opt in to one configured MCP discovery when authoring exact remote Tool names.
+echidna --config /path/to/provider.toml agent inspect ./my-agent --discover-mcp
 echidna --config /path/to/provider.toml chat --agent ./my-agent
 ```
 
@@ -100,6 +102,14 @@ Use `--from builtin-research` to export the research template. `check` validates
 known tools, and static context budgets offline; runtime admission also checks task history
 and current facts. `inspect` shows resolved instructions and tools, including your selected
 personal/project instruction content.
+
+`check` and default `inspect` stay offline: they do not contact an MCP server or resolve
+an MCP credential. To author an external Tool declaration, run `agent inspect --discover-mcp`
+against a definition that omits the remote Tool. It discovers the configured MCP catalog once,
+prints `discovered_mcp_tools` even though they are currently hidden, and then performs the
+usual static binding and budget validation without a model request or persisted catalog. Copy
+the exact generated local name into `[tools]`, for example
+`mcp__fixture__0123456789abcdef0123 = "deferred"`; names cannot be wildcarded or defaulted.
 
 The version-1 `agent.toml` contains:
 
@@ -109,7 +119,7 @@ The version-1 `agent.toml` contains:
 | `instructions` | Relative `persona_file`, `work_file`, and ordered `method_files`. |
 | `context.personal` / `project` | `configured` snapshots the files selected in Provider config; `none` excludes them. |
 | `context.memory` | `none`, `project`, or `agent`; Agent memory is scoped by project and stable ID. |
-| `tools` | Known names mapped to `direct`, `deferred`, or `hidden`; omitted names are Hidden. Deferred tools require direct `tool_search`. |
+| `tools` | Known built-in or exact discovered MCP names mapped to `direct`, `deferred`, or `hidden`; omitted names are Hidden. Deferred tools require direct `tool_search`. |
 | Optional `research` | Existing domain/phase selections and complete external prompt maps. Omission means no Research state or default Research events. |
 
 For research definitions, Direct/Deferred are baseline exposure and existing Domain/Phase
@@ -165,6 +175,7 @@ Choose a complete template for your setup and save it outside the source reposit
 | Text-only model | [provider.toml](examples/provider.toml) | `disabled`: no image input |
 | One multimodal model | [provider-multimodal.toml](examples/provider-multimodal.toml) | `primary_direct`: the primary model receives images directly |
 | Text primary + separate vision model | [provider-text-vision.toml](examples/provider-text-vision.toml) | `secondary_tool`: the vision model analyzes images; the primary continues with its observations |
+| Text model + remote MCP tools | [provider-mcp.toml](examples/provider-mcp.toml) | Deferred remote tools discovered when `chat` starts |
 
 The following copies the text-only template. For image support, replace the source file
 in the copy command with the appropriate template:
@@ -204,6 +215,30 @@ The program **does not load `.env` files automatically**. If you maintain a trus
 load it in your shell and export its variables before starting. Alternatively, replace
 `credential_ref` with `api_key = "…"` in your local TOML; each provider must use exactly one.
 Keep real keys and configuration outside the repository and out of Git.
+
+#### Optional remote HTTP MCP tools
+
+Use the [MCP template](examples/provider-mcp.toml) to declare one or more remote
+Streamable HTTP tool servers under `mcp_servers`. Each server needs an absolute
+HTTP(S) `url` and either `protocol_version = "2025-11-25"` or
+`protocol_version = "2026-07-28"`. An optional `timeout_ms` defaults to 60000.
+
+If a server requires Bearer authentication, use only a dedicated reference such
+as `CYBER_AGENT_MCP_EXAMPLE_API_KEY`; provider keys and subscription accounts are
+never reused. Export it in the terminal that starts Chat:
+
+```sh
+export CYBER_AGENT_MCP_EXAMPLE_API_KEY='replace-with-your-MCP-key'
+```
+
+`doctor` does not read MCP credentials or contact MCP servers. A Chat startup
+resolves each configured MCP credential once, discovers its finite tool catalog
+in configured-name order, and keeps that catalog unchanged for the process,
+including compaction and `/resume`. Remote tools begin as deferred entries and
+become available through the ordinary tool search flow. Their schemas and
+arguments are passed by value to the server; MCP output remains transport output
+until you verify it. A disconnected or incomplete remote call stops the turn
+without inventing a receipt or replaying the call.
 
 #### ChatGPT subscription sign-in
 
@@ -284,14 +319,20 @@ echidna --config /absolute/path/codex.toml auth select-model --provider codex \
   --model gpt-6-astra --reasoning-effort xhigh
 ```
 
-Executable effort levels are `low`, `medium`, `high`, `xhigh` and `max`; available
-choices depend on the returned catalog. Omitting effort keeps service-default
-behavior without sending the advertised default. Saving clones an isolated
+Efforts accept valid catalog-advertised strings, including future values; the
+picker requires a value advertised by the selected model. Direct configuration
+accepts 1–64 ASCII letters, digits, underscores or hyphens. Omitting effort keeps
+the server default; explicit `none` is a different request value. Saving clones an isolated
 capability mapping for the provider and preserves other providers, comments and
 credentials. The configuration lock coordinates Echidna selection commands, so
 avoid editing the file externally while a selection is being saved.
-Image, tool and window declarations still require explicit review;
-the picker does not infer them from model names. Offline `doctor` shows the
+Add `--apply-capabilities` to import present default context-window, text/image
+input and summary-parameter support metadata for the selected model. Missing
+fields or unknown windows (including `null`) preserve existing settings; `max_context_window` remains metadata and
+never replaces the default window. Existing configuration/output-budget checks
+must pass before publication; failures leave the original file intact. Without
+the flag, selection behavior is unchanged. Other declarations such as tool
+support still need explicit review; none are inferred from model names. Offline `doctor` shows the
 configured effort; a new `chat` uses the saved settings. The protocol
 is based on a pinned Codex source version; actual account/server compatibility
 requires live verification. Failures do not switch models or paid APIs or replay
@@ -302,6 +343,9 @@ The Codex path requests available reasoning summaries and labels them
 not full internal reasoning. Empty summaries stay empty. They do not enter
 conversation text or replace encrypted continuation. Reasoning effort is
 independent of presentation; selecting `high` does not guarantee a summary.
+If a server rejects this parameter, explicitly set
+`supports_reasoning_summary_parameter = false` inside `codex_subscription`.
+Missing or `true` preserves the default request.
 
 #### One multimodal model
 
@@ -348,6 +392,8 @@ text-only model image support. Set each model's `context_window` to its actual c
 `[runtime].model_request_limit_per_turn` defaults to `32`, a per-turn request limit shared
 by the primary and vision models.
 
+In Chat, use `/image PATH` to select a local image. You can repeat the command: images queue in input order and the next ordinary task submits the whole queue as that Turn's initial context. With `primary_direct`, each image reaches the primary; with `secondary_tool`, each image gets its own retained observation before the primary request. If a later image fails, is cancelled, or reaches the shared request limit, earlier durable image facts remain, but the task and queued images are not submitted to the primary. The queue exists only in the current Chat process; restart and `/resume` do not replay image processing.
+
 ### 3. Create a research project
 
 ```sh
@@ -383,7 +429,8 @@ Domain guidance does not install analysis tools automatically.
 | --- | --- |
 | `/stop` or Ctrl+C | Request that the current turn stop. Completed operations are not undone; background jobs need separate handling. |
 | `/paste` | Follow the prompt to enter a multiline task or additional material. |
-| `/compact` | Compact context when prerequisites such as a target and research records are present. |
+| `/image PATH` | Append one local image to the next Turn's queue; repeated commands preserve order. |
+| `/compact` | Compact context when prerequisites such as a target and research records are present; unavailable while images are queued. |
 | `/resume` | Explicitly rebuild the model session after a recoverable stop, then enter a task. |
 | `/exit` | Leave the interactive interface. |
 
@@ -430,6 +477,7 @@ from actual use. External orchestration evolves independently of the single-agen
 | [Text-only configuration](examples/provider.toml) | Primary model, capability declarations, and environment key reference |
 | [Single multimodal model](examples/provider-multimodal.toml) | One primary model for text and images |
 | [Text + vision configuration](examples/provider-text-vision.toml) | Independent services, capabilities, and keys for the two models |
+| [Remote MCP configuration](examples/provider-mcp.toml) | Explicit Streamable HTTP tools and dedicated MCP credential references |
 | [Original mechanism figure](assets/architecture-overview.svg) | Execution and persistence flow in scalable SVG form |
 | [Changelog](CHANGELOG.md) | Feature changes and compatibility notes |
 

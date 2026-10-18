@@ -1,5 +1,36 @@
 use super::*;
 
+fn stop_held_pipe_descendant(root: &std::path::Path) {
+    let pid_path = root.join("held-pipe.pid");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !pid_path.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    let pid = fs::read_to_string(&pid_path)
+        .expect("held-pipe helper must record its descendant PID")
+        .trim()
+        .to_owned();
+    let _ = Command::new("/bin/kill").args(["-TERM", &pid]).output();
+    while Instant::now() < deadline {
+        let running = Command::new("/bin/kill")
+            .args(["-0", &pid])
+            .output()
+            .is_ok_and(|output| output.status.success());
+        if !running {
+            return;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    panic!("held-pipe descendant {pid} did not stop after TERM");
+}
+
+fn held_pipe_command(resource_path: &str) -> serde_json::Value {
+    json!({
+        "argv": ["sh", "-c", "( exec /bin/sleep 30 ) & descendant=$!; printf '%s\\n' \"$descendant\" > held-pipe.pid; printf HELD_CHILD"],
+        "resources": [{"kind": "output", "path": resource_path}]
+    })
+}
+
 #[test]
 fn ctf_r3b1_real_executor_deadline_preserves_acknowledged_children() {
     let root = TemporaryDirectory::new("r3b1-timeout");
@@ -387,4 +418,137 @@ fn ctf_r3b1_completed_batch_has_ordered_parent_and_individual_durable_children()
         }
         assert_eq!(fs::read(root.path().join("first-count")).unwrap(), b"x");
     }
+}
+
+#[test]
+fn ec_k4_incomplete_batch_child_checkpoints_before_parent_receipt_in_serial_and_parallel() {
+    for mode in ["serial", "parallel"] {
+        let root = TemporaryDirectory::new("ec-k4-incomplete-batch");
+        let harness = TemporaryDirectory::new("ec-k4-incomplete-batch-provider");
+        initialize_project(root.path());
+        let server = spawn_responses_server(vec![
+            (
+                200,
+                m4_long_flow_tool_response(
+                    "incomplete-batch",
+                    "run_commands",
+                    json!({"mode":mode,"commands":[
+                        held_pipe_command("held-output"),
+                        {"argv":["sh","-c","printf COMPLETE_CHILD"],"resources":[{"kind":"output","path":"complete-output"}]}
+                    ]}),
+                    "incomplete-batch-response",
+                ),
+            ),
+            (
+                200,
+                text_response("batch complete", "incomplete-batch-final"),
+            ),
+        ]);
+        let config = write_config(harness.path(), &server.base_url);
+        let output = f2a_wait_child(
+            spawn_f2a_chat(root.path(), &config, "run incomplete batch\n/exit\n", &[]),
+            "EC-K4 incomplete batch",
+        );
+        stop_held_pipe_descendant(root.path());
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let _ = f2a_request_body(&server.requests, "EC-K4 incomplete batch tool call");
+        let result = f2a_request_body(&server.requests, "EC-K4 incomplete batch result");
+        f2a_join_server(server, "EC-K4 incomplete batch");
+        assert!(result.to_string().contains("HELD_CHILD"));
+        assert!(result.to_string().contains("stdout_reader_grace_timeout"));
+
+        let events = session_events(root.path(), &session_id(root.path()));
+        let children = events
+            .iter()
+            .filter(|event| event["event_type"] == "tool.subcommand_checkpointed")
+            .collect::<Vec<_>>();
+        assert_eq!(children.len(), 2);
+        let receipt = events
+            .iter()
+            .find(|event| event["event_type"] == "tool.execution_receipt_recorded")
+            .expect("parent Receipt follows both child checkpoints");
+        let held = children
+            .iter()
+            .find(|event| event["payload"]["index"] == 0)
+            .expect("held child is checkpointed");
+        let held_captures = held["payload"]["output_captures"]
+            .as_array()
+            .expect("held child captures are durable");
+        assert_eq!(held_captures.len(), 2);
+        assert!(held_captures.iter().all(|capture| {
+            capture["child_index"] == 0 && capture["complete"] == false && capture["eof"] == false
+        }));
+        assert!(
+            held_captures
+                .iter()
+                .any(|capture| { capture["read_error"] == "stdout_reader_grace_timeout" })
+        );
+        for checkpoint in children {
+            assert!(
+                checkpoint["sequence"].as_u64().unwrap() < receipt["sequence"].as_u64().unwrap()
+            );
+            let index = checkpoint["payload"]["index"].as_u64().unwrap();
+            let parent_captures = receipt["payload"]["receipt"]["output_captures"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|capture| capture["child_index"] == index)
+                .cloned()
+                .collect::<Vec<_>>();
+            assert_eq!(
+                json!(parent_captures),
+                checkpoint["payload"]["output_captures"]
+            );
+        }
+    }
+}
+
+#[test]
+fn ec_k4_incomplete_batch_capture_publication_failure_is_fatal_before_parent_receipt() {
+    let root = TemporaryDirectory::new("ec-k4-incomplete-batch-publication");
+    let harness = TemporaryDirectory::new("ec-k4-incomplete-batch-publication-provider");
+    initialize_project(root.path());
+    let blob_directory = root.path().join(".cyber-agent/artifacts/blobs/sha256");
+    fs::create_dir_all(&blob_directory).unwrap();
+    fs::write(
+        blob_directory.join(format!("{:x}", Sha256::digest(b"HELD_CHILD"))),
+        b"CONFLICTED",
+    )
+    .unwrap();
+    let server = spawn_responses_server(vec![(
+        200,
+        m4_long_flow_tool_response(
+            "incomplete-batch-publication",
+            "run_commands",
+            json!({"mode":"serial","commands":[held_pipe_command("held-output")]}),
+            "incomplete-batch-publication-response",
+        ),
+    )]);
+    let config = write_config(harness.path(), &server.base_url);
+    let output = f2a_wait_child(
+        spawn_f2a_chat(root.path(), &config, "run incomplete batch\n/exit\n", &[]),
+        "EC-K4 incomplete batch publication failure",
+    );
+    stop_held_pipe_descendant(root.path());
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Tool output persistence failed"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = f2a_request_body(
+        &server.requests,
+        "EC-K4 incomplete batch publication failure",
+    );
+    f2a_join_server(server, "EC-K4 incomplete batch publication failure");
+    let events = session_events(root.path(), &session_id(root.path()));
+    assert!(!events.iter().any(|event| {
+        event["event_type"] == "tool.subcommand_checkpointed"
+            || event["event_type"] == "tool.execution_receipt_recorded"
+            || event["payload"]["item"]["kind"] == "tool_result"
+    }));
 }

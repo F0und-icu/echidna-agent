@@ -181,11 +181,11 @@ impl ToolExecutor for ReplayToolExecutor {
                 .planned_steps
                 .remove(&plan.execution_id);
             let Some(step) = step else {
-                return ToolExecutionOutcome::failed(
+                return Ok(ToolExecutionOutcome::failed(
                     plan,
                     "replay_step_missing",
                     serde_json::json!({"error": "Replay Tool plan has no staged historical result"}),
-                );
+                ));
             };
             let (source_receipt_event_id, source_receipt, _expected_call, source_result) =
                 step.into_parts();
@@ -220,7 +220,7 @@ impl ToolExecutor for ReplayToolExecutor {
                     source_receipt_for_use,
                     outcome.receipt.clone(),
                 ));
-            outcome
+            Ok(outcome)
         })
     }
 }

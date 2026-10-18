@@ -44,7 +44,7 @@ async fn execute(
             tool_call(call_id, name, arguments),
         )
         .expect("Tool plan should be valid");
-    tools.execute(plan).await
+    tools.execute(plan).await.expect("Tool execution completes")
 }
 
 async fn record_target_snapshot(tools: &ToolRegistry, snapshot_id: &str, event_id: &str) {

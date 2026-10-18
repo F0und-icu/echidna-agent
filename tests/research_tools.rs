@@ -35,7 +35,7 @@ async fn execute(tools: &ToolRegistry, id: &str, name: &str, arguments: Value) -
             call(id, name, arguments),
         )
         .unwrap();
-    let outcome = tools.execute(plan).await;
+    let outcome = tools.execute(plan).await.expect("Tool execution completes");
     assert_eq!(outcome.result.tool_name, ToolName::new(name));
     outcome.result.output
 }
@@ -52,7 +52,7 @@ async fn execute_outcome(
             call(id, name, arguments),
         )
         .unwrap();
-    tools.execute(plan).await
+    tools.execute(plan).await.expect("Tool execution completes")
 }
 
 fn update(event_id: &str, operation: Value) -> Value {

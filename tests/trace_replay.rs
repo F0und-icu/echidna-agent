@@ -1427,7 +1427,8 @@ async fn non_success_source_tool_result_replays_with_its_exact_output_and_cannot
         let plan = tools
             .plan(ExecutionId::new("shadow-execution"), call())
             .unwrap();
-        let outcome: ToolExecutionOutcome = tools.execute(plan).await;
+        let outcome: ToolExecutionOutcome =
+            tools.execute(plan).await.expect("Tool execution completes");
 
         assert_eq!(outcome.result.status, status);
         assert_eq!(outcome.result.output, source_result.output);
@@ -1482,7 +1483,7 @@ async fn replay_use_keeps_complete_source_receipt_separate_from_derived_receipt(
     let plan = tools
         .plan(ExecutionId::new("eval-replay-execution"), call())
         .unwrap();
-    let outcome = tools.execute(plan).await;
+    let outcome = tools.execute(plan).await.expect("Tool execution completes");
     let replay_use = &tools.replay_uses()[0];
 
     assert_eq!(replay_use.source(), &source);

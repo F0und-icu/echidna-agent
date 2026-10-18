@@ -41,7 +41,7 @@ async fn execute(
             call(id, name, arguments),
         )
         .unwrap();
-    tools.execute(plan).await
+    tools.execute(plan).await.expect("builtin Tool completes")
 }
 
 fn update(event_id: &str, operation: Value) -> Value {

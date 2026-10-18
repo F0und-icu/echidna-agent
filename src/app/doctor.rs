@@ -51,9 +51,9 @@ pub fn inspect_agent_model_profile(profile: &AgentModelProfile) -> AgentProfileD
         vision_max_output_tokens: profile
             .vision()
             .and_then(|vision| vision.capabilities().max_output_tokens),
-        primary_reasoning_effort: profile.primary().capabilities().reasoning_effort,
+        primary_reasoning_effort: profile.primary().capabilities().reasoning_effort.clone(),
         vision_reasoning_effort: profile
             .vision()
-            .and_then(|vision| vision.capabilities().reasoning_effort),
+            .and_then(|vision| vision.capabilities().reasoning_effort.clone()),
     }
 }

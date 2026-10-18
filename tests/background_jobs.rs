@@ -30,7 +30,8 @@ async fn global_background_lease_preserves_discovery_and_model_bound_stop() {
         }
         let started = tools
             .execute(plan(&tools, "start", start_name, arguments))
-            .await;
+            .await
+            .expect("Tool execution completes");
         assert_eq!(started.result.status, ToolResultStatus::Succeeded);
         let handle = started.result.output[id_field].as_str().unwrap();
         let blocked = tools
@@ -40,7 +41,8 @@ async fn global_background_lease_preserves_discovery_and_model_bound_stop() {
                 "run_command",
                 json!({"argv":["sh","-c","printf forbidden > forbidden"]}),
             ))
-            .await;
+            .await
+            .expect("Tool execution completes");
         assert_eq!(blocked.result.status, ToolResultStatus::Failed);
         assert!(!project.root.join("forbidden").exists());
 
@@ -59,7 +61,8 @@ async fn global_background_lease_preserves_discovery_and_model_bound_stop() {
                     .plan_model_call(&before, ExecutionId::new("search"), call)
                     .unwrap(),
             )
-            .await;
+            .await
+            .expect("Tool execution completes");
         assert_eq!(search.result.status, ToolResultStatus::Succeeded);
         activation
             .apply_search_result(&search.result, &before)
@@ -84,7 +87,8 @@ async fn global_background_lease_preserves_discovery_and_model_bound_stop() {
             ),
         )
         .await
-        .expect("stop must not wait for the Job deadline");
+        .expect("stop must not wait for the Job deadline")
+        .expect("Tool execution completes");
         assert_eq!(stopped.result.status, ToolResultStatus::Succeeded);
         assert_eq!(stopped.result.output["status"], "cancelled");
         let recovered = tools
@@ -94,7 +98,8 @@ async fn global_background_lease_preserves_discovery_and_model_bound_stop() {
                 "run_command",
                 json!({"argv":["sh","-c","printf recovered"]}),
             ))
-            .await;
+            .await
+            .expect("Tool execution completes");
         assert_eq!(recovered.result.status, ToolResultStatus::Succeeded);
         let next_turn = tools
             .resolve_tool_plan(&exposure, &DeferredActivationSet::default())
@@ -165,7 +170,8 @@ async fn runtime_handle_subprocess_probe() {
             "start_job",
             json!({"argv":["sh","-c","exit 0"]}),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     let job_id = job.result.output["job_id"].as_str().unwrap();
     poll_until_terminal(&tools, job_id, 0, 0).await;
     let pty = tools
@@ -175,7 +181,8 @@ async fn runtime_handle_subprocess_probe() {
             "start_pty",
             json!({"argv":["sh","-c","exit 0"]}),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     let pty_id = pty.result.output["pty_session_id"].as_str().unwrap();
     let stopped = tools
         .execute(plan(
@@ -184,7 +191,8 @@ async fn runtime_handle_subprocess_probe() {
             "stop_pty",
             json!({"pty_session_id":pty_id}),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     assert_eq!(stopped.result.status, ToolResultStatus::Succeeded);
     println!("RUNTIME_HANDLES={job_id}|{pty_id}");
 }
@@ -200,7 +208,8 @@ async fn ctf_r3a_old_job_handles_cannot_control_a_new_registry() {
             "start_job",
             json!({"argv":["sh","-c","exit 0"]}),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     let old_id = started.result.output["job_id"].as_str().unwrap();
     poll_until_terminal(&old, old_id, 0, 0).await;
     let fresh = ToolRegistry::for_project(&project.root);
@@ -213,7 +222,8 @@ async fn ctf_r3a_old_job_handles_cannot_control_a_new_registry() {
                 "argv":["sh","-c","read line; printf 'fresh:%s' \"$line\""], "timeout_ms":10000
             }),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     let fresh_id = started.result.output["job_id"].as_str().unwrap();
     assert_ne!(old_id, fresh_id);
     for stale in [old_id, "job:1"] {
@@ -225,7 +235,10 @@ async fn ctf_r3a_old_job_handles_cannot_control_a_new_registry() {
             ),
             ("stop_job", json!({"job_id":stale})),
         ] {
-            let outcome = fresh.execute(plan(&fresh, "stale", name, arguments)).await;
+            let outcome = fresh
+                .execute(plan(&fresh, "stale", name, arguments))
+                .await
+                .expect("Tool execution completes");
             assert_eq!(outcome.result.status, ToolResultStatus::Failed);
         }
     }
@@ -236,7 +249,8 @@ async fn ctf_r3a_old_job_handles_cannot_control_a_new_registry() {
             "input_job",
             json!({"job_id":fresh_id,"input":"safe\n","close":true}),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     assert_eq!(input.result.status, ToolResultStatus::Succeeded);
     let output = poll_until_terminal(&fresh, fresh_id, 0, 0).await;
     assert_eq!(output.result.output["stdout"]["data"], "fresh:safe");
@@ -290,7 +304,8 @@ async fn poll_until_terminal(
                     "stderr_offset": stderr_offset,
                 }),
             ))
-            .await;
+            .await
+            .expect("Tool execution completes");
         if outcome.result.output["status"] != "running"
             && outcome.result.output["status"] != "stopping"
         {
@@ -330,7 +345,8 @@ async fn poll_uses_caller_offsets_and_keeps_start_completion_linkage_stable() {
                 "timeout_ms": 1_000,
             }),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     assert_eq!(start.result.status, ToolResultStatus::Succeeded);
     let job_id = start.result.output["job_id"].as_str().unwrap().to_owned();
 
@@ -341,7 +357,8 @@ async fn poll_uses_caller_offsets_and_keeps_start_completion_linkage_stable() {
             "input_job",
             json!({"job_id": job_id, "input": "fixture", "close": true}),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     assert_eq!(input.result.status, ToolResultStatus::Succeeded);
     assert_eq!(input.result.output["input_closed"], true);
 
@@ -377,7 +394,8 @@ async fn poll_uses_caller_offsets_and_keeps_start_completion_linkage_stable() {
                 "stderr_offset": stderr_offset,
             }),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     assert_eq!(repeated.result.status, ToolResultStatus::Succeeded);
     assert_eq!(repeated.result.output["stdout"]["data"], "");
     assert_eq!(repeated.result.output["stderr"]["data"], "");
@@ -393,7 +411,8 @@ async fn poll_uses_caller_offsets_and_keeps_start_completion_linkage_stable() {
             "poll_job",
             json!({"job_id": job_id, "stdout_offset": stdout_offset + 1}),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     assert_eq!(invalid_offset.result.status, ToolResultStatus::Failed);
     assert_eq!(
         invalid_offset.result.output["stdout"]["error"],
@@ -412,7 +431,8 @@ async fn timeout_and_stop_reap_jobs_into_one_terminal_state() {
             "start_job",
             json!({"argv": ["sh", "-c", "sleep 5"], "timeout_ms": 20}),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     let timed_out_id = timed_out_start.result.output["job_id"].as_str().unwrap();
     let timed_out = poll_until_terminal(&tools, timed_out_id, 0, 0).await;
     assert_eq!(timed_out.result.output["status"], "timed_out");
@@ -431,7 +451,8 @@ async fn timeout_and_stop_reap_jobs_into_one_terminal_state() {
             "start_job",
             json!({"argv": ["sh", "-c", "sleep 5"], "timeout_ms": 1_000}),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     let stopped_id = stopped_start.result.output["job_id"].as_str().unwrap();
     let stopped = tools
         .execute(plan(
@@ -440,7 +461,8 @@ async fn timeout_and_stop_reap_jobs_into_one_terminal_state() {
             "stop_job",
             json!({"job_id": stopped_id}),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     assert_eq!(stopped.result.status, ToolResultStatus::Succeeded);
     assert_eq!(stopped.result.output["status"], "cancelled");
     assert_eq!(
@@ -454,7 +476,8 @@ async fn timeout_and_stop_reap_jobs_into_one_terminal_state() {
             "stop_job",
             json!({"job_id": stopped_id}),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     assert_eq!(repeat_stop.result.status, ToolResultStatus::Succeeded);
     assert_eq!(repeat_stop.result.output["already_terminal"], true);
     assert_eq!(repeat_stop.result.output["status"], "cancelled");
@@ -466,7 +489,8 @@ async fn timeout_and_stop_reap_jobs_into_one_terminal_state() {
             "start_job",
             json!({"argv": ["sh", "-c", "exit 0"], "timeout_ms": 1_000}),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     let raced_id = raced_start.result.output["job_id"].as_str().unwrap();
     let raced_stop = tokio::time::timeout(
         std::time::Duration::from_millis(500),
@@ -478,7 +502,8 @@ async fn timeout_and_stop_reap_jobs_into_one_terminal_state() {
         )),
     )
     .await
-    .expect("a stop racing natural completion must not wait for an orphaned acknowledgement");
+    .expect("a stop racing natural completion must not wait for an orphaned acknowledgement")
+    .expect("Tool execution completes");
     assert_eq!(raced_stop.result.status, ToolResultStatus::Succeeded);
     assert!(matches!(
         raced_stop.result.output["status"].as_str(),
@@ -527,7 +552,8 @@ async fn stop_waits_for_terminal_when_descendant_holds_job_pipes() {
                 "timeout_ms": 2_000,
             }),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     assert_eq!(start.result.status, ToolResultStatus::Succeeded);
     let job_id = start.result.output["job_id"].as_str().unwrap().to_owned();
 
@@ -543,7 +569,8 @@ async fn stop_waits_for_terminal_when_descendant_holds_job_pipes() {
                 "poll_job",
                 json!({"job_id": job_id}),
             ))
-            .await;
+            .await
+            .expect("Tool execution completes");
         if observed.result.output["stdout"]["data"] == "ready" {
             descendant_started = true;
             break;
@@ -568,7 +595,8 @@ async fn stop_waits_for_terminal_when_descendant_holds_job_pipes() {
         )),
     )
     .await
-    .expect("stop must finish after bounded reader grace");
+    .expect("stop must finish after bounded reader grace")
+    .expect("Tool execution completes");
     assert_eq!(stopped.result.status, ToolResultStatus::Succeeded);
     assert_ne!(stopped.result.output["error"], "job_stop_unavailable");
     assert!(matches!(
@@ -587,7 +615,8 @@ async fn stop_waits_for_terminal_when_descendant_holds_job_pipes() {
         )),
     )
     .await
-    .expect("poll after stop must be immediate");
+    .expect("poll after stop must be immediate")
+    .expect("Tool execution completes");
     assert_eq!(polled.result.status, ToolResultStatus::Succeeded);
     assert_eq!(
         polled.result.output["status"],
@@ -622,7 +651,8 @@ async fn active_job_resource_leases_block_conflicts_until_terminal() {
                 "timeout_ms": 1_000,
             }),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     assert_eq!(start.result.status, ToolResultStatus::Succeeded);
     let job_id = start.result.output["job_id"].as_str().unwrap().to_owned();
 
@@ -636,7 +666,8 @@ async fn active_job_resource_leases_block_conflicts_until_terminal() {
                 "resources": [{"kind": "output", "path": "shared.log"}],
             }),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     assert_eq!(conflicting_command.result.status, ToolResultStatus::Failed);
     assert_eq!(
         conflicting_command.receipt.exit_reason.as_deref(),
@@ -658,7 +689,8 @@ async fn active_job_resource_leases_block_conflicts_until_terminal() {
                 "timeout_ms": 1_000,
             }),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     assert_eq!(conflicting_start.result.status, ToolResultStatus::Failed);
     assert_eq!(
         conflicting_start.receipt.exit_reason.as_deref(),
@@ -675,7 +707,8 @@ async fn active_job_resource_leases_block_conflicts_until_terminal() {
                 "resources": [{"kind": "output", "path": "independent.log"}],
             }),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     assert_eq!(
         independent_command.result.status,
         ToolResultStatus::Succeeded
@@ -688,7 +721,8 @@ async fn active_job_resource_leases_block_conflicts_until_terminal() {
             "stop_job",
             json!({"job_id": job_id}),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     assert_eq!(stopped.result.status, ToolResultStatus::Succeeded);
     assert_eq!(stopped.result.output["status"], "cancelled");
 
@@ -702,7 +736,8 @@ async fn active_job_resource_leases_block_conflicts_until_terminal() {
                 "resources": [{"kind": "output", "path": "shared.log"}],
             }),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     assert_eq!(released_command.result.status, ToolResultStatus::Succeeded);
 }
 
@@ -720,7 +755,8 @@ async fn poll_offsets_wait_for_utf8_boundaries_and_reject_continuation_bytes() {
                 "timeout_ms": 1_000,
             }),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     assert_eq!(start.result.status, ToolResultStatus::Succeeded);
     let job_id = start.result.output["job_id"].as_str().unwrap().to_owned();
 
@@ -732,7 +768,8 @@ async fn poll_offsets_wait_for_utf8_boundaries_and_reject_continuation_bytes() {
             "poll_job",
             json!({"job_id": job_id, "stdout_offset": 0}),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     assert_eq!(partial.result.status, ToolResultStatus::Succeeded);
     assert_eq!(partial.result.output["stdout"]["data"], "");
     assert_eq!(partial.result.output["stdout"]["next_offset"], 0);
@@ -749,7 +786,8 @@ async fn poll_offsets_wait_for_utf8_boundaries_and_reject_continuation_bytes() {
             "poll_job",
             json!({"job_id": job_id, "stdout_offset": 1}),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     assert_eq!(continuation_offset.result.status, ToolResultStatus::Failed);
     assert_eq!(
         continuation_offset.result.output["stdout"]["error"],
@@ -775,7 +813,8 @@ async fn poll_binary_output_allows_offsets_at_independent_continuation_bytes() {
                 "timeout_ms": 1_000,
             }),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     assert_eq!(start.result.status, ToolResultStatus::Succeeded);
     let job_id = start.result.output["job_id"].as_str().unwrap().to_owned();
     let completed = poll_until_terminal(&tools, &job_id, 0, 0).await;
@@ -789,7 +828,8 @@ async fn poll_binary_output_allows_offsets_at_independent_continuation_bytes() {
                 "poll_job",
                 json!({"job_id": job_id, "stdout_offset": stdout_offset}),
             ))
-            .await;
+            .await
+            .expect("Tool execution completes");
         assert_eq!(polled.result.status, ToolResultStatus::Succeeded);
         assert_eq!(polled.result.output["stdout"]["offset"], stdout_offset);
         assert_ne!(

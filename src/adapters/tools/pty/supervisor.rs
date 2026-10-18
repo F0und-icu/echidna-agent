@@ -2,7 +2,6 @@
 
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use portable_pty::Child;
 
@@ -11,10 +10,8 @@ use crate::domain::tools::{
 };
 
 use super::super::active::ActiveProcessLeaseGuard;
-use super::super::output::{CapturedOutput, lock_captured_output};
+use super::super::output::{CapturedOutput, OUTPUT_DRAIN_GRACE, lock_captured_output};
 use super::{PtySessionTable, lock_table};
-
-const OUTPUT_DRAIN_GRACE: Duration = Duration::from_millis(100);
 
 pub(super) struct PtySupervisor {
     pub(super) child: Box<dyn Child + Send + Sync>,

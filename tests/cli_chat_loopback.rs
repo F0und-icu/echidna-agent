@@ -28,6 +28,8 @@ mod f4_output;
 mod f5_output;
 #[path = "cli_chat_cases/f6a_geometry.rs"]
 mod f6a_geometry;
+#[path = "cli_chat_cases/mcp_http.rs"]
+mod mcp_http;
 #[path = "cli_chat_cases/operator_steering.rs"]
 mod operator_steering;
 #[path = "cli_chat_cases/output_budget.rs"]
@@ -164,6 +166,13 @@ struct F2aPendingVisionServer {
     thread: JoinHandle<()>,
 }
 
+struct F2aFirstResponseThenPendingServer {
+    base_url: String,
+    requests: Receiver<String>,
+    release: mpsc::Sender<()>,
+    thread: JoinHandle<()>,
+}
+
 impl F2aPendingVisionServer {
     fn shutdown(self) -> Vec<String> {
         let _ = self.release.send(());
@@ -179,6 +188,25 @@ impl F2aPendingVisionServer {
         self.thread
             .join()
             .expect("F2a pending Vision server should not panic");
+        self.requests.try_iter().collect()
+    }
+}
+
+impl F2aFirstResponseThenPendingServer {
+    fn shutdown(self) -> Vec<String> {
+        let _ = self.release.send(());
+        let deadline = Instant::now() + F2A_WAIT;
+        while !self.thread.is_finished() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            self.thread.is_finished(),
+            "F2a first-response pending server did not stop within {} seconds",
+            F2A_WAIT.as_secs()
+        );
+        self.thread
+            .join()
+            .expect("F2a first-response pending server should not panic");
         self.requests.try_iter().collect()
     }
 }
@@ -279,6 +307,61 @@ fn spawn_f2a_pending_vision_server() -> F2aPendingVisionServer {
         }
     });
     F2aPendingVisionServer {
+        base_url: format!("http://{address}/v1"),
+        requests,
+        release,
+        thread,
+    }
+}
+
+/// Delivers one completed Vision response and then deliberately leaves the
+/// second request pending until the fixture releases it. This isolates
+/// cancellation after a durable first observation without inventing a second
+/// Provider result.
+fn spawn_f2a_first_response_then_pending_server(
+    first_body: String,
+) -> F2aFirstResponseThenPendingServer {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let (request_sender, requests) = mpsc::channel();
+    let (release, release_receiver) = mpsc::channel();
+    let thread = thread::spawn(move || {
+        let deadline = Instant::now() + F2A_WAIT;
+        let mut received = 0;
+        loop {
+            if release_receiver.try_recv().is_ok() || Instant::now() >= deadline {
+                return;
+            }
+            match listener.accept() {
+                Ok((mut socket, _)) => {
+                    socket.set_nonblocking(false).unwrap();
+                    socket
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    request_sender.send(read_http_request(&mut socket)).unwrap();
+                    if received == 0 {
+                        let headers = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            first_body.len()
+                        );
+                        socket.write_all(headers.as_bytes()).unwrap();
+                        socket.write_all(first_body.as_bytes()).unwrap();
+                        socket.flush().unwrap();
+                    } else {
+                        let _ = release_receiver.recv_timeout(F2A_WAIT);
+                        return;
+                    }
+                    received += 1;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("F2a first-response pending server accept failed: {error}"),
+            }
+        }
+    });
+    F2aFirstResponseThenPendingServer {
         base_url: format!("http://{address}/v1"),
         requests,
         release,
@@ -717,6 +800,23 @@ fn json_contains_type(value: &Value, expected: &str) -> bool {
     }
 }
 
+fn json_count_type(value: &Value, expected: &str) -> usize {
+    match value {
+        Value::Array(values) => values
+            .iter()
+            .map(|value| json_count_type(value, expected))
+            .sum(),
+        Value::Object(values) => {
+            usize::from(values.get("type").and_then(Value::as_str) == Some(expected))
+                + values
+                    .values()
+                    .map(|value| json_count_type(value, expected))
+                    .sum::<usize>()
+        }
+        _ => 0,
+    }
+}
+
 fn json_contains_text(value: &Value, expected: &str) -> bool {
     match value {
         Value::String(value) => value.contains(expected),
@@ -1150,6 +1250,220 @@ fn f2a_primary_direct_cli_image_reaches_only_primary_and_keeps_real_tool_receipt
 }
 
 #[test]
+fn ec_k4_two_primary_direct_images_keep_order_without_duplicate_history_and_survive_compaction_resume()
+ {
+    let root = TemporaryDirectory::new("ec-k4-two-direct-images");
+    initialize_project(root.path());
+    let project = Project::discover(root.path()).unwrap();
+    append_research_snapshot(&project, "two-direct");
+    fs::write(root.path().join("first.png"), png_bytes(9, 7)).unwrap();
+    fs::write(root.path().join("second.png"), png_bytes(13, 5)).unwrap();
+
+    let initial = spawn_responses_server(vec![(
+        200,
+        text_response("TWO_DIRECT_COMPLETE", "two-direct-initial"),
+    )]);
+    let config = write_direct_config(root.path(), &initial.base_url);
+    let initial_task = format!(
+        "Compare both attached images in order. {}",
+        "stable historical context ".repeat(1024)
+    );
+    let output = run_chat(
+        root.path(),
+        &config,
+        &format!("/image first.png\n/image second.png\n{initial_task}\n/exit\n"),
+        &[],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let request = f2a_request_body(&initial.requests, "two direct Primary");
+    f2a_join_server(initial, "two direct Primary");
+    assert_eq!(json_count_type(&request["input"], "input_image"), 2);
+
+    let session = session_id(root.path());
+    let state = reduced_session(&project, &session);
+    assert_eq!(state.vision_routes().len(), 2);
+    assert!(state.vision_observations().is_empty());
+    assert_eq!(state.request_audits().len(), 1);
+    let route_sources = state
+        .vision_routes()
+        .iter()
+        .map(|route| route.source_artifact_ids.as_slice())
+        .collect::<Vec<_>>();
+    assert_eq!(route_sources.len(), 2);
+    assert_eq!(route_sources[0].len(), 1);
+    assert_eq!(route_sources[1].len(), 1);
+    assert_ne!(route_sources[0], route_sources[1]);
+    let direct_history = state
+        .history()
+        .items()
+        .iter()
+        .filter_map(|item| match item {
+            echidna::domain::model::ContentItem::ImageArtifact { artifact_id, .. } => {
+                Some(artifact_id)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(direct_history.len(), 2);
+    assert_ne!(direct_history[0], direct_history[1]);
+    let events = session_events(root.path(), &session);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["event_type"] == "tool.execution_receipt_recorded")
+            .count(),
+        2
+    );
+
+    let resumed_server = spawn_responses_server(vec![(
+        200,
+        text_response("TWO_DIRECT_RESUMED", "two-direct-resumed"),
+    )]);
+    let resumed_config = write_direct_config(root.path(), &resumed_server.base_url);
+    let resumed = run_chat(
+        root.path(),
+        &resumed_config,
+        "/compact\nContinue from the compacted two-image history.\n/exit\n",
+        &["--session", &session],
+    );
+    assert!(
+        resumed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    assert!(String::from_utf8_lossy(&resumed.stdout).contains("Compaction revision 1 applied"));
+    let resumed_request = f2a_request_body(&resumed_server.requests, "two direct resumed Primary");
+    f2a_join_server(resumed_server, "two direct resumed Primary");
+    assert!(json_contains_text(
+        &resumed_request["input"],
+        "Continue from the compacted two-image history."
+    ));
+    let resumed_state = reduced_session(&project, &session);
+    assert!(resumed_state.latest_compaction().is_some());
+    assert_eq!(resumed_state.vision_routes().len(), 2);
+    assert!(resumed_state.vision_observations().is_empty());
+    assert_eq!(
+        resumed_state
+            .history()
+            .items()
+            .iter()
+            .filter(|item| matches!(
+                item,
+                echidna::domain::model::ContentItem::ImageArtifact { .. }
+            ))
+            .count(),
+        2,
+        "compaction and Resume retain the actual durable History projection; they do not replay image intake"
+    );
+    assert_eq!(
+        session_events(root.path(), &session)
+            .iter()
+            .filter(|event| event["event_type"] == "tool.execution_receipt_recorded")
+            .count(),
+        2,
+        "Resume must not create fresh image-intake executions"
+    );
+}
+
+#[test]
+fn ec_k4_two_secondary_images_make_ordered_distinct_observations_before_one_primary_request() {
+    let root = TemporaryDirectory::new("ec-k4-two-secondary-images");
+    initialize_project(root.path());
+    let project = Project::discover(root.path()).unwrap();
+    append_research_snapshot(&project, "two-secondary");
+    fs::write(root.path().join("first.png"), png_bytes(16, 12)).unwrap();
+    fs::write(root.path().join("second.png"), png_bytes(7, 15)).unwrap();
+
+    let vision = spawn_responses_server(vec![
+        (
+            200,
+            vision_response("first queued observation", "vision-first"),
+        ),
+        (
+            200,
+            vision_response("second queued observation", "vision-second"),
+        ),
+    ]);
+    let primary = spawn_responses_server(vec![(
+        200,
+        text_response("TWO_SECONDARY_COMPLETE", "two-secondary-primary"),
+    )]);
+    let config = write_dual_config(root.path(), &primary.base_url, &vision.base_url);
+    let output = run_chat(
+        root.path(),
+        &config,
+        "/image first.png\n/image second.png\nCompare the two queued secondary images.\n/exit\n",
+        &[],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let first_vision = f2a_request_body(&vision.requests, "first queued Vision");
+    let second_vision = f2a_request_body(&vision.requests, "second queued Vision");
+    f2a_join_server(vision, "two queued Vision");
+    assert_eq!(json_count_type(&first_vision["input"], "input_image"), 1);
+    assert_eq!(json_count_type(&second_vision["input"], "input_image"), 1);
+    assert_ne!(first_vision["input"], second_vision["input"]);
+    let primary_request = f2a_request_body(&primary.requests, "two queued Primary");
+    f2a_join_server(primary, "two queued Primary");
+    assert_eq!(json_count_type(&primary_request["input"], "input_image"), 0);
+    assert!(json_contains_text(
+        &primary_request["input"],
+        "first queued observation"
+    ));
+    assert!(json_contains_text(
+        &primary_request["input"],
+        "second queued observation"
+    ));
+
+    let session = session_id(root.path());
+    let state = reduced_session(&project, &session);
+    assert_eq!(state.vision_routes().len(), 2);
+    assert_eq!(state.vision_observations().len(), 2);
+    assert_eq!(state.request_audits().len(), 3);
+    let first_geometry = state.vision_observations()[0]
+        .image_geometry
+        .as_ref()
+        .unwrap();
+    let second_geometry = state.vision_observations()[1]
+        .image_geometry
+        .as_ref()
+        .unwrap();
+    assert_eq!(
+        (first_geometry.source_width, first_geometry.source_height),
+        (16, 12)
+    );
+    assert_eq!(
+        (second_geometry.source_width, second_geometry.source_height),
+        (7, 15)
+    );
+    assert_ne!(
+        state.vision_observations()[0].source_artifact_id,
+        state.vision_observations()[1].source_artifact_id
+    );
+    assert_eq!(
+        state
+            .history()
+            .items()
+            .iter()
+            .filter(|item| matches!(
+                item,
+                echidna::domain::model::ContentItem::ImageArtifact { .. }
+            ))
+            .count(),
+        0,
+        "secondary input contributes only durable observations to Primary History"
+    );
+    assert_audits_reconstruct(root.path(), &state);
+}
+
+#[test]
 fn f2a_model_view_image_follow_up_runs_secondary_before_the_next_primary_sample() {
     let root = TemporaryDirectory::new("f2a-cli-model-view-image-follow-up");
     initialize_project(root.path());
@@ -1379,7 +1693,7 @@ fn f2a_image_commands_reject_invalid_inputs_before_any_provider_request_or_route
 }
 
 #[test]
-fn f2a_second_pending_image_is_rejected_and_resume_does_not_replay_process_state() {
+fn ec_k4_queued_but_unsubmitted_images_are_not_reconstructed_after_restart() {
     let root = TemporaryDirectory::new("f2a-cli-image-pending-resume");
     initialize_project(root.path());
     let project = Project::discover(root.path()).unwrap();
@@ -1390,20 +1704,20 @@ fn f2a_second_pending_image_is_rejected_and_resume_does_not_replay_process_state
     let first = run_chat(
         root.path(),
         &inert_config,
-        "/image first.png\n/image second.png\n/exit\n",
+        "/image first.png\n/image second.png\n/compact\n/exit\n",
         &[],
     );
     assert!(first.status.success());
     let first_stdout = String::from_utf8(first.stdout).unwrap();
-    assert!(first_stdout.contains("Queued image"));
-    assert!(first_stdout.contains("already queued for the next Turn"));
+    assert_eq!(first_stdout.matches("Queued image").count(), 2);
+    assert!(first_stdout.contains("Compaction is unavailable while 2 image(s)"));
     let session = session_id(root.path());
     assert_eq!(
         session_events(root.path(), &session)
             .iter()
             .filter(|event| event["event_type"] == "tool.execution_receipt_recorded")
             .count(),
-        1
+        2
     );
 
     let primary = spawn_responses_server(vec![(
@@ -1428,6 +1742,202 @@ fn f2a_second_pending_image_is_rejected_and_resume_does_not_replay_process_state
     let state = reduced_session(&project, &session);
     assert!(state.vision_routes().is_empty());
     assert!(state.vision_observations().is_empty());
+}
+
+#[test]
+fn ec_k4_second_secondary_image_failure_keeps_durable_prefix_without_primary_history() {
+    let root = TemporaryDirectory::new("ec-k4-second-secondary-failure");
+    initialize_project(root.path());
+    let project = Project::discover(root.path()).unwrap();
+    append_research_snapshot(&project, "second-secondary-failure");
+    fs::write(root.path().join("first.png"), png_bytes(8, 6)).unwrap();
+    fs::write(root.path().join("second.png"), png_bytes(6, 8)).unwrap();
+    let vision = spawn_responses_server(vec![
+        (
+            200,
+            vision_response("durable first observation", "failure-first"),
+        ),
+        (503, "second Vision failure".to_owned()),
+    ]);
+    let primary = spawn_f2a_pending_vision_server();
+    let config = write_dual_config(root.path(), &primary.base_url, &vision.base_url);
+    let output = run_chat(
+        root.path(),
+        &config,
+        "/image first.png\n/image second.png\nSubmit both images even if the second Vision request fails.\n/exit\n",
+        &[],
+    );
+    assert!(
+        !output.status.success(),
+        "a recoverable stopped Turn must require explicit Resume"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("Initial images/task were not submitted to Primary")
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unresolved stopped Turn"));
+    let _ = f2a_request_body(&vision.requests, "first secondary failure Vision");
+    let _ = f2a_request_body(&vision.requests, "second secondary failure Vision");
+    f2a_join_server(vision, "second secondary failure Vision");
+    assert!(
+        primary.shutdown().is_empty(),
+        "Primary must not start after a later initial-image failure"
+    );
+
+    let state = reduced_session(&project, &session_id(root.path()));
+    assert_eq!(state.vision_routes().len(), 2);
+    assert_eq!(state.vision_observations().len(), 1);
+    assert_eq!(state.request_audits().len(), 2);
+    assert!(state.history().items().is_empty());
+    let events = session_events(root.path(), &session_id(root.path()));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["event_type"] == "vision.analysis_failed")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn ec_k4_shared_budget_stops_between_secondary_images_without_primary_submission() {
+    let root = TemporaryDirectory::new("ec-k4-second-secondary-budget");
+    initialize_project(root.path());
+    let project = Project::discover(root.path()).unwrap();
+    append_research_snapshot(&project, "second-secondary-budget");
+    fs::write(root.path().join("first.png"), png_bytes(8, 6)).unwrap();
+    fs::write(root.path().join("second.png"), png_bytes(6, 8)).unwrap();
+    let vision = spawn_responses_server(vec![(
+        200,
+        vision_response("budget first observation", "budget-first"),
+    )]);
+    let primary = spawn_f2a_pending_vision_server();
+    let config = write_dual_config(root.path(), &primary.base_url, &vision.base_url);
+    fs::write(
+        &config,
+        format!(
+            "{}\n[runtime]\nmodel_request_limit_per_turn = 1\n",
+            fs::read_to_string(&config).unwrap()
+        ),
+    )
+    .unwrap();
+    let output = run_chat(
+        root.path(),
+        &config,
+        "/image first.png\n/image second.png\nSubmit both images under the shared request budget.\n/exit\n",
+        &[],
+    );
+    assert!(
+        !output.status.success(),
+        "a budget-stopped Turn must require explicit Resume"
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("per-Turn model-request limit of 1"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unresolved stopped Turn"));
+    let _ = f2a_request_body(&vision.requests, "budget first Vision");
+    f2a_join_server(vision, "budget first Vision");
+    assert!(
+        primary.shutdown().is_empty(),
+        "the second initial image must not dispatch Vision or Primary after budget exhaustion"
+    );
+
+    let state = reduced_session(&project, &session_id(root.path()));
+    assert_eq!(state.vision_routes().len(), 2);
+    assert_eq!(state.vision_observations().len(), 1);
+    assert_eq!(state.request_audits().len(), 1);
+    assert!(state.history().items().is_empty());
+    assert!(
+        !session_events(root.path(), &session_id(root.path()))
+            .iter()
+            .any(|event| event["event_type"] == "vision.analysis_failed")
+    );
+}
+
+#[test]
+fn ec_k4_second_secondary_image_cancellation_keeps_prefix_without_primary_or_resume_replay() {
+    let root = TemporaryDirectory::new("ec-k4-second-secondary-cancel");
+    initialize_project(root.path());
+    let project = Project::discover(root.path()).unwrap();
+    append_research_snapshot(&project, "second-secondary-cancel");
+    fs::write(root.path().join("first.png"), png_bytes(8, 6)).unwrap();
+    fs::write(root.path().join("second.png"), png_bytes(6, 8)).unwrap();
+    let vision = spawn_f2a_first_response_then_pending_server(vision_response(
+        "cancel first observation",
+        "cancel-first",
+    ));
+    let primary = spawn_f2a_pending_vision_server();
+    let config = write_dual_config(root.path(), &primary.base_url, &vision.base_url);
+    let child = spawn_f2a_chat(
+        root.path(),
+        &config,
+        "/image first.png\n/image second.png\nCancel after the second initial Vision request begins.\n",
+        &[],
+    );
+    let first_request = f2a_request_body(&vision.requests, "first cancellation Vision");
+    let second_request = f2a_request_body(&vision.requests, "second cancellation Vision");
+    assert_eq!(json_count_type(&first_request["input"], "input_image"), 1);
+    assert_eq!(json_count_type(&second_request["input"], "input_image"), 1);
+    let signal_status = Command::new("/bin/kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .unwrap();
+    let _ = vision.shutdown();
+    let output = f2a_wait_child(child, "second initial Vision cancellation");
+    assert!(signal_status.success());
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("[vision request cancelled; no Primary request was started]")
+    );
+    assert!(
+        primary.shutdown().is_empty(),
+        "Primary must not start while a later initial image is cancelled"
+    );
+
+    let session = session_id(root.path());
+    let state = reduced_session(&project, &session);
+    assert_eq!(state.vision_routes().len(), 2);
+    assert_eq!(state.vision_observations().len(), 1);
+    assert_eq!(state.request_audits().len(), 2);
+    assert!(state.history().items().is_empty());
+    let events_before_resume = session_events(root.path(), &session);
+    assert_eq!(
+        events_before_resume
+            .iter()
+            .filter(|event| event["event_type"] == "vision.analysis_failed")
+            .count(),
+        1
+    );
+
+    let inert = write_config(root.path(), "http://127.0.0.1:1/v1");
+    let resumed = run_chat(root.path(), &inert, "/exit\n", &["--session", &session]);
+    assert!(
+        resumed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    let events_after_resume = session_events(root.path(), &session);
+    for event_type in [
+        "vision.route_decided",
+        "vision.observation_recorded",
+        "vision.analysis_failed",
+        "session.request_audit_recorded",
+    ] {
+        assert_eq!(
+            events_after_resume
+                .iter()
+                .filter(|event| event["event_type"] == event_type)
+                .count(),
+            events_before_resume
+                .iter()
+                .filter(|event| event["event_type"] == event_type)
+                .count(),
+            "Resume must not replay queued image processing for {event_type}"
+        );
+    }
 }
 
 #[test]

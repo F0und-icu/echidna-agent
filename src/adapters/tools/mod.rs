@@ -8,6 +8,7 @@ mod file_write;
 mod filesystem;
 mod http_request;
 mod job;
+mod mcp;
 mod memory;
 mod operation_time;
 mod output;
@@ -30,6 +31,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::adapters::mcp_http::{McpCatalogTool, McpError};
 use crate::domain::events::StreamId;
 use crate::domain::memory::MemoryScope;
 use crate::domain::tools::{
@@ -76,9 +78,17 @@ enum BuiltinTool {
     ToolSearch,
 }
 
+enum RegisteredTool {
+    Builtin(BuiltinTool),
+    Mcp {
+        tool: McpCatalogTool,
+        spec: Box<ToolSpec>,
+    },
+}
+
 pub struct ToolRegistry {
     project_root: PathBuf,
-    tools: BTreeMap<ToolName, BuiltinTool>,
+    tools: BTreeMap<ToolName, RegisteredTool>,
     jobs: job::BackgroundJobs,
     ptys: pty::PtySessions,
     active_leases: ActiveProcessLeases,
@@ -110,6 +120,28 @@ impl ToolRegistry {
         Self::with_bindings(project_root, artifact_scope, memory_scope, research_enabled)
     }
 
+    pub(crate) fn for_project_with_mcp(
+        project_root: impl Into<PathBuf>,
+        discovered: &[McpCatalogTool],
+    ) -> Result<Self, McpError> {
+        let mut registry = Self::for_project(project_root);
+        registry.register_mcp(discovered)?;
+        Ok(registry)
+    }
+
+    pub(crate) fn for_agent_with_mcp(
+        project_root: impl Into<PathBuf>,
+        session_id: StreamId,
+        memory_scope: Option<MemoryScope>,
+        research_enabled: bool,
+        discovered: &[McpCatalogTool],
+    ) -> Result<Self, McpError> {
+        let mut registry =
+            Self::for_agent(project_root, session_id, memory_scope, research_enabled);
+        registry.register_mcp(discovered)?;
+        Ok(registry)
+    }
+
     fn with_bindings(
         project_root: impl Into<PathBuf>,
         artifact_scope: artifact::ArtifactScopeBinding,
@@ -117,7 +149,7 @@ impl ToolRegistry {
         research_enabled: bool,
     ) -> Self {
         let project_root = project_root.into();
-        let mut tools: BTreeMap<ToolName, BuiltinTool> = [
+        let mut tools: BTreeMap<ToolName, RegisteredTool> = [
             (ToolName::new("read_file"), BuiltinTool::ReadFile),
             (ToolName::new("read_files"), BuiltinTool::ReadFiles),
             (ToolName::new("list_files"), BuiltinTool::ListFiles),
@@ -157,6 +189,7 @@ impl ToolRegistry {
             (ToolName::new("tool_search"), BuiltinTool::ToolSearch),
         ]
         .into_iter()
+        .map(|(name, tool)| (name, RegisteredTool::Builtin(tool)))
         .collect();
         if !research_enabled {
             tools.remove(&ToolName::new("research_get"));
@@ -177,7 +210,38 @@ impl ToolRegistry {
         }
     }
 
-    fn canonical_spec(&self, name: &ToolName, tool: BuiltinTool) -> ToolSpec {
+    fn register_mcp(&mut self, discovered: &[McpCatalogTool]) -> Result<(), McpError> {
+        for tool in discovered {
+            let spec = mcp::spec(tool)?;
+            let name = spec.name.clone();
+            if self
+                .tools
+                .insert(
+                    name.clone(),
+                    RegisteredTool::Mcp {
+                        tool: tool.clone(),
+                        spec: Box::new(spec),
+                    },
+                )
+                .is_some()
+            {
+                return Err(McpError::Catalog {
+                    message: format!("MCP tool local name `{name}` collides with an existing tool"),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn canonical_spec(&self, name: &ToolName, tool: &RegisteredTool) -> ToolSpec {
+        if let RegisteredTool::Mcp { spec, .. } = tool {
+            debug_assert_eq!(&spec.name, name);
+            return spec.as_ref().clone();
+        }
+        let RegisteredTool::Builtin(tool) = tool else {
+            unreachable!("registered tool is builtin or MCP")
+        };
+        let tool = *tool;
         let mut builtin_spec = tool.spec();
         match tool {
             BuiltinTool::ArtifactStore => {
@@ -248,7 +312,17 @@ impl ToolRegistry {
     fn canonical_specs(&self) -> Vec<ToolSpec> {
         self.tools
             .iter()
-            .map(|(name, tool)| self.canonical_spec(name, *tool))
+            .map(|(name, tool)| self.canonical_spec(name, tool))
+            .collect()
+    }
+
+    pub(crate) fn discovered_mcp_specs(&self) -> Vec<ToolSpec> {
+        self.tools
+            .values()
+            .filter_map(|tool| match tool {
+                RegisteredTool::Mcp { spec, .. } => Some(spec.as_ref().clone()),
+                RegisteredTool::Builtin(_) => None,
+            })
             .collect()
     }
 
@@ -265,6 +339,12 @@ impl ToolRegistry {
             .ok_or_else(|| ToolExecutorError::UnknownTool {
                 tool_name: call.name.to_string(),
             })?;
+        if let RegisteredTool::Mcp { tool, .. } = tool {
+            return mcp::plan(execution_id, call, tool, spec, resolved);
+        }
+        let RegisteredTool::Builtin(tool) = tool else {
+            unreachable!("registered tool is builtin or MCP")
+        };
         let arguments = std::mem::take(&mut call.arguments);
         let (arguments, rerun_reason) = split_execution_control(arguments).map_err(|error| {
             ToolExecutorError::InvalidArguments {
@@ -312,13 +392,12 @@ impl ToolExecutor for ToolRegistry {
         execution_id: ExecutionId,
         call: ToolCall,
     ) -> Result<ToolExecutionPlan, ToolExecutorError> {
-        let tool =
-            self.tools
-                .get(&call.name)
-                .copied()
-                .ok_or_else(|| ToolExecutorError::UnknownTool {
-                    tool_name: call.name.to_string(),
-                })?;
+        let tool = self
+            .tools
+            .get(&call.name)
+            .ok_or_else(|| ToolExecutorError::UnknownTool {
+                tool_name: call.name.to_string(),
+            })?;
         let spec = self.canonical_spec(&call.name, tool);
         self.plan_with_spec(execution_id, call, &spec, None)
     }
@@ -356,26 +435,33 @@ impl ToolRegistry {
         plan: ToolExecutionPlan,
         observer: Option<crate::ports::tool::ToolObservationSender>,
     ) -> ToolExecutionFuture<'_> {
-        let tool = self.tools.get(&plan.call.name).copied();
+        let tool = self.tools.get(&plan.call.name);
         Box::pin(async move {
             let Some(tool) = tool else {
-                return ToolExecutionOutcome::failed(
+                return Ok(ToolExecutionOutcome::failed(
                     plan,
                     "tool_not_registered",
                     json!({"error": "execution plan names an unregistered Tool"}),
-                );
+                ));
             };
+            if let RegisteredTool::Mcp { tool, .. } = tool {
+                return mcp::execute(tool, plan).await;
+            }
+            let RegisteredTool::Builtin(tool) = tool else {
+                unreachable!("registered tool is builtin or MCP")
+            };
+            let tool = *tool;
             // Catalog-only discovery does not touch the leased environment.
             // Keep deferred lifecycle controls reachable, without exempting
             // arbitrary read-only filesystem/process tools from resource locks.
             if tool == BuiltinTool::ToolSearch {
                 let deferred = plan.deferred_tool_specs().to_vec();
-                return tool_search::execute(plan, &deferred);
+                return Ok(tool_search::execute(plan, &deferred));
             }
             if !is_process_lifecycle_tool(plan.call.name.as_str())
                 && let Some(conflict) = self.active_leases.conflicting(&plan)
             {
-                return active_resource_busy(plan, conflict);
+                return Ok(active_resource_busy(plan, conflict));
             }
             let timeout_plan = plan.clone();
             let specs = if tool == BuiltinTool::InspectProject {
@@ -396,8 +482,11 @@ impl ToolRegistry {
             })
             .await
             {
-                Ok(outcome) => outcome,
-                Err(_) => ToolExecutionOutcome::cancelled(timeout_plan, "tool_timeout"),
+                Ok(outcome) => Ok(outcome),
+                Err(_) => Ok(ToolExecutionOutcome::cancelled(
+                    timeout_plan,
+                    "tool_timeout",
+                )),
             }
         })
     }

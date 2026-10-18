@@ -1,4 +1,4 @@
-//! Fixed production CLI composition for one pending local image.
+//! Fixed production CLI composition for queued local images.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -106,7 +106,7 @@ pub(super) async fn ingest_image(
         .map_err(|error| ChatError::ImageIntake {
             message: error.to_string(),
         })?;
-    let outcome = tools.execute(plan).await;
+    let outcome = tools.execute(plan).await?;
     session.record_execution(&outcome)?;
     if outcome.result.status != ToolResultStatus::Succeeded {
         return Err(ChatError::ImageIntake {
@@ -124,6 +124,31 @@ pub(super) async fn ingest_image(
         selection,
         target_snapshot_id,
     })
+}
+
+pub(super) async fn prepare_primary_contexts(
+    session: &DurableChatSession,
+    composition: &ProviderComposition,
+    pending: Vec<PendingImage>,
+    task: &str,
+    cancellation: AgentCancellation,
+    request_budget: std::sync::Arc<crate::app::model_request_budget::ModelRequestBudget>,
+) -> Result<Vec<InitialImagePrimaryContext>, ChatError> {
+    let mut contexts = Vec::with_capacity(pending.len());
+    for image in pending {
+        contexts.push(
+            prepare_primary_context(
+                session,
+                composition,
+                image,
+                task,
+                cancellation.clone(),
+                std::sync::Arc::clone(&request_budget),
+            )
+            .await?,
+        );
+    }
+    Ok(contexts)
 }
 
 pub(super) async fn prepare_primary_context(

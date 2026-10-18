@@ -5,6 +5,7 @@ use std::path::Path;
 use crate::adapters::agent_definition::{
     bind_definition, builtin_definition, builtin_research_binding, load_definition_binding,
 };
+use crate::adapters::mcp_http::McpCatalogTool;
 use crate::adapters::project_event_store::{Project, read_existing_session_events};
 use crate::adapters::tools::ToolRegistry;
 use crate::app::agent_loop::AgentLoop;
@@ -30,8 +31,9 @@ pub(super) fn initial_binding(
     resume: bool,
     requested: Option<&Path>,
     composition: &ProviderComposition,
+    discovered_mcp: &[McpCatalogTool],
 ) -> Result<AgentDefinitionBinding, ChatError> {
-    let tools = ToolRegistry::for_project(project.root());
+    let tools = ToolRegistry::for_project_with_mcp(project.root(), discovered_mcp)?;
     if resume {
         let events = read_existing_session_events(project, session).map_err(error)?;
         let state = SessionReducer.reduce(events)?;
@@ -116,21 +118,27 @@ impl DurableChatSession {
         &self.binding
     }
 
-    pub(super) fn bound_tools(&self) -> ToolRegistry {
-        ToolRegistry::for_agent(
+    pub(super) fn bound_tools(
+        &self,
+        discovered_mcp: &[McpCatalogTool],
+    ) -> Result<ToolRegistry, ChatError> {
+        ToolRegistry::for_agent_with_mcp(
             self.project.root(),
             self.session_id.clone(),
             crate::cli_agent::memory_scope(&self.binding),
             self.binding.definition().research().is_some(),
+            discovered_mcp,
         )
+        .map_err(ChatError::from)
     }
 
     pub(super) fn preflight_binding(
         &self,
         state: &SessionState,
         composition: &ProviderComposition,
+        discovered_mcp: &[McpCatalogTool],
     ) -> Result<(), ChatError> {
-        let tools = self.bound_tools();
+        let tools = self.bound_tools(discovered_mcp)?;
         let prompt = prompt_for_state(&self.binding, state)?;
         let mut preview = AgentLoop::with_primary_context(
             composition.primary_provider(),
