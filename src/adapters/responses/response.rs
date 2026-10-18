@@ -262,7 +262,9 @@ impl ResponseDecoder {
                 continuation_requested,
             )),
             "response.incomplete" => Err(decode_incomplete(self.profile, event.response)),
-            "response.metadata" if self.profile == ResponsesWireProfile::CodexSubscription => {
+            "response.metadata" | "keepalive"
+                if self.profile == ResponsesWireProfile::CodexSubscription =>
+            {
                 Ok(decoded(Vec::new()))
             }
             "response.created"
