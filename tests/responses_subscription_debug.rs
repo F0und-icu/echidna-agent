@@ -209,7 +209,7 @@ mod release_regression {
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::process::Command;
-    use std::sync::Arc;
+    use std::sync::{Arc, mpsc};
     use std::thread;
 
     use futures_util::StreamExt;
@@ -347,6 +347,42 @@ mod release_regression {
                 _ => unreachable!("release fixture cases are exhaustive"),
             }
             server.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn codex_summary_support_false_omits_only_summary_from_the_reasoning_object() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let (base_url, request_receiver, server) = spawn_no_summary_wire_server();
+            let provider = ResponsesHttpAdapter::new(
+                ResponsesHttpConfig::new(
+                    base_url,
+                    "fixture-codex-no-summary-model",
+                    "codex_subscription:fixture",
+                    capabilities(),
+                )
+                .with_codex_subscription_profile()
+                .with_codex_reasoning_summary_support(Some(false)),
+                Arc::new(FixtureCredentialSource),
+            );
+            let input = ModelInputIR::current(
+                "Fixture instruction.",
+                vec![ContentItem::user_text("Fixture input.")],
+                ModelRequestRequirements::default(),
+            );
+            let mut stream = provider.stream(ModelRequest::full(input)).unwrap();
+            assert!(matches!(
+                stream.next().await,
+                Some(Ok(ModelStreamEvent::Completed(_)))
+            ));
+            assert!(stream.next().await.is_none());
+
+            let request = request_receiver.recv().unwrap();
+            server.join().unwrap();
+            let (_, body) = request.split_once("\r\n\r\n").unwrap();
+            let wire: serde_json::Value = serde_json::from_str(body).unwrap();
+            assert_eq!(wire["reasoning"], json!({}));
+            assert_eq!(wire["include"], json!(["reasoning.encrypted_content"]));
         });
     }
 
@@ -495,6 +531,27 @@ mod release_regression {
         (base_url, server)
     }
 
+    fn spawn_no_summary_wire_server() -> (String, mpsc::Receiver<String>, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let (request_sender, request_receiver) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_request(&mut stream);
+            assert!(request.starts_with("POST /responses HTTP/1.1"));
+            request_sender.send(request).unwrap();
+            let body = "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"codex-no-summary\",\"status\":\"completed\"}}\n\n";
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+            stream.flush().unwrap();
+        });
+        (base_url, request_receiver, server)
+    }
+
     fn read_headers(stream: &mut TcpStream) -> String {
         stream
             .set_read_timeout(Some(std::time::Duration::from_secs(5)))
@@ -502,6 +559,35 @@ mod release_regression {
         let mut bytes = Vec::new();
         let mut chunk = [0_u8; 1024];
         while !bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+            let count = stream.read(&mut chunk).unwrap();
+            assert_ne!(count, 0);
+            bytes.extend_from_slice(&chunk[..count]);
+        }
+        String::from_utf8(bytes).unwrap()
+    }
+
+    fn read_request(stream: &mut TcpStream) -> String {
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let mut bytes = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        let header_end = loop {
+            if let Some(position) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                break position + 4;
+            }
+            let count = stream.read(&mut chunk).unwrap();
+            assert_ne!(count, 0);
+            bytes.extend_from_slice(&chunk[..count]);
+        };
+        let headers = std::str::from_utf8(&bytes[..header_end]).unwrap();
+        let content_length = headers
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length: "))
+            .unwrap()
+            .parse::<usize>()
+            .unwrap();
+        while bytes.len() < header_end + content_length {
             let count = stream.read(&mut chunk).unwrap();
             assert_ne!(count, 0);
             bytes.extend_from_slice(&chunk[..count]);

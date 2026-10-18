@@ -150,6 +150,7 @@ pub(super) fn encode_request(
     model: String,
     image_resolver: Option<&super::ImageArtifactResolver>,
     profile: ResponsesWireProfile,
+    codex_reasoning_summary_supported: bool,
     opaque_resolver: &dyn Fn(
         &OpaqueContinuationReference,
         &OpaqueContinuationScope,
@@ -272,7 +273,7 @@ pub(super) fn encode_request(
         reasoning: match profile {
             ResponsesWireProfile::CodexSubscription => Some(ResponsesReasoningConfiguration {
                 effort: input.requirements.reasoning_effort,
-                summary: Some("auto"),
+                summary: codex_reasoning_summary_supported.then_some("auto"),
             }),
             ResponsesWireProfile::Standard | ResponsesWireProfile::ChatGptSubscription => input
                 .requirements

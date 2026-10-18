@@ -51,6 +51,123 @@ fn provider(name: &str, args: Value) -> ScriptedProvider {
     provider
 }
 
+fn write_held_pipe_script(project: &TestProject) {
+    project.write(
+        "hold-pipes.sh",
+        r#"(
+  : > held-pipe-ready
+  exec /bin/sleep 30
+) &
+descendant=$!
+printf '%s\n' "$descendant" > held-pipe.pid
+while [ ! -f held-pipe-ready ]; do
+  /bin/sleep 0.01
+done
+printf RETAINED
+exit 0
+"#,
+    );
+}
+
+fn stop_held_pipe_descendant(project: &TestProject) {
+    let pid_path = project.root.join("held-pipe.pid");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !pid_path.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let pid = fs::read_to_string(&pid_path)
+        .expect("held-pipe helper must record its descendant PID")
+        .trim()
+        .to_owned();
+    let _ = std::process::Command::new("/bin/kill")
+        .args(["-TERM", &pid])
+        .output();
+    while std::time::Instant::now() < deadline {
+        let running = std::process::Command::new("/bin/kill")
+            .args(["-0", &pid])
+            .output()
+            .is_ok_and(|output| output.status.success());
+        if !running {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("held-pipe descendant {pid} did not stop after TERM");
+}
+
+#[tokio::test]
+async fn incomplete_direct_command_raw_blobs_match_receipt_and_publication_failure_stays_fatal() {
+    let project = TestProject::new("incomplete-direct-capture");
+    write_held_pipe_script(&project);
+    let tools = ToolRegistry::for_project(&project.root);
+    let store = Captures::default();
+    let initial_provider = provider("run_command", json!({"argv":["/bin/sh", "hold-pipes.sh"]}));
+    let mut agent = AgentLoop::new(&initial_provider, &tools).with_output_store(store.clone());
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_millis(750),
+        agent.run_turn("capture incomplete", AgentCancellation::new()),
+    )
+    .await;
+    stop_held_pipe_descendant(&project);
+    let AgentTurnOutcome::Completed { executions, .. } = outcome
+        .expect("direct command must stop after its residual drain grace")
+        .expect("failed Tool result remains a completed Agent turn")
+    else {
+        panic!("completed")
+    };
+    let execution = &executions[0];
+    assert_eq!(execution.result.status, ToolResultStatus::Failed);
+    assert_eq!(
+        execution.result.output["output_captures"],
+        serde_json::to_value(&execution.receipt.output_captures).unwrap()
+    );
+    let stdout = &execution.receipt.output_captures[0];
+    assert!(!stdout.complete && !stdout.eof);
+    assert_eq!(
+        stdout.read_error.as_deref(),
+        Some("stdout_reader_grace_timeout")
+    );
+    assert_eq!(store.read_blob(&stdout.blob_id).unwrap(), b"RETAINED");
+    let stderr = &execution.receipt.output_captures[1];
+    assert!(!stderr.complete && !stderr.eof);
+    assert_eq!(
+        stderr.read_error.as_deref(),
+        Some("stderr_reader_grace_timeout")
+    );
+    assert_eq!(store.read_blob(&stderr.blob_id).unwrap(), b"");
+    assert_eq!(initial_provider.requests().len(), 2);
+
+    let failed = TestProject::new("incomplete-direct-publication-failure");
+    write_held_pipe_script(&failed);
+    let tools = ToolRegistry::for_project(&failed.root);
+    let provider = provider("run_command", json!({"argv":["/bin/sh", "hold-pipes.sh"]}));
+    let mut agent = AgentLoop::new(&provider, &tools).with_output_store(Captures {
+        fail_on: Some(1),
+        ..Default::default()
+    });
+    let error = tokio::time::timeout(
+        std::time::Duration::from_millis(750),
+        agent.run_turn("capture publication failure", AgentCancellation::new()),
+    )
+    .await;
+    stop_held_pipe_descendant(&failed);
+    let error = error
+        .expect("publication failure follows bounded drain")
+        .expect_err("raw Blob publication must remain fatal");
+    assert!(matches!(
+        error,
+        AgentLoopError::ToolOutputPublication { .. }
+    ));
+    assert_eq!(provider.requests().len(), 1);
+    assert!(
+        !agent
+            .history()
+            .items()
+            .iter()
+            .any(|item| matches!(item, ContentItem::ToolResult { .. }))
+    );
+}
+
 #[tokio::test]
 async fn raw_capture_survives_preview_and_keeps_exact_non_utf8_bytes() {
     let project = TestProject::new("raw-capture");
@@ -281,7 +398,8 @@ async fn terminal_job_and_pty_snapshots_use_the_same_durable_capture_path() {
                     json!({"argv":["sh","-c","printf TERMINAL"]})
                 },
             ))
-            .await;
+            .await
+            .expect("Tool execution completes");
         let key = if pty { "pty_session_id" } else { "job_id" };
         let id = start.result.output[key].clone();
         let args = json!({key:id});
@@ -294,7 +412,8 @@ async fn terminal_job_and_pty_snapshots_use_the_same_durable_capture_path() {
                         if pty { "poll_pty" } else { "poll_job" },
                         args.clone(),
                     ))
-                    .await;
+                    .await
+                    .expect("Tool execution completes");
                 if !poll.result.output["completion"].is_null() {
                     break;
                 }
@@ -336,13 +455,15 @@ async fn job_reader_grace_expiry_keeps_observed_bytes_without_claiming_eof() {
             "start_job",
             json!({"argv":["sh","-c","printf RETAINED; sleep 2 &"]}),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     let id = started.result.output["job_id"].clone();
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             let poll = tools
                 .execute(plan(&tools, "poll", "poll_job", json!({"job_id":id})))
-                .await;
+                .await
+                .expect("Tool execution completes");
             if !poll.result.output["completion"].is_null() {
                 break;
             }

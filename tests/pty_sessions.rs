@@ -26,7 +26,8 @@ async fn ctf_r3a_old_pty_handles_cannot_control_a_new_registry() {
             "start_pty",
             json!({"argv":["sh","-c","exit 0"]}),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     let old_id = started.result.output["pty_session_id"].as_str().unwrap();
     poll_until_terminal(&old, old_id, 0).await;
     let fresh = ToolRegistry::for_project(&project.root);
@@ -39,7 +40,8 @@ async fn ctf_r3a_old_pty_handles_cannot_control_a_new_registry() {
                 "argv":["sh","-c","read line; printf 'fresh:%s' \"$line\""]
             }),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     let fresh_id = started.result.output["pty_session_id"].as_str().unwrap();
     assert_ne!(old_id, fresh_id);
     for stale in [old_id, "pty:1"] {
@@ -55,7 +57,10 @@ async fn ctf_r3a_old_pty_handles_cannot_control_a_new_registry() {
             ),
             ("stop_pty", json!({"pty_session_id":stale})),
         ] {
-            let outcome = fresh.execute(plan(&fresh, "stale", name, arguments)).await;
+            let outcome = fresh
+                .execute(plan(&fresh, "stale", name, arguments))
+                .await
+                .expect("Tool execution completes");
             assert_eq!(outcome.result.status, ToolResultStatus::Failed);
         }
     }
@@ -66,7 +71,8 @@ async fn ctf_r3a_old_pty_handles_cannot_control_a_new_registry() {
             "resize_pty",
             json!({"pty_session_id":fresh_id,"rows":30,"cols":90}),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     assert_eq!(resized.result.status, ToolResultStatus::Succeeded);
     let input = fresh
         .execute(plan(
@@ -75,7 +81,8 @@ async fn ctf_r3a_old_pty_handles_cannot_control_a_new_registry() {
             "input_pty",
             json!({"pty_session_id":fresh_id,"input":"safe\n"}),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     assert_eq!(input.result.status, ToolResultStatus::Succeeded);
     let output = poll_until_terminal(&fresh, fresh_id, 0).await;
     let text = output.result.output["output"]["data"].as_str().unwrap();
@@ -126,7 +133,8 @@ async fn poll_until_terminal(
                 "poll_pty",
                 json!({"pty_session_id": session_id, "offset": offset}),
             ))
-            .await;
+            .await
+            .expect("Tool execution completes");
         if outcome.result.output["status"] != "running"
             && outcome.result.output["status"] != "stopping"
         {
@@ -152,7 +160,8 @@ async fn interactive_echo_uses_caller_offsets_and_stable_completion_linkage() {
                 "cols": 90,
             }),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     assert_eq!(start.result.status, ToolResultStatus::Succeeded);
     let session_id = start.result.output["pty_session_id"]
         .as_str()
@@ -168,7 +177,8 @@ async fn interactive_echo_uses_caller_offsets_and_stable_completion_linkage() {
             "input_pty",
             json!({"pty_session_id": session_id, "input": "fixture\n"}),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     assert_eq!(input.result.status, ToolResultStatus::Succeeded);
     assert_eq!(input.result.output["bytes_written"], 8);
 
@@ -199,7 +209,8 @@ async fn interactive_echo_uses_caller_offsets_and_stable_completion_linkage() {
             "poll_pty",
             json!({"pty_session_id": session_id, "offset": next_offset}),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     assert_eq!(repeated.result.status, ToolResultStatus::Succeeded);
     assert_eq!(repeated.result.output["output"]["data"], "");
     assert_eq!(
@@ -219,7 +230,8 @@ async fn resize_reaches_the_interactive_child() {
             "start_pty",
             json!({"argv": ["sh", "-c", "read line; stty size"]}),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     let session_id = start.result.output["pty_session_id"]
         .as_str()
         .unwrap()
@@ -231,7 +243,8 @@ async fn resize_reaches_the_interactive_child() {
             "resize_pty",
             json!({"pty_session_id": session_id, "rows": 40, "cols": 100}),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     assert_eq!(resize.result.status, ToolResultStatus::Succeeded);
     assert_eq!(resize.result.output["rows"], 40);
     assert_eq!(resize.result.output["cols"], 100);
@@ -242,7 +255,8 @@ async fn resize_reaches_the_interactive_child() {
             "input_pty",
             json!({"pty_session_id": session_id, "input": "go\n"}),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     assert_eq!(input.result.status, ToolResultStatus::Succeeded);
     let completed = poll_until_terminal(&tools, &session_id, 0).await;
     assert!(
@@ -266,7 +280,8 @@ async fn poll_preserves_utf8_boundaries_and_binary_byte_offsets() {
                 "argv": ["sh", "-c", "printf '\\303'; sleep 0.1; printf '\\251'"],
             }),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     let utf8_id = utf8.result.output["pty_session_id"]
         .as_str()
         .unwrap()
@@ -279,7 +294,8 @@ async fn poll_preserves_utf8_boundaries_and_binary_byte_offsets() {
             "poll_pty",
             json!({"pty_session_id": utf8_id, "offset": 0}),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     assert_eq!(partial.result.status, ToolResultStatus::Succeeded);
     assert_eq!(partial.result.output["output"]["data"], "");
     assert_eq!(partial.result.output["output"]["next_offset"], 0);
@@ -292,7 +308,8 @@ async fn poll_preserves_utf8_boundaries_and_binary_byte_offsets() {
             "poll_pty",
             json!({"pty_session_id": utf8_id, "offset": 1}),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     assert_eq!(continuation.result.status, ToolResultStatus::Failed);
     assert_eq!(
         continuation.result.output["output"]["error"],
@@ -306,7 +323,8 @@ async fn poll_preserves_utf8_boundaries_and_binary_byte_offsets() {
             "start_pty",
             json!({"argv": ["sh", "-c", "printf '\\200\\277'"]}),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     let binary_id = binary.result.output["pty_session_id"]
         .as_str()
         .unwrap()
@@ -320,7 +338,8 @@ async fn poll_preserves_utf8_boundaries_and_binary_byte_offsets() {
                 "poll_pty",
                 json!({"pty_session_id": binary_id, "offset": offset}),
             ))
-            .await;
+            .await
+            .expect("Tool execution completes");
         assert_eq!(polled.result.status, ToolResultStatus::Succeeded);
         assert_eq!(polled.result.output["output"]["offset"], offset);
         assert_ne!(
@@ -342,7 +361,8 @@ async fn stop_racing_natural_completion_publishes_once_after_reaping_the_child()
             "start_pty",
             json!({"argv": ["sh", "-c", "exit 0"]}),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     let raced_id = raced.result.output["pty_session_id"]
         .as_str()
         .unwrap()
@@ -357,7 +377,8 @@ async fn stop_racing_natural_completion_publishes_once_after_reaping_the_child()
         )),
     )
     .await
-    .expect("stop racing natural completion must wait for one terminal publication");
+    .expect("stop racing natural completion must wait for one terminal publication")
+    .expect("Tool execution completes");
     assert_eq!(raced_stop.result.status, ToolResultStatus::Succeeded);
     assert!(matches!(
         raced_stop.result.output["status"].as_str(),
@@ -372,7 +393,8 @@ async fn stop_racing_natural_completion_publishes_once_after_reaping_the_child()
             "start_pty",
             json!({"argv": ["sh", "-c", "sleep 5"]}),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     let stopped_id = stopped.result.output["pty_session_id"]
         .as_str()
         .unwrap()
@@ -387,7 +409,8 @@ async fn stop_racing_natural_completion_publishes_once_after_reaping_the_child()
         )),
     )
     .await
-    .expect("stop must reap the direct PTY child before terminal publication");
+    .expect("stop must reap the direct PTY child before terminal publication")
+    .expect("Tool execution completes");
     assert_eq!(stopped.result.status, ToolResultStatus::Succeeded);
     assert_eq!(stopped.result.output["status"], "cancelled");
     let repeated = tools
@@ -397,7 +420,8 @@ async fn stop_racing_natural_completion_publishes_once_after_reaping_the_child()
             "stop_pty",
             json!({"pty_session_id": stopped_id}),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     assert_eq!(repeated.result.output["already_terminal"], true);
     assert_eq!(
         repeated.result.output["completion"],
@@ -422,7 +446,8 @@ async fn terminal_publication_seals_output_from_a_descendant_held_pty() {
                 ],
             }),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     let session_id = start.result.output["pty_session_id"]
         .as_str()
         .unwrap()
@@ -447,7 +472,8 @@ async fn terminal_publication_seals_output_from_a_descendant_held_pty() {
             "poll_pty",
             json!({"pty_session_id": session_id, "offset": terminal_offset}),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     assert_eq!(after_descendant.result.output["output"]["data"], "");
     assert_eq!(
         after_descendant.result.output["output"]["next_offset"],
@@ -471,7 +497,8 @@ async fn active_job_and_pty_leases_share_conflict_and_release_rules() {
             "start_job",
             json!({"argv": ["sh", "-c", "sleep 5"], "resources": resource}),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     let job_id = job.result.output["job_id"].as_str().unwrap().to_owned();
     let blocked_pty = tools
         .execute(plan(
@@ -483,7 +510,8 @@ async fn active_job_and_pty_leases_share_conflict_and_release_rules() {
                 "resources": resource
             }),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     assert_eq!(blocked_pty.result.status, ToolResultStatus::Failed);
     assert_eq!(
         blocked_pty.receipt.exit_reason.as_deref(),
@@ -498,7 +526,8 @@ async fn active_job_and_pty_leases_share_conflict_and_release_rules() {
             "stop_job",
             json!({"job_id": job_id}),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     assert_eq!(stopped_job.result.output["status"], "cancelled");
 
     let pty = tools
@@ -508,7 +537,8 @@ async fn active_job_and_pty_leases_share_conflict_and_release_rules() {
             "start_pty",
             json!({"argv": ["sh", "-c", "sleep 5"], "resources": resource}),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     assert_eq!(pty.result.status, ToolResultStatus::Succeeded);
     let session_id = pty.result.output["pty_session_id"]
         .as_str()
@@ -524,7 +554,8 @@ async fn active_job_and_pty_leases_share_conflict_and_release_rules() {
                 "resources": resource
             }),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     assert_eq!(blocked_job.result.status, ToolResultStatus::Failed);
     assert_eq!(
         blocked_job.receipt.exit_reason.as_deref(),
@@ -559,7 +590,8 @@ async fn active_job_and_pty_leases_share_conflict_and_release_rules() {
             "stop_pty",
             json!({"pty_session_id": session_id}),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     assert_eq!(stopped_pty.result.output["status"], "cancelled");
     let released_job = tools
         .execute(plan(
@@ -568,7 +600,8 @@ async fn active_job_and_pty_leases_share_conflict_and_release_rules() {
             "start_job",
             json!({"argv": ["sh", "-c", "exit 0"], "resources": resource}),
         ))
-        .await;
+        .await
+        .expect("Tool execution completes");
     assert_eq!(released_job.result.status, ToolResultStatus::Succeeded);
 }
 

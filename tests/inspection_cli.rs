@@ -94,7 +94,7 @@ async fn snapshot_inspection_validates_cache_without_rebuilding_or_rewriting_it(
     let plan = tools
         .plan(ExecutionId::new("build-snapshot-cache"), call)
         .unwrap();
-    let outcome = tools.execute(plan).await;
+    let outcome = tools.execute(plan).await.expect("Tool execution completes");
     assert_eq!(outcome.result.status, ToolResultStatus::Succeeded);
 
     let cache = project.root().join(".cyber-agent/cache");
@@ -133,7 +133,7 @@ async fn snapshot_inspection_reports_a_current_hit_after_an_incremental_cache_re
             }),
         );
         let plan = tools.plan(ExecutionId::new(execution_id), call).unwrap();
-        let outcome = tools.execute(plan).await;
+        let outcome = tools.execute(plan).await.expect("Tool execution completes");
         assert_eq!(outcome.result.status, ToolResultStatus::Succeeded);
     }
 

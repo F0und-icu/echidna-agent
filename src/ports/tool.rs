@@ -10,8 +10,9 @@ use crate::domain::tools::{
     ToolExecutionPlan, ToolExposurePlan, ToolSpec,
 };
 
-pub type ToolExecutionFuture<'executor> =
-    Pin<Box<dyn Future<Output = ToolExecutionOutcome> + Send + 'executor>>;
+pub type ToolExecutionFuture<'executor> = Pin<
+    Box<dyn Future<Output = Result<ToolExecutionOutcome, ToolExecutionError>> + Send + 'executor>,
+>;
 
 pub trait ToolExecutor: Send + Sync {
     /// Optional fixed child-checkpoint path; non-command executors retain the
@@ -89,6 +90,15 @@ pub trait ToolExecutor: Send + Sync {
     }
 
     fn execute(&self, plan: ToolExecutionPlan) -> ToolExecutionFuture<'_>;
+}
+
+/// A terminal execution boundary that cannot be represented as a durable
+/// Receipt/ToolResult pair. It is deliberately transient: the owning
+/// scheduler stops the Turn before History can be extended.
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
+pub enum ToolExecutionError {
+    #[error("Tool outcome is unknown after dispatch: {safe_reason}")]
+    OutcomeUnknown { safe_reason: String },
 }
 
 /// Opaque bounded handoff shared by the command Adapter and App scheduler.

@@ -43,13 +43,13 @@ impl DurableChatSession {
         facts: &CompactionValidationFacts,
         composition: &crate::provider_composition::ProviderComposition,
         provider_session: crate::domain::context::ProviderSession,
+        tools: &ToolRegistry,
     ) -> Result<SessionCompaction, ChatError> {
         // A context-only preflight uses the same configured Provider and Tool
         // catalog, never `stream` or a second executing AgentLoop.
-        let tools = ToolRegistry::for_project(self.project.root());
         let mut preview = AgentLoop::with_primary_context(
             composition.primary_provider(),
-            &tools,
+            tools,
             composition.agent_profile().primary().model().clone(),
             composition.agent_profile().primary().profile().clone(),
             provider_session,
@@ -59,7 +59,7 @@ impl DurableChatSession {
         preview.queue_agent_model_profile(composition.agent_profile().clone())?;
         preview.refresh_current_context(super::context::ChatContextCache::default().refresh(
             &self.project,
-            &tools,
+            tools,
             composition,
         )?)?;
         let (_, candidate) = select_compaction(state, facts, |candidate| {

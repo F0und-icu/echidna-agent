@@ -203,7 +203,7 @@ impl ContextPlanner {
             capabilities,
             tool_schema_hash: &canonical_tools.hash,
             fixed_input_tokens,
-            requirements,
+            requirements: requirements.clone(),
             full_logical_manifest: &full_logical_manifest,
             decisions: candidates
                 .iter()

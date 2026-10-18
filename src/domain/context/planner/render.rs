@@ -126,7 +126,6 @@ pub(super) fn render_model_input(
         instruction_spans,
         content_deliveries,
     )?;
-    delivery_map.validate_against(&model_input)?;
     Ok(RenderedContext {
         model_input,
         delivery_map,

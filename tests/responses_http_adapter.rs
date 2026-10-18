@@ -305,7 +305,7 @@ async fn execute_tool(
         arguments,
     );
     let plan = tools.plan(ExecutionId::new(execution_id), call).unwrap();
-    tools.execute(plan).await
+    tools.execute(plan).await.expect("Tool execution completes")
 }
 
 async fn publish_image_fixture(project: &Project) -> (ArtifactId, Vec<u8>) {

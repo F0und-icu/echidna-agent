@@ -182,27 +182,37 @@ pub enum ToolArgumentErrorCategory {
 }
 
 /// A bounded, provider-neutral reasoning setting explicitly selected in a
-/// capability mapping. Provider metadata may advertise other values, but they
-/// are not executable until this contract gains a corresponding variant.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "lowercase")]
+/// capability mapping. Provider metadata may advertise validated custom values
+/// alongside the known variants.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReasoningEffort {
     Low,
     Medium,
     High,
-    #[serde(rename = "xhigh")]
     XHigh,
     Max,
+    Custom(String),
 }
 
 impl ReasoningEffort {
-    pub(crate) const fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(&self) -> &str {
         match self {
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
             Self::XHigh => "xhigh",
             Self::Max => "max",
+            Self::Custom(value) => value,
+        }
+    }
+
+    pub(crate) fn is_valid(&self) -> bool {
+        match self {
+            Self::Custom(value) => {
+                valid_reasoning_effort(value)
+                    && !matches!(value.as_str(), "low" | "medium" | "high" | "xhigh" | "max")
+            }
+            _ => true,
         }
     }
 }
@@ -217,14 +227,43 @@ impl FromStr for ReasoningEffort {
             "high" => Ok(Self::High),
             "xhigh" => Ok(Self::XHigh),
             "max" => Ok(Self::Max),
+            _ if valid_reasoning_effort(value) => Ok(Self::Custom(value.to_owned())),
             _ => Err(()),
         }
     }
 }
 
+impl Serialize for ReasoningEffort {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ReasoningEffort {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        value
+            .parse()
+            .map_err(|_| serde::de::Error::custom("invalid reasoning effort"))
+    }
+}
+
+fn valid_reasoning_effort(value: &str) -> bool {
+    (1..=64).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
 /// Explicit request requirements that later Slices can derive from tools and
 /// output contracts without guessing capability from a model name.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ModelRequestRequirements {
     pub tool_call: bool,
     pub structured_output: bool,
@@ -345,12 +384,19 @@ impl ModelCapabilities {
         &self,
         requested: Option<ReasoningEffort>,
     ) -> Result<Option<ReasoningEffort>, ModelCapabilityError> {
-        if let Some(requested) = requested
-            && self.reasoning_effort != Some(requested)
+        if self
+            .reasoning_effort
+            .as_ref()
+            .is_some_and(|effort| !effort.is_valid())
         {
             return Err(ModelCapabilityError::ReasoningEffortUnsupported);
         }
-        Ok(requested.or(self.reasoning_effort))
+        if let Some(requested) = requested.as_ref()
+            && (!requested.is_valid() || self.reasoning_effort.as_ref() != Some(requested))
+        {
+            return Err(ModelCapabilityError::ReasoningEffortUnsupported);
+        }
+        Ok(requested.or_else(|| self.reasoning_effort.clone()))
     }
 
     /// Resolve the declared ceiling before Context/audit capture. A smaller
@@ -389,7 +435,7 @@ impl ModelCapabilities {
 
     /// Validates every semantic requirement without inferring from model names.
     pub fn validate_input(&self, input: &ModelInputIR) -> Result<(), ModelCapabilityError> {
-        if self.resolve_reasoning_effort(input.requirements.reasoning_effort)?
+        if self.resolve_reasoning_effort(input.requirements.reasoning_effort.clone())?
             != input.requirements.reasoning_effort
         {
             return Err(ModelCapabilityError::ReasoningEffortRequired);

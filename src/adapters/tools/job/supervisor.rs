@@ -11,10 +11,8 @@ use tokio::task::JoinHandle;
 use crate::domain::tools::{JobCompletion, JobId, JobStatus, ToolExecutionPlan};
 
 use super::super::active::ActiveProcessLeaseGuard;
-use super::super::output::{CapturedOutput, lock_captured_output};
+use super::super::output::{CapturedOutput, OUTPUT_DRAIN_GRACE, lock_captured_output};
 use super::{JobTable, lock_table};
-
-const OUTPUT_DRAIN_GRACE: Duration = Duration::from_millis(100);
 
 pub(super) struct JobSupervisor {
     pub(super) child: Child,

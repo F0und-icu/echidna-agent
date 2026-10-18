@@ -20,7 +20,7 @@ use crate::ports::tool::ToolExecutorError;
 use crate::ports::tool::ToolObservationSender;
 
 use super::filesystem::{display_path, resolve_path};
-use super::output::{BoundedText, CapturedOutput, bounded_text};
+use super::output::{BoundedText, CapturedOutput, OUTPUT_DRAIN_GRACE, bounded_text};
 use super::resources::ResourceKeyResolver;
 use super::{decode_arguments, invalid_arguments, invalid_plan};
 
@@ -525,18 +525,48 @@ async fn run_probe_at(
         .take()
         .expect("fixed probe stderr is configured as piped");
     let max_each = max_bytes / 2;
-    let (stdout, stderr, status) = tokio::join!(
-        read_bounded_output(stdout, raw_bytes),
-        read_bounded_output(stderr, raw_bytes),
-        child.wait(),
-    );
+    let mut stdout_capture = CapturedOutput::new(raw_bytes);
+    let mut stderr_capture = CapturedOutput::new(raw_bytes);
+    let (status, stdout_incomplete, stderr_incomplete) = {
+        let stdout_reader = read_bounded_output(stdout, &mut stdout_capture);
+        let stderr_reader = read_bounded_output(stderr, &mut stderr_capture);
+        tokio::pin!(stdout_reader);
+        tokio::pin!(stderr_reader);
+        let mut stdout_done = false;
+        let mut stderr_done = false;
+        let status = loop {
+            tokio::select! {
+                () = &mut stdout_reader, if !stdout_done => stdout_done = true,
+                () = &mut stderr_reader, if !stderr_done => stderr_done = true,
+                status = child.wait() => break status,
+            }
+        };
+        let grace = tokio::time::sleep(OUTPUT_DRAIN_GRACE);
+        tokio::pin!(grace);
+        while !stdout_done || !stderr_done {
+            tokio::select! {
+                () = &mut stdout_reader, if !stdout_done => stdout_done = true,
+                () = &mut stderr_reader, if !stderr_done => stderr_done = true,
+                () = &mut grace => break,
+            }
+        }
+        (status, !stdout_done, !stderr_done)
+    };
+    // The reader futures and their local pipe handles dropped with the inner
+    // scope above, so no reader can mutate a capture after it is incomplete.
+    if stdout_incomplete {
+        stdout_capture.mark_incomplete("stdout_reader_grace_timeout");
+    }
+    if stderr_incomplete {
+        stderr_capture.mark_incomplete("stderr_reader_grace_timeout");
+    }
     let error = status
         .as_ref()
         .err()
         .map(|error| ProcessFailureStage::Wait.describe(program, &cwd, error));
     let captures = vec![
-        stdout.capture(OutputStream::Stdout, None),
-        stderr.capture(OutputStream::Stderr, None),
+        stdout_capture.capture(OutputStream::Stdout, None),
+        stderr_capture.capture(OutputStream::Stderr, None),
     ];
     let error = error.or_else(|| {
         captures
@@ -555,8 +585,8 @@ async fn run_probe_at(
     FixedProbeOutput {
         cwd,
         exit_code: status.ok().and_then(|status| status.code()),
-        stdout: stdout.preview(max_each),
-        stderr: stderr.preview(max_each),
+        stdout: stdout_capture.preview(max_each),
+        stderr: stderr_capture.preview(max_each),
         error,
         captures,
     }
@@ -565,11 +595,10 @@ async fn run_probe_at(
 /// Drains a child pipe so the process cannot block while retaining at most
 /// the caller's byte budget in memory. The final UTF-8 view remains owned by
 /// the existing bounded-text normalizer.
-async fn read_bounded_output<Reader>(mut reader: Reader, maximum_bytes: usize) -> CapturedOutput
+async fn read_bounded_output<Reader>(mut reader: Reader, captured: &mut CapturedOutput)
 where
     Reader: AsyncRead + Unpin,
 {
-    let mut captured = CapturedOutput::new(maximum_bytes);
     let mut buffer = [0_u8; 8 * 1024];
     loop {
         let read = match reader.read(&mut buffer).await {
@@ -585,7 +614,6 @@ where
         captured.append(&buffer[..read]);
     }
     captured.seal();
-    captured
 }
 
 fn output_value(project_root: &Path, cwd: &Path, output: &FixedProbeOutput) -> Value {

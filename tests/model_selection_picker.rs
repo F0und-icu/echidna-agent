@@ -32,12 +32,20 @@ mod picker_regression {
                         description: "Server-defined".to_owned(),
                     },
                 ],
+                context_window: Some(128_000),
+                max_context_window: Some(256_000),
+                input_modalities: Some(vec!["text".to_owned(), "future".to_owned()]),
+                supports_reasoning_summary_parameter: Some(true),
             },
             SubscriptionModel {
                 slug: "second".to_owned(),
                 display_name: "Second".to_owned(),
                 default_reasoning_level: None,
                 supported_reasoning_levels: Vec::new(),
+                context_window: None,
+                max_context_window: None,
+                input_modalities: None,
+                supports_reasoning_summary_parameter: None,
             },
         ]
     }
@@ -59,7 +67,7 @@ mod picker_regression {
     }
 
     #[test]
-    fn picker_rejects_invalid_or_advertised_but_unknown_choices() {
+    fn picker_rejects_invalid_choices_and_retains_advertised_custom_efforts() {
         let catalog = catalog();
         let model_error = select_model_choice(&catalog, "3").unwrap_err();
         assert!(
@@ -73,11 +81,9 @@ mod picker_regression {
                 .to_string()
                 .contains("outside the current catalog")
         );
-        let unknown_error = select_effort_choice(&catalog[0], Some("future")).unwrap_err();
-        assert!(
-            unknown_error
-                .to_string()
-                .contains("advertised but not executable")
+        assert_eq!(
+            select_effort_choice(&catalog[0], Some("future")).unwrap(),
+            Some(ReasoningEffort::Custom("future".to_owned()))
         );
     }
 

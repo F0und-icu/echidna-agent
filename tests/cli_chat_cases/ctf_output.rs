@@ -183,7 +183,9 @@ fn ctf_r3a2_durable_output_can_be_read_after_explicit_resume() {
         )
         .unwrap();
     let runtime = tokio::runtime::Runtime::new().unwrap();
-    let read = runtime.block_on(tools.execute(plan.clone()));
+    let read = runtime
+        .block_on(tools.execute(plan.clone()))
+        .expect("Tool execution completes");
     assert_eq!(
         read.result.output["data_base64"],
         STANDARD.encode(b"\xffTAIL")
@@ -195,7 +197,9 @@ fn ctf_r3a2_durable_output_can_be_read_after_explicit_resume() {
     // Same size and valid offset: rejection must reach SHA-256 verification,
     // not merely reject an offset beyond a shortened file.
     fs::write(&blob_path, &tampered).unwrap();
-    let rejected = runtime.block_on(tools.execute(plan));
+    let rejected = runtime
+        .block_on(tools.execute(plan))
+        .expect("Tool execution completes");
     assert_eq!(
         rejected.result.status,
         echidna::domain::tools::ToolResultStatus::Failed

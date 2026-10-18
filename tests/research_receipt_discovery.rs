@@ -40,7 +40,7 @@ async fn execute(
             call(id, name, arguments),
         )
         .unwrap();
-    tools.execute(plan).await
+    tools.execute(plan).await.expect("Tool execution completes")
 }
 
 fn update(event_id: &str, operation: Value) -> Value {

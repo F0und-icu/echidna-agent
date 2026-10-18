@@ -1217,6 +1217,14 @@ struct ModelResponse {
     default_reasoning_level: Option<String>,
     #[serde(default)]
     supported_reasoning_levels: Vec<ReasoningLevelResponse>,
+    #[serde(default, deserialize_with = "optional_positive_u32")]
+    context_window: Option<u32>,
+    #[serde(default, deserialize_with = "optional_positive_u32")]
+    max_context_window: Option<u32>,
+    #[serde(default, deserialize_with = "optional_modalities")]
+    input_modalities: Option<Vec<String>>,
+    #[serde(default, deserialize_with = "optional_bool")]
+    supports_reasoning_summary_parameter: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1243,6 +1251,10 @@ fn siwc_subscription_models(
             display_name: model.display_name,
             default_reasoning_level: None,
             supported_reasoning_levels: Vec::new(),
+            context_window: None,
+            max_context_window: None,
+            input_modalities: None,
+            supports_reasoning_summary_parameter: None,
         })
         .collect())
 }
@@ -1275,6 +1287,14 @@ fn codex_subscription_models(
                 return Err(SubscriptionAuthError::InvalidResponse);
             }
         }
+        if model.input_modalities.as_ref().is_some_and(|modalities| {
+            modalities.len() > 32
+                || modalities
+                    .iter()
+                    .any(|value| !valid_reasoning_metadata(value, 64))
+        }) {
+            return Err(SubscriptionAuthError::InvalidResponse);
+        }
     }
     Ok(models
         .into_iter()
@@ -1290,8 +1310,40 @@ fn codex_subscription_models(
                     description: level.description,
                 })
                 .collect(),
+            context_window: model.context_window,
+            max_context_window: model.max_context_window,
+            input_modalities: model.input_modalities,
+            supports_reasoning_summary_parameter: model.supports_reasoning_summary_parameter,
         })
         .collect())
+}
+
+fn optional_positive_u32<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<u32>::deserialize(deserializer)? {
+        Some(value) if value > 0 => Ok(Some(value)),
+        Some(_) => Err(serde::de::Error::custom(
+            "expected a positive unsigned integer",
+        )),
+        None => Ok(None),
+    }
+}
+
+fn optional_modalities<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let values = Vec::<String>::deserialize(deserializer)?;
+    Ok(Some(values))
+}
+
+fn optional_bool<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    bool::deserialize(deserializer).map(Some)
 }
 
 fn valid_reasoning_metadata(value: &str, maximum_length: usize) -> bool {

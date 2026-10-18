@@ -276,7 +276,8 @@ async fn deferred_tool_search_changes_actual_schema_and_blocks_pre_discovery_pla
                 )
                 .unwrap(),
         )
-        .await;
+        .await
+        .expect("Tool execution completes");
     assert_eq!(
         search.result.status,
         echidna::domain::tools::ToolResultStatus::Succeeded

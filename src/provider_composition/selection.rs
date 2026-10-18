@@ -8,6 +8,15 @@ use std::time::SystemTime;
 use thiserror::Error;
 use toml_edit::{DocumentMut, Item, TableLike, Value, value};
 
+/// Catalog metadata that an operator has explicitly chosen to import with a
+/// model selection. It has one production consumer: the isolated writer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CatalogCapabilityImport {
+    pub(crate) context_window: Option<u32>,
+    pub(crate) input_modalities: Option<Vec<String>>,
+    pub(crate) supports_reasoning_summary_parameter: Option<bool>,
+}
+
 #[derive(Debug, Error)]
 pub(crate) enum ModelSelectionError {
     #[error("model selection configuration is malformed")]
@@ -42,6 +51,7 @@ pub(super) fn edit_model_selection(
     provider_id: &str,
     model: &str,
     reasoning_effort: Option<&str>,
+    capabilities: Option<&CatalogCapabilityImport>,
 ) -> Result<String, ModelSelectionError> {
     let mut document = source
         .parse::<DocumentMut>()
@@ -109,6 +119,23 @@ pub(super) fn edit_model_selection(
                 mapping.remove("reasoning_effort");
             }
         }
+        if let Some(capabilities) = capabilities {
+            if let Some(context_window) = capabilities.context_window {
+                replace_value(mapping, "context_window", i64::from(context_window));
+            }
+            if let Some(modalities) = &capabilities.input_modalities {
+                replace_value(
+                    mapping,
+                    "text_input",
+                    modalities.iter().any(|value| value == "text"),
+                );
+                replace_value(
+                    mapping,
+                    "image_input",
+                    modalities.iter().any(|value| value == "image"),
+                );
+            }
+        }
     }
 
     {
@@ -120,6 +147,19 @@ pub(super) fn edit_model_selection(
         replace_value(provider, "model", model);
         replace_value(provider, "capability_mapping", new_mapping_name);
         replace_value(provider, "generation", next_provider_generation);
+        if let Some(supports_summary) =
+            capabilities.and_then(|capabilities| capabilities.supports_reasoning_summary_parameter)
+        {
+            let subscription = provider
+                .get_mut("codex_subscription")
+                .and_then(Item::as_table_like_mut)
+                .ok_or(ModelSelectionError::UnsupportedProvider)?;
+            replace_value(
+                subscription,
+                "supports_reasoning_summary_parameter",
+                supports_summary,
+            );
+        }
     }
 
     Ok(document.to_string())
@@ -132,6 +172,7 @@ pub(super) fn publish_model_selection<F>(
     provider_id: &str,
     model: &str,
     reasoning_effort: Option<&str>,
+    capabilities: Option<&CatalogCapabilityImport>,
     validate_candidate: F,
 ) -> Result<(), ModelSelectionError>
 where
@@ -141,7 +182,13 @@ where
         std::path::absolute(path).map_err(|_| ModelSelectionError::UnsafeConfigurationPath)?;
     let _lock_file = acquire_selection_lock(&path)?;
     let source = SourceSnapshot::read(&path)?;
-    let candidate = edit_model_selection(&source.text, provider_id, model, reasoning_effort)?;
+    let candidate = edit_model_selection(
+        &source.text,
+        provider_id,
+        model,
+        reasoning_effort,
+        capabilities,
+    )?;
     let (temporary, mut file) = create_temporary(&path, &source.permissions)?;
     let publication = (|| {
         file.write_all(candidate.as_bytes())

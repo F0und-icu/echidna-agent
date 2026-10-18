@@ -1,0 +1,44 @@
+# Text model plus explicitly configured remote HTTP MCP tools.
+# This file contains no credentials. Copy it outside the repository before use.
+# Each MCP server is discovered only when `chat` starts; `doctor` remains offline.
+schema_version = 1
+active_agent_profile = "default"
+
+[providers.primary]
+binding = "http_sse"
+wire_api = "responses"
+base_url = "https://responses.example.invalid/v1"
+model = "replace-with-your-model"
+credential_ref = "CYBER_AGENT_PRIMARY_API_KEY"
+capability_mapping = "primary-v1"
+generation = 1
+
+[capability_mappings.primary-v1]
+version = 1
+text_input = true
+image_input = false
+streaming = true
+tool_call = true
+structured_output = true
+incremental_input = false
+usage_reporting = true
+# Example capacity. Confirm it with the configured model service.
+context_window = 32768
+
+[agent_profiles.default]
+primary = "primary"
+vision_mode = "disabled"
+generation = 1
+
+[mcp_servers.example]
+# Absolute HTTP(S) Streamable HTTP endpoint, with no userinfo, query or fragment.
+url = "https://mcp.example.invalid/mcp"
+# Select exactly one implemented MCP protocol path.
+protocol_version = "2026-07-28"
+# Optional dedicated MCP Bearer reference. Do not reuse a model-provider key.
+credential_ref = "CYBER_AGENT_MCP_EXAMPLE_API_KEY"
+# Optional; defaults to 60000 and must be from 1 through 86400000.
+timeout_ms = 60000
+
+[runtime]
+model_request_limit_per_turn = 32

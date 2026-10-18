@@ -161,7 +161,7 @@ impl RequestProperties {
             tool_call: input.requirements.tool_call,
             incremental_input: input.requirements.incremental_input,
             usage_reporting: input.requirements.usage_reporting,
-            reasoning_effort: input.requirements.reasoning_effort,
+            reasoning_effort: input.requirements.reasoning_effort.clone(),
         }
     }
 }

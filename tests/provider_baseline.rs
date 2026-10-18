@@ -150,7 +150,7 @@ fn append_input(baseline: &ModelInputIR, server_output: &[ContentItem]) -> Model
         &baseline.instructions,
         items,
         baseline.tool_specs.clone(),
-        baseline.requirements,
+        baseline.requirements.clone(),
     )
 }
 

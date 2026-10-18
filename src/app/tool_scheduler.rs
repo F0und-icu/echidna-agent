@@ -10,13 +10,18 @@ use crate::domain::tools::{
     IdempotencyKey, ToolExecutionOutcome, ToolExecutionPlan, ToolFailure, ToolFailureRetryability,
     ToolResult, ToolResultStatus, ToolRetryPolicy, scheduling_conflicts,
 };
-use crate::ports::tool::{ToolExecutor, ToolObservationSender};
+use crate::ports::tool::{ToolExecutionError, ToolExecutor, ToolObservationSender};
 
 use super::agent_loop::{AgentLoopError, ToolExecutionStartStage};
 use super::cancellation::AgentCancellation;
 
-type ActiveFuture<'tools> =
-    Pin<Box<dyn Future<Output = (usize, ToolExecutionOutcome)> + Send + 'tools>>;
+type ActiveFuture<'tools> = Pin<
+    Box<
+        dyn Future<Output = (usize, Result<ToolExecutionOutcome, ToolExecutionError>)>
+            + Send
+            + 'tools,
+    >,
+>;
 
 pub(super) type CompletionStage<'a> =
     dyn FnMut(ExecutionCheckpoint<'_>) -> Result<(), AgentLoopError> + 'a;
@@ -61,6 +66,9 @@ fn observation_sender(
 pub(super) struct ScheduledToolBatch {
     pub(super) outcomes: Vec<ScheduledToolResult>,
     pub(super) cancelled: bool,
+    /// A post-dispatch Tool error has no durable outcome. The AgentLoop owns
+    /// the fatal return after it has recorded known completed results.
+    pub(super) unknown_stop: Option<String>,
 }
 
 pub(super) enum ScheduledToolResult {
@@ -104,11 +112,12 @@ pub(super) async fn execute_batch<Tools: ToolExecutor + ?Sized>(
     let mut active = BTreeMap::<usize, ToolExecutionPlan>::new();
     let mut running = FuturesUnordered::<ActiveFuture<'_>>::new();
     let mut cancelled = cancellation.is_cancelled();
+    let mut unknown_stop = None;
     let (sender, mut observations) = tokio::sync::mpsc::channel(1);
     let sender = observation_sender(sender);
     let mut children = Vec::new();
 
-    while !cancelled && (!pending.is_empty() || !running.is_empty()) {
+    while !cancelled && unknown_stop.is_none() && (!pending.is_empty() || !running.is_empty()) {
         if cancellation.is_cancelled() {
             cancelled = true;
             break;
@@ -150,7 +159,14 @@ pub(super) async fn execute_batch<Tools: ToolExecutor + ?Sized>(
             completed = running.next() => completed,
         };
         match completion {
-            Some((index, mut outcome)) => {
+            Some((index, result)) => {
+                let mut outcome = match result {
+                    Ok(outcome) => outcome,
+                    Err(ToolExecutionError::OutcomeUnknown { safe_reason }) => {
+                        unknown_stop = Some(safe_reason);
+                        break;
+                    }
+                };
                 // Polling an executor may enqueue its last observation and
                 // observe its deadline in the same poll. Drain that accepted
                 // fact before reconciling the terminal parent.
@@ -178,7 +194,7 @@ pub(super) async fn execute_batch<Tools: ToolExecutor + ?Sized>(
         }
     }
 
-    if cancelled {
+    if cancelled || unknown_stop.is_some() {
         observations.close();
         while let Ok(observation) = observations.try_recv() {
             checkpoint_child(observation, completion_stage, &mut children, &active)?;
@@ -226,6 +242,7 @@ pub(super) async fn execute_batch<Tools: ToolExecutor + ?Sized>(
     Ok(ScheduledToolBatch {
         outcomes,
         cancelled,
+        unknown_stop,
     })
 }
 

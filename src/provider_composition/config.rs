@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::adapters::mcp_http::McpServerConfig;
 use crate::domain::context::{ModelIdentity, ModelProfile};
 use crate::domain::model::{CapabilityMappingVersion, ModelCapabilities, ReasoningEffort};
 use crate::domain::profile::{AgentModelProfile, ProviderProfile, VisionMode};
@@ -25,6 +26,8 @@ pub(super) struct ProviderConfigV1 {
     pub(super) prompts: PromptSources,
     #[serde(default)]
     pub(super) runtime: RuntimeSettings,
+    #[serde(default)]
+    pub(super) mcp_servers: BTreeMap<String, McpServerConfig>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -238,6 +241,7 @@ pub(super) struct CodexSubscription {
     pub(super) account: String,
     pub(super) auth_store: PathBuf,
     pub(super) catalog_client_version: Option<String>,
+    pub(super) supports_reasoning_summary_parameter: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -287,7 +291,7 @@ impl CapabilityMappingDefinition {
             usage_reporting: self.usage_reporting,
             context_window: self.context_window,
             max_output_tokens: self.max_output_tokens,
-            reasoning_effort: self.reasoning_effort,
+            reasoning_effort: self.reasoning_effort.clone(),
             capability_mapping_version: CapabilityMappingVersion::new(self.version),
         }
     }

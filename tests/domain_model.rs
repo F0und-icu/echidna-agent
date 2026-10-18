@@ -118,6 +118,24 @@ fn declared_reasoning_effort_preserves_absence_and_rejects_missing_or_mismatched
         serde_json::to_value(&matching).unwrap()["requirements"]["reasoning_effort"],
         json!("xhigh")
     );
+
+    let custom = "extra_thorough".parse::<ReasoningEffort>().unwrap();
+    configured.reasoning_effort = Some(custom.clone());
+    let custom_input = text_input(ModelRequestRequirements {
+        reasoning_effort: Some(custom),
+        ..Default::default()
+    });
+    assert_eq!(configured.validate_input(&custom_input), Ok(()));
+    assert_eq!(
+        serde_json::to_value(&custom_input).unwrap()["requirements"]["reasoning_effort"],
+        json!("extra_thorough")
+    );
+    configured.reasoning_effort = Some(ReasoningEffort::Custom("high".to_owned()));
+    assert_eq!(
+        configured.validate_input(&matching),
+        Err(ModelCapabilityError::ReasoningEffortUnsupported)
+    );
+    assert!("invalid effort".parse::<ReasoningEffort>().is_err());
 }
 
 #[test]

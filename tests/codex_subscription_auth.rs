@@ -118,7 +118,7 @@ async fn codex_login_uses_fixed_oauth_requests_and_account_bound_model_discovery
         assert!(!models_request.to_ascii_lowercase().contains("originator:"));
         respond(
             models_stream,
-            r#"{"models":[{"slug":"second","display_name":"Second","default_reasoning_level":"high","supported_reasoning_levels":[{"effort":"medium","description":"Balanced"},{"effort":"high","description":"Thorough"}]},{"slug":"first","display_name":"First","supported_reasoning_levels":[{"effort":"future","description":"Future server option"}]}]}"#,
+            r#"{"models":[{"slug":"second","display_name":"Second","default_reasoning_level":"high","supported_reasoning_levels":[{"effort":"medium","description":"Balanced"},{"effort":"high","description":"Thorough"}],"context_window":128000,"max_context_window":256000,"input_modalities":["text","image","future"],"supports_reasoning_summary_parameter":true},{"slug":"first","display_name":"First","supported_reasoning_levels":[{"effort":"future","description":"Future server option"}]},{"slug":"null-window","display_name":"Null window","context_window":null,"max_context_window":null}]}"#,
         );
     });
 
@@ -187,9 +187,16 @@ async fn codex_login_uses_fixed_oauth_requests_and_account_bound_model_discovery
             .iter()
             .map(|model| model.slug.as_str())
             .collect::<Vec<_>>(),
-        ["second", "first"]
+        ["second", "first", "null-window"]
     );
     assert_eq!(models[0].default_reasoning_level.as_deref(), Some("high"));
+    assert_eq!(models[0].context_window, Some(128_000));
+    assert_eq!(models[0].max_context_window, Some(256_000));
+    assert_eq!(
+        models[0].input_modalities.as_deref(),
+        Some(["text".to_owned(), "image".to_owned(), "future".to_owned()].as_slice())
+    );
+    assert_eq!(models[0].supports_reasoning_summary_parameter, Some(true));
     assert_eq!(
         models[0]
             .supported_reasoning_levels
@@ -200,6 +207,11 @@ async fn codex_login_uses_fixed_oauth_requests_and_account_bound_model_discovery
     );
     assert_eq!(models[1].default_reasoning_level, None);
     assert_eq!(models[1].supported_reasoning_levels[0].effort, "future");
+    assert_eq!(models[1].context_window, None);
+    assert_eq!(models[1].max_context_window, None);
+    assert_eq!(models[1].input_modalities, None);
+    assert_eq!(models[2].context_window, None);
+    assert_eq!(models[2].max_context_window, None);
     server.join().unwrap();
 
     let stored = std::fs::read_to_string(store.join("personal.connection")).unwrap();
@@ -266,6 +278,34 @@ async fn codex_models_reject_ambiguous_or_malformed_catalog_metadata() {
         (
             "missing-description",
             r#"{"models":[{"slug":"one","display_name":"One","supported_reasoning_levels":[{"effort":"high"}]}]}"#,
+        ),
+        (
+            "zero-context-window",
+            r#"{"models":[{"slug":"one","display_name":"One","context_window":0}]}"#,
+        ),
+        (
+            "negative-max-context-window",
+            r#"{"models":[{"slug":"one","display_name":"One","max_context_window":-1}]}"#,
+        ),
+        (
+            "fractional-context-window",
+            r#"{"models":[{"slug":"one","display_name":"One","context_window":1.5}]}"#,
+        ),
+        (
+            "overflow-max-context-window",
+            r#"{"models":[{"slug":"one","display_name":"One","max_context_window":4294967296}]}"#,
+        ),
+        (
+            "string-context-window",
+            r#"{"models":[{"slug":"one","display_name":"One","context_window":"128000"}]}"#,
+        ),
+        (
+            "null-input-modalities",
+            r#"{"models":[{"slug":"one","display_name":"One","input_modalities":null}]}"#,
+        ),
+        (
+            "null-summary-support",
+            r#"{"models":[{"slug":"one","display_name":"One","supports_reasoning_summary_parameter":null}]}"#,
         ),
     ];
     for (label, body) in cases {

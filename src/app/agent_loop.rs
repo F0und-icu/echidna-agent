@@ -622,7 +622,7 @@ where
             user_text,
             cancellation,
             None,
-            None,
+            Vec::new(),
             None,
             StreamingStages::none(),
         )
@@ -644,7 +644,7 @@ where
             user_text,
             cancellation,
             Some((audit_context, record_attempt)),
-            None,
+            Vec::new(),
             None,
             StreamingStages::none(),
         )
@@ -670,7 +670,7 @@ where
             user_text,
             cancellation,
             Some((audit_context, record_attempt)),
-            Some(initial_image),
+            vec![initial_image],
             None,
             StreamingStages::none(),
         )
@@ -694,7 +694,7 @@ where
             user_text,
             cancellation,
             Some((audit_context, record_attempt)),
-            None,
+            Vec::new(),
             Some(follow_up),
             StreamingStages::none(),
         )
@@ -718,7 +718,7 @@ where
             user_text,
             cancellation,
             Some((audit_context, record_attempt)),
-            None,
+            Vec::new(),
             None,
             StreamingStages {
                 request_budget: None,
@@ -739,21 +739,22 @@ where
     pub(crate) async fn run_turn_audited_with_context_refresh_and_vision_stages(
         &mut self,
         user_text: impl Into<String>,
-        initial_image: Option<InitialImagePrimaryContext>,
+        initial_images: Vec<InitialImagePrimaryContext>,
         cancellation: AgentCancellation,
         audit_context: &RequestAuditRunContext,
         record_attempt: &mut dyn FnMut(RequestAuditAttempt) -> Result<(), AgentLoopError>,
         stages: CliRuntimeStages<'_>,
     ) -> Result<AgentTurnOutcome, AgentLoopError> {
         let primary_capability_hash = self.provider.capabilities().semantic_hash();
-        let initial_image = initial_image
+        let initial_images = initial_images
+            .into_iter()
             .map(|context| context.into_content_item(&self.profile, &primary_capability_hash))
-            .transpose()?;
+            .collect::<Result<Vec<_>, _>>()?;
         self.run_turn_inner(
             user_text,
             cancellation,
             Some((audit_context, record_attempt)),
-            initial_image,
+            initial_images,
             Some(stages.follow_up),
             StreamingStages {
                 request_budget: Some(stages.request_budget),
@@ -772,7 +773,7 @@ where
         user_text: impl Into<String>,
         cancellation: AgentCancellation,
         mut audit: Option<RequestAuditStage<'_>>,
-        initial_image: Option<(ContentItem, ContextProvenance)>,
+        initial_images: Vec<(ContentItem, ContextProvenance)>,
         mut view_image_follow_up: Option<&mut ViewImageFollowUp<'_>>,
         stages: StreamingStages<'_>,
     ) -> Result<AgentTurnOutcome, AgentLoopError> {
@@ -799,7 +800,7 @@ where
         self.history.append_user_text(user_text);
         self.history_provenance
             .insert(turn_history_start, user_provenance);
-        if let Some((initial_image, provenance)) = initial_image {
+        for (initial_image, provenance) in initial_images {
             let history_index = self.history.items().len();
             self.history.append_content_item(initial_image)?;
             self.history_provenance.insert(history_index, provenance);
@@ -1515,10 +1516,15 @@ where
             )
             .await?
         };
-        if scheduled.outcomes.len() != planned_outcome_count {
+        let super::tool_scheduler::ScheduledToolBatch {
+            outcomes: scheduled_outcomes,
+            cancelled: scheduled_cancelled,
+            unknown_stop,
+        } = scheduled;
+        if scheduled_outcomes.len() != planned_outcome_count {
             return Err(AgentLoopError::SchedulerResultCountMismatch);
         }
-        let mut outcomes = scheduled.outcomes.into_iter();
+        let mut outcomes = scheduled_outcomes.into_iter();
         let mut executions = Vec::new();
         let result_history_start = self.history.items().len();
         let mut interrupted = false;
@@ -1560,13 +1566,16 @@ where
                 stage(outcome)?;
             }
         }
+        if let Some(safe_reason) = unknown_stop {
+            return Err(AgentLoopError::ToolExecutionOutcomeUnknown { safe_reason });
+        }
         if interrupted {
             return Err(AgentLoopError::ToolExecutionInterrupted);
         }
         self.history.ensure_all_tool_calls_paired()?;
         Ok(ScheduledCalls {
             executions,
-            cancelled: scheduled.cancelled,
+            cancelled: scheduled_cancelled,
         })
     }
 }
@@ -1813,6 +1822,10 @@ pub enum AgentLoopError {
         "Tool execution was interrupted before an outcome was observed; external effects are unknown, no Receipt or result was invented and no Tool was retried"
     )]
     ToolExecutionInterrupted,
+    #[error(
+        "Tool execution outcome is unknown after dispatch: {safe_reason}; no Receipt or result was invented and no Tool was retried"
+    )]
+    ToolExecutionOutcomeUnknown { safe_reason: String },
     #[error("the Tool scheduler returned fewer outcomes than staged plans")]
     SchedulerResultMissing,
     #[error("the Tool scheduler returned more outcomes than staged plans")]

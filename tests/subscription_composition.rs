@@ -151,6 +151,31 @@ fn codex_subscription_composition_is_offline_and_uses_a_distinct_adapter_identit
 }
 
 #[test]
+fn codex_summary_support_false_selects_the_matching_no_summary_identity_offline() {
+    let directory = TemporaryDirectory::new("codex-subscription-no-summary-composition");
+    let store = directory
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("uncreated-codex-auth");
+    let path = directory.path().join("config.toml");
+    let composition = load(
+        &path,
+        &codex_config(&store).replacen(
+            "auth_store = ",
+            "supports_reasoning_summary_parameter = false, auth_store = ",
+            1,
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        composition.primary_request_adapter_version().as_str(),
+        "responses-http-sse-codex-subscription-no-summary-v1"
+    );
+    assert!(!store.exists());
+}
+
+#[test]
 fn codex_subscription_catalog_client_version_is_validated_without_credential_reads() {
     let directory = TemporaryDirectory::new("codex-subscription-catalog-version");
     let store = directory

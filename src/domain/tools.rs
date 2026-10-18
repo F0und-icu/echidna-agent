@@ -275,7 +275,7 @@ impl ToolExecutionPlan {
         execution_id: ExecutionId,
         mut call: ToolCall,
         spec: &ToolSpec,
-        mut resolved_resource_keys: Vec<ResourceKey>,
+        resolved_resource_keys: Vec<ResourceKey>,
         explicit_rerun_reason: Option<RerunReason>,
     ) -> Result<Self, ToolContractError> {
         let (arguments, embedded_rerun_reason) = split_execution_control(call.arguments)?;
@@ -289,6 +289,34 @@ impl ToolExecutionPlan {
             (Some(explicit), _) | (_, Some(explicit)) => Some(explicit),
             (None, None) => None,
         };
+        Self::build(
+            execution_id,
+            call,
+            spec,
+            resolved_resource_keys,
+            rerun_reason,
+        )
+    }
+
+    /// Imported Tool arguments have already crossed their own boundary and
+    /// may legitimately use the builtin control field name. MCP is the sole
+    /// current consumer; it has no local rerun semantics.
+    pub(crate) fn new_unmodified_arguments(
+        execution_id: ExecutionId,
+        call: ToolCall,
+        spec: &ToolSpec,
+        resolved_resource_keys: Vec<ResourceKey>,
+    ) -> Result<Self, ToolContractError> {
+        Self::build(execution_id, call, spec, resolved_resource_keys, None)
+    }
+
+    fn build(
+        execution_id: ExecutionId,
+        call: ToolCall,
+        spec: &ToolSpec,
+        mut resolved_resource_keys: Vec<ResourceKey>,
+        rerun_reason: Option<RerunReason>,
+    ) -> Result<Self, ToolContractError> {
         let input_fingerprint = fingerprint(&call.arguments)?;
         resolved_resource_keys.sort();
         resolved_resource_keys.dedup();
