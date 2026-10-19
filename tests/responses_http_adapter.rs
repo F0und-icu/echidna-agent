@@ -47,6 +47,11 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
+// The shared fixture also contains a legacy-summary builder used by a separate
+// integration target; this Adapter case needs only its current v2 facts.
+#[allow(dead_code)]
+#[path = "support/compaction.rs"]
+mod compaction_support;
 #[path = "support/live_provider.rs"]
 mod live_provider;
 mod support;
@@ -55,6 +60,8 @@ const FIXTURE_SECRET: &str = "fixture-secret";
 
 #[path = "responses_cases/text_finalization.rs"]
 mod text_finalization;
+#[path = "responses_cases/transport.rs"]
+mod transport;
 const FIXTURE_CREDENTIAL_REFERENCE: &str = "CYBER_AGENT_FIXTURE_API_KEY";
 type CredentialReadResult = Result<Option<String>, CredentialSourceError>;
 
@@ -551,13 +558,13 @@ async fn spawn_sse_server_chunked(
 
 async fn spawn_sse_server_chunked_with_declared_length(
     status: u16,
-    body: &str,
+    body: impl AsRef<[u8]>,
     chunk_bytes: usize,
     declared_body_bytes: usize,
 ) -> (String, oneshot::Receiver<CapturedRequest>, JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let response_body = body.as_bytes().to_vec();
+    let response_body = body.as_ref().to_vec();
     let (request_sender, request_receiver) = oneshot::channel();
 
     let task = tokio::spawn(async move {
@@ -2827,6 +2834,138 @@ async fn explicit_resume_discards_opaque_delivery_state_before_the_next_subscrip
             .all(|item| { item.get("type").and_then(Value::as_str) != Some("reasoning") })
     );
     assert!(!resumed_request.body.contains("resume-ciphertext"));
+}
+
+#[tokio::test]
+async fn durable_compaction_discards_opaque_delivery_state_before_the_next_subscription_request() {
+    let opaque = json!({
+        "type": "reasoning",
+        "id": "rsn-before-auto-compaction",
+        "status": "completed",
+        "content": [],
+        "encrypted_content": "auto-compaction-ciphertext",
+        "summary": [],
+    });
+    let first = [
+        json!({"type": "response.output_item.done", "output_index": 0, "item": opaque}),
+        json!({"type": "response.output_text.delta", "delta": "opaque state committed"}),
+        json!({"type": "response.completed", "response": {
+            "id": "response-before-auto-compaction", "status": "completed",
+        }}),
+    ]
+    .into_iter()
+    .map(|event| format!("data: {event}\n\n"))
+    .collect::<String>();
+    let second = concat!(
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"fresh after durable compaction\"}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response-after-auto-compaction\",\"status\":\"completed\"}}\n\n",
+    );
+    let (base_url, mut requests, server) =
+        spawn_sse_sequence_server(vec![first, second.to_owned()]).await;
+    let provider =
+        subscription_adapter(base_url, FakeCredentialSource::value(Some(FIXTURE_SECRET)));
+    let tools = ToolRegistry::for_project(env!("CARGO_MANIFEST_DIR"));
+    let mut agent = AgentLoop::new(&provider, &tools);
+    agent
+        .run_turn("create opaque delivery state", AgentCancellation::new())
+        .await
+        .unwrap();
+
+    let facts = compaction_support::CompactionFacts::new("subscription-auto-compaction");
+    let stream = StreamId::new("session:subscription-auto-compaction");
+    let primary = ProviderSessionRef {
+        id: ProviderSessionId::new("primary:0"),
+        role: ProviderSessionRole::Primary,
+        generation: 0,
+    };
+    let mut session = SessionReducer
+        .reduce([
+            SessionEvent::Started {
+                primary_provider_session: primary,
+            }
+            .into_envelope(
+                EventId::new("subscription-auto-compaction-started"),
+                stream.clone(),
+                EventSequence::new(1),
+                OccurredAt::new("2026-10-19T00:00:00Z"),
+            )
+            .unwrap(),
+            SessionEvent::HistoryItemRecorded {
+                item: ContentItem::user_text("retain durable context before compaction"),
+            }
+            .into_envelope(
+                EventId::new("subscription-auto-compaction-user"),
+                stream.clone(),
+                EventSequence::new(2),
+                OccurredAt::new("2026-10-19T00:00:01Z"),
+            )
+            .unwrap(),
+            SessionEvent::HistoryItemRecorded {
+                item: ContentItem::assistant_text("durable answer before compaction"),
+            }
+            .into_envelope(
+                EventId::new("subscription-auto-compaction-assistant"),
+                stream.clone(),
+                EventSequence::new(3),
+                OccurredAt::new("2026-10-19T00:00:02Z"),
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+    let compaction = session
+        .next_compaction(
+            facts.summary_draft("compact completed opaque delivery state"),
+            1,
+            &facts.validation(),
+        )
+        .unwrap();
+    SessionReducer
+        .apply(
+            &mut session,
+            SessionEvent::CompactionCreated { compaction }
+                .into_envelope(
+                    EventId::new("subscription-auto-compaction-created"),
+                    stream,
+                    EventSequence::new(4),
+                    OccurredAt::new("2026-10-19T00:00:03Z"),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+    agent
+        .apply_compaction(&session, Some(&facts.validation()))
+        .unwrap();
+
+    let outcome = agent
+        .run_turn(
+            "continue after durable compaction",
+            AgentCancellation::new(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        AgentTurnOutcome::Completed { assistant_text, .. }
+            if assistant_text == "fresh after durable compaction"
+    ));
+    let first_request = requests.recv().await.unwrap();
+    let compacted_request = requests.recv().await.unwrap();
+    server.await.unwrap();
+    assert!(first_request.body.contains("create opaque delivery state"));
+    let compacted_wire: Value = serde_json::from_str(&compacted_request.body).unwrap();
+    assert!(compacted_wire.get("previous_response_id").is_none());
+    assert!(
+        compacted_wire["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| { item.get("type").and_then(Value::as_str) != Some("reasoning") })
+    );
+    assert!(
+        !compacted_request
+            .body
+            .contains("auto-compaction-ciphertext")
+    );
 }
 
 #[tokio::test]

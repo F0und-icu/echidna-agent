@@ -34,6 +34,13 @@ impl AppliedCompactionSummary {
             self.revision, self.retained_history_items, self.source_history_items
         )
     }
+
+    pub(super) fn automatic_message(&self) -> String {
+        format!(
+            "Automatic completed-Turn compaction applied because runtime.auto_compact is enabled. {} Completed Provider delivery state was intentionally reset at this boundary.",
+            self.message()
+        )
+    }
 }
 
 impl DurableChatSession {
@@ -97,8 +104,8 @@ impl DurableChatSession {
 
         // The Writer lock freezes both Research and Session appenders while
         // these read-only facts and the new Compaction Event are composed.
-        let facts = load_compaction_validation_facts(&self.project)
-            .map_err(ChatError::ResearchProjection)?;
+        let facts =
+            load_compaction_validation_facts(&self.project).map_err(ChatError::CompactionFacts)?;
         let (draft, compaction) = select_compaction(projection.state(), &facts, |candidate| {
             agent
                 .preflight_compaction(candidate, true)
@@ -257,7 +264,7 @@ impl ContextPressure {
             " No Compaction is suggested."
         };
         format!(
-            "[context pressure: {}] planner demand estimate={}/{} input tokens; artifact_refs={}, truncations={}, exclusions={}. Provider usage is not inferred.{guidance}",
+            "[context pressure: {}] last model-request planner demand estimate={}/{} input tokens; artifact_refs={}, truncations={}, exclusions={}. Provider usage is not inferred.{guidance}",
             self.level.as_str(),
             self.estimated_demand,
             self.input_limit,

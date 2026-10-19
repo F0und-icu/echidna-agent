@@ -39,6 +39,8 @@ mod support;
 mod tool_activation_continuation;
 #[path = "cli_chat_cases/tool_argument_integrity.rs"]
 mod tool_argument_integrity;
+#[path = "cli_chat_cases/transport.rs"]
+mod transport;
 
 #[test]
 fn final_text_integrity_reaches_cli_and_history_without_committing_conflicts() {
@@ -118,8 +120,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use echidna::adapters::project_event_store::{Project, ProjectEventStream};
-use echidna::domain::artifacts::ArtifactId;
+use echidna::domain::artifacts::{ArtifactId, BlobId};
 use echidna::domain::events::{EventEnvelope, EventId, EventType, OccurredAt, StreamId};
+use echidna::domain::memory::{MemoryEvent, MemoryPath, MemoryRevision};
 use echidna::domain::request_audit::REQUEST_AUDIT_MANIFEST_SCHEMA_VERSION;
 use echidna::domain::research::{
     EvidenceLink, EvidenceRef, EvidenceRelation, ExecutionReceiptId, ExperimentCapsuleDraft,
@@ -223,11 +226,23 @@ impl LoopbackServer {
 }
 
 fn spawn_responses_server(responses: Vec<(u16, String)>) -> LoopbackServer {
+    spawn_responses_server_with_lengths(
+        responses
+            .into_iter()
+            .map(|(status, body)| {
+                let length = body.len();
+                (status, body, length)
+            })
+            .collect(),
+    )
+}
+
+fn spawn_responses_server_with_lengths(responses: Vec<(u16, String, usize)>) -> LoopbackServer {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let (sender, receiver) = mpsc::channel();
     let thread = thread::spawn(move || {
-        for (status, body) in responses {
+        for (status, body, length) in responses {
             let (mut socket, _) = listener.accept().unwrap();
             socket
                 .set_read_timeout(Some(Duration::from_secs(5)))
@@ -237,7 +252,7 @@ fn spawn_responses_server(responses: Vec<(u16, String)>) -> LoopbackServer {
             let reason = if status == 200 { "OK" } else { "Error" };
             let headers = format!(
                 "HTTP/1.1 {status} {reason}\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
+                length
             );
             socket.write_all(headers.as_bytes()).unwrap();
             socket.write_all(body.as_bytes()).unwrap();
@@ -422,6 +437,27 @@ fn write_context_window_config(
                 &format!("context_window = {context_window}"),
                 1,
             ),
+    )
+    .unwrap();
+    config
+}
+
+fn write_auto_compact_context_window_config(
+    directory: &std::path::Path,
+    base_url: &str,
+    context_window: u32,
+) -> std::path::PathBuf {
+    let config = directory.join(format!("provider-auto-context-{context_window}.toml"));
+    fs::write(
+        &config,
+        provider_config::fixture()
+            .replace("http://127.0.0.1:1/v1", base_url)
+            .replacen(
+                "context_window = 32768",
+                &format!("context_window = {context_window}"),
+                1,
+            )
+            + "\n[runtime]\nauto_compact = true\n",
     )
     .unwrap();
     config
@@ -662,6 +698,27 @@ fn text_response(text: &str, response_id: &str) -> String {
         "data: {{\"type\":\"response.output_text.delta\",\"delta\":{text}}}\n\n\
          data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"{response_id}\"}}}}\n\n"
     )
+}
+
+fn plaintext_reasoning_response(reasoning: &str, text: &str, response_id: &str) -> String {
+    [
+        json!({
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": {
+                "type": "reasoning",
+                "id": "ec-h1-plaintext-reasoning",
+                "status": "completed",
+                "content": [{"type": "reasoning_text", "text": reasoning}],
+                "summary": [],
+            },
+        }),
+        json!({"type": "response.output_text.delta", "delta": text}),
+        json!({"type": "response.completed", "response": {"id": response_id}}),
+    ]
+    .into_iter()
+    .map(|event| format!("data: {event}\n\n"))
+    .collect()
 }
 
 fn vision_response(summary: &str, response_id: &str) -> String {
@@ -3815,6 +3872,512 @@ fn m5_context_pressure_uses_only_planner_manifest_and_never_auto_compacts() {
                 .all(|event| event["event_type"] != "session.compaction_created")
         );
     }
+}
+
+#[test]
+fn ec_h1_auto_compacts_once_after_completed_turn_and_resets_the_next_request() {
+    let root = TemporaryDirectory::new("ec-h1-auto-compact-completed");
+    initialize_project(root.path());
+    let project = Project::discover(root.path()).unwrap();
+    append_research_snapshot(&project, "ec-h1-auto");
+    let server = spawn_responses_server(vec![
+        (
+            200,
+            plaintext_reasoning_response(
+                "retain only as volatile Provider delivery state",
+                &"analysis ".repeat(20_000),
+                "ec-h1-first",
+            ),
+        ),
+        (200, text_response("EC_H1_SECOND_COMPLETE", "ec-h1-second")),
+    ]);
+    let config = write_auto_compact_context_window_config(root.path(), &server.base_url, 32_768);
+    let output = run_chat(
+        root.path(),
+        &config,
+        "first automatic context task\n/context\nsecond automatic context task\n/exit\n",
+        &[],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let first_request = request_body(&server.requests.recv().unwrap());
+    let second_request = request_body(&server.requests.recv().unwrap());
+    assert!(server.requests.try_recv().is_err());
+    server.join();
+    assert!(json_contains_text(
+        &first_request["input"],
+        "first automatic context task"
+    ));
+    assert!(json_contains_text(
+        &second_request["input"],
+        "second automatic context task"
+    ));
+    assert!(second_request["previous_response_id"].is_null());
+    assert!(!json_contains_type(&second_request["input"], "reasoning"));
+    assert!(
+        !second_request
+            .to_string()
+            .contains("ec-h1-plaintext-reasoning"),
+        "the completed plaintext reasoning state must clear only after the durable CompactionReset"
+    );
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("Automatic completed-Turn compaction applied"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("CompactionReset Full"), "{stdout}");
+    assert!(stdout.contains("EC_H1_SECOND_COMPLETE"), "{stdout}");
+    assert!(
+        stdout.contains("[context pressure: normal] last model-request planner demand estimate="),
+        "{stdout}"
+    );
+    assert!(stdout.contains("No Compaction is suggested."), "{stdout}");
+
+    let events = session_events(root.path(), &session_id(root.path()));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["event_type"] == "session.compaction_created")
+            .count(),
+        1
+    );
+    let compaction_index = events
+        .iter()
+        .position(|event| event["event_type"] == "session.compaction_created")
+        .unwrap();
+    let second_input_index = events
+        .iter()
+        .position(|event| {
+            event["event_type"] == "session.history_item_recorded"
+                && event["payload"]["item"]["text"] == "second automatic context task"
+        })
+        .unwrap();
+    assert!(compaction_index < second_input_index);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| {
+                event["event_type"] == "session.history_item_recorded"
+                    && event["payload"]["item"]["text"] == "second automatic context task"
+            })
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["event_type"] == "tool.execution_receipt_recorded")
+            .count(),
+        0
+    );
+    let state = reduced_session(&project, &session_id(root.path()));
+    assert_eq!(state.request_audits().len(), 2);
+    assert_eq!(
+        state.request_audits()[1].delivery().reason(),
+        echidna::domain::request_audit::RequestAuditDeliveryReason::Full(
+            echidna::domain::context::BaselineInvalidationReason::CompactionReset
+        )
+    );
+}
+
+#[test]
+fn ec_h1_auto_compact_skips_cancelled_budget_stopped_and_failed_turns() {
+    let cancelled = TemporaryDirectory::new("ec-h1-auto-compact-cancelled");
+    initialize_project(cancelled.path());
+    let cancelled_project = Project::discover(cancelled.path()).unwrap();
+    append_research_snapshot(&cancelled_project, "ec-h1-cancelled");
+    fs::write(
+        cancelled.path().join("personal.md"),
+        "stable prompt constraint ".repeat(16_000),
+    )
+    .unwrap();
+    let cancelled_server = spawn_pending_responses_server();
+    let cancelled_config = write_auto_compact_context_window_config(
+        cancelled.path(),
+        &cancelled_server.base_url,
+        32_768,
+    );
+    fs::write(
+        &cancelled_config,
+        format!(
+            "{}\n[prompts]\npersonal_file = \"personal.md\"\n",
+            fs::read_to_string(&cancelled_config).unwrap()
+        ),
+    )
+    .unwrap();
+    let child = spawn_f2a_chat(
+        cancelled.path(),
+        &cancelled_config,
+        "wait for cancellation\n/exit\n",
+        &[],
+    );
+    cancelled_server
+        .requests
+        .recv_timeout(F2A_WAIT)
+        .expect("the cancellable request reaches the Provider");
+    let signal_status = Command::new("/bin/kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(signal_status.success());
+    let cancelled_output = f2a_wait_child(child, "EC-H1 automatic cancellation");
+    cancelled_server.join();
+    assert!(
+        cancelled_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cancelled_output.stderr)
+    );
+    let cancelled_stdout = String::from_utf8_lossy(&cancelled_output.stdout);
+    assert!(cancelled_stdout.contains("[request cancelled]"));
+    assert!(
+        cancelled_stdout
+            .contains("[context pressure: warning] last model-request planner demand estimate=")
+            || cancelled_stdout.contains(
+                "[context pressure: critical] last model-request planner demand estimate="
+            ),
+        "{cancelled_stdout}"
+    );
+    assert!(
+        !cancelled_stdout.contains("Automatic completed-Turn compaction"),
+        "{cancelled_stdout}"
+    );
+    assert!(
+        session_events(cancelled.path(), &session_id(cancelled.path()))
+            .iter()
+            .all(|event| event["event_type"] != "session.compaction_created")
+    );
+
+    let budget = TemporaryDirectory::new("ec-h1-auto-compact-budget-stop");
+    initialize_project(budget.path());
+    let budget_project = Project::discover(budget.path()).unwrap();
+    append_research_snapshot(&budget_project, "ec-h1-budget");
+    fs::write(
+        budget.path().join("personal.md"),
+        "stable prompt constraint ".repeat(16_000),
+    )
+    .unwrap();
+    let budget_server = spawn_responses_server(vec![(
+        200,
+        concat!(
+            "data: {\"type\":\"response.output_item.done\",\"item\":{",
+            "\"type\":\"function_call\",\"call_id\":\"ec-h1-budget\",",
+            "\"name\":\"research_get\",\"arguments\":\"{}\"}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"ec-h1-budget\"}}\n\n"
+        )
+        .to_owned(),
+    )]);
+    let budget_config =
+        write_auto_compact_context_window_config(budget.path(), &budget_server.base_url, 32_768);
+    fs::write(
+        &budget_config,
+        format!(
+            "{}\nmodel_request_limit_per_turn = 1\n[prompts]\npersonal_file = \"personal.md\"\n",
+            fs::read_to_string(&budget_config).unwrap()
+        ),
+    )
+    .unwrap();
+    let budget_output = run_chat(budget.path(), &budget_config, "read research\n/exit\n", &[]);
+    assert!(
+        !budget_output.status.success(),
+        "a stopped Turn remains unresolved until explicit /resume"
+    );
+    budget_server.requests.recv().unwrap();
+    assert!(budget_server.requests.try_recv().is_err());
+    budget_server.join();
+    assert!(
+        String::from_utf8_lossy(&budget_output.stderr)
+            .contains("per-Turn model-request limit of 1")
+    );
+    let budget_stdout = String::from_utf8_lossy(&budget_output.stdout);
+    assert!(
+        budget_stdout
+            .contains("[context pressure: warning] last model-request planner demand estimate=")
+            || budget_stdout.contains(
+                "[context pressure: critical] last model-request planner demand estimate="
+            ),
+        "{budget_stdout}"
+    );
+    assert!(
+        !budget_stdout.contains("Automatic completed-Turn compaction"),
+        "{budget_stdout}"
+    );
+    assert!(
+        session_events(budget.path(), &session_id(budget.path()))
+            .iter()
+            .all(|event| event["event_type"] != "session.compaction_created")
+    );
+
+    let failed = TemporaryDirectory::new("ec-h1-auto-compact-provider-failure");
+    initialize_project(failed.path());
+    let failed_project = Project::discover(failed.path()).unwrap();
+    append_research_snapshot(&failed_project, "ec-h1-failed");
+    fs::write(
+        failed.path().join("personal.md"),
+        "stable prompt constraint ".repeat(16_000),
+    )
+    .unwrap();
+    let failed_server = spawn_responses_server(vec![(
+        200,
+        concat!(
+            "data: {\"type\":\"response.failed\",\"response\":{\"error\":{",
+            "\"code\":\"fixture_failure\",\"message\":\"ec-h1 provider failure\"}}}\n\n"
+        )
+        .to_owned(),
+    )]);
+    let failed_config =
+        write_auto_compact_context_window_config(failed.path(), &failed_server.base_url, 32_768);
+    fs::write(
+        &failed_config,
+        format!(
+            "{}\n[prompts]\npersonal_file = \"personal.md\"\n",
+            fs::read_to_string(&failed_config).unwrap()
+        ),
+    )
+    .unwrap();
+    let failed_output = run_chat(failed.path(), &failed_config, "fail visibly\n/exit\n", &[]);
+    failed_server.requests.recv().unwrap();
+    assert!(failed_server.requests.try_recv().is_err());
+    failed_server.join();
+    assert!(String::from_utf8_lossy(&failed_output.stderr).contains("ec-h1 provider failure"));
+    let failed_stdout = String::from_utf8_lossy(&failed_output.stdout);
+    assert!(
+        failed_stdout
+            .contains("[context pressure: warning] last model-request planner demand estimate=")
+            || failed_stdout.contains(
+                "[context pressure: critical] last model-request planner demand estimate="
+            ),
+        "{failed_stdout}"
+    );
+    assert!(
+        !failed_stdout.contains("Automatic completed-Turn compaction"),
+        "{failed_stdout}"
+    );
+    assert!(
+        session_events(failed.path(), &session_id(failed.path()))
+            .iter()
+            .all(|event| event["event_type"] != "session.compaction_created")
+    );
+}
+
+#[test]
+fn ec_h1_auto_compact_defers_without_a_target_or_under_low_pressure() {
+    let empty_stream = TemporaryDirectory::new("ec-h1-auto-compact-empty-stream");
+    initialize_project(empty_stream.path());
+    let empty_stream_server = spawn_responses_server(vec![(
+        200,
+        text_response(&"analysis ".repeat(20_000), "ec-h1-empty-stream"),
+    )]);
+    let empty_stream_config = write_auto_compact_context_window_config(
+        empty_stream.path(),
+        &empty_stream_server.base_url,
+        32_768,
+    );
+    let empty_stream_output = run_chat(
+        empty_stream.path(),
+        &empty_stream_config,
+        "completed task with empty research\n/exit\n",
+        &[],
+    );
+    assert!(
+        empty_stream_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&empty_stream_output.stderr)
+    );
+    empty_stream_server.requests.recv().unwrap();
+    assert!(empty_stream_server.requests.try_recv().is_err());
+    empty_stream_server.join();
+    let empty_stream_stdout = String::from_utf8(empty_stream_output.stdout).unwrap();
+    assert!(
+        empty_stream_stdout.contains(
+            "Automatic completed-Turn compaction deferred: the Project Research stream is empty"
+        ),
+        "{empty_stream_stdout}"
+    );
+    assert!(
+        session_events(empty_stream.path(), &session_id(empty_stream.path()))
+            .iter()
+            .all(|event| event["event_type"] != "session.compaction_created")
+    );
+
+    let no_target = TemporaryDirectory::new("ec-h1-auto-compact-no-target");
+    initialize_project(no_target.path());
+    let no_target_project = Project::discover(no_target.path()).unwrap();
+    append_research_event(
+        &no_target_project,
+        "ec-h1-no-target-memory",
+        ResearchEvent::Memory(MemoryEvent::Changed(MemoryRevision {
+            path: MemoryPath::parse("core.md").unwrap(),
+            old_hash: None,
+            new_hash: Some("a".repeat(64)),
+            old_blob_id: None,
+            new_blob_id: Some(BlobId::new("b".repeat(64)).unwrap()),
+            diff_blob_id: Some(BlobId::new("c".repeat(64)).unwrap()),
+        })),
+    );
+    let no_target_server = spawn_responses_server(vec![(
+        200,
+        text_response(&"analysis ".repeat(20_000), "ec-h1-no-target"),
+    )]);
+    let no_target_config = write_auto_compact_context_window_config(
+        no_target.path(),
+        &no_target_server.base_url,
+        32_768,
+    );
+    let no_target_output = run_chat(
+        no_target.path(),
+        &no_target_config,
+        "completed task without target\n/exit\n",
+        &[],
+    );
+    assert!(
+        no_target_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&no_target_output.stderr)
+    );
+    no_target_server.requests.recv().unwrap();
+    assert!(no_target_server.requests.try_recv().is_err());
+    no_target_server.join();
+    let no_target_stdout = String::from_utf8(no_target_output.stdout).unwrap();
+    assert!(
+        no_target_stdout.contains("Automatic completed-Turn compaction deferred: the current Project has no TargetSnapshot"),
+        "{no_target_stdout}"
+    );
+    assert!(
+        session_events(no_target.path(), &session_id(no_target.path()))
+            .iter()
+            .all(|event| event["event_type"] != "session.compaction_created")
+    );
+
+    let low_pressure = TemporaryDirectory::new("ec-h1-auto-compact-low-pressure");
+    initialize_project(low_pressure.path());
+    let low_pressure_project = Project::discover(low_pressure.path()).unwrap();
+    append_research_snapshot(&low_pressure_project, "ec-h1-low-pressure");
+    let low_pressure_server =
+        spawn_responses_server(vec![(200, text_response("small answer", "ec-h1-low"))]);
+    let low_pressure_config = write_auto_compact_context_window_config(
+        low_pressure.path(),
+        &low_pressure_server.base_url,
+        32_768,
+    );
+    let low_pressure_output = run_chat(
+        low_pressure.path(),
+        &low_pressure_config,
+        "completed task with room\n/exit\n",
+        &[],
+    );
+    assert!(
+        low_pressure_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&low_pressure_output.stderr)
+    );
+    low_pressure_server.requests.recv().unwrap();
+    assert!(low_pressure_server.requests.try_recv().is_err());
+    low_pressure_server.join();
+    let low_pressure_stdout = String::from_utf8(low_pressure_output.stdout).unwrap();
+    assert!(!low_pressure_stdout.contains("Automatic completed-Turn compaction"));
+    assert!(
+        session_events(low_pressure.path(), &session_id(low_pressure.path()))
+            .iter()
+            .all(|event| event["event_type"] != "session.compaction_created")
+    );
+
+    let explicit_false = TemporaryDirectory::new("ec-h1-auto-compact-explicit-false");
+    initialize_project(explicit_false.path());
+    let explicit_false_server = spawn_responses_server(vec![(
+        200,
+        text_response(&"analysis ".repeat(20_000), "ec-h1-explicit-false"),
+    )]);
+    let explicit_false_config = write_context_window_config(
+        explicit_false.path(),
+        &explicit_false_server.base_url,
+        32_768,
+    );
+    fs::write(
+        &explicit_false_config,
+        format!(
+            "{}\n[runtime]\nauto_compact = false\n",
+            fs::read_to_string(&explicit_false_config).unwrap()
+        ),
+    )
+    .unwrap();
+    let explicit_false_output = run_chat(
+        explicit_false.path(),
+        &explicit_false_config,
+        "completed task with explicit false\n/exit\n",
+        &[],
+    );
+    assert!(
+        explicit_false_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&explicit_false_output.stderr)
+    );
+    explicit_false_server.requests.recv().unwrap();
+    assert!(explicit_false_server.requests.try_recv().is_err());
+    explicit_false_server.join();
+    let explicit_false_stdout = String::from_utf8(explicit_false_output.stdout).unwrap();
+    assert!(!explicit_false_stdout.contains("Automatic completed-Turn compaction"));
+    assert!(
+        session_events(explicit_false.path(), &session_id(explicit_false.path()))
+            .iter()
+            .all(|event| event["event_type"] != "session.compaction_created")
+    );
+
+    let not_useful = TemporaryDirectory::new("ec-h1-auto-compact-not-useful");
+    initialize_project(not_useful.path());
+    let not_useful_project = Project::discover(not_useful.path()).unwrap();
+    append_research_snapshot(&not_useful_project, "ec-h1-not-useful");
+    fs::write(
+        not_useful.path().join("personal.md"),
+        "stable prompt constraint ".repeat(16_000),
+    )
+    .unwrap();
+    let not_useful_server = spawn_responses_server(vec![(
+        200,
+        text_response("small answer", "ec-h1-not-useful"),
+    )]);
+    let not_useful_config = write_auto_compact_context_window_config(
+        not_useful.path(),
+        &not_useful_server.base_url,
+        32_768,
+    );
+    fs::write(
+        &not_useful_config,
+        format!(
+            "{}\n[prompts]\npersonal_file = \"personal.md\"\n",
+            fs::read_to_string(&not_useful_config).unwrap()
+        ),
+    )
+    .unwrap();
+    let not_useful_output = run_chat(
+        not_useful.path(),
+        &not_useful_config,
+        "completed task with stable prompt pressure\n/exit\n",
+        &[],
+    );
+    assert!(
+        not_useful_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&not_useful_output.stderr)
+    );
+    not_useful_server.requests.recv().unwrap();
+    assert!(not_useful_server.requests.try_recv().is_err());
+    not_useful_server.join();
+    let not_useful_stdout = String::from_utf8(not_useful_output.stdout).unwrap();
+    assert!(
+        not_useful_stdout.contains(
+            "Automatic completed-Turn compaction deferred: no smaller usable next-Turn Context was found"
+        ),
+        "{not_useful_stdout}"
+    );
+    assert!(
+        session_events(not_useful.path(), &session_id(not_useful.path()))
+            .iter()
+            .all(|event| event["event_type"] != "session.compaction_created")
+    );
 }
 
 #[test]

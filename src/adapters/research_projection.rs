@@ -1,6 +1,7 @@
 //! One read-only composition of Research facts with Project Session Receipt facts.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::fs;
 
 use crate::adapters::project_event_store::{
@@ -126,6 +127,28 @@ pub(crate) struct CompactionValidationFacts {
     research_state: ResearchState,
     research_references: ResearchReferenceCatalog,
     execution_receipt_ids: BTreeSet<ExecutionReceiptId>,
+}
+
+/// A missing Research stream is a known non-mutating Compaction prerequisite.
+/// All other loading, integrity and projection failures retain their existing
+/// visible string diagnostics at the CLI boundary.
+#[derive(Debug)]
+pub(crate) enum CompactionValidationFactsError {
+    ResearchStreamEmpty,
+    Projection(String),
+}
+
+impl fmt::Display for CompactionValidationFactsError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ResearchStreamEmpty => write!(
+                formatter,
+                "{}",
+                crate::domain::session::SessionError::CompactionResearchStreamEmpty
+            ),
+            Self::Projection(message) => message.fmt(formatter),
+        }
+    }
 }
 
 impl CompactionValidationFacts {
@@ -533,7 +556,7 @@ pub(crate) fn load_research_projection(
 
 pub(crate) fn load_compaction_validation_facts(
     project: &Project,
-) -> Result<CompactionValidationFacts, String> {
+) -> Result<CompactionValidationFacts, CompactionValidationFactsError> {
     load_compaction_facts_at(project, None)
 }
 
@@ -544,7 +567,8 @@ pub(crate) fn load_historical_compaction_facts(
     project: &Project,
     source: &ResearchStreamIdentity,
 ) -> Result<CompactionValidationFacts, String> {
-    let facts = load_compaction_facts_at(project, Some(source.watermark().get()))?;
+    let facts = load_compaction_facts_at(project, Some(source.watermark().get()))
+        .map_err(|error| error.to_string())?;
     if &facts.research_stream != source {
         return Err(
             "Compaction historical Research prefix identity/hash does not match".to_owned(),
@@ -556,19 +580,27 @@ pub(crate) fn load_historical_compaction_facts(
 fn load_compaction_facts_at(
     project: &Project,
     watermark: Option<u64>,
-) -> Result<CompactionValidationFacts, String> {
-    let (references, execution_receipt_ids) = load_reference_catalog_and_receipt_ids(project)?;
-    let mut events = read_existing_research_events(project).map_err(|error| error.to_string())?;
+) -> Result<CompactionValidationFacts, CompactionValidationFactsError> {
+    let (references, execution_receipt_ids) = load_reference_catalog_and_receipt_ids(project)
+        .map_err(CompactionValidationFactsError::Projection)?;
+    let mut events = read_existing_research_events(project)
+        .map_err(|error| CompactionValidationFactsError::Projection(error.to_string()))?;
     if let Some(watermark) = watermark {
         // Identity validation below checks contiguous sequences and exact hash.
         events.retain(|event| event.sequence.get() <= watermark);
     }
     let research_stream =
-        ResearchStreamIdentity::from_events(project.project_id().clone(), &events)
-            .map_err(|error| error.to_string())?;
+        ResearchStreamIdentity::from_events(project.project_id().clone(), &events).map_err(
+            |error| match error {
+                SessionError::CompactionResearchStreamEmpty => {
+                    CompactionValidationFactsError::ResearchStreamEmpty
+                }
+                error => CompactionValidationFactsError::Projection(error.to_string()),
+            },
+        )?;
     let research_state = ResearchReducer
         .reduce_with_references(events, &references)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| CompactionValidationFactsError::Projection(error.to_string()))?;
     Ok(CompactionValidationFacts {
         project_id: project.project_id().clone(),
         research_stream,

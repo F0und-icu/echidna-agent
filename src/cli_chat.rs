@@ -27,7 +27,7 @@ use crate::adapters::artifact_store::LocalArtifactStore;
 use crate::adapters::fragment_cache::LocalFragmentCache;
 use crate::adapters::project_event_store::{Project, ProjectEventStream};
 use crate::adapters::research_projection::{
-    CompactionValidationFacts, load_compaction_validation_facts,
+    CompactionValidationFacts, CompactionValidationFactsError, load_compaction_validation_facts,
 };
 use crate::adapters::tools::ToolRegistry;
 use crate::app::agent_loop::{
@@ -46,7 +46,7 @@ use crate::domain::request_audit::{
     RequestAuditAttempt, RequestAuditBinding, RequestAuditManifest, RequestAuditRunContext,
 };
 use crate::domain::research_control::{ResearchPhase, ResearchPhaseSelection};
-use crate::domain::session::{SessionEvent, SessionLifecycle, SessionState};
+use crate::domain::session::{SessionError, SessionEvent, SessionLifecycle, SessionState};
 use crate::domain::tools::ToolExecutionOutcome;
 use crate::ports::EventSource;
 use crate::provider_composition::ProviderComposition;
@@ -477,9 +477,49 @@ pub(crate) async fn run(
         };
 
         tool_output.borrow_mut().finish_turn();
+        let mut auto_compacted = false;
         match outcome {
             Ok(AgentTurnOutcome::Completed { .. }) => {
                 println!();
+                if composition.runtime().auto_compact {
+                    let current = context_cache.refresh(&session.project, &tools, composition)?;
+                    agent.refresh_current_context(current)?;
+                    let should_compact = match agent.fresh_compaction_context_probe() {
+                        Ok(Some(plan)) => {
+                            compaction::ContextPressure::from_plan(&plan).should_remind()
+                        }
+                        Ok(None) => true,
+                        Err(error) => return Err(ChatError::Agent(error)),
+                    };
+                    if should_compact {
+                        match session.compact(&mut agent) {
+                            Err(ChatError::CompactionFacts(
+                                CompactionValidationFactsError::ResearchStreamEmpty,
+                            )) => {
+                                println!(
+                                    "Automatic completed-Turn compaction deferred: the Project Research stream is empty; no Compaction was appended and Provider delivery state was retained."
+                                );
+                            }
+                            Ok(summary) => {
+                                println!("{}", summary.automatic_message());
+                                auto_compacted = true;
+                            }
+                            Err(ChatError::Session(
+                                SessionError::CompactionCurrentTargetRequired,
+                            )) => {
+                                println!(
+                                    "Automatic completed-Turn compaction deferred: the current Project has no TargetSnapshot; no Compaction was appended and Provider delivery state was retained."
+                                );
+                            }
+                            Err(ChatError::CompactionNotUseful) => {
+                                println!(
+                                    "Automatic completed-Turn compaction deferred: no smaller usable next-Turn Context was found; no Compaction was appended and Provider delivery state was retained."
+                                );
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    }
+                }
             }
             Ok(AgentTurnOutcome::Cancelled { .. }) => {
                 println!("\n[request cancelled]");
@@ -498,7 +538,7 @@ pub(crate) async fn run(
         if !recovery_required {
             recovery::report_budget(&request_budget);
         }
-        if let Some(plan) = agent.last_context_plan() {
+        if !auto_compacted && let Some(plan) = agent.last_context_plan() {
             let pressure = compaction::ContextPressure::from_plan(plan);
             if pressure.should_remind() {
                 println!("{}", pressure.message());
@@ -605,7 +645,7 @@ impl DurableChatSession {
                 .filter(|compaction| compaction.summary().schema_version() == 2)
             {
                 let facts = load_compaction_validation_facts(&self.project)
-                    .map_err(ChatError::ResearchProjection)?;
+                    .map_err(|error| ChatError::ResearchProjection(error.to_string()))?;
                 match compaction.validate_references(&facts.context()) {
                     Ok(()) => {},
                     Err(crate::domain::session::SessionError::CompactionEvidenceStaleResearchRevision { .. }) => {
@@ -1049,6 +1089,8 @@ pub(crate) enum ChatError {
     Research(#[from] crate::domain::research::ResearchError),
     #[error("Research projection is invalid: {0}")]
     ResearchProjection(String),
+    #[error("Research projection is invalid: {0}")]
+    CompactionFacts(CompactionValidationFactsError),
     #[error(transparent)]
     WorldState(#[from] crate::domain::world_state::WorldStateError),
     #[error("Session `{session_id}` does not exist in the current project")]

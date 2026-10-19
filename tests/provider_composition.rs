@@ -213,6 +213,16 @@ fn request_budget_config_validates_without_credentials_or_vendor_binding() {
 }
 
 #[test]
+fn auto_compact_config_is_optional_boolean_and_does_not_resolve_credentials() {
+    for value in ["false", "true"] {
+        let credentials = Arc::new(RecordingCredentialSource::default());
+        let config = format!("{}\n[runtime]\nauto_compact = {value}\n", valid_config());
+        assert!(load("auto-compact", &config, credentials.clone()).is_ok());
+        assert!(credentials.references().is_empty());
+    }
+}
+
+#[test]
 fn transport_deadline_config_rejects_zero_and_unbounded_values_before_credentials() {
     for field in ["connect_timeout_ms", "read_timeout_ms"] {
         for value in [0, 86_400_001] {

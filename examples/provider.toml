@@ -34,3 +34,6 @@ generation = 1
 
 [runtime]
 model_request_limit_per_turn = 32
+# Disabled by default. When enabled, Chat may compact only after a completed
+# Turn whose fresh next-Turn Context probe has planner pressure.
+auto_compact = false

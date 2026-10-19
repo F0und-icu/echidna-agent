@@ -283,6 +283,13 @@ generation = 1
 能力声明需要匹配实际服务；设置 `image_input = true` 不会让纯文本模型具备图像能力。
 `context_window` 分别填写各模型的真实窗口；`[runtime].model_request_limit_per_turn`
 默认为 `32`，是每轮主模型与视觉模型共享的请求次数上限。
+`[runtime].auto_compact` 默认为 `false`。显式设为 `true` 后，Chat 只会在正常完成的
+Turn 之后，用包含该最终回复的下一 Turn 小探针评估 Planner 压力；达到既有阈值时复用
+耐久压缩流程。成功后下一次 Primary 请求为 `CompactionReset Full`，并清除该已完成
+边界的短暂 Provider 续接状态。探针不代表 Provider 用量，也不保证任意下一条输入可容纳；
+取消、停止、错误和未完成 Turn 不会自动压缩。
+自动压缩沿用目标与研究记录的前提；前提不足或无法减小上下文时会明确暂缓。
+摘要有损，可能省略历史输出和约束；需要长期保留的规则请放入 `prompts.project_file`。
 
 在 Chat 中用 `/image PATH` 选择本地图片。可重复输入该命令；图片按输入顺序排队，下一条普通任务会将整队图片作为同一 Turn 的初始上下文。`primary_direct` 会将每张图片交给主模型，`secondary_tool` 会为每张图片单独保留观察后再请求主模型。后续图片的准备失败、取消或耗尽本轮请求预算时，已保留的图片事实不会丢失，但该任务和队列中的图片不会提交给主模型。队列只存在于当前 Chat 进程；重新启动或 `/resume` 不会自动重放图片处理。
 

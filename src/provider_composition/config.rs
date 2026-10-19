@@ -34,6 +34,7 @@ pub(super) struct ProviderConfigV1 {
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct RuntimeSettings {
     pub(crate) model_request_limit_per_turn: usize,
+    pub(crate) auto_compact: bool,
 }
 
 impl Default for RuntimeSettings {
@@ -41,6 +42,7 @@ impl Default for RuntimeSettings {
         Self {
             model_request_limit_per_turn:
                 crate::app::model_request_budget::DEFAULT_MODEL_REQUEST_LIMIT,
+            auto_compact: false,
         }
     }
 }
