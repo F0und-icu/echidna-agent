@@ -1,11 +1,17 @@
-//! Fixed configured Streamable HTTP MCP tools. The Adapter owns wire DTOs,
+//! Fixed configured HTTP/stdio MCP tools. The Adapter owns wire DTOs,
 //! catalog bounds and header rules; the Tool bridge owns ToolSpec mapping.
 
 mod headers;
 mod protocol;
+#[cfg(unix)]
+mod stdio;
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+#[cfg(unix)]
+use std::sync::{Mutex, Weak};
+use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -15,7 +21,6 @@ use crate::adapters::credentials::CredentialSource;
 
 use self::headers::HeaderBinding;
 pub(crate) use self::protocol::CompletedCall;
-use self::protocol::McpClient;
 
 const MAX_LIST_PAGES: usize = 64;
 const MAX_LIST_TOOLS: usize = 1024;
@@ -38,14 +43,84 @@ impl McpProtocolVersion {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct McpServerConfig {
-    pub(crate) url: String,
+    pub(crate) url: Option<String>,
+    pub(crate) command: Option<PathBuf>,
+    pub(crate) args: Option<Vec<String>>,
+    pub(crate) env: Option<BTreeMap<String, String>>,
+    pub(crate) cwd: Option<PathBuf>,
     pub(crate) protocol_version: McpProtocolVersion,
     pub(crate) credential_ref: Option<String>,
     #[serde(default = "default_timeout_ms")]
     pub(crate) timeout_ms: u64,
+}
+
+impl std::fmt::Debug for McpServerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpServerConfig")
+            .field("stdio", &self.command.is_some())
+            .field("protocol_version", &self.protocol_version)
+            .field("timeout_ms", &self.timeout_ms)
+            .finish_non_exhaustive()
+    }
+}
+
+impl McpServerConfig {
+    pub(crate) fn resolve_relative_to(&mut self, parent: &Path) {
+        if let Some(command) = &mut self.command {
+            if !command.as_os_str().is_empty()
+                && command.is_relative()
+                && (command.as_os_str().as_encoded_bytes().contains(&b'/')
+                    || !matches!(
+                        command.components().next(),
+                        Some(std::path::Component::Normal(_))
+                    ))
+            {
+                *command = parent.join(&*command);
+            }
+            let cwd = self.cwd.get_or_insert_with(|| parent.to_path_buf());
+            if !cwd.as_os_str().is_empty() && cwd.is_relative() {
+                *cwd = parent.join(&*cwd);
+            }
+        }
+    }
+}
+
+enum McpClient {
+    Http(protocol::McpClient),
+    #[cfg(unix)]
+    Stdio(Arc<stdio::StdioClient>),
+}
+
+impl McpClient {
+    async fn initialize(&self) -> Result<(), McpError> {
+        match self {
+            Self::Http(client) => client.initialize().await,
+            #[cfg(unix)]
+            Self::Stdio(client) => client.initialize().await,
+        }
+    }
+    async fn list_tools(&self, cursor: Option<&str>) -> Result<Value, McpError> {
+        match self {
+            Self::Http(client) => client.list_tools(cursor).await,
+            #[cfg(unix)]
+            Self::Stdio(client) => client.list_tools(cursor).await,
+        }
+    }
+    async fn call(
+        &self,
+        name: &str,
+        arguments: Value,
+        headers: &[HeaderBinding],
+    ) -> Result<CompletedCall, McpError> {
+        match self {
+            Self::Http(client) => client.call(name, arguments, headers).await,
+            #[cfg(unix)]
+            Self::Stdio(client) => client.call(name, arguments).await,
+        }
+    }
 }
 
 const fn default_timeout_ms() -> u64 {
@@ -55,6 +130,8 @@ const fn default_timeout_ms() -> u64 {
 pub(crate) struct McpRuntime {
     servers: BTreeMap<String, McpServerConfig>,
     credentials: Arc<dyn CredentialSource>,
+    #[cfg(unix)]
+    stdio_clients: Mutex<Vec<Weak<stdio::StdioClient>>>,
 }
 
 impl McpRuntime {
@@ -65,39 +142,87 @@ impl McpRuntime {
         Self {
             servers,
             credentials,
+            #[cfg(unix)]
+            stdio_clients: Mutex::new(Vec::new()),
         }
     }
 
     pub(crate) async fn discover(&self) -> Result<Vec<McpCatalogTool>, McpError> {
         let mut tools = Vec::new();
         for (server_id, config) in &self.servers {
-            let bearer = config
-                .credential_ref
-                .as_deref()
-                .map(|reference| {
-                    self.credentials
-                        .read(reference)
-                        .map_err(|error| McpError::Credential {
-                            server_id: server_id.clone(),
-                            message: error.to_string(),
-                        })?
-                        .filter(|value| !value.trim().is_empty())
-                        .ok_or_else(|| McpError::Credential {
-                            server_id: server_id.clone(),
-                            message: "configured MCP credential is unavailable".to_owned(),
-                        })
-                })
-                .transpose()?;
-            let client = Arc::new(McpClient::new(
-                config.url.clone(),
-                config.protocol_version,
-                config.timeout_ms,
-                bearer,
-            )?);
-            client.initialize().await?;
-            tools.extend(discover_server(server_id, config, client).await?);
+            let (client, endpoint) = if let Some(url) = &config.url {
+                let bearer = config
+                    .credential_ref
+                    .as_deref()
+                    .map(|reference| {
+                        self.credentials
+                            .read(reference)
+                            .map_err(|error| McpError::Credential {
+                                server_id: server_id.clone(),
+                                message: error.to_string(),
+                            })?
+                            .filter(|value| !value.trim().is_empty())
+                            .ok_or_else(|| McpError::Credential {
+                                server_id: server_id.clone(),
+                                message: "configured MCP credential is unavailable".to_owned(),
+                            })
+                    })
+                    .transpose()?;
+                let client = McpClient::Http(protocol::McpClient::new(
+                    url.clone(),
+                    config.protocol_version,
+                    config.timeout_ms,
+                    bearer,
+                )?);
+                (client, url.clone())
+            } else {
+                #[cfg(unix)]
+                {
+                    let client = Arc::new(stdio::StdioClient::start(config)?);
+                    self.stdio_clients
+                        .lock()
+                        .expect("MCP lifecycle mutex poisoned")
+                        .push(Arc::downgrade(&client));
+                    let endpoint = client.identity().to_owned();
+                    (McpClient::Stdio(client), endpoint)
+                }
+                #[cfg(not(unix))]
+                return Err(McpError::Catalog {
+                    message: "stdio MCP requires Unix".to_owned(),
+                });
+            };
+            let client = Arc::new(client);
+            let discovery = async {
+                client.initialize().await?;
+                discover_server(server_id, config, endpoint, Arc::clone(&client)).await
+            };
+            let discovered = if config.command.is_some() {
+                tokio::time::timeout(Duration::from_millis(config.timeout_ms), discovery)
+                    .await
+                    .map_err(|_| McpError::Catalog {
+                        message: format!("MCP server `{server_id}` startup timed out"),
+                    })??
+            } else {
+                discovery.await?
+            };
+            tools.extend(discovered);
         }
         Ok(tools)
+    }
+}
+
+impl Drop for McpRuntime {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        for client in self
+            .stdio_clients
+            .get_mut()
+            .expect("MCP lifecycle mutex poisoned")
+            .iter()
+            .filter_map(Weak::upgrade)
+        {
+            client.shutdown();
+        }
     }
 }
 
@@ -125,6 +250,7 @@ impl McpCatalogTool {
 async fn discover_server(
     server_id: &str,
     config: &McpServerConfig,
+    endpoint: String,
     client: Arc<McpClient>,
 ) -> Result<Vec<McpCatalogTool>, McpError> {
     let mut cursor = None;
@@ -202,7 +328,7 @@ async fn discover_server(
             };
             tools.push(McpCatalogTool {
                 server_id: server_id.to_owned(),
-                endpoint: config.url.clone(),
+                endpoint: endpoint.clone(),
                 protocol_version: config.protocol_version,
                 remote_name: remote_name.to_owned(),
                 definition: definition.clone(),

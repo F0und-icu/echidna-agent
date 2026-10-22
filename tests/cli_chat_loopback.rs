@@ -1,9 +1,15 @@
 #[path = "cli_chat_cases/agent_definitions.rs"]
 mod agent_definitions;
+#[path = "cli_chat_cases/agent_evolution.rs"]
+mod agent_evolution;
 #[path = "cli_chat_cases/argument_regeneration.rs"]
 mod argument_regeneration;
+#[path = "cli_chat_cases/automatic_compaction.rs"]
+mod automatic_compaction;
 #[path = "cli_chat_cases/command_diagnostics.rs"]
 mod command_diagnostics;
+#[path = "cli_chat_cases/core_memory_continuation.rs"]
+mod core_memory_continuation;
 #[path = "cli_chat_cases/ctf_child_checkpoint.rs"]
 mod ctf_child_checkpoint;
 #[path = "cli_chat_cases/ctf_context.rs"]
@@ -41,6 +47,10 @@ mod support;
 mod tool_activation_continuation;
 #[path = "cli_chat_cases/tool_argument_integrity.rs"]
 mod tool_argument_integrity;
+#[path = "cli_chat_cases/transport.rs"]
+mod transport;
+#[path = "cli_chat_cases/window_budgets.rs"]
+mod window_budgets;
 
 #[test]
 fn final_text_integrity_reaches_cli_and_history_without_committing_conflicts() {
@@ -225,11 +235,23 @@ impl LoopbackServer {
 }
 
 fn spawn_responses_server(responses: Vec<(u16, String)>) -> LoopbackServer {
+    spawn_responses_server_with_lengths(
+        responses
+            .into_iter()
+            .map(|(status, body)| {
+                let length = body.len();
+                (status, body, length)
+            })
+            .collect(),
+    )
+}
+
+fn spawn_responses_server_with_lengths(responses: Vec<(u16, String, usize)>) -> LoopbackServer {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let (sender, receiver) = mpsc::channel();
     let thread = thread::spawn(move || {
-        for (status, body) in responses {
+        for (status, body, length) in responses {
             let (mut socket, _) = listener.accept().unwrap();
             socket
                 .set_read_timeout(Some(Duration::from_secs(5)))
@@ -239,7 +261,7 @@ fn spawn_responses_server(responses: Vec<(u16, String)>) -> LoopbackServer {
             let reason = if status == 200 { "OK" } else { "Error" };
             let headers = format!(
                 "HTTP/1.1 {status} {reason}\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
+                length
             );
             socket.write_all(headers.as_bytes()).unwrap();
             socket.write_all(body.as_bytes()).unwrap();
@@ -626,7 +648,7 @@ fn session_id(project: &std::path::Path) -> String {
 }
 
 fn session_ids(project: &std::path::Path) -> Vec<String> {
-    let sessions = project.join(".cyber-agent/sessions");
+    let sessions = project.join(".echidna/sessions");
     let mut entries = fs::read_dir(sessions)
         .unwrap()
         .map(|entry| entry.unwrap().file_name().into_string().unwrap())
@@ -648,7 +670,7 @@ fn assert_session_id_binds_process(session: &str, process_id: u32) {
 fn session_events(project: &std::path::Path, session: &str) -> Vec<Value> {
     fs::read_to_string(
         project
-            .join(".cyber-agent/sessions")
+            .join(".echidna/sessions")
             .join(session)
             .join("events.jsonl"),
     )
@@ -1028,7 +1050,7 @@ fn assert_audits_reconstruct(project_root: &std::path::Path, state: &SessionStat
             .reconstruct(|blob| {
                 fs::read(
                     project_root
-                        .join(".cyber-agent/artifacts/blobs/sha256")
+                        .join(".echidna/artifacts/blobs/sha256")
                         .join(blob.as_str()),
                 )
             })
@@ -1149,7 +1171,7 @@ fn f2a_secondary_cli_image_is_observed_before_primary_tool_loop_and_remains_audi
             .reconstruct(|blob| {
                 fs::read(
                     root.path()
-                        .join(".cyber-agent/artifacts/blobs/sha256")
+                        .join(".echidna/artifacts/blobs/sha256")
                         .join(blob.as_str()),
                 )
             })
@@ -1172,7 +1194,7 @@ fn f2a_secondary_cli_image_is_observed_before_primary_tool_loop_and_remains_audi
             .count(),
         5
     );
-    let research = fs::read_to_string(root.path().join(".cyber-agent/research.jsonl")).unwrap();
+    let research = fs::read_to_string(root.path().join(".echidna/research.jsonl")).unwrap();
     assert!(research.contains(current_target.as_str()));
     assert!(!research.contains("finding.recorded"));
 }
@@ -2657,7 +2679,7 @@ fn changed_historical_research_prefix_is_rejected_before_resume() {
     let bound = append_research_snapshot(&project, "bound");
     append_v2_compaction(&project, &session, bound);
     append_research_snapshot(&project, "newer");
-    let research_path = root.path().join(".cyber-agent/research.jsonl");
+    let research_path = root.path().join(".echidna/research.jsonl");
     let contents = fs::read_to_string(&research_path).unwrap();
     let mut lines = contents
         .lines()
@@ -2723,7 +2745,7 @@ fn inline_api_key_drives_loopback_chat_without_entering_output_or_project_facts(
         format!("Bearer {INLINE_API_KEY_FIXTURE}")
     );
     assert_tree_does_not_contain(
-        &project.path().join(".cyber-agent"),
+        &project.path().join(".echidna"),
         INLINE_API_KEY_FIXTURE.as_bytes(),
     );
 }
@@ -2856,7 +2878,7 @@ fn chat_loopback_streams_text_and_persists_started_history_audit_and_explicit_re
     assert!(
         project
             .path()
-            .join(".cyber-agent/artifacts/blobs/sha256")
+            .join(".echidna/artifacts/blobs/sha256")
             .is_dir()
     );
 }
@@ -4596,7 +4618,7 @@ fn chat_runtime_lease_rejects_a_second_process_for_the_same_project() {
     assert!(!second.status.success());
     assert!(String::from_utf8_lossy(&second.stderr).contains("Chat runtime is already active"));
     assert_eq!(
-        fs::read_dir(project.path().join(".cyber-agent/sessions"))
+        fs::read_dir(project.path().join(".echidna/sessions"))
             .unwrap()
             .count(),
         1,
@@ -4749,12 +4771,8 @@ mod f3_context {
         fs::create_dir_all(&prompts).unwrap();
         fs::write(prompts.join("personal.md"), "F3 personal prompt v1\n").unwrap();
         fs::write(prompts.join("project.md"), "F3 project prompt fixed\n").unwrap();
-        fs::create_dir_all(root.join(".cyber-agent/memory")).unwrap();
-        fs::write(
-            root.join(".cyber-agent/memory/core.md"),
-            "F3 core memory v1\n",
-        )
-        .unwrap();
+        fs::create_dir_all(root.join(".echidna/memory")).unwrap();
+        fs::write(root.join(".echidna/memory/core.md"), "F3 core memory v1\n").unwrap();
 
         let config = write_config(root, base_url);
         let mut content = fs::read_to_string(&config).unwrap();
@@ -4913,7 +4931,7 @@ mod f3_context {
         )
         .unwrap();
         fs::write(
-            root.path().join(".cyber-agent/memory/core.md"),
+            root.path().join(".echidna/memory/core.md"),
             "F3 core memory v2\n",
         )
         .unwrap();

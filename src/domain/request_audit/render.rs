@@ -113,6 +113,7 @@ impl RenderedRequestAudit {
             1
         };
         let manifest = RequestAuditManifest {
+            improvement_scope: self.attempt.improvement_scope,
             schema_version,
             audit_event_id,
             binding: self.attempt.binding,

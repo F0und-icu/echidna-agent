@@ -397,7 +397,7 @@ fn fixture_project(label: &str) -> (TemporaryDirectory, Project) {
         "target-binary",
         "native/JNI_OnLoad.bin",
     );
-    let memory = project.root().join(".cyber-agent/memory/notes");
+    let memory = project.root().join(".echidna/memory/notes");
     fs::create_dir_all(&memory).unwrap();
     fs::write(
         memory.join("security.md"),
@@ -447,7 +447,7 @@ fn deterministic_shadow_meets_controlled_identifier_cjk_and_typo_contract_withou
     let (directory, project) = fixture_project("m4-s3f-controlled");
     let fixture: QueryFixture =
         serde_json::from_str(include_str!("fixtures/m4_retrieval/queries.json")).unwrap();
-    let before = tree_bytes(project.root().join(".cyber-agent").as_path());
+    let before = tree_bytes(project.root().join(".echidna").as_path());
     let mut recalled = 0_usize;
     let mut returned = 0_usize;
     let mut relevant_returned = 0_usize;
@@ -541,7 +541,7 @@ fn deterministic_shadow_meets_controlled_identifier_cjk_and_typo_contract_withou
         "controlled precision@10 must remain at least 0.60"
     );
     assert_eq!(
-        tree_bytes(project.root().join(".cyber-agent").as_path()),
+        tree_bytes(project.root().join(".echidna").as_path()),
         before,
         "Shadow must not mutate facts, cache, session, Research, or Memory"
     );
@@ -609,7 +609,7 @@ fn current_target_filters_old_and_cross_project_facts_and_artifact_metadata_with
             .iter()
             .any(|result| result["id"] == "research:finding:finding-other-project")
     );
-    assert!(!project.root().join(".cyber-agent/artifacts/blobs").exists());
+    assert!(!project.root().join(".echidna/artifacts/blobs").exists());
 }
 
 #[test]
@@ -636,9 +636,7 @@ fn mixed_exact_queries_keep_explanations_and_report_true_rrf_rank_before_tier_re
     assert!(mixed_ids.contains(&"research:hypothesis:hypothesis-explanation"));
 
     fs::write(
-        project
-            .root()
-            .join(".cyber-agent/memory/notes/mixed-tier.md"),
+        project.root().join(".echidna/memory/notes/mixed-tier.md"),
         "# Mixed tier\nCVE-2026-5151\n",
     )
     .unwrap();
@@ -674,9 +672,7 @@ fn mixed_exact_queries_keep_explanations_and_report_true_rrf_rank_before_tier_re
         "CVE-2026-4242",
     );
     fs::write(
-        project
-            .root()
-            .join(".cyber-agent/memory/notes/tier-rank.md"),
+        project.root().join(".echidna/memory/notes/tier-rank.md"),
         "# Tier rank\nCVE-2026-4242\n",
     )
     .unwrap();
@@ -709,12 +705,12 @@ fn production_results_are_top_ten_and_core_memory_is_not_a_retrieval_candidate()
         .map(|index| format!("# Candidate {index}\nCVE-2026-9999\n"))
         .collect::<String>();
     fs::write(
-        project.root().join(".cyber-agent/memory/notes/top-ten.md"),
+        project.root().join(".echidna/memory/notes/top-ten.md"),
         sections,
     )
     .unwrap();
     fs::write(
-        project.root().join(".cyber-agent/memory/core.md"),
+        project.root().join(".echidna/memory/core.md"),
         "CVE-2099-0001 must remain in always-injected core Memory only\n",
     )
     .unwrap();
@@ -772,7 +768,7 @@ fn memory_quota_project(label: &str) -> (TemporaryDirectory, Project) {
         "1",
         TargetKind::Source,
     );
-    let notes = project.root().join(".cyber-agent/memory/notes");
+    let notes = project.root().join(".echidna/memory/notes");
     fs::create_dir_all(&notes).unwrap();
     // Reverse creation order proves selection uses sorted names, not directory order.
     for index in (0..65).rev() {
@@ -798,7 +794,7 @@ fn memory_document_quota_counts_present_files_including_empty_but_not_missing() 
         [Some(""), Some("")],
     ] {
         let (directory, project) = memory_quota_project("r5c2-present-documents");
-        let memory = project.root().join(".cyber-agent/memory");
+        let memory = project.root().join(".echidna/memory");
         for (name, content) in ["decisions.md", "failed-paths.md"].into_iter().zip(fixed) {
             if let Some(content) = content {
                 fs::write(memory.join(name), content).unwrap();
@@ -817,7 +813,7 @@ fn memory_document_quota_counts_present_files_including_empty_but_not_missing() 
             vec![0xff; 65 * 1024],
         )
         .unwrap();
-        let before = tree_bytes(&project.root().join(".cyber-agent"));
+        let before = tree_bytes(&project.root().join(".echidna"));
         let args = command(&format!("symbol_{last_note:04}"), "quota-target");
         let report = run(&directory, &args);
         assert_eq!(report["report"]["queried_candidate_count"], 65 - empty);
@@ -839,7 +835,7 @@ fn memory_document_quota_counts_present_files_including_empty_but_not_missing() 
                 .values()
                 .all(|value| value == 0)
         );
-        assert_eq!(tree_bytes(&project.root().join(".cyber-agent")), before);
+        assert_eq!(tree_bytes(&project.root().join(".echidna")), before);
     }
 }
 
@@ -861,11 +857,11 @@ fn memory_document_quota_preserves_selected_content_and_fixed_path_errors() {
     ] {
         let (directory, project) = memory_quota_project("r5c2-invalid-selected-document");
         fs::write(
-            project.root().join(".cyber-agent/memory").join(relative),
+            project.root().join(".echidna/memory").join(relative),
             content,
         )
         .unwrap();
-        let before = tree_bytes(&project.root().join(".cyber-agent"));
+        let before = tree_bytes(&project.root().join(".echidna"));
         let output = Command::new(env!("CARGO_BIN_EXE_echidna"))
             .current_dir(directory.path())
             .args(command("symbol_0063", "quota-target"))
@@ -880,7 +876,7 @@ fn memory_document_quota_preserves_selected_content_and_fixed_path_errors() {
             "{:?}",
             output.stderr
         );
-        assert_eq!(tree_bytes(&project.root().join(".cyber-agent")), before);
+        assert_eq!(tree_bytes(&project.root().join(".echidna")), before);
     }
 }
 
@@ -900,7 +896,7 @@ fn memory_document_quota_preserves_path_rejections() {
         ("failed-paths.md", "symlink", "must not be a symlink"),
     ] {
         let (directory, project) = memory_quota_project("r5c2-invalid-note-entry");
-        let memory = project.root().join(".cyber-agent/memory");
+        let memory = project.root().join(".echidna/memory");
         let path = memory.join(name);
         match kind {
             "directory" => fs::create_dir(path).unwrap(),
@@ -911,7 +907,7 @@ fn memory_document_quota_preserves_path_rejections() {
             }
             _ => unreachable!("fixed fixture entry kind"),
         }
-        let before = tree_bytes(&project.root().join(".cyber-agent"));
+        let before = tree_bytes(&project.root().join(".echidna"));
         let output = Command::new(env!("CARGO_BIN_EXE_echidna"))
             .current_dir(directory.path())
             .args(command("symbol_0000", "quota-target"))
@@ -923,7 +919,7 @@ fn memory_document_quota_preserves_path_rejections() {
             "{:?}",
             output.stderr
         );
-        assert_eq!(tree_bytes(&project.root().join(".cyber-agent")), before);
+        assert_eq!(tree_bytes(&project.root().join(".echidna")), before);
     }
 }
 
@@ -932,7 +928,7 @@ fn lexical_ranking_preserves_per_field_deduplication_weights_and_stable_ties() {
     let directory = TemporaryDirectory::new("r6-query-field-terms");
     let project = Project::initialize(directory.path()).unwrap();
     target(&project, "terms-target", "fixture", "1", TargetKind::Source);
-    let notes = project.root().join(".cyber-agent/memory/notes");
+    let notes = project.root().join(".echidna/memory/notes");
     fs::create_dir_all(&notes).unwrap();
     for (name, body) in [
         ("a.md", "# amber\nquartz quartz quartz\n"),
@@ -941,7 +937,7 @@ fn lexical_ranking_preserves_per_field_deduplication_weights_and_stable_ties() {
     ] {
         fs::write(notes.join(name), body).unwrap();
     }
-    let before = tree_bytes(&project.root().join(".cyber-agent"));
+    let before = tree_bytes(&project.root().join(".echidna"));
     let args = command("quartz", "terms-target");
     let report = run(&directory, &args);
     let results = report["report"]["results"].as_array().unwrap();
@@ -957,7 +953,7 @@ fn lexical_ranking_preserves_per_field_deduplication_weights_and_stable_ties() {
         assert_eq!(result["component_ranks"]["exact_identifier"], Value::Null);
     }
     assert_eq!(report, run(&directory, &args));
-    assert_eq!(tree_bytes(&project.root().join(".cyber-agent")), before);
+    assert_eq!(tree_bytes(&project.root().join(".echidna")), before);
 }
 
 #[test]
@@ -965,7 +961,7 @@ fn lexical_field_term_limit_and_later_query_refresh_remain_independent() {
     let directory = TemporaryDirectory::new("r6-query-term-boundary");
     let project = Project::initialize(directory.path()).unwrap();
     target(&project, "terms-target", "fixture", "1", TargetKind::Source);
-    let notes = project.root().join(".cyber-agent/memory/notes");
+    let notes = project.root().join(".echidna/memory/notes");
     fs::create_dir_all(&notes).unwrap();
     let terms = (0..256).map(|i| format!("word{i:04} ")).collect::<String>();
     let path = notes.join("boundary.md");
@@ -986,7 +982,7 @@ fn lexical_field_term_limit_and_later_query_refresh_remain_independent() {
 
     // A later invocation observes current bytes, not persisted query data.
     fs::write(&path, "# amber\nquartz\n").unwrap();
-    let before = tree_bytes(&project.root().join(".cyber-agent"));
+    let before = tree_bytes(&project.root().join(".echidna"));
     let second = run(&directory, &args);
     assert_eq!(
         second["report"]["results"][0]["matched_fields"],
@@ -1003,7 +999,7 @@ fn lexical_field_term_limit_and_later_query_refresh_remain_independent() {
             .is_empty()
     );
     assert_eq!(second, run(&directory, &args));
-    assert_eq!(tree_bytes(&project.root().join(".cyber-agent")), before);
+    assert_eq!(tree_bytes(&project.root().join(".echidna")), before);
 }
 
 #[test]

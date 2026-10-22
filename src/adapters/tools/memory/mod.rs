@@ -47,6 +47,7 @@ struct MemoryWriteArgs {
 
 pub(super) fn normalize_read(
     project_root: &Path,
+    control_directory: &str,
     scope: &MemoryScope,
     value: Value,
 ) -> Result<(Value, Vec<ResourceKey>), ToolExecutorError> {
@@ -55,12 +56,13 @@ pub(super) fn normalize_read(
     require_event_id("memory_read", &arguments.event_id)?;
     Ok((
         serde_json::to_value(&arguments).expect("MemoryReadArgs serialization cannot fail"),
-        memory_resources(project_root, scope, &path),
+        memory_resources(project_root, control_directory, scope, &path),
     ))
 }
 
 pub(super) fn normalize_write(
     project_root: &Path,
+    control_directory: &str,
     scope: &MemoryScope,
     value: Value,
 ) -> Result<(Value, Vec<ResourceKey>), ToolExecutorError> {
@@ -70,7 +72,7 @@ pub(super) fn normalize_write(
     validate_expected_hash("memory_write", arguments.expected_hash.as_deref())?;
     Ok((
         serde_json::to_value(&arguments).expect("MemoryWriteArgs serialization cannot fail"),
-        memory_resources(project_root, scope, &path),
+        memory_resources(project_root, control_directory, scope, &path),
     ))
 }
 
@@ -78,6 +80,7 @@ pub(super) async fn execute_read(
     project_root: &Path,
     scope: &MemoryScope,
     plan: ToolExecutionPlan,
+    core_byte_limit: usize,
 ) -> ToolExecutionOutcome {
     let arguments: MemoryReadArgs =
         match decode_arguments("memory_read", plan.call.arguments.clone()) {
@@ -120,6 +123,11 @@ pub(super) async fn execute_read(
         Ok(document) => document,
         Err(error) => return memory_failure(plan, "memory_read_failed", error),
     };
+    if let Some(content) = &document.content
+        && let Err(error) = validate_core_tool_limit(&path, content, core_byte_limit)
+    {
+        return memory_failure(plan, "memory_read_failed", error);
+    }
     let external_event = match external_revision(&path, scope, &document, &memory_state, &project) {
         Ok(event) => event,
         Err(error) => return memory_failure(plan, "memory_revision_unavailable", error),
@@ -159,6 +167,7 @@ pub(super) async fn execute_write(
     project_root: &Path,
     scope: &MemoryScope,
     plan: ToolExecutionPlan,
+    core_byte_limit: usize,
 ) -> ToolExecutionOutcome {
     let arguments: MemoryWriteArgs =
         match decode_arguments("memory_write", plan.call.arguments.clone()) {
@@ -173,6 +182,9 @@ pub(super) async fn execute_write(
         .and_then(|()| validate_expected_hash("memory_write", arguments.expected_hash.as_deref()))
     {
         return invalid_plan(plan, error);
+    }
+    if let Err(error) = validate_core_tool_limit(&path, &arguments.content, core_byte_limit) {
+        return memory_failure(plan, "memory_content_too_large", error);
     }
     let occurred_at = match super::operation_time::current_utc() {
         Ok(occurred_at) => occurred_at,
@@ -301,17 +313,17 @@ pub(super) async fn execute_write(
 
 fn memory_resources(
     project_root: &Path,
+    control_directory: &str,
     scope: &MemoryScope,
     path: &MemoryPath,
 ) -> Vec<ResourceKey> {
     let resolver = ResourceKeyResolver::new(project_root);
     vec![
-        resolver.file(&format!(
-            ".cyber-agent/{}/{}",
-            scope.storage_directory(),
-            path.as_str()
-        )),
-        resolver.file(".cyber-agent/research.jsonl"),
+        resolver.project_file(
+            control_directory,
+            &format!("{}/{}", scope.storage_directory(), path.as_str()),
+        ),
+        resolver.project_file(control_directory, "research.jsonl"),
     ]
 }
 
@@ -534,12 +546,23 @@ fn memory_failure(
     )
 }
 
+fn validate_core_tool_limit(path: &MemoryPath, content: &str, limit: usize) -> Result<(), String> {
+    if path.as_str() == "core.md" && content.len() > limit {
+        Err(format!(
+            "core.md has {} UTF-8 bytes; active Tool limit is {limit}",
+            content.len()
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 pub(super) fn read_input_schema() -> Value {
     schema::read_input_schema()
 }
 
-pub(super) fn write_input_schema() -> Value {
-    schema::write_input_schema()
+pub(super) fn write_input_schema(core_byte_limit: usize) -> Value {
+    schema::write_input_schema(core_byte_limit)
 }
 
 pub(super) fn output_schema() -> Value {

@@ -81,7 +81,7 @@ async fn memory_write_is_cas_protected_and_external_edits_are_audited_with_blobs
         .unwrap()
         .to_owned();
     assert_eq!(
-        fs::read_to_string(project.root().join(".cyber-agent/memory/core.md")).unwrap(),
+        fs::read_to_string(project.root().join(".echidna/memory/core.md")).unwrap(),
         "# Target\nfixture\n"
     );
     assert_eq!(
@@ -94,7 +94,7 @@ async fn memory_write_is_cas_protected_and_external_edits_are_audited_with_blobs
     assert_eq!(created.result.output["old_hash"], Value::Null);
     assert_eq!(created.result.output["new_hash"], initial_hash);
     let initial_event: Value = serde_json::from_str(
-        fs::read_to_string(project.root().join(".cyber-agent/research.jsonl"))
+        fs::read_to_string(project.root().join(".echidna/research.jsonl"))
             .unwrap()
             .lines()
             .next()
@@ -107,7 +107,7 @@ async fn memory_write_is_cas_protected_and_external_edits_are_audited_with_blobs
             .as_str()
             .is_some_and(|occurred_at| occurred_at.starts_with("unix:"))
     );
-    let blob_root = project.root().join(".cyber-agent/artifacts/blobs/sha256");
+    let blob_root = project.root().join(".echidna/artifacts/blobs/sha256");
     assert_eq!(
         fs::read_to_string(blob_root.join(revision["new_blob_id"].as_str().unwrap())).unwrap(),
         "# Target\nfixture\n"
@@ -134,7 +134,7 @@ async fn memory_write_is_cas_protected_and_external_edits_are_audited_with_blobs
     assert_eq!(unchanged.result.output["event_appended"], false);
     assert_eq!(fs::read_dir(&blob_root).unwrap().count(), blob_count);
     assert_eq!(
-        fs::read_to_string(project.root().join(".cyber-agent/research.jsonl"))
+        fs::read_to_string(project.root().join(".echidna/research.jsonl"))
             .unwrap()
             .lines()
             .count(),
@@ -159,7 +159,7 @@ async fn memory_write_is_cas_protected_and_external_edits_are_audited_with_blobs
         Some("memory_event_id_duplicate")
     );
     assert_eq!(
-        fs::read_to_string(project.root().join(".cyber-agent/memory/core.md")).unwrap(),
+        fs::read_to_string(project.root().join(".echidna/memory/core.md")).unwrap(),
         "# Target\nfixture\n"
     );
 
@@ -181,12 +181,12 @@ async fn memory_write_is_cas_protected_and_external_edits_are_audited_with_blobs
         Some("memory_expected_hash_mismatch")
     );
     assert_eq!(
-        fs::read_to_string(project.root().join(".cyber-agent/memory/core.md")).unwrap(),
+        fs::read_to_string(project.root().join(".echidna/memory/core.md")).unwrap(),
         "# Target\nfixture\n"
     );
 
     fs::write(
-        project.root().join(".cyber-agent/memory/core.md"),
+        project.root().join(".echidna/memory/core.md"),
         "# Target\nexternal editor\n",
     )
     .unwrap();
@@ -217,10 +217,10 @@ async fn memory_write_is_cas_protected_and_external_edits_are_audited_with_blobs
         Some("memory_expected_hash_mismatch")
     );
     assert_eq!(
-        fs::read_to_string(project.root().join(".cyber-agent/memory/core.md")).unwrap(),
+        fs::read_to_string(project.root().join(".echidna/memory/core.md")).unwrap(),
         "# Target\nexternal editor\n"
     );
-    let stream = fs::read_to_string(project.root().join(".cyber-agent/research.jsonl")).unwrap();
+    let stream = fs::read_to_string(project.root().join(".echidna/research.jsonl")).unwrap();
     assert!(stream.contains("memory.changed"));
     assert!(stream.contains("memory.external_change_detected"));
     assert!(stream.contains("diff_blob_id"));
@@ -243,24 +243,20 @@ async fn core_memory_enforces_its_bounded_context_contract_before_blob_or_event_
         rejected.receipt.exit_reason.as_deref(),
         Some("memory_content_too_large")
     );
-    assert!(!project.root().join(".cyber-agent/memory/core.md").exists());
+    assert!(!project.root().join(".echidna/memory/core.md").exists());
     assert!(
         !project
             .root()
-            .join(".cyber-agent/artifacts/blobs/sha256")
+            .join(".echidna/artifacts/blobs/sha256")
             .exists()
     );
     assert_eq!(
-        fs::read_to_string(project.root().join(".cyber-agent/research.jsonl")).unwrap(),
+        fs::read_to_string(project.root().join(".echidna/research.jsonl")).unwrap(),
         ""
     );
 
-    fs::create_dir_all(project.root().join(".cyber-agent/memory")).unwrap();
-    fs::write(
-        project.root().join(".cyber-agent/memory/core.md"),
-        &oversized,
-    )
-    .unwrap();
+    fs::create_dir_all(project.root().join(".echidna/memory")).unwrap();
+    fs::write(project.root().join(".echidna/memory/core.md"), &oversized).unwrap();
     let external = execute(
         &tools,
         "memory-core-external-oversized",
@@ -274,7 +270,7 @@ async fn core_memory_enforces_its_bounded_context_contract_before_blob_or_event_
         Some("memory_read_failed")
     );
     assert_eq!(
-        fs::read_to_string(project.root().join(".cyber-agent/research.jsonl")).unwrap(),
+        fs::read_to_string(project.root().join(".echidna/research.jsonl")).unwrap(),
         ""
     );
 
@@ -327,7 +323,7 @@ async fn memory_paths_are_confined_and_research_replay_strictly_accepts_typed_me
     assert_eq!(research.result.status, ToolResultStatus::Succeeded);
     assert_eq!(research.result.output["stream_event_count"], 1);
 
-    let stream = project.root().join(".cyber-agent/research.jsonl");
+    let stream = project.root().join(".echidna/research.jsonl");
     let mut bytes = fs::read(&stream).unwrap();
     bytes.extend_from_slice(
         br#"{"schema_family":"cyber-agent.event","schema_version":1,"event_id":"unknown-memory","stream_id":"research","sequence":2,"occurred_at":"2026-08-23T12:00:01Z","event_type":"memory.unknown","payload":{}}"#,
@@ -357,7 +353,7 @@ async fn memory_paths_are_confined_and_research_replay_strictly_accepts_typed_me
     )
     .await;
     assert_eq!(unknown_write.result.status, ToolResultStatus::Succeeded);
-    let unknown_stream = unknown_project.root().join(".cyber-agent/research.jsonl");
+    let unknown_stream = unknown_project.root().join(".echidna/research.jsonl");
     let mut unknown_event: Value =
         serde_json::from_str(&fs::read_to_string(&unknown_stream).unwrap()).unwrap();
     unknown_event["payload"]["data"]["data"]["unexpected"] = json!(true);
@@ -394,7 +390,7 @@ async fn memory_paths_are_confined_and_research_replay_strictly_accepts_typed_me
     )
     .await;
     assert_eq!(version_write.result.status, ToolResultStatus::Succeeded);
-    let version_stream = version_project.root().join(".cyber-agent/research.jsonl");
+    let version_stream = version_project.root().join(".echidna/research.jsonl");
     let mut event: Value =
         serde_json::from_str(&fs::read_to_string(&version_stream).unwrap()).unwrap();
     event["payload"]["data"]["memory_schema_version"] = json!(3);
@@ -445,7 +441,7 @@ async fn memory_paths_are_confined_and_research_replay_strictly_accepts_typed_me
     )
     .await;
     assert_eq!(chain_second.result.status, ToolResultStatus::Succeeded);
-    let chain_stream = chain_project.root().join(".cyber-agent/research.jsonl");
+    let chain_stream = chain_project.root().join(".echidna/research.jsonl");
     let mut chain_lines = fs::read_to_string(&chain_stream)
         .unwrap()
         .lines()
@@ -490,7 +486,7 @@ async fn memory_paths_are_confined_and_research_replay_strictly_accepts_typed_me
     )
     .await;
     assert_eq!(first.result.status, ToolResultStatus::Succeeded);
-    let duplicate_stream = duplicate_project.root().join(".cyber-agent/research.jsonl");
+    let duplicate_stream = duplicate_project.root().join(".echidna/research.jsonl");
     let first_line = fs::read_to_string(&duplicate_stream).unwrap();
     let mut duplicate_event: Value = serde_json::from_str(first_line.trim()).unwrap();
     duplicate_event["sequence"] = json!(2);
@@ -519,12 +515,9 @@ async fn memory_paths_are_confined_and_research_replay_strictly_accepts_typed_me
 async fn memory_adapter_rejects_symlinked_note_directories() {
     let (_root, project) = initialized_project("memory-symlink");
     let outside = TemporaryDirectory::new("memory-symlink-outside");
-    fs::create_dir_all(project.root().join(".cyber-agent/memory")).unwrap();
-    std::os::unix::fs::symlink(
-        outside.path(),
-        project.root().join(".cyber-agent/memory/notes"),
-    )
-    .unwrap();
+    fs::create_dir_all(project.root().join(".echidna/memory")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), project.root().join(".echidna/memory/notes"))
+        .unwrap();
     let tools = ToolRegistry::for_project(project.root());
     let outcome = execute(
         &tools,
@@ -558,7 +551,7 @@ async fn memory_adapter_rejects_symlinked_note_directories() {
         .as_array()
         .unwrap();
     assert!(entries.iter().any(|entry| {
-        entry["relative_path"] == ".cyber-agent/memory" && entry["kind"] == "directory"
+        entry["relative_path"] == ".echidna/memory" && entry["kind"] == "directory"
     }));
     assert!(!entries.iter().any(|entry| {
         entry["relative_path"]
@@ -594,7 +587,7 @@ async fn inspect_project_reuses_complete_cache_and_rebuilds_changed_deleted_or_c
             .unwrap()["blake3"],
         Value::Null
     );
-    let cache = project.root().join(".cyber-agent/cache");
+    let cache = project.root().join(".echidna/cache");
     for name in [
         "file-manifest.json",
         "tool-capabilities.json",
@@ -789,11 +782,11 @@ async fn inspect_project_never_uses_cache_to_replace_a_missing_research_fact() {
     assert!(
         project
             .root()
-            .join(".cyber-agent/cache/project-snapshot.json")
+            .join(".echidna/cache/project-snapshot.json")
             .is_file()
     );
 
-    fs::remove_file(project.root().join(".cyber-agent/research.jsonl")).unwrap();
+    fs::remove_file(project.root().join(".echidna/research.jsonl")).unwrap();
     let missing = execute(
         &tools,
         "inspect-required-facts-missing",
@@ -868,7 +861,7 @@ async fn git_fingerprint_excludes_cache_writes_but_detects_tracked_changes() {
     assert_eq!(second.result.output["status"], "hit");
 
     fs::write(
-        project.root().join(".cyber-agent/cache/derived-noise"),
+        project.root().join(".echidna/cache/derived-noise"),
         "ignored derived bytes\n",
     )
     .unwrap();
@@ -937,13 +930,13 @@ async fn project_memory_and_snapshot_caches_are_isolated() {
     assert!(
         first
             .root()
-            .join(".cyber-agent/cache/project-snapshot.json")
+            .join(".echidna/cache/project-snapshot.json")
             .is_file()
     );
     assert!(
         !second
             .root()
-            .join(".cyber-agent/cache/project-snapshot.json")
+            .join(".echidna/cache/project-snapshot.json")
             .exists()
     );
     let second_snapshot = execute(
@@ -959,18 +952,8 @@ async fn project_memory_and_snapshot_caches_are_isolated() {
         second_snapshot.result.output["snapshot"]["project_id"]
     );
     assert_ne!(
-        fs::read(
-            first
-                .root()
-                .join(".cyber-agent/cache/project-snapshot.json")
-        )
-        .unwrap(),
-        fs::read(
-            second
-                .root()
-                .join(".cyber-agent/cache/project-snapshot.json")
-        )
-        .unwrap()
+        fs::read(first.root().join(".echidna/cache/project-snapshot.json")).unwrap(),
+        fs::read(second.root().join(".echidna/cache/project-snapshot.json")).unwrap()
     );
 }
 

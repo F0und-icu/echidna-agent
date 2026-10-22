@@ -143,7 +143,7 @@ impl ResearchWorldState {
         let full_fragment = context_fragment(
             "research-world-state:full",
             ContextFragmentSource::ResearchWorldState,
-            render_full(&state),
+            render_full(&state, MAX_SECTION_RENDERED_BYTES),
         )?;
         Ok(Self {
             full_fragment,
@@ -367,11 +367,33 @@ impl ResearchWorldState {
         Ok(self.full_fragment.clone())
     }
 
+    pub(crate) fn full_fragment_with_limit(
+        &self,
+        maximum_bytes: usize,
+    ) -> Result<ContextFragment, WorldStateError> {
+        if maximum_bytes == MAX_SECTION_RENDERED_BYTES {
+            return self.full_fragment();
+        }
+        context_fragment(
+            "research-world-state:full",
+            ContextFragmentSource::ResearchWorldState,
+            render_full(self, maximum_bytes),
+        )
+    }
+
     /// Renders only changed fixed Sections. An unchanged state creates no
     /// fragment rather than injecting an ambiguous no-op Context item.
     pub fn diff_fragment(
         &self,
         previous: &ResearchWorldState,
+    ) -> Result<Option<ContextFragment>, WorldStateError> {
+        self.diff_fragment_with_limit(previous, MAX_SECTION_RENDERED_BYTES)
+    }
+
+    pub(crate) fn diff_fragment_with_limit(
+        &self,
+        previous: &ResearchWorldState,
+        maximum_bytes: usize,
     ) -> Result<Option<ContextFragment>, WorldStateError> {
         let changed = self
             .sections()
@@ -382,7 +404,7 @@ impl ResearchWorldState {
                         "section_id": current.id.id(),
                         "previous_hash": prior.snapshot_hash,
                         "current_hash": current.snapshot_hash,
-                        "snapshot": bounded_value(&current.value),
+                        "snapshot": bounded_value(&current.value, maximum_bytes),
                     })
                 })
             })
@@ -412,16 +434,8 @@ impl ProjectSnapshotContext {
         let semantic_snapshot = ProjectSnapshotSemanticHash::from(&snapshot);
         let snapshot_hash =
             canonical_blake3_hash(&semantic_snapshot).map_err(WorldStateError::encoding)?;
-        let full_fragment = context_fragment(
-            "project-snapshot:full",
-            ContextFragmentSource::ProjectSnapshot,
-            json!({
-                "kind": "project_snapshot_full",
-                "snapshot_hash": snapshot_hash,
-                "snapshot": bounded_value(&serde_json::to_value(&semantic_snapshot).map_err(WorldStateError::encoding)?),
-            })
-            .to_string(),
-        )?;
+        let full_fragment =
+            project_full_fragment(&snapshot, &snapshot_hash, MAX_SECTION_RENDERED_BYTES)?;
         Ok(Self {
             snapshot,
             snapshot_hash,
@@ -437,9 +451,27 @@ impl ProjectSnapshotContext {
         Ok(self.full_fragment.clone())
     }
 
+    pub(crate) fn full_fragment_with_limit(
+        &self,
+        maximum_bytes: usize,
+    ) -> Result<ContextFragment, WorldStateError> {
+        if maximum_bytes == MAX_SECTION_RENDERED_BYTES {
+            return self.full_fragment();
+        }
+        project_full_fragment(&self.snapshot, &self.snapshot_hash, maximum_bytes)
+    }
+
     pub fn diff_fragment(
         &self,
         previous: &ProjectSnapshotContext,
+    ) -> Result<Option<ContextFragment>, WorldStateError> {
+        self.diff_fragment_with_limit(previous, MAX_SECTION_RENDERED_BYTES)
+    }
+
+    pub(crate) fn diff_fragment_with_limit(
+        &self,
+        previous: &ProjectSnapshotContext,
+        maximum_bytes: usize,
     ) -> Result<Option<ContextFragment>, WorldStateError> {
         if self.snapshot_hash == previous.snapshot_hash {
             return Ok(None);
@@ -452,7 +484,7 @@ impl ProjectSnapshotContext {
                 "kind": "project_snapshot_diff",
                 "previous_hash": previous.snapshot_hash,
                 "current_hash": self.snapshot_hash,
-                "snapshot": bounded_value(&serde_json::to_value(&semantic_snapshot).map_err(WorldStateError::encoding)?),
+                "snapshot": bounded_value(&serde_json::to_value(&semantic_snapshot).map_err(WorldStateError::encoding)?, maximum_bytes),
             })
             .to_string(),
         )
@@ -461,6 +493,18 @@ impl ProjectSnapshotContext {
 }
 
 const MAX_SECTION_RENDERED_BYTES: usize = 384;
+
+fn project_full_fragment(
+    snapshot: &ProjectSnapshot,
+    snapshot_hash: &str,
+    maximum_bytes: usize,
+) -> Result<ContextFragment, WorldStateError> {
+    let semantic_snapshot = ProjectSnapshotSemanticHash::from(snapshot);
+    context_fragment("project-snapshot:full", ContextFragmentSource::ProjectSnapshot, json!({
+        "kind": "project_snapshot_full", "snapshot_hash": snapshot_hash,
+        "snapshot": bounded_value(&serde_json::to_value(&semantic_snapshot).map_err(WorldStateError::encoding)?, maximum_bytes),
+    }).to_string())
+}
 
 #[derive(Serialize)]
 struct ProjectSnapshotSemanticHash<'a> {
@@ -523,7 +567,7 @@ fn environment_projection(snapshot: &TargetSnapshotRecord) -> Value {
     })
 }
 
-fn render_full(state: &ResearchWorldState) -> String {
+fn render_full(state: &ResearchWorldState, maximum_bytes: usize) -> String {
     json!({
         "kind": "research_world_state_full",
         "sections": state
@@ -531,23 +575,23 @@ fn render_full(state: &ResearchWorldState) -> String {
             .map(|section| json!({
                 "section_id": section.id.id(),
                 "snapshot_hash": section.snapshot_hash,
-                "snapshot": bounded_value(&section.value),
+                "snapshot": bounded_value(&section.value, maximum_bytes),
             }))
             .collect::<Vec<_>>(),
     })
     .to_string()
 }
 
-fn bounded_value(value: &Value) -> Value {
+fn bounded_value(value: &Value, maximum_bytes: usize) -> Value {
     let canonical = canonical_json(value);
     let rendered = canonical.to_string();
-    if rendered.len() <= MAX_SECTION_RENDERED_BYTES {
+    if rendered.len() <= maximum_bytes {
         return canonical;
     }
     let cut = rendered
         .char_indices()
         .map(|(index, character)| index + character.len_utf8())
-        .take_while(|end| *end <= MAX_SECTION_RENDERED_BYTES)
+        .take_while(|end| *end <= maximum_bytes)
         .last()
         .unwrap_or(0);
     json!({

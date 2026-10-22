@@ -99,6 +99,7 @@ struct ViewImageExecutionArgs {
 
 pub(super) fn normalize_for_scope(
     project_root: &Path,
+    control_directory: &str,
     value: Value,
     binding: &ArtifactScopeBinding,
 ) -> Result<(Value, Vec<ResourceKey>), ToolExecutorError> {
@@ -111,7 +112,7 @@ pub(super) fn normalize_for_scope(
         serde_json::to_value(&arguments).expect("ViewImageArgs serialization cannot fail"),
         vec![
             resolver.file(&arguments.input.source_path),
-            resolver.file(".cyber-agent/research.jsonl"),
+            resolver.project_file(control_directory, "research.jsonl"),
         ],
     ))
 }

@@ -7,7 +7,9 @@ use crate::adapters::session_compaction::{SessionCompactionFacts, load_session_c
 use crate::adapters::tools::ToolRegistry;
 use crate::app::agent_loop::AgentLoop;
 use crate::app::session::SessionProjection;
-use crate::domain::context::{ContextDecision, ContextDecisionManifest, ContextPlan};
+use crate::domain::context::{
+    ContextDecision, ContextDecisionManifest, ContextPlan, ContextWindowPolicy,
+};
 use crate::domain::session::{
     SessionCompaction, SessionError, SessionEvent, SessionState, SessionSummaryDraft,
 };
@@ -16,7 +18,6 @@ use crate::ports::model::ModelProvider;
 
 use super::{ChatError, DurableChatSession, event_id, occurred_at};
 
-const MAX_REFERENCE_ITEMS_PER_KIND: usize = 32;
 const WARNING_PERCENT: u64 = 80;
 
 pub(super) struct AppliedCompactionSummary {
@@ -32,6 +33,13 @@ impl AppliedCompactionSummary {
             self.revision, self.retained_history_items, self.source_history_items
         )
     }
+
+    pub(super) fn automatic_message(&self) -> String {
+        format!(
+            "Automatic completed-Turn compaction applied because runtime.auto_compact is enabled. {} Completed Provider delivery state was intentionally reset at this boundary.",
+            self.message()
+        )
+    }
 }
 
 impl DurableChatSession {
@@ -45,7 +53,12 @@ impl DurableChatSession {
     ) -> Result<SessionCompaction, ChatError> {
         // A context-only preflight uses the same configured Provider and Tool
         // catalog, never `stream` or a second executing AgentLoop.
-        let tools = self.bound_tools(discovered_mcp)?;
+        let window_tokens = composition
+            .agent_profile()
+            .primary()
+            .capabilities()
+            .context_window;
+        let tools = self.bound_tools(discovered_mcp, window_tokens)?;
         let mut preview = AgentLoop::with_primary_context(
             composition.primary_provider(),
             &tools,
@@ -54,8 +67,10 @@ impl DurableChatSession {
             provider_session,
         )?
         .with_prompt_composition(super::definition::prompt_for_state(
+            &self.project,
             self.agent_binding(),
             state,
+            self.session_id.as_str(),
         )?);
         preview.queue_agent_model_profile(composition.agent_profile().clone())?;
         preview.refresh_current_context(super::context::ChatContextCache::default().refresh(
@@ -63,11 +78,16 @@ impl DurableChatSession {
             &tools,
             self.agent_binding(),
         )?)?;
-        let (_, candidate) = select_compaction(state, facts, |candidate| {
-            preview
-                .preflight_compaction(candidate, false)
-                .map_err(ChatError::from)
-        })?;
+        let (_, candidate) = select_compaction(
+            state,
+            facts,
+            ContextWindowPolicy::for_window(window_tokens),
+            |candidate| {
+                preview
+                    .preflight_compaction(candidate, false)
+                    .map_err(ChatError::from)
+            },
+        )?;
         Ok(candidate)
     }
 
@@ -78,6 +98,7 @@ impl DurableChatSession {
     pub(super) fn compact<Provider>(
         &self,
         agent: &mut AgentLoop<'_, '_, Provider, ToolRegistry>,
+        window_tokens: u32,
     ) -> Result<AppliedCompactionSummary, ChatError>
     where
         Provider: ModelProvider + ?Sized,
@@ -99,12 +120,17 @@ impl DurableChatSession {
         // The Writer lock freezes both Research and Session appenders while
         // these read-only facts and the new Compaction Event are composed.
         let facts = load_session_compaction_facts(&self.project, projection.state())
-            .map_err(ChatError::ResearchProjection)?;
-        let (draft, compaction) = select_compaction(projection.state(), &facts, |candidate| {
-            agent
-                .preflight_compaction(candidate, true)
-                .map_err(ChatError::from)
-        })?;
+            .map_err(ChatError::CompactionFacts)?;
+        let (draft, compaction) = select_compaction(
+            projection.state(),
+            &facts,
+            ContextWindowPolicy::for_window(window_tokens),
+            |candidate| {
+                agent
+                    .preflight_compaction(candidate, true)
+                    .map_err(ChatError::from)
+            },
+        )?;
         let validation = facts.context();
         let result = AppliedCompactionSummary {
             revision: compaction.summary().revision(),
@@ -140,20 +166,24 @@ impl DurableChatSession {
 pub(super) fn select_compaction(
     state: &SessionState,
     facts: &SessionCompactionFacts,
+    policy: ContextWindowPolicy,
     mut fits: impl FnMut(&SessionCompaction) -> Result<bool, ChatError>,
 ) -> Result<(SessionSummaryDraft, SessionCompaction), ChatError> {
     let history = state
         .full_normalized_history()
         .map_err(SessionError::from)?;
-    let mut references = MAX_REFERENCE_ITEMS_PER_KIND;
+    let mut references = policy.compaction_reference_items();
     loop {
-        let draft = facts.compose_session_summary_draft(
-            &history,
-            state
-                .latest_compaction()
-                .map(|compaction| compaction.summary()),
-            references,
-        )?;
+        let draft = facts
+            .compose_session_summary_draft(
+                &history,
+                state
+                    .latest_compaction()
+                    .map(|compaction| compaction.summary()),
+                references,
+                policy,
+            )?
+            .with_byte_limit(policy.summary_bytes())?;
         let mut retained = state
             .normalized_history_items()
             .map_err(SessionError::from)?

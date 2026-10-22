@@ -90,7 +90,7 @@ fn preserve_existing_permissions(_destination: &Path, _temporary: &File) -> io::
     Ok(())
 }
 
-fn commit_new_durable_file_with(
+pub(crate) fn commit_new_durable_file_with(
     destination: &Path,
     persist: impl FnOnce(&mut File) -> io::Result<()>,
 ) -> Result<(), ProjectEventStoreError> {

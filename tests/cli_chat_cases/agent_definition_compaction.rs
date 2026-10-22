@@ -230,7 +230,7 @@ fn generic_summary_rejects_cross_session_wrong_prefix_and_forged_references() {
     let session = StreamId::new(session_id(root.path()));
     let path = root
         .path()
-        .join(".cyber-agent/sessions")
+        .join(".echidna/sessions")
         .join(session.as_str())
         .join("events.jsonl");
     let original = fs::read_to_string(&path).unwrap();

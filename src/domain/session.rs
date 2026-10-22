@@ -53,6 +53,9 @@ const DOMAIN_PROFILE_SELECTED_EVENT_TYPE: &str = "session.domain_profile_selecte
 pub(super) const CURRENT_SESSION_PAYLOAD_SCHEMA_VERSION: u16 = 1;
 
 mod compaction;
+mod improvement;
+pub use improvement::ImprovementActivity;
+pub(crate) use improvement::{ImprovementFact, ImprovementStage, scoped_call_id};
 
 pub use compaction::{
     CompactionValidationContext, EvidenceSpine, NarrativeSummary, ResearchStreamIdentity,
@@ -81,6 +84,9 @@ pub enum SessionLifecycle {
 /// the Tool domain's `ExecutionReceipt` rather than defining a Session copy.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionEvent {
+    ImprovementActivityRecorded {
+        activity: ImprovementActivity,
+    },
     StartedWithAgent {
         primary_provider_session: ProviderSessionRef,
         binding: AgentDefinitionBinding,
@@ -165,6 +171,9 @@ impl SessionEvent {
 
     fn event_type(&self) -> EventType {
         match self {
+            Self::ImprovementActivityRecorded { .. } => {
+                EventType::new("session.rsi_activity_recorded")
+            }
             Self::StartedWithAgent { .. } => EventType::new(SESSION_STARTED_WITH_AGENT_EVENT_TYPE),
             Self::AgentDefinitionApplied { .. } => {
                 EventType::new(AGENT_DEFINITION_APPLIED_EVENT_TYPE)
@@ -196,6 +205,7 @@ impl SessionEvent {
 
     fn encode_payload(&self, event_type: &EventType) -> Result<Value, SessionError> {
         let payload = match self {
+            Self::ImprovementActivityRecorded { activity } => serde_json::to_value(activity),
             Self::StartedWithAgent {
                 primary_provider_session,
                 binding,
@@ -263,6 +273,11 @@ impl SessionEvent {
 
     fn decode(event_type: &EventType, payload: Value) -> Result<Self, SessionError> {
         match event_type.as_str() {
+            "session.rsi_activity_recorded" => {
+                let activity: ImprovementActivity = decode_strict_payload(event_type, payload)?;
+                require_current_payload_schema(event_type, activity.schema_version)?;
+                Ok(Self::ImprovementActivityRecorded { activity })
+            }
             SESSION_STARTED_WITH_AGENT_EVENT_TYPE | AGENT_DEFINITION_APPLIED_EVENT_TYPE => {
                 let payload: AgentDefinitionPayload = decode_strict_payload(event_type, payload)?;
                 require_current_payload_schema(event_type, payload.schema_version)?;
@@ -413,6 +428,7 @@ impl SessionEvent {
 /// The pure Session state reconstructed from one ordered Session stream.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionState {
+    improvement_records: Vec<improvement::ImprovementRecord>,
     agent_definition_binding: Option<AgentDefinitionBinding>,
     event_state: State,
     stream_id: Option<StreamId>,
@@ -440,6 +456,7 @@ pub struct SessionState {
 impl Default for SessionState {
     fn default() -> Self {
         Self {
+            improvement_records: Vec::new(),
             agent_definition_binding: None,
             event_state: State::default(),
             stream_id: None,
@@ -555,6 +572,7 @@ impl SessionState {
         requested_recent_items: usize,
         validation: &CompactionValidationContext<'_>,
     ) -> Result<SessionCompaction, SessionError> {
+        self.ensure_no_unknown_improvement()?;
         require_transition(
             self.lifecycle,
             "session.compaction_created",
@@ -825,6 +843,9 @@ fn apply_session_event(
     event_id: &EventId,
 ) -> Result<(), SessionError> {
     match event {
+        SessionEvent::ImprovementActivityRecorded { activity } => {
+            improvement::apply(state, activity, event_id)?
+        }
         SessionEvent::StartedWithAgent {
             primary_provider_session,
             binding,
@@ -844,6 +865,7 @@ fn apply_session_event(
             primary_provider_session,
             binding,
         } => {
+            state.ensure_no_unknown_improvement()?;
             require_primary_provider_session(&primary_provider_session)?;
             require_transition(
                 state.lifecycle,
@@ -926,6 +948,7 @@ fn apply_session_event(
         SessionEvent::Resumed {
             primary_provider_session,
         } => {
+            state.ensure_no_unknown_improvement()?;
             require_primary_provider_session(&primary_provider_session)?;
             require_transition(state.lifecycle, "session.resumed", SessionLifecycle::Active)?;
             record_fresh_primary_provider_session_id(state, &primary_provider_session)?;
@@ -961,6 +984,9 @@ fn apply_session_event(
             state.recovery_count = increment("recovery count", state.recovery_count)?;
         }
         SessionEvent::HistoryItemRecorded { item } => {
+            if let ContentItem::ToolCall { call } = &item {
+                state.ensure_no_scope_call_identity_collision(&call.call_id)?;
+            }
             require_transition(
                 state.lifecycle,
                 "session.history_item_recorded",
@@ -996,6 +1022,7 @@ fn apply_session_event(
             }
         }
         SessionEvent::CompactionCreated { compaction } => {
+            state.ensure_no_unknown_improvement()?;
             require_transition(
                 state.lifecycle,
                 "session.compaction_created",
@@ -1058,6 +1085,9 @@ fn apply_session_event(
             state.last_rejected_request = Some(request_audit_event_id);
         }
         SessionEvent::RequestAuditRecorded { manifest } => {
+            if let Some(scope) = manifest.improvement_scope() {
+                improvement::validate_audit_scope(state, scope)?;
+            }
             require_transition(
                 state.lifecycle,
                 "session.request_audit_recorded",
@@ -1524,6 +1554,10 @@ impl ResearchPhaseSelectedPayload {
 /// Explicit Session schema, stream, payload and transition failures.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum SessionError {
+    #[error(
+        "RSI activity violates scoped identity, ordering, pairing or retained-reference constraints"
+    )]
+    InvalidImprovementActivity,
     #[error("invalid Agent definition binding: {message}")]
     AgentDefinition { message: String },
     #[error(
@@ -1609,6 +1643,14 @@ pub enum SessionError {
     CompactionSummaryEntryDuplicate { field: &'static str, value: String },
     #[error("Session Compaction Summary is {actual} bytes, above the {maximum}-byte local bound")]
     CompactionSummaryTooLarge { actual: usize, maximum: usize },
+    #[error(
+        "Session Compaction Summary byte limit {actual} is outside {minimum}..={maximum} bytes"
+    )]
+    CompactionSummaryByteLimit {
+        actual: usize,
+        minimum: usize,
+        maximum: usize,
+    },
     #[error("Session Compaction requires a current TargetSnapshot in the Project Research stream")]
     CompactionCurrentTargetRequired,
     #[error("Session Compaction requires non-empty resumable History with a user goal")]

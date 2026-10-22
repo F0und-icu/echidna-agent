@@ -128,7 +128,7 @@ fn f6a_out_of_bounds_vision_keeps_failed_attempt_and_never_samples_primary() {
     assert_eq!(
         fs::read(
             root.path()
-                .join(".cyber-agent/artifacts/blobs/sha256")
+                .join(".echidna/artifacts/blobs/sha256")
                 .join(raw_hash)
         )
         .unwrap(),

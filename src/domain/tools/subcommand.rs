@@ -110,6 +110,8 @@ impl SubcommandCheckpoint {
         }
         let result: CommandObservation =
             serde_json::from_value(self.result.clone()).map_err(|_| invalid())?;
+        crate::domain::agent_evolution::validate_input_files(&result.verified_inputs)
+            .map_err(|_| invalid())?;
         if self.result.get("exit_code").is_none() {
             return Err(invalid());
         }
@@ -199,4 +201,6 @@ struct CommandObservation {
     _truncated: bool,
     #[serde(default)]
     error: Option<String>,
+    #[serde(default)]
+    verified_inputs: Vec<crate::domain::agent_evolution::ScriptFile>,
 }

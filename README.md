@@ -128,10 +128,105 @@ memory_read、memory_write、inspect_project 的 v2 契约由运行时填写本�
 Job/PTY、待提交图片；`/image cancel` 可撤下待提交图片而保留原始产物。
 
 会话保存实际使用的完整指令。修改或删除源文件不会改变已有会话；Resume 使用保存的
-内容，reload 才读取新内容。reload 不允许改变 `id`、记忆作用域或研究契约，
+内容，reload 才读取新内容。reload 不允许改变 `id`、记忆作用域、研究契约或 RSI 开关，
 这类变化使用 `use`。两个命令都不会自动请求模型、继续旧任务或重放工具。
 新会话选择顺序为 `chat --agent`、Provider 配置顶层 `agent_definition`、内置研究定义；
 配置中的路径相对配置文件。模型与凭据配置保持独立。旧二进制不能读取新定义事件。
+
+### 可选 RSI 自我迭代
+
+`[rsi]` 可另设 `improvement = true`；缺省为 `false`，原被动 RSI 行为和旧定义身份保持不变。
+主动模式只在正常完成、历史配对、无后台任务/PTY及待处理图片时检查真实失败、
+同一已校验输入的重复命令或以 `[rsi-feedback]` 开头的明确长期纠正。
+没有这些信号或原轮次预算剩余不足 3 次时不增加请求；一次诊断及旧/新各一次采样
+最多增加 3 次请求，全部计入原轮次预算。`no_change` 只消耗其实际诊断请求。
+
+诊断仅提出人格或方法中一个范围的改动，方法优先。工具代码仍走原有普通脚本生成、
+实际执行与 RSI 发布链。探针仅保留当前轮次最后已提交计划里实际曝光的 `run_command`；
+本轮由 `tool_search` 激活的命令可继续使用，Hidden 不被提升，激活不会带入下一轮。
+主动模式的 `run_command` / `run_commands` 可用
+`code_inputs = ["script.py", "input.csv"]` 让宿主计算并留存执行前后 BLAKE3；
+显式 `verified_inputs` 的预期摘要仍受校验，两者合计最多 8 个文件。
+宿主只从当前轮次成功命令的完整原始输出建立隐藏的 `reference_match` 参考，
+在相同输入的两份副本上各执行一个新命令；只有旧结果不匹配而新结果匹配时才允许试用。
+持平、回退、输入变更、空参考或缺少完整捕获均不自动采纳。
+这只说明该次局部输出对照，不能证明一般正确性、性能或跨任务收益。
+
+采纳后的经验按显式任务子串 cue 选入上下文，携带原对照和回执引用，始终是派生指导。
+它不代替当前验证。新活动事件与普通聊天历史分开保存在同一 Session；
+旧程序不能恢复含这些事件的新会话。未知执行与持久化失败保持致命，恢复不会重跑探针。
+
+给外接定义添加以下配置，或从 [`examples/agents/self-improving`](examples/agents/self-improving)
+开始。原定义保持默认关闭；按需要在 `[tools]` 显式提供文件与命令工具，
+模型只能使用已曝光工具完成对应修改和测试。
+
+```toml
+[rsi]
+persona = true
+methods = true
+fixed_rules_file = "fixed.md" # 可选；操作员固定规则，不属于 AI 可修改内容
+```
+
+人格可以替换或精简；方法也可以删除。工作范围、Personal/Project、工具曝光、记忆作用域、
+Research、模型配置及 RSI 协议不属于可修改范围。主机单独注入只读协议和固定规则，
+给出当前 Agent/Session、父版本和精确候选路径。模型用现有文件工具写入严格 JSON，
+无需逐项确认；被动模式不增加反思请求。FullAccess 仍然存在，这里的只读是更新入口的
+所有权约定，不是文件系统保护或模型服从保证。
+
+当前 Turn 内所有请求固定使用原指令。正常完成、历史持久化且调用结果配对、没有活跃
+Job/PTY 或待提交图片时，每轮最多发布一批；下一次请求使用新版本和新的 ProviderSession。
+取消、停止和执行效果未知时保留候选；既有显式恢复要求不变。错误候选会显示拒绝原因，
+保留文件以便修正，不会悄悄覆盖原人格文件。
+
+版本保存在项目 `.echidna/evolution/<agent-id>/revisions/<digest>.json`，
+`active.json` 选择新 Session 的缺省版本。已有 Session Resume 使用其保存的完整绑定；
+`/agent` 可查看当前版本。落后于已发布版本的旧 Session 可以显式 `/agent reload` 对齐。
+Personal/Project 仍由每个新 Session 显式快照，不随人格版本覆盖旧会话。
+新项目的历史、记忆、产物和缓存统一保存在 `.echidna/`。已有 `.cyber-agent/`
+项目继续原地使用，历史和脚本路径不会自动搬迁；同一项目根同时存在这两个目录时
+程序会明确拒绝，请先确认两边数据来源，避免形成两套会话和锁。
+手动修改源定义后会提示源分支冲突，执行以下离线命令明确选择新源并保留旧版本：
+
+```sh
+echidna --config /path/to/provider.toml agent lineage ./my-agent
+# 定义含显式远端 MCP 名称时，仅通过此旗标允许一次目录发现。
+echidna --config /path/to/provider.toml agent lineage ./my-agent --discover-mcp
+```
+
+回滚也通过候选文件完成：保留协议要求的身份、父版本、reason/basis 字段，添加
+`"rollback_to":"旧版本 digest"`，不要同时包含人格、方法或工具修改。回滚生成新版本，
+历史请求与旧版本不变。版本文件、Session 绑定事件、发布指针和候选消耗不是跨存储事务；
+如果绑定已提交但发布指针失败，错误会终止进程。显式 Resume 该 Session 后运行
+`/rsi reconcile`，只有指针仍指向其父版本时才补齐；它不发请求、不重跑工具、不重建 Provider。
+
+模型可在任务中写脚本并直接运行，然后发布小型脚本索引。启用 RSI 的绑定提供 `run_command` 的可选
+`verified_inputs=[{path,blake3}]` 对项目相对代码文件在执行前后核验字节，成功结果保留
+实际核验值；不填写时参数和结果不增加该字段。发布要求真实成功的调用、配对结果和
+Receipt，当前代码仍匹配，并在项目根目录测试。多文件脚本按完整文件清单复制到同一个
+版本目录，保持相对目录；索引中的 argv 只替换完整匹配的路径参数，后续使用该 argv。
+包内依赖应以脚本自身位置解析；运行时不会重写脚本内容或任意路径字符串。
+Unix 发布副本按源文件是否可执行使用私有0700/0600模式，执行属性参与包身份；直接入口
+发布时仍须可执行。更改执行属性会生成不同包路径，原包的模式不变，也不自动选择解释器。
+非Unix平台明确拒绝脚本发布，人格和方法更新保持可用；不推测其他系统的执行权限语义。
+完整版本按实际JSON编码限制为1MiB，包含逐轮累积索引与转义；超限候选保留，旧版本继续可用。
+依赖说明仅作记录，不自动安装。此证据说明一次调用前后的代码身份和退出结果，
+不证明进程内部加载字节、测试覆盖率或语义改进；实际任务反馈决定保留、修改或回滚。
+
+### 长上下文容量
+
+显式 `capability_mapping.context_window` 决定本地容量，运行时不按模型名猜测。
+输出预留为 `min(W/8, 65536)`，工具循环预留为 `min(W/8, 131072)`；已有显式输出
+上限仍可提高前者。这些预留消耗输入空间，不是服务端输出上限或额外窗口。
+
+工具输出、Core Memory、摘要和状态片段按 `clamp(floor(W/131072), 1, 8)` 倍扩展。
+例如 272000 窗口使用 256KiB 工具输出、128KiB Core 和16KiB摘要；输入容量为204000。
+1048576 窗口使用1MiB工具输出、512KiB Core 和64KiB摘要；输入容量为851968。
+小窗口保留原有128KiB工具输出、64KiB Core、8KiB摘要和384字节状态片段。
+命令 stdout/stderr 共享工具预览容量；完整原始捕获、传输和 MCP 边界保持各自原有上限。
+
+大摘要保存为含自身字节上限的 v4；历史v1至v3不变。切换到小窗口不会使已保存的大摘要
+或Core文档失效，后续请求仍须通过当前上下文预算。Core作为完整来源交给现有规划器，
+是否全部发送由选择与截断记录说明；较小模型的Memory工具读取或写入超限内容会明确失败。
 
 ## 快速开始
 
@@ -217,6 +312,32 @@ export CYBER_AGENT_MCP_EXAMPLE_API_KEY='replace-with-your-MCP-key'
 一次凭据并发现有限工具目录；该目录在本进程内保持不变，压缩和 `/resume` 也复用它。
 远程工具初始为延迟项，通过已有工具搜索流程暴露。它们的 schema 与参数按值传给服务端，
 MCP 输出在核验前仍只是传输输出。远端断线或结果不完整会停止本轮，不会虚构收据或重放调用。
+
+#### 可选本地 stdio MCP 工具
+
+同一个 [MCP 模板](examples/provider-mcp.toml) 也支持 Unix stdio 服务器，每项在 `url`
+和 `command` 中选一个。stdio 当前使用 `protocol_version = "2025-11-25"`：
+
+```toml
+[mcp_servers.local]
+command = "python3"
+args = ["/absolute/path/to/server.py", "--transport", "stdio"]
+protocol_version = "2025-11-25"
+env = { MY_TOOL_SETTING = "explicit-value" }
+timeout_ms = 60000
+```
+
+裸命令通过 `PATH` 查找；相对命令路径和可选 `cwd` 相对配置文件所在目录解析，默认
+工作目录也是该目录。参数和环境变量保持字面值，不经过 shell 或 `$VAR` 展开。
+子进程只继承 `PATH`、`HOME`、`USER`、`LOGNAME`、`TMPDIR`、`TMP`、`TEMP`、`LANG`、
+`LC_ALL`、`LC_CTYPE`、`TZ`，再叠加显式 `env`，不会隐式继承 Provider/vendor 密钥。
+stdio 不接受 HTTP 的 `credential_ref`；真实环境密钥留在仓库外配置。
+
+`doctor` 不启动子进程。Chat 发现工具后复用同一连接；每个 JSON-RPC 换行帧最多 2 MiB，
+每次请求的收发总量最多 8 MiB，目录保持 64 页、1024 项、8 MiB 限制。
+stderr 持续排空，只保留字节计数和 I/O 错误类型。取消、超时、EOF 或协议错误会关闭
+连接并终止进程组，不自动重启或重放；已发送而没有最终结果的调用仍按未知执行结果处理。
+退出时同步回收直接子进程，并终止同组后代；主动脱离该进程组的后代不在此清理范围。
 
 #### ChatGPT 订阅登录
 
@@ -378,9 +499,23 @@ cd ../echidna-research
 | `/stop` 或 Ctrl+C | 请求停止当前 Turn；已执行操作不会被撤销，后台任务需要单独处理。 |
 | `/paste` | 按提示输入多行任务或补充材料。 |
 | `/image PATH` | 将一张本地图片追加到下一轮队列；重复输入按顺序追加。 |
-| `/compact` | 在具备目标与研究记录等前提时压缩上下文；有待提交图片时不可用。 |
+| `/compact` | 压缩上下文；通用 Agent 无需研究目标，研究 Agent 保留目标和引用校验。有待提交图片时不可用。 |
 | `/resume` | 在可恢复停止后显式重建模型会话，再输入任务。 |
 | `/exit` | 离开交互界面。 |
+
+可在模型配置中开启正常回合结束后的自动压缩，缺省关闭：
+
+```toml
+[runtime]
+auto_compact = true
+```
+
+每次任务正常完成并处理适用的 RSI 边界后，使用包含最终回复的最新上下文估算下一轮压力。
+达到输入预算的 80%，或出现上下文截断/排除时，复用本地压缩，不额外请求模型；
+成功后下一次请求为 `CompactionReset Full`。人格、指令快照、作用域记忆及已发现 MCP
+目录保持原有契约。研究前提不足、无法缩减时会显示推迟原因。
+摘要有损且不替代稳定规则。取消、失败和已停止的回合不自动恢复、重发或丢弃推理；
+单个长回合仍可能超出预算，这时继续使用显式 `/resume` 和 `/compact`。
 
 导出指定会话，保留对过程和材料的引用：
 
@@ -421,7 +556,7 @@ Echidna 将执行、预算、Session 和恢复留在一个内核中。模型、�
 | [纯文本配置](examples/provider.toml) | 主模型、能力声明与环境变量密钥引用 |
 | [单模型多模态配置](examples/provider-multimodal.toml) | 主模型直接处理文本与图像 |
 | [文本 + 视觉配置](examples/provider-text-vision.toml) | 两个模型的独立服务、能力与密钥配置 |
-| [远程 MCP 配置](examples/provider-mcp.toml) | 显式 Streamable HTTP 工具与专用 MCP 凭据引用 |
+| [MCP 配置](examples/provider-mcp.toml) | HTTP 与本地 stdio 工具、专用凭据引用和显式子进程环境 |
 | [原理图原图](assets/architecture-overview.svg) | 可放大的执行与持久化流程图 |
 | [更新记录](CHANGELOG.md) | 功能变化与兼容性说明 |
 

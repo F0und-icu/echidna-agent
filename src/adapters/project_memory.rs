@@ -15,7 +15,7 @@ use crate::adapters::project_event_store::{Project, replace_durable_file, sync_d
 use crate::domain::memory::{MemoryPath, MemoryScope};
 
 const MEMORY_DIRECTORY: &str = "memory";
-pub(crate) const MAX_CORE_MEMORY_BYTES: usize = 64 * 1024;
+const MAX_CORE_MEMORY_BYTES: usize = 512 * 1024;
 const MAX_RETRIEVAL_MEMORY_DOCUMENTS: usize = 64;
 const MAX_RETRIEVAL_MEMORY_DOCUMENT_BYTES: u64 = 64 * 1024;
 
@@ -192,10 +192,7 @@ impl<'project> LocalProjectMemory<'project> {
     }
 
     fn base_memory_root(&self) -> PathBuf {
-        self.project
-            .root()
-            .join(".cyber-agent")
-            .join(MEMORY_DIRECTORY)
+        self.project.control_directory().join(MEMORY_DIRECTORY)
     }
 
     fn ensure_memory_root(&self) -> Result<(), LocalProjectMemoryError> {

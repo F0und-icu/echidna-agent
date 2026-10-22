@@ -5,6 +5,7 @@
 //! clock I/O.
 
 pub mod agent_definition;
+pub(crate) mod agent_evolution;
 pub mod artifacts;
 pub(crate) mod canonical_json;
 pub mod context;

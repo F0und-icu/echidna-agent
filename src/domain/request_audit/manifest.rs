@@ -203,6 +203,7 @@ impl RequestAuditDelivery {
 /// One supplied actual Provider attempt before any Blob or Event I/O.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RequestAuditAttempt {
+    pub(super) improvement_scope: Option<crate::domain::context::ProviderSessionRef>,
     pub(super) binding: RequestAuditBinding,
     pub(super) model: ModelIdentity,
     pub(super) profile: ModelProfile,
@@ -240,6 +241,7 @@ impl RequestAuditAttempt {
         delivery.validate_attempt_input_relationship(&full_logical_input, &delivered_input)?;
         Ok(Self {
             binding: context.binding.clone(),
+            improvement_scope: None,
             model,
             profile,
             adapter_version: context.adapter_version.clone(),
@@ -255,6 +257,14 @@ impl RequestAuditAttempt {
 
     pub fn binding(&self) -> &RequestAuditBinding {
         &self.binding
+    }
+
+    pub(crate) fn bind_improvement_scope(
+        mut self,
+        scope: crate::domain::context::ProviderSessionRef,
+    ) -> Self {
+        self.improvement_scope = Some(scope);
+        self
     }
 
     pub fn delivery(&self) -> RequestAuditDelivery {
@@ -405,6 +415,8 @@ impl RequestAuditCapabilityMapping {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RequestAuditManifest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) improvement_scope: Option<crate::domain::context::ProviderSessionRef>,
     pub(super) schema_version: u16,
     pub(super) audit_event_id: EventId,
     pub(super) binding: RequestAuditBinding,
@@ -425,6 +437,9 @@ pub struct RequestAuditManifest {
 }
 
 impl RequestAuditManifest {
+    pub(crate) fn improvement_scope(&self) -> Option<&crate::domain::context::ProviderSessionRef> {
+        self.improvement_scope.as_ref()
+    }
     pub const fn schema_version(&self) -> u16 {
         self.schema_version
     }

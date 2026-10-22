@@ -622,7 +622,7 @@ fn observation_error(error: impl std::fmt::Display) -> CliError {
 }
 
 fn read_snapshot(project: &Project) -> SnapshotFacts {
-    let registry = ToolRegistry::for_project(project.root());
+    let registry = ToolRegistry::for_project(project.root()).with_project(project);
     let snapshot_specs = registry.specs();
     match LocalProjectSnapshot::new(project).inspect_read_only(&snapshot_specs) {
         Ok(result) => {

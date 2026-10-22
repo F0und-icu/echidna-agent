@@ -11,8 +11,10 @@ mod jsonl;
 mod migration;
 mod project;
 
+#[cfg(unix)]
+pub(crate) use durable_file::commit_new_durable_file_with;
 pub(crate) use durable_file::{
-    commit_durable_temporary_file, create_durable_temporary_file,
+    commit_durable_temporary_file, commit_new_durable_file, create_durable_temporary_file,
     remove_durable_temporary_file_best_effort, replace_durable_file, sync_directory,
 };
 pub use error::ProjectEventStoreError;

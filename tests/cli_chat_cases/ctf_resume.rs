@@ -45,7 +45,7 @@ fn ctf_r0_clean_binary_paste_matches_durable_history_audit_and_actual_request() 
         .reconstruct(|blob| {
             fs::read(
                 root.path()
-                    .join(".cyber-agent/artifacts/blobs/sha256")
+                    .join(".echidna/artifacts/blobs/sha256")
                     .join(blob.as_str()),
             )
         })
@@ -81,7 +81,7 @@ fn ctf_r0_clean_binary_paste_matches_durable_history_audit_and_actual_request() 
         .collect();
     assert_eq!(
         target_entries,
-        BTreeSet::from([".cyber-agent".to_owned(), "target.txt".to_owned()])
+        BTreeSet::from([".echidna".to_owned(), "target.txt".to_owned()])
     );
 }
 
@@ -148,7 +148,7 @@ fn ctf_r1_repeated_full_resume_repairs_wire_without_fabricating_durable_results(
     let session = seed_interrupted_session(&project, false);
     let event_path = root
         .path()
-        .join(".cyber-agent/sessions")
+        .join(".echidna/sessions")
         .join(session.as_str())
         .join("events.jsonl");
     let mut prefix = fs::read(&event_path).unwrap();

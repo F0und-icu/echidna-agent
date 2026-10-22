@@ -38,6 +38,8 @@ struct StartJobArgs {
 impl StartJobArgs {
     fn command(&self) -> RunCommandArgs {
         RunCommandArgs {
+            verified_inputs: Vec::new(),
+            code_inputs: Vec::new(),
             argv: self.argv.clone(),
             cwd: self.cwd.clone(),
             resources: self.resources.clone(),

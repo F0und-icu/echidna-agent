@@ -23,7 +23,7 @@ async fn publish(tools: &ToolRegistry, source: &Path, suffix: &str) -> Value {
 fn blob_path(project: &Project, bytes: &[u8]) -> PathBuf {
     project
         .root()
-        .join(".cyber-agent/artifacts/blobs/sha256")
+        .join(".echidna/artifacts/blobs/sha256")
         .join(format!("{:x}", Sha256::digest(bytes)))
 }
 

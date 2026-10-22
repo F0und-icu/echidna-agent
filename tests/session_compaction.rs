@@ -393,6 +393,124 @@ fn compaction_event(
     )
 }
 
+fn rehash_summary(event: &mut EventEnvelope<Value>) {
+    let summary = &mut event.payload["summary"];
+    summary["fingerprint"] = json!("");
+    // The fixture is a serde_json Value, whose object keys are sorted. This is
+    // the canonical wire sample consumed by the existing production reader.
+    summary["fingerprint"] = json!(
+        blake3::hash(&serde_json::to_vec(summary).unwrap())
+            .to_hex()
+            .to_string()
+    );
+}
+
+fn extended_summary_event(
+    state: &SessionState,
+    facts: &CompactionFacts,
+    byte_limit: usize,
+    narrative_bytes: usize,
+) -> EventEnvelope<Value> {
+    let mut event = compaction_event(state, facts, "extended-compaction", 9);
+    event.payload["schema_version"] = json!(4);
+    event.payload["summary"]["schema_version"] = json!(4);
+    event.payload["summary"]["byte_limit"] = json!(byte_limit);
+    event.payload["summary"]["task_references"] = Value::Null;
+    event.payload["summary"]["narrative"]["concise_progress"] = json!("x".repeat(narrative_bytes));
+    rehash_summary(&mut event);
+    event
+}
+
+#[test]
+fn summary_v4_replays_its_recorded_byte_limit_and_preserves_original_history() {
+    let facts = CompactionFacts::new("summary-v4-recorded-ceiling");
+    let source = source_state();
+    let event = extended_summary_event(&source, &facts, 16 * 1024, 12 * 1024);
+    assert!(serde_json::to_vec(&event.payload["summary"]).unwrap().len() > 8 * 1024);
+    let reducer = SessionReducer;
+    let mut state = source.clone();
+    reducer.apply(&mut state, event.clone()).unwrap();
+    let summary = state.latest_compaction().unwrap().summary();
+    assert_eq!(summary.schema_version(), 4);
+    assert_eq!(
+        summary.narrative().unwrap().concise_progress().len(),
+        12 * 1024
+    );
+    assert_eq!(
+        summary.evidence_spine().unwrap().source(),
+        facts.research_stream()
+    );
+    assert_eq!(
+        serde_json::to_value(summary).unwrap()["byte_limit"],
+        json!(16 * 1024)
+    );
+    assert_eq!(source.history(), state.history());
+    let replayed = reducer
+        .reduce(source_events().into_iter().chain([event]))
+        .unwrap();
+    assert_eq!(replayed, state);
+}
+
+#[test]
+fn summary_v4_rejects_invalid_ceilings_oversize_and_tampering_atomically() {
+    let facts = CompactionFacts::new("summary-v4-rejection");
+    let source = source_state();
+    let reducer = SessionReducer;
+    for byte_limit in [0, 8191, 65537] {
+        let mut state = source.clone();
+        let event = extended_summary_event(&source, &facts, byte_limit, 128);
+        assert!(
+            matches!(reducer.apply(&mut state, event), Err(SessionError::CompactionSummaryByteLimit {
+            actual, minimum: 8192, maximum: 65536
+        }) if actual == byte_limit)
+        );
+        assert_eq!(state, source);
+    }
+    let mut state = source.clone();
+    assert!(matches!(
+        reducer.apply(
+            &mut state,
+            extended_summary_event(&source, &facts, 16 * 1024, 17 * 1024)
+        ),
+        Err(SessionError::CompactionSummaryTooLarge { maximum: 16384, .. })
+    ));
+    assert_eq!(state, source);
+
+    let mut changed_ceiling = extended_summary_event(&source, &facts, 16 * 1024, 128);
+    changed_ceiling.payload["summary"]["byte_limit"] = json!(32 * 1024);
+    assert!(matches!(
+        reducer.apply(&mut state, changed_ceiling),
+        Err(SessionError::CompactionFingerprintMismatch)
+    ));
+    assert_eq!(state, source);
+
+    let mut missing_references = extended_summary_event(&source, &facts, 16 * 1024, 128);
+    missing_references.payload["summary"]["evidence_spine"] = Value::Null;
+    rehash_summary(&mut missing_references);
+    assert!(matches!(
+        reducer.apply(&mut state, missing_references),
+        Err(SessionError::CompactionSummaryFieldRequired {
+            field: "summary.references"
+        })
+    ));
+    assert_eq!(state, source);
+}
+
+#[test]
+fn legacy_v2_summary_retains_the_original_eight_kibibyte_bound() {
+    let facts = CompactionFacts::new("summary-v2-size-compatibility");
+    let source = source_state();
+    let mut event = compaction_event(&source, &facts, "old-size-bound", 9);
+    event.payload["summary"]["narrative"]["concise_progress"] = json!("x".repeat(12 * 1024));
+    rehash_summary(&mut event);
+    let mut state = source.clone();
+    assert!(matches!(
+        SessionReducer.apply(&mut state, event),
+        Err(SessionError::CompactionSummaryTooLarge { maximum: 8192, .. })
+    ));
+    assert_eq!(state, source);
+}
+
 #[test]
 fn summary_v2_rebuilds_reference_only_continuation_without_rewriting_history() {
     let facts = CompactionFacts::new("summary-v2");

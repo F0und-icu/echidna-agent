@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::domain::artifacts::ArtifactScope;
+use crate::domain::context::ContextWindowPolicy;
 use crate::ports::tool::ToolExecutorError;
 
 use super::super::invalid_arguments;
@@ -17,7 +18,6 @@ use super::body::validate_body;
 
 pub(super) const MAX_TIMEOUT_MS: u64 = 30_000;
 pub(super) const MAX_REDIRECTS: usize = 5;
-pub(super) const MAX_PREVIEW_BYTES: usize = 16 * 1024;
 pub(super) const MAX_CAPTURE_BYTES: usize = 4 * 1024 * 1024;
 pub(super) const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
 pub(super) const MAX_BASE64_BODY_CHARS: usize = MAX_REQUEST_BODY_BYTES.div_ceil(3) * 4;
@@ -31,7 +31,6 @@ pub(super) const MAX_QUERY_VALUE_BYTES: usize = 4 * 1024;
 
 const DEFAULT_TIMEOUT_MS: u64 = 10_000;
 const DEFAULT_MAX_REDIRECTS: usize = 3;
-const DEFAULT_PREVIEW_BYTES: usize = 4 * 1024;
 const DEFAULT_CAPTURE_BYTES: usize = 128 * 1024;
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
@@ -119,7 +118,10 @@ pub(super) struct PreparedRequest {
     pub(super) headers: HeaderMap,
 }
 
-pub(super) fn validate(arguments: &HttpRequestArgs) -> Result<(), ToolExecutorError> {
+pub(super) fn validate(
+    arguments: &HttpRequestArgs,
+    max_preview_bytes: usize,
+) -> Result<(), ToolExecutorError> {
     if arguments.url.len() > MAX_URL_BYTES {
         return Err(invalid_arguments(
             "http_request",
@@ -183,10 +185,10 @@ pub(super) fn validate(arguments: &HttpRequestArgs) -> Result<(), ToolExecutorEr
             "`max_redirects` must be at most 5",
         ));
     }
-    if arguments.preview_bytes > MAX_PREVIEW_BYTES {
+    if arguments.preview_bytes > max_preview_bytes {
         return Err(invalid_arguments(
             "http_request",
-            "`preview_bytes` must be at most 16384",
+            format!("`preview_bytes` must be at most {max_preview_bytes}"),
         ));
     }
     if arguments.capture_bytes > MAX_CAPTURE_BYTES {
@@ -298,7 +300,7 @@ fn default_max_redirects() -> usize {
 }
 
 fn default_preview_bytes() -> usize {
-    DEFAULT_PREVIEW_BYTES
+    ContextWindowPolicy::for_window(32768).readback_default_bytes()
 }
 
 fn default_capture_bytes() -> usize {

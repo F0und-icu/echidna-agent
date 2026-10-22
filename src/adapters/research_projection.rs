@@ -1,12 +1,14 @@
 //! One read-only composition of Research facts with Project Session Receipt facts.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::fs;
 
 use crate::adapters::project_event_store::{
     Project, read_existing_research_events, read_existing_session_events,
 };
 use crate::domain::artifacts::{ArtifactId, ArtifactScope};
+use crate::domain::context::ContextWindowPolicy;
 use crate::domain::events::{EventEnvelope, StreamId};
 use crate::domain::model::{ContentItem, MessageRole};
 use crate::domain::project_stream::ProjectStreamReducer;
@@ -19,8 +21,6 @@ use crate::domain::session::{
     CompactionValidationContext, EvidenceSpine, NarrativeSummary, ResearchStreamIdentity,
     SessionError, SessionReducer, SessionSummaryDraft,
 };
-
-const MAX_COMPACTION_NARRATIVE_FIELD_BYTES: usize = 1536;
 
 /// Strict, discardable projection of shared project Artifact facts.
 ///
@@ -189,8 +189,9 @@ impl CompactionValidationFacts {
         history: &[ContentItem],
         previous: Option<&crate::domain::session::SessionSummary>,
         reference_limit: usize,
+        policy: ContextWindowPolicy,
     ) -> Result<SessionSummaryDraft, SessionError> {
-        let (current_goal, progress) = continuation_text(history, previous)?;
+        let (current_goal, progress) = continuation_text(history, previous, policy)?;
 
         let current_target_id = self
             .research_state
@@ -456,6 +457,7 @@ fn research_reference_is_retained(
 pub(super) fn continuation_text(
     history: &[ContentItem],
     previous: Option<&crate::domain::session::SessionSummary>,
+    policy: ContextWindowPolicy,
 ) -> Result<(String, String), SessionError> {
     crate::domain::history::ConversationHistory::from_complete_content_items(history)?;
     let latest_goal = latest_text(history, MessageRole::User)
@@ -476,12 +478,12 @@ pub(super) fn continuation_text(
         })
         .unwrap_or(latest_goal);
     let current_goal = if initial_goal == latest_goal {
-        bounded_text(latest_goal, MAX_COMPACTION_NARRATIVE_FIELD_BYTES)
+        bounded_text(latest_goal, policy.continuation_field_bytes())
     } else {
         format!(
             "Initial request: {}\nLatest request: {}",
-            bounded_text(initial_goal, 640),
-            bounded_text(latest_goal, 640)
+            bounded_text(initial_goal, policy.continuation_goal_part_bytes()),
+            bounded_text(latest_goal, policy.continuation_goal_part_bytes())
         )
     };
     let progress = latest_text(history, MessageRole::Assistant).map_or_else(
@@ -490,7 +492,7 @@ pub(super) fn continuation_text(
     );
     Ok((
         current_goal,
-        bounded_text(&progress, MAX_COMPACTION_NARRATIVE_FIELD_BYTES),
+        bounded_text(&progress, policy.continuation_field_bytes()),
     ))
 }
 
@@ -587,9 +589,32 @@ pub(crate) fn load_research_projection(
     Ok((state, references))
 }
 
+/// Only an empty Research stream is a known non-mutating prerequisite. Other
+/// source/projection errors remain fatal at the automatic compaction boundary.
+#[derive(Debug)]
+pub(crate) enum CompactionValidationFactsError {
+    ResearchStreamEmpty,
+    Projection(String),
+}
+
+impl fmt::Display for CompactionValidationFactsError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ResearchStreamEmpty => SessionError::CompactionResearchStreamEmpty.fmt(formatter),
+            Self::Projection(message) => message.fmt(formatter),
+        }
+    }
+}
+
+impl From<String> for CompactionValidationFactsError {
+    fn from(message: String) -> Self {
+        Self::Projection(message)
+    }
+}
+
 pub(crate) fn load_compaction_validation_facts(
     project: &Project,
-) -> Result<CompactionValidationFacts, String> {
+) -> Result<CompactionValidationFacts, CompactionValidationFactsError> {
     load_compaction_facts_at(project, None)
 }
 
@@ -600,7 +625,8 @@ pub(crate) fn load_historical_compaction_facts(
     project: &Project,
     source: &ResearchStreamIdentity,
 ) -> Result<CompactionValidationFacts, String> {
-    let facts = load_compaction_facts_at(project, Some(source.watermark().get()))?;
+    let facts = load_compaction_facts_at(project, Some(source.watermark().get()))
+        .map_err(|error| error.to_string())?;
     if &facts.research_stream != source {
         return Err(
             "Compaction historical Research prefix identity/hash does not match".to_owned(),
@@ -612,7 +638,7 @@ pub(crate) fn load_historical_compaction_facts(
 fn load_compaction_facts_at(
     project: &Project,
     watermark: Option<u64>,
-) -> Result<CompactionValidationFacts, String> {
+) -> Result<CompactionValidationFacts, CompactionValidationFactsError> {
     let (references, execution_receipt_ids) = load_reference_catalog_and_receipt_ids(project)?;
     let mut events = read_existing_research_events(project).map_err(|error| error.to_string())?;
     if let Some(watermark) = watermark {
@@ -620,8 +646,14 @@ fn load_compaction_facts_at(
         events.retain(|event| event.sequence.get() <= watermark);
     }
     let research_stream =
-        ResearchStreamIdentity::from_events(project.project_id().clone(), &events)
-            .map_err(|error| error.to_string())?;
+        ResearchStreamIdentity::from_events(project.project_id().clone(), &events).map_err(
+            |error| match error {
+                SessionError::CompactionResearchStreamEmpty => {
+                    CompactionValidationFactsError::ResearchStreamEmpty
+                }
+                error => CompactionValidationFactsError::Projection(error.to_string()),
+            },
+        )?;
     let research_state = ResearchReducer
         .reduce_with_references(events, &references)
         .map_err(|error| error.to_string())?;

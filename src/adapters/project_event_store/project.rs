@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 use super::durable_file::{commit_new_durable_file, sync_directory};
 use super::error::ProjectEventStoreError;
 
-pub(crate) const CONTROL_DIRECTORY: &str = ".cyber-agent";
+const CONTROL_DIRECTORY: &str = ".echidna";
+const LEGACY_CONTROL_DIRECTORY: &str = ".cyber-agent";
 pub(crate) const PROJECT_FILE: &str = "project.toml";
 pub(crate) const RESEARCH_FILE: &str = "research.jsonl";
 pub(crate) const SESSIONS_DIRECTORY: &str = "sessions";
@@ -23,6 +24,7 @@ const RESEARCH_STREAM_ID: &str = "research";
 pub struct Project {
     root: PathBuf,
     project_id: ProjectId,
+    control_directory_name: &'static str,
 }
 
 /// An advisory, process-scoped Chat runtime lease. It does not own Event
@@ -34,6 +36,8 @@ pub(crate) struct ProjectChatRuntimeLease {
 }
 
 impl Project {
+    pub(crate) const DEFAULT_CONTROL_DIRECTORY: &'static str = CONTROL_DIRECTORY;
+
     /// Initializes `root` with the minimum isolated project facts.
     ///
     /// The identifier deterministically derives from the canonical root. The
@@ -41,19 +45,22 @@ impl Project {
     /// sentinel: no existing file is opened with truncation semantics.
     pub fn initialize(root: &Path) -> Result<Self, ProjectEventStoreError> {
         let root = canonical_directory(root)?;
-        let control_directory = root.join(CONTROL_DIRECTORY);
-        let project_file = control_directory.join(PROJECT_FILE);
-        if control_directory.exists() {
+        if let Some(name) = existing_control_directory(&root)? {
+            let control_directory = root.join(name);
+            let project_file = control_directory.join(PROJECT_FILE);
             return if project_file.exists() {
                 Err(ProjectEventStoreError::AlreadyInitialized { project_file })
             } else {
                 Err(ProjectEventStoreError::IncompleteInitialization { control_directory })
             };
         }
+        let control_directory = root.join(CONTROL_DIRECTORY);
+        let project_file = control_directory.join(PROJECT_FILE);
 
         let project = Self {
             project_id: project_id_for(&root),
             root,
+            control_directory_name: CONTROL_DIRECTORY,
         };
         let encoded = toml::to_string_pretty(&ProjectToml {
             project_id: project.project_id.clone(),
@@ -83,55 +90,52 @@ impl Project {
         }
 
         loop {
-            let control_directory = candidate.join(CONTROL_DIRECTORY);
+            let Some(name) = existing_control_directory(&candidate)? else {
+                let Some(parent) = candidate.parent() else {
+                    break;
+                };
+                candidate = parent.to_path_buf();
+                continue;
+            };
+            let control_directory = candidate.join(name);
             let project_file = control_directory.join(PROJECT_FILE);
-            if control_directory.exists() && !project_file.is_file() {
+            if !project_file.is_file() {
                 return Err(ProjectEventStoreError::IncompleteInitialization { control_directory });
             }
-            if project_file.is_file() {
-                let encoded = fs::read_to_string(&project_file).map_err(|source| {
-                    ProjectEventStoreError::Io {
-                        operation: "read project configuration",
-                        path: project_file.clone(),
-                        source,
-                    }
+            let encoded =
+                fs::read_to_string(&project_file).map_err(|source| ProjectEventStoreError::Io {
+                    operation: "read project configuration",
+                    path: project_file.clone(),
+                    source,
                 })?;
-                let config: ProjectToml = toml::from_str(&encoded).map_err(|source| {
-                    ProjectEventStoreError::ProjectTomlDecode {
-                        path: project_file.clone(),
-                        source,
-                    }
-                })?;
-                let configured_root = canonical_directory(&config.canonical_root)?;
-                if configured_root != candidate {
-                    return Err(ProjectEventStoreError::ProjectRootMismatch {
-                        project_file,
-                        configured_root,
-                        discovered_root: candidate,
-                    });
+            let config: ProjectToml = toml::from_str(&encoded).map_err(|source| {
+                ProjectEventStoreError::ProjectTomlDecode {
+                    path: project_file.clone(),
+                    source,
                 }
-                let expected_project_id = project_id_for(&configured_root);
-                if config.project_id != expected_project_id {
-                    return Err(ProjectEventStoreError::ProjectIdentityMismatch {
-                        project_file,
-                        configured: config.project_id,
-                        expected: expected_project_id,
-                    });
-                }
-
-                return Ok(Self {
-                    root: configured_root,
-                    project_id: expected_project_id,
+            })?;
+            let configured_root = canonical_directory(&config.canonical_root)?;
+            if configured_root != candidate {
+                return Err(ProjectEventStoreError::ProjectRootMismatch {
+                    project_file,
+                    configured_root,
+                    discovered_root: candidate,
+                });
+            }
+            let expected_project_id = project_id_for(&configured_root);
+            if config.project_id != expected_project_id {
+                return Err(ProjectEventStoreError::ProjectIdentityMismatch {
+                    project_file,
+                    configured: config.project_id,
+                    expected: expected_project_id,
                 });
             }
 
-            let Some(parent) = candidate.parent() else {
-                break;
-            };
-            if parent == candidate {
-                break;
-            }
-            candidate = parent.to_path_buf();
+            return Ok(Self {
+                root: configured_root,
+                project_id: expected_project_id,
+                control_directory_name: name,
+            });
         }
 
         Err(ProjectEventStoreError::ProjectNotFound {
@@ -224,7 +228,11 @@ impl Project {
     }
 
     pub(crate) fn control_directory(&self) -> PathBuf {
-        self.root.join(CONTROL_DIRECTORY)
+        self.root.join(self.control_directory_name)
+    }
+
+    pub(crate) fn control_directory_name(&self) -> &'static str {
+        self.control_directory_name
     }
 
     /// Resolves the initialized Research stream without creating a file or
@@ -347,6 +355,32 @@ impl Project {
         ids.sort_by(|left, right| left.as_str().cmp(right.as_str()));
         Ok(ids)
     }
+}
+
+fn existing_control_directory(root: &Path) -> Result<Option<&'static str>, ProjectEventStoreError> {
+    let mut selected = None;
+    for name in [CONTROL_DIRECTORY, LEGACY_CONTROL_DIRECTORY] {
+        let path = root.join(name);
+        match fs::symlink_metadata(&path) {
+            Ok(_) => {
+                if selected.is_some() {
+                    return Err(ProjectEventStoreError::ConflictingControlDirectories {
+                        project_root: root.to_path_buf(),
+                    });
+                }
+                selected = Some(name);
+            }
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(ProjectEventStoreError::Io {
+                    operation: "inspect project control directory",
+                    path,
+                    source,
+                });
+            }
+        }
+    }
+    Ok(selected)
 }
 
 /// The minimum serialized project configuration, kept at the filesystem edge.

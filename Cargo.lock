@@ -341,6 +341,7 @@ dependencies = [
  "futures-core",
  "futures-util",
  "image",
+ "libc",
  "portable-pty",
  "reqwest",
  "ring",

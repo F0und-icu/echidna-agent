@@ -95,7 +95,7 @@ fn artifact_args(
 }
 
 fn research_line_count(project: &Project) -> usize {
-    fs::read_to_string(project.root().join(".cyber-agent/research.jsonl"))
+    fs::read_to_string(project.root().join(".echidna/research.jsonl"))
         .expect("Research stream should be readable")
         .lines()
         .count()
@@ -105,7 +105,7 @@ fn sha256_path(project: &Project, bytes: &[u8]) -> std::path::PathBuf {
     let digest = format!("{:x}", Sha256::digest(bytes));
     project
         .root()
-        .join(".cyber-agent/artifacts/blobs/sha256")
+        .join(".echidna/artifacts/blobs/sha256")
         .join(digest)
 }
 
@@ -142,7 +142,7 @@ fn artifact_event_envelope(
 }
 
 fn append_raw_events(project: &Project, events: &[EventEnvelope<Value>]) {
-    let stream = project.root().join(".cyber-agent/research.jsonl");
+    let stream = project.root().join(".echidna/research.jsonl");
     let mut bytes = fs::read(&stream).unwrap();
     for event in events {
         bytes.extend_from_slice(&serde_json::to_vec(event).unwrap());
@@ -182,7 +182,7 @@ fn artifact_store_schema_effect_retry_and_resources_are_fixed() {
     assert_eq!(spec.cache_policy, ToolCachePolicy::None);
     assert_eq!(
         spec.resource_key_template.as_deref(),
-        Some("file:{source_path},file:.cyber-agent/research.jsonl")
+        Some("file:{source_path},file:.echidna/research.jsonl")
     );
     assert_eq!(
         spec.input_schema["required"],
@@ -218,7 +218,7 @@ fn artifact_store_schema_effect_retry_and_resources_are_fixed() {
             ResourceKey::file(
                 project
                     .root()
-                    .join(".cyber-agent/research.jsonl")
+                    .join(".echidna/research.jsonl")
                     .display()
                     .to_string()
             ),
@@ -232,7 +232,7 @@ async fn artifact_event_versions_and_unknown_types_are_strict_on_replay() {
     let (_directory, project) = initialized_project("artifact-event-version");
     let tools = ToolRegistry::for_project(project.root());
     record_target_snapshot(&tools, "snapshot-a", "event-snapshot-a").await;
-    let stream = project.root().join(".cyber-agent/research.jsonl");
+    let stream = project.root().join(".echidna/research.jsonl");
     let malformed_artifact = EventEnvelope::current(
         EventId::new("event-unsupported-artifact-version"),
         StreamId::new("research"),
@@ -272,7 +272,7 @@ async fn artifact_event_versions_and_unknown_types_are_strict_on_replay() {
     let (_directory, project) = initialized_project("artifact-event-unknown");
     let tools = ToolRegistry::for_project(project.root());
     record_target_snapshot(&tools, "snapshot-a", "event-snapshot-a").await;
-    let stream = project.root().join(".cyber-agent/research.jsonl");
+    let stream = project.root().join(".echidna/research.jsonl");
     let unknown_artifact = EventEnvelope::current(
         EventId::new("event-unknown-artifact-type"),
         StreamId::new("research"),
@@ -691,7 +691,7 @@ async fn symlinked_sources_and_blob_paths_are_rejected_without_leaving_artifact_
     assert_eq!(research_line_count(&project), 1);
 
     fs::remove_file(&blob_path).unwrap();
-    let artifacts_directory = project.root().join(".cyber-agent/artifacts");
+    let artifacts_directory = project.root().join(".echidna/artifacts");
     fs::remove_dir_all(&artifacts_directory).unwrap();
     let external_directory = project.root().join("external-artifacts");
     fs::create_dir(&external_directory).unwrap();
@@ -776,7 +776,7 @@ async fn artifacts_are_project_isolated_and_remain_facts_after_cache_deletion() 
         sha256_path(&second, b"same bytes")
     );
 
-    let cache = first.root().join(".cyber-agent/cache");
+    let cache = first.root().join(".echidna/cache");
     fs::create_dir_all(&cache).unwrap();
     fs::write(cache.join("derived.json"), b"not a fact").unwrap();
     fs::remove_dir_all(cache).unwrap();

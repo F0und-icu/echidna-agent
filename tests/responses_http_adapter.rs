@@ -55,6 +55,8 @@ const FIXTURE_SECRET: &str = "fixture-secret";
 
 #[path = "responses_cases/text_finalization.rs"]
 mod text_finalization;
+#[path = "responses_cases/transport.rs"]
+mod transport;
 const FIXTURE_CREDENTIAL_REFERENCE: &str = "CYBER_AGENT_FIXTURE_API_KEY";
 type CredentialReadResult = Result<Option<String>, CredentialSourceError>;
 
@@ -551,13 +553,13 @@ async fn spawn_sse_server_chunked(
 
 async fn spawn_sse_server_chunked_with_declared_length(
     status: u16,
-    body: &str,
+    body: impl AsRef<[u8]>,
     chunk_bytes: usize,
     declared_body_bytes: usize,
 ) -> (String, oneshot::Receiver<CapturedRequest>, JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let response_body = body.as_bytes().to_vec();
+    let response_body = body.as_ref().to_vec();
     let (request_sender, request_receiver) = oneshot::channel();
 
     let task = tokio::spawn(async move {

@@ -4,9 +4,11 @@ use crate::adapters::project_event_store::{
     Project, read_existing_research_events, read_existing_session_events,
 };
 use crate::adapters::research_projection::{
-    CompactionValidationFacts, ProjectArtifactCatalog, continuation_text,
-    load_compaction_validation_facts, load_historical_compaction_facts, load_reference_catalog,
+    CompactionValidationFacts, CompactionValidationFactsError, ProjectArtifactCatalog,
+    continuation_text, load_compaction_validation_facts, load_historical_compaction_facts,
+    load_reference_catalog,
 };
+use crate::domain::context::ContextWindowPolicy;
 use crate::domain::events::StreamId;
 use crate::domain::model::ContentItem;
 use crate::domain::project::ProjectId;
@@ -38,11 +40,14 @@ impl SessionCompactionFacts {
         history: &[ContentItem],
         previous: Option<&SessionSummary>,
         reference_limit: usize,
+        policy: ContextWindowPolicy,
     ) -> Result<SessionSummaryDraft, SessionError> {
         let research = self
             .research
             .as_ref()
-            .map(|facts| facts.compose_session_summary_draft(history, previous, reference_limit))
+            .map(|facts| {
+                facts.compose_session_summary_draft(history, previous, reference_limit, policy)
+            })
             .transpose()?;
         let Some(task) = &self.task else {
             return Ok(research.expect("unbound legacy facts contain Research"));
@@ -50,21 +55,24 @@ impl SessionCompactionFacts {
         let (spine, narrative) = match research {
             Some(draft) => (draft.evidence_spine().cloned(), draft.narrative().clone()),
             None => {
-                let (goal, progress) = continuation_text(history, previous)?;
+                let (goal, progress) = continuation_text(history, previous, policy)?;
                 (
                     None,
                     NarrativeSummary::new(goal, progress, Vec::new(), Vec::new())?,
                 )
             }
         };
-        SessionSummaryDraft::for_task(task.references(reference_limit), spine, narrative)
+        // Task summaries use FactReference provenance. Even the smallest
+        // candidate must retain a source event; an empty reference list would
+        // violate that contract before preflight can report no useful reduction.
+        SessionSummaryDraft::for_task(task.references(reference_limit.max(1)), spine, narrative)
     }
 }
 
 pub(crate) fn load_session_compaction_facts(
     project: &Project,
     state: &SessionState,
-) -> Result<SessionCompactionFacts, String> {
+) -> Result<SessionCompactionFacts, CompactionValidationFactsError> {
     let Some(binding) = state.agent_definition_binding() else {
         return Ok(SessionCompactionFacts {
             project_id: project.project_id().clone(),
@@ -82,7 +90,9 @@ pub(crate) fn load_session_compaction_facts(
         .reduce(events.iter().cloned())
         .map_err(|error| error.to_string())?;
     if &reduced != state {
-        return Err("Compaction Session source changed before validation".to_owned());
+        return Err("Compaction Session source changed before validation"
+            .to_owned()
+            .into());
     }
     let project_events =
         read_existing_research_events(project).map_err(|error| error.to_string())?;
@@ -133,7 +143,7 @@ fn load_summary_facts(
             if historical_research {
                 load_historical_compaction_facts(project, spine.source())
             } else {
-                load_compaction_validation_facts(project)
+                load_compaction_validation_facts(project).map_err(|error| error.to_string())
             }
         })
         .transpose()?;

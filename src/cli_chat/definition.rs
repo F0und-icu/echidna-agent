@@ -33,7 +33,15 @@ pub(super) fn initial_binding(
     composition: &ProviderComposition,
     discovered_mcp: &[McpCatalogTool],
 ) -> Result<AgentDefinitionBinding, ChatError> {
-    let tools = ToolRegistry::for_project_with_mcp(project.root(), discovered_mcp)?;
+    let tools = ToolRegistry::for_project_with_mcp(project.root(), discovered_mcp)?
+        .with_project(project)
+        .with_context_window(
+            composition
+                .agent_profile()
+                .primary()
+                .capabilities()
+                .context_window,
+        );
     if resume {
         let events = read_existing_session_events(project, session).map_err(error)?;
         let state = SessionReducer.reduce(events)?;
@@ -52,7 +60,10 @@ pub(super) fn initial_binding(
         )
         .map_err(error);
     }
-    crate::cli_agent::select_binding(requested, composition, &tools).map_err(error)
+    let source = crate::cli_agent::select_binding(requested, composition, &tools).map_err(error)?;
+    crate::adapters::agent_evolution::EvolutionStore::new(project, &source)
+        .select(source)
+        .map_err(Into::into)
 }
 
 pub(super) fn reload_candidate(
@@ -98,10 +109,24 @@ pub(super) fn reload_candidate(
 }
 
 pub(super) fn prompt_for_state(
+    project: &Project,
     binding: &AgentDefinitionBinding,
     state: &SessionState,
+    session_id: &str,
 ) -> Result<PromptComposition, ChatError> {
-    let mut prompt = PromptComposition::from_binding(binding.clone()).map_err(error)?;
+    let mut prompt = PromptComposition::from_binding(binding.clone())
+        .map_err(error)?
+        .with_evolution_session(
+            session_id,
+            format!(
+                "{}/{}",
+                project.control_directory_name(),
+                crate::domain::agent_evolution::pending_relative(
+                    binding.definition().id().as_str(),
+                    session_id
+                )
+            ),
+        );
     if binding.definition().research().is_some() {
         if let Some(selection) = state.domain_profile_selection() {
             prompt = prompt.with_domain_profile(selection.profile());
@@ -121,6 +146,7 @@ impl DurableChatSession {
     pub(super) fn bound_tools(
         &self,
         discovered_mcp: &[McpCatalogTool],
+        window_tokens: u32,
     ) -> Result<ToolRegistry, ChatError> {
         ToolRegistry::for_agent_with_mcp(
             self.project.root(),
@@ -129,6 +155,18 @@ impl DurableChatSession {
             self.binding.definition().research().is_some(),
             discovered_mcp,
         )
+        .map(|tools| {
+            tools
+                .with_project(&self.project)
+                .with_input_verification(self.binding.definition().rsi().is_some())
+                .with_automatic_verification(
+                    self.binding
+                        .definition()
+                        .rsi()
+                        .is_some_and(|rsi| rsi.improvement),
+                )
+                .with_context_window(window_tokens)
+        })
         .map_err(ChatError::from)
     }
 
@@ -138,8 +176,20 @@ impl DurableChatSession {
         composition: &ProviderComposition,
         discovered_mcp: &[McpCatalogTool],
     ) -> Result<(), ChatError> {
-        let tools = self.bound_tools(discovered_mcp)?;
-        let prompt = prompt_for_state(&self.binding, state)?;
+        let tools = self.bound_tools(
+            discovered_mcp,
+            composition
+                .agent_profile()
+                .primary()
+                .capabilities()
+                .context_window,
+        )?;
+        let prompt = prompt_for_state(
+            &self.project,
+            &self.binding,
+            state,
+            self.session_id.as_str(),
+        )?;
         let mut preview = AgentLoop::with_primary_context(
             composition.primary_provider(),
             &tools,

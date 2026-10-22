@@ -21,7 +21,7 @@ pub(crate) use task::{
     SessionSourceIdentity, SessionTaskReferences, TaskCompactionValidationFacts,
 };
 
-pub(super) const CURRENT_SESSION_SUMMARY_SCHEMA_VERSION: u16 = 3;
+pub(super) const CURRENT_SESSION_SUMMARY_SCHEMA_VERSION: u16 = 4;
 
 /// One append-only Compaction fact. Original Session History remains durable.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -79,7 +79,7 @@ impl SessionCompaction {
         if self.schema_version != self.summary.schema_version()
             || !matches!(
                 self.schema_version,
-                1 | 2 | CURRENT_SESSION_SUMMARY_SCHEMA_VERSION
+                1 | 2 | 3 | CURRENT_SESSION_SUMMARY_SCHEMA_VERSION
             )
         {
             return Err(SessionError::UnsupportedPayloadSchema {

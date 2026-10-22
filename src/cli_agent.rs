@@ -34,6 +34,13 @@ pub(crate) enum AgentCommand {
     },
     /// Validate all resources and configured model context budgets offline.
     Check { path: PathBuf },
+    /// Explicitly select the current source as a new RSI lineage, retaining old revisions.
+    Lineage {
+        path: PathBuf,
+        /// Discover configured MCP names once before validating the new lineage.
+        #[arg(long)]
+        discover_mcp: bool,
+    },
     /// Show resolved instruction snapshots, their sources, and effective tools.
     Inspect {
         path: PathBuf,
@@ -97,15 +104,23 @@ pub(crate) fn run(config: Option<&Path>, command: AgentCommand) -> Result<(), Cl
         write_builtin_definition(template, &path, id.as_deref()).map_err(definition_error)?;
         return print_json(&json!({"status":"created", "path":path, "template":template}));
     }
-    let (path, inspect, discover_mcp) = match command {
-        AgentCommand::Check { path } => (path, false, false),
-        AgentCommand::Inspect { path, discover_mcp } => (path, true, discover_mcp),
+    let (path, inspect, discover_mcp, new_lineage) = match command {
+        AgentCommand::Check { path } => (path, false, false, false),
+        AgentCommand::Lineage { path, discover_mcp } => (path, false, discover_mcp, true),
+        AgentCommand::Inspect { path, discover_mcp } => (path, true, discover_mcp, false),
         AgentCommand::Init { .. } => unreachable!("init returns above"),
     };
     let composition = load_provider_composition(config)?.ok_or_else(|| {
         definition_error("check/inspect requires --config for model and context validation")
     })?;
     let root = std::env::current_dir().map_err(CliError::WorkingDirectory)?;
+    let project = match crate::adapters::project_event_store::Project::discover(&root) {
+        Ok(project) => Some(project),
+        Err(crate::adapters::project_event_store::ProjectEventStoreError::ProjectNotFound {
+            ..
+        }) => None,
+        Err(error) => return Err(definition_error(error)),
+    };
     let discovered_mcp = if discover_mcp {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -121,6 +136,10 @@ pub(crate) fn run(config: Option<&Path>, command: AgentCommand) -> Result<(), Cl
         ToolRegistry::for_project_with_mcp(&root, &discovered_mcp).map_err(definition_error)?
     } else {
         ToolRegistry::for_project(&root)
+    };
+    let tools = match &project {
+        Some(project) => tools.with_project(project),
+        None => tools,
     };
     let binding = select_binding(Some(&path), &composition, &tools)?;
     let tools = if discover_mcp {
@@ -140,7 +159,26 @@ pub(crate) fn run(config: Option<&Path>, command: AgentCommand) -> Result<(), Cl
             binding.definition().research().is_some(),
         )
     };
+    let tools = match &project {
+        Some(project) => tools.with_project(project),
+        None => tools,
+    };
     let prompt = PromptComposition::from_binding(binding.clone()).map_err(definition_error)?;
+    let tools = tools
+        .with_input_verification(binding.definition().rsi().is_some())
+        .with_automatic_verification(
+            binding
+                .definition()
+                .rsi()
+                .is_some_and(|rsi| rsi.improvement),
+        )
+        .with_context_window(
+            composition
+                .agent_profile()
+                .primary()
+                .capabilities()
+                .context_window,
+        );
     let preview = AgentLoop::with_primary_context(
         composition.primary_provider(),
         &tools,
@@ -164,6 +202,20 @@ pub(crate) fn run(config: Option<&Path>, command: AgentCommand) -> Result<(), Cl
             &DeferredActivationSet::default(),
         )
         .map_err(definition_error)?;
+    if new_lineage {
+        let project = project
+            .as_ref()
+            .ok_or_else(|| definition_error("agent lineage requires an initialized project"))?;
+        let _lease = project
+            .acquire_chat_runtime_lease()
+            .map_err(definition_error)?;
+        crate::adapters::agent_evolution::EvolutionStore::new(project, &binding)
+            .new_lineage(&binding)
+            .map_err(definition_error)?;
+        return print_json(
+            &json!({"status":"lineage_selected","agent_id":binding.definition().id(),"source_digest":binding.definition().digest(),"history":"prior revisions and Session bindings retained"}),
+        );
+    }
     if inspect {
         print_json(&json!({
             "status":"valid", "binding":binding,

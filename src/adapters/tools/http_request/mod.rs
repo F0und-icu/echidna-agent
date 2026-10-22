@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 
 use crate::adapters::artifact_store::LocalArtifactStore;
 use crate::domain::artifacts::ArtifactScope;
+use crate::domain::context::ContextWindowPolicy;
 use crate::domain::tools::{ResourceKey, ToolExecutionOutcome, ToolExecutionPlan};
 use crate::ports::artifact::ArtifactStore;
 use crate::ports::tool::ToolExecutorError;
@@ -39,9 +40,16 @@ pub(super) fn output_schema() -> Value {
 
 pub(super) fn normalize_for_scope(
     project_root: &std::path::Path,
-    value: Value,
+    control_directory: &str,
+    mut value: Value,
     binding: &ArtifactScopeBinding,
+    policy: ContextWindowPolicy,
 ) -> Result<(Value, Vec<ResourceKey>), ToolExecutorError> {
+    if let Some(arguments) = value.as_object_mut() {
+        arguments
+            .entry("preview_bytes")
+            .or_insert(json!(policy.readback_default_bytes()));
+    }
     let mut arguments: HttpRequestArgs = decode_arguments("http_request", value)?;
     if arguments.artifact_scope.is_some() {
         return Err(ToolExecutorError::InvalidArguments {
@@ -49,27 +57,31 @@ pub(super) fn normalize_for_scope(
             message: "artifact_scope is runtime-bound and must not be supplied".to_owned(),
         });
     }
-    validate(&arguments)?;
+    validate(&arguments, policy.readback_max_bytes())?;
     arguments.artifact_scope = Some(scope_from_input(
         binding,
         arguments.artifact.target_snapshot_id.as_deref(),
     )?);
     Ok((
         serde_json::to_value(arguments).expect("HttpRequestArgs serialization cannot fail"),
-        vec![ResourceKeyResolver::new(project_root).file(".cyber-agent/research.jsonl")],
+        vec![
+            ResourceKeyResolver::new(project_root)
+                .project_file(control_directory, "research.jsonl"),
+        ],
     ))
 }
 
 pub(super) async fn execute(
     project_root: &std::path::Path,
     plan: ToolExecutionPlan,
+    policy: ContextWindowPolicy,
 ) -> ToolExecutionOutcome {
     let arguments: HttpRequestArgs =
         match decode_arguments("http_request", plan.call.arguments.clone()) {
             Ok(arguments) => arguments,
             Err(error) => return invalid_plan(plan, error),
         };
-    if let Err(error) = validate(&arguments) {
+    if let Err(error) = validate(&arguments, policy.readback_max_bytes()) {
         return invalid_plan(plan, error);
     }
 

@@ -126,7 +126,7 @@ fn research_state(output: Value) -> Value {
 }
 
 fn research_line_count(project: &Project) -> usize {
-    fs::read_to_string(project.root().join(".cyber-agent/research.jsonl"))
+    fs::read_to_string(project.root().join(".echidna/research.jsonl"))
         .unwrap()
         .lines()
         .count()
@@ -136,7 +136,7 @@ fn research_line_count(project: &Project) -> usize {
 async fn research_get_is_lock_free_and_missing_streams_are_never_recreated() {
     let (_root, project) = initialized_project("research-read-only");
     let tools = ToolRegistry::for_project(project.root());
-    let control_directory = project.root().join(".cyber-agent");
+    let control_directory = project.root().join(".echidna");
     let stream_path = control_directory.join("research.jsonl");
     let writer_lock_path = control_directory.join("writer.lock");
     let mut entries_before = fs::read_dir(&control_directory)
@@ -476,7 +476,7 @@ async fn updates_replay_as_new_events_and_preserve_confirmed_finding_requirement
     assert_eq!(state["findings"]["finding-1"]["status"], "confirmed");
     assert_eq!(state["next_actions"]["action-1"]["status"], "done");
     assert!(
-        fs::read_to_string(project.root().join(".cyber-agent/research.jsonl"))
+        fs::read_to_string(project.root().join(".echidna/research.jsonl"))
             .unwrap()
             .contains("research.finding_updated")
     );
@@ -683,10 +683,9 @@ async fn invalid_persisted_research_is_read_only_and_projects_remain_isolated() 
         )
         .await;
     }
-    let first_contents =
-        fs::read_to_string(first.root().join(".cyber-agent/research.jsonl")).unwrap();
+    let first_contents = fs::read_to_string(first.root().join(".echidna/research.jsonl")).unwrap();
     let second_contents =
-        fs::read_to_string(second.root().join(".cyber-agent/research.jsonl")).unwrap();
+        fs::read_to_string(second.root().join(".echidna/research.jsonl")).unwrap();
     assert!(first_contents.contains("first.target"));
     assert!(!first_contents.contains("second.target"));
     assert!(second_contents.contains("second.target"));
@@ -863,6 +862,6 @@ fn research_tool_schemas_are_fixed_and_execution_metadata_is_exact() {
     assert!(update.input_schema["properties"].get("execution").is_some());
     assert_eq!(
         update.resource_key_template.as_deref(),
-        Some("file:.cyber-agent/research.jsonl")
+        Some("file:.echidna/research.jsonl")
     );
 }

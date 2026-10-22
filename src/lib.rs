@@ -332,7 +332,7 @@ fn doctor_report(composition: Option<&ProviderComposition>) -> DoctorReport {
                 Diagnostic {
                     code: "PROJECT_NOT_INITIALIZED",
                     severity: "info",
-                    message: "no .cyber-agent/project.toml is configured for this project",
+                    message: "no .echidna/project.toml or legacy .cyber-agent/project.toml is configured for this project",
                 },
                 Diagnostic {
                     code: "PROVIDER_NOT_CONFIGURED",

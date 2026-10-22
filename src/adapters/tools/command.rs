@@ -1,6 +1,8 @@
 //! Argv-only single and batched command execution.
 
 use std::collections::VecDeque;
+use std::fs;
+use std::io::Read;
 use std::path::Path;
 use std::process::Stdio;
 
@@ -23,8 +25,40 @@ use super::filesystem::{display_path, resolve_path};
 use super::output::{BoundedText, CapturedOutput, OUTPUT_DRAIN_GRACE, bounded_text};
 use super::resources::ResourceKeyResolver;
 use super::{decode_arguments, invalid_arguments, invalid_plan};
+use crate::domain::agent_evolution::{ScriptFile, validate_input_files};
+
+pub(super) fn verified_inputs_schema() -> Value {
+    json!({"type":"array","maxItems":8,"items":{"type":"object","properties":{"path":{"type":"string","minLength":1},"blake3":{"type":"string","pattern":"^[0-9a-f]{64}$"}},"required":["path","blake3"],"additionalProperties":false}})
+}
 
 const MAX_COMMANDS: usize = 32;
+const MAX_ATTESTED_INPUT_BYTES: usize = 1024 * 1024;
+
+/// Reads the local regular-file inputs used by command attestation and RSI copies.
+pub(crate) fn read_attested_input(path: &Path) -> Result<(Vec<u8>, fs::Permissions), String> {
+    // Reject static FIFOs/devices/links before open; confirm the actual opened
+    // descriptor as well. This local-input contract is not OS race isolation.
+    let entry = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    if !entry.is_file() {
+        return Err("input must be a regular file, not a link or special file".to_owned());
+    }
+    let file = fs::File::open(path).map_err(|error| error.to_string())?;
+    let metadata = file.metadata().map_err(|error| error.to_string())?;
+    if !metadata.is_file() {
+        return Err("opened input is not a regular file".to_owned());
+    }
+    if metadata.len() > MAX_ATTESTED_INPUT_BYTES as u64 {
+        return Err("input exceeds 1MiB".to_owned());
+    }
+    let mut bytes = Vec::new();
+    file.take((MAX_ATTESTED_INPUT_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() > MAX_ATTESTED_INPUT_BYTES {
+        return Err("input exceeds 1MiB".to_owned());
+    }
+    Ok((bytes, metadata.permissions()))
+}
 
 pub(super) fn resource_schema() -> Value {
     json!({
@@ -77,6 +111,10 @@ pub(super) struct RunCommandArgs {
     pub(super) cwd: Option<String>,
     #[serde(default)]
     pub(super) resources: Vec<CommandResource>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) verified_inputs: Vec<ScriptFile>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) code_inputs: Vec<String>,
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
@@ -96,7 +134,21 @@ struct RunCommandsArgs {
 pub(super) fn normalize_one(
     project_root: &Path,
     value: Value,
+    input_verification_enabled: bool,
+    automatic_verification_enabled: bool,
 ) -> Result<(Value, Vec<ResourceKey>), ToolExecutorError> {
+    if !automatic_verification_enabled && value.get("code_inputs").is_some() {
+        return Err(invalid_arguments(
+            "run_command",
+            "code_inputs requires RSI improvement opt-in",
+        ));
+    }
+    if !input_verification_enabled && value.get("verified_inputs").is_some() {
+        return Err(invalid_arguments(
+            "run_command",
+            "verified_inputs is available only for an RSI-enabled Agent binding",
+        ));
+    }
     let arguments: RunCommandArgs = decode_arguments("run_command", value)?;
     validate_command(&arguments, "run_command")?;
     let keys = command_resource_keys(project_root, &arguments);
@@ -109,7 +161,39 @@ pub(super) fn normalize_one(
 pub(super) fn normalize_batch(
     project_root: &Path,
     value: Value,
+    input_verification_enabled: bool,
+    automatic_verification_enabled: bool,
 ) -> Result<(Value, Vec<ResourceKey>), ToolExecutorError> {
+    if !automatic_verification_enabled
+        && value
+            .get("commands")
+            .and_then(Value::as_array)
+            .is_some_and(|commands| {
+                commands
+                    .iter()
+                    .any(|command| command.get("code_inputs").is_some())
+            })
+    {
+        return Err(invalid_arguments(
+            "run_commands",
+            "code_inputs requires RSI improvement opt-in",
+        ));
+    }
+    if !input_verification_enabled
+        && value
+            .get("commands")
+            .and_then(Value::as_array)
+            .is_some_and(|commands| {
+                commands
+                    .iter()
+                    .any(|command| command.get("verified_inputs").is_some())
+            })
+    {
+        return Err(invalid_arguments(
+            "run_commands",
+            "verified_inputs is available only for an RSI-enabled Agent binding",
+        ));
+    }
     let arguments: RunCommandsArgs = decode_arguments("run_commands", value)?;
     let keys = command_resource_sets(&arguments, project_root)?
         .into_iter()
@@ -256,6 +340,31 @@ pub(super) fn validate_command(
     arguments: &RunCommandArgs,
     tool_name: &str,
 ) -> Result<(), ToolExecutorError> {
+    validate_input_files(&arguments.verified_inputs)
+        .map_err(|message| invalid_arguments(tool_name, message))?;
+    let automatic = arguments
+        .code_inputs
+        .iter()
+        .map(|path| ScriptFile {
+            path: path.clone(),
+            blake3: "0".repeat(64),
+        })
+        .collect::<Vec<_>>();
+    validate_input_files(&automatic).map_err(|message| invalid_arguments(tool_name, message))?;
+    if arguments
+        .verified_inputs
+        .iter()
+        .map(|file| &file.path)
+        .chain(arguments.code_inputs.iter())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+        > 8
+    {
+        return Err(invalid_arguments(
+            tool_name,
+            "at most 8 combined code inputs are supported",
+        ));
+    }
     if arguments.argv.is_empty() || arguments.argv[0].is_empty() {
         return Err(invalid_arguments(
             tool_name,
@@ -407,7 +516,48 @@ async fn run(
     max_bytes: usize,
     raw_bytes: usize,
 ) -> CapturedCommand {
+    let mut arguments = arguments.clone();
+    for path in arguments.code_inputs.clone() {
+        let bytes = match read_attested_input(&project_root.join(&path)) {
+            Ok((bytes, _)) => bytes,
+            Err(error) => {
+                return verification_failure(
+                    project_root,
+                    &arguments,
+                    format!("read code input `{path}`: {error}"),
+                );
+            }
+        };
+        let digest = blake3::hash(&bytes).to_hex().to_string();
+        if let Some(expected) = arguments
+            .verified_inputs
+            .iter()
+            .find(|file| file.path == path)
+        {
+            if expected.blake3 != digest {
+                return verification_failure(
+                    project_root,
+                    &arguments,
+                    format!("code input `{path}` does not match explicit expected digest"),
+                );
+            }
+        } else {
+            arguments.verified_inputs.push(ScriptFile {
+                path,
+                blake3: digest,
+            });
+        }
+    }
     let cwd = resolve_path(project_root, arguments.cwd.as_deref().unwrap_or("."));
+    if let Err(error) = verify_inputs(project_root, &arguments.verified_inputs) {
+        return CapturedCommand {
+            result: Err(
+                json!({"cwd":display_path(project_root, &cwd),"exit_code":null,"stdout":"","stderr":"","truncated":false,"error":error}),
+            ),
+            captures: Vec::new(),
+            published: Vec::new(),
+        };
+    }
     let argv = arguments
         .argv
         .iter()
@@ -418,7 +568,15 @@ async fn run(
     if let Some(error) = &output.error {
         value["error"] = Value::from(error.clone());
     }
-    let result = if output.exit_code == Some(0) && output.error.is_none() {
+    let verification = verify_inputs(project_root, &arguments.verified_inputs);
+    if let Err(error) = &verification {
+        value["error"] = Value::from(error.clone());
+    }
+    if verification.is_ok() && !arguments.verified_inputs.is_empty() {
+        value["verified_inputs"] = serde_json::to_value(&arguments.verified_inputs)
+            .expect("validated input identities serialize");
+    }
+    let result = if output.exit_code == Some(0) && output.error.is_none() && verification.is_ok() {
         Ok(value)
     } else {
         Err(value)
@@ -428,6 +586,35 @@ async fn run(
         captures: output.captures,
         published: Vec::new(),
     }
+}
+
+fn verification_failure(
+    project_root: &Path,
+    arguments: &RunCommandArgs,
+    error: String,
+) -> CapturedCommand {
+    CapturedCommand {
+        result: Err(
+            json!({"cwd":display_path(project_root, &resolve_path(project_root, arguments.cwd.as_deref().unwrap_or("."))),"exit_code":null,"stdout":"","stderr":"","truncated":false,"error":error}),
+        ),
+        captures: Vec::new(),
+        published: Vec::new(),
+    }
+}
+
+fn verify_inputs(project_root: &Path, inputs: &[ScriptFile]) -> Result<(), String> {
+    for input in inputs {
+        let path = project_root.join(&input.path);
+        let (bytes, _) = read_attested_input(&path)
+            .map_err(|error| format!("read verified input `{}`: {error}", input.path))?;
+        if blake3::hash(&bytes).to_hex().as_str() != input.blake3 {
+            return Err(format!(
+                "verified input `{}` does not match its declared bytes",
+                input.path
+            ));
+        }
+    }
+    Ok(())
 }
 
 struct CapturedCommand {

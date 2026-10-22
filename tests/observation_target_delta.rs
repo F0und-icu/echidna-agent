@@ -244,8 +244,7 @@ fn rewrite_jsonl(path: &std::path::Path, mut rewrite: impl FnMut(&mut Value)) {
 }
 
 fn artifact_blob_id(project: &Project, artifact_id: &str) -> String {
-    let source =
-        std::fs::read_to_string(project.root().join(".cyber-agent/research.jsonl")).unwrap();
+    let source = std::fs::read_to_string(project.root().join(".echidna/research.jsonl")).unwrap();
     source
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).unwrap())
@@ -259,7 +258,7 @@ fn artifact_blob_id(project: &Project, artifact_id: &str) -> String {
 fn session_events_path(project: &Project, session_id: &str) -> std::path::PathBuf {
     project
         .root()
-        .join(".cyber-agent/sessions")
+        .join(".echidna/sessions")
         .join(session_id)
         .join("events.jsonl")
 }
@@ -332,8 +331,7 @@ async fn external_android_manifest_batches_use_run_commands_and_produce_stable_p
     );
     record_external_batch(&project, &before, &before_batch).await;
     record_external_batch(&project, &after, &after_batch).await;
-    let research_before =
-        std::fs::read(project.root().join(".cyber-agent/research.jsonl")).unwrap();
+    let research_before = std::fs::read(project.root().join(".echidna/research.jsonl")).unwrap();
 
     let delta = execute_cli(
         &directory,
@@ -397,12 +395,12 @@ async fn external_android_manifest_batches_use_run_commands_and_produce_stable_p
         after.receipt_event_id
     );
     assert_eq!(
-        std::fs::read(project.root().join(".cyber-agent/research.jsonl")).unwrap(),
+        std::fs::read(project.root().join(".echidna/research.jsonl")).unwrap(),
         research_before,
         "the read-only Observation/Delta path must not promote a Finding or write Research"
     );
     assert!(
-        !project.root().join(".cyber-agent/memory").exists(),
+        !project.root().join(".echidna/memory").exists(),
         "the read-only Observation/Delta path must not write Memory"
     );
 }
@@ -578,18 +576,15 @@ async fn observation_ingestion_revalidates_artifact_size_hash_and_extractor_tool
         )],
     );
     record_external_batch(&project, &size_source, &size_batch).await;
-    rewrite_jsonl(
-        &project.root().join(".cyber-agent/research.jsonl"),
-        |event| {
-            if event["event_type"] == "artifact.created" {
-                let record = &mut event["payload"]["data"]["record"];
-                if record["id"] == size_source.artifact_id {
-                    let declared = record["size_bytes"].as_u64().unwrap();
-                    record["size_bytes"] = json!(declared + 1);
-                }
+    rewrite_jsonl(&project.root().join(".echidna/research.jsonl"), |event| {
+        if event["event_type"] == "artifact.created" {
+            let record = &mut event["payload"]["data"]["record"];
+            if record["id"] == size_source.artifact_id {
+                let declared = record["size_bytes"].as_u64().unwrap();
+                record["size_bytes"] = json!(declared + 1);
             }
-        },
-    );
+        }
+    });
     let size = execute_cli(
         &directory,
         &[
@@ -665,7 +660,7 @@ async fn observation_ingestion_revalidates_artifact_size_hash_and_extractor_tool
     std::fs::write(
         project
             .root()
-            .join(".cyber-agent/artifacts/blobs/sha256")
+            .join(".echidna/artifacts/blobs/sha256")
             .join(blob_id),
         b"{}",
     )

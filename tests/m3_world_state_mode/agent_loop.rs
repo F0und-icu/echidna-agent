@@ -1,6 +1,89 @@
 use super::*;
 
 #[tokio::test]
+async fn capacity_state_full_and_diff_share_the_active_limit_and_semantic_hashes() {
+    for window in [131072, 272000] {
+        let root = TemporaryDirectory::new("capacity-state-diff");
+        let tools = ToolRegistry::for_project(root.path());
+        let provider = ScriptedProvider::new(
+            ModelCapabilities {
+                context_window: window,
+                ..incremental_capabilities()
+            },
+            [
+                completed_response("first", "state-one"),
+                completed_response("second", "state-two"),
+            ],
+        );
+        let state = |version: &str| {
+            ResearchWorldState::from_sections([(
+                ResearchWorldStateSection::NextActions,
+                json!({"action":format!("{version}{}", "explicit observation ".repeat(30))}),
+            )])
+            .unwrap()
+        };
+        let first = state("FIRST");
+        let second = state("SECOND");
+        let previous_hash = first
+            .section(ResearchWorldStateSection::NextActions)
+            .snapshot_hash
+            .clone();
+        let current_hash = second
+            .section(ResearchWorldStateSection::NextActions)
+            .snapshot_hash
+            .clone();
+        let mut agent = AgentLoop::new(&provider, &tools).with_world_state(first);
+        agent
+            .run_turn("first", AgentCancellation::new())
+            .await
+            .unwrap();
+        agent.set_world_state(second);
+        agent
+            .run_turn("second", AgentCancellation::new())
+            .await
+            .unwrap();
+        let requests = provider.requests();
+        let projection = |request: &ModelRequest, kind: &str| {
+            request
+                .input()
+                .content_items
+                .iter()
+                .filter_map(|item| match item {
+                    ContentItem::Text { text, .. } => {
+                        serde_json::from_str::<serde_json::Value>(text).ok()
+                    }
+                    _ => None,
+                })
+                .find(|value| value["kind"] == kind)
+                .unwrap()
+        };
+        let full = projection(&requests[0], "research_world_state_full");
+        let section = full["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|section| section["section_id"] == "next_actions")
+            .unwrap();
+        assert_eq!(section["snapshot_hash"], previous_hash);
+        assert_eq!(section["snapshot"]["truncated"] == true, window == 131072);
+        assert!(requests[1].is_incremental());
+        let diff = projection(&requests[1], "research_world_state_diff");
+        let section = &diff["sections"][0];
+        assert_eq!(section["previous_hash"], previous_hash);
+        assert_eq!(section["current_hash"], current_hash);
+        assert_eq!(section["snapshot"]["truncated"] == true, window == 131072);
+        if window == 272000 {
+            assert!(
+                section["snapshot"]["action"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("SECOND")
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn queued_mode_and_agent_profile_apply_at_turn_boundary_with_fresh_primary_session() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/m3-agent-loop");
     fs::create_dir_all(&root).unwrap();

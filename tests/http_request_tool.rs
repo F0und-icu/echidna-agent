@@ -111,7 +111,7 @@ fn http_request_contract_is_external_nondeterministic_noncacheable_and_deferred_
     assert_eq!(spec.cache_policy, ToolCachePolicy::None);
     assert_eq!(
         spec.resource_key_template.as_deref(),
-        Some("file:.cyber-agent/research.jsonl")
+        Some("file:.echidna/research.jsonl")
     );
 }
 
@@ -287,13 +287,13 @@ async fn loopback_success_uses_structured_json_body_and_never_echoes_credentials
         fs::read(
             project
                 .root()
-                .join(".cyber-agent/artifacts/blobs/sha256")
+                .join(".echidna/artifacts/blobs/sha256")
                 .join(blob_id)
         )
         .unwrap(),
         b"hello"
     );
-    let research = fs::read_to_string(project.root().join(".cyber-agent/research.jsonl")).unwrap();
+    let research = fs::read_to_string(project.root().join(".echidna/research.jsonl")).unwrap();
     assert!(!research.contains("never-echo-this"));
     assert!(!research.contains("also-never-echo-this"));
 }
@@ -612,13 +612,13 @@ async fn binary_and_oversize_loopback_bodies_publish_bounded_auditable_artifacts
         fs::read(
             project
                 .root()
-                .join(".cyber-agent/artifacts/blobs/sha256")
+                .join(".echidna/artifacts/blobs/sha256")
                 .join(blob_id)
         )
         .unwrap(),
         b"abcd"
     );
-    let research = fs::read_to_string(project.root().join(".cyber-agent/research.jsonl")).unwrap();
+    let research = fs::read_to_string(project.root().join(".echidna/research.jsonl")).unwrap();
     assert!(research.contains("cyber-agent-captured-prefix=4"));
     server.await.unwrap();
 }

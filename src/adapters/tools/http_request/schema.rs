@@ -1,14 +1,16 @@
 //! Exact model-visible schemas for the bounded HTTP Tool.
 
+use crate::domain::context::ContextWindowPolicy;
 use serde_json::{Value, json};
 
 use super::request::{
     MAX_BASE64_BODY_CHARS, MAX_CAPTURE_BYTES, MAX_HEADER_NAME_BYTES, MAX_HEADER_VALUE_BYTES,
-    MAX_HEADERS, MAX_PREVIEW_BYTES, MAX_QUERY_NAME_BYTES, MAX_QUERY_PARAMETERS,
-    MAX_QUERY_VALUE_BYTES, MAX_REDIRECTS, MAX_REQUEST_BODY_BYTES, MAX_TIMEOUT_MS, MAX_URL_BYTES,
+    MAX_HEADERS, MAX_QUERY_NAME_BYTES, MAX_QUERY_PARAMETERS, MAX_QUERY_VALUE_BYTES, MAX_REDIRECTS,
+    MAX_REQUEST_BODY_BYTES, MAX_TIMEOUT_MS, MAX_URL_BYTES,
 };
 
 pub(super) fn input_schema(target_required: bool) -> Value {
+    let max_preview_bytes = ContextWindowPolicy::for_window(32768).readback_max_bytes();
     let mut schema = json!({
         "type": "object",
         "properties": {
@@ -24,7 +26,7 @@ pub(super) fn input_schema(target_required: bool) -> Value {
             ]},
             "timeout_ms": {"type": "integer", "minimum": 1, "maximum": MAX_TIMEOUT_MS},
             "max_redirects": {"type": "integer", "minimum": 0, "maximum": MAX_REDIRECTS},
-            "preview_bytes": {"type": "integer", "minimum": 0, "maximum": MAX_PREVIEW_BYTES},
+            "preview_bytes": {"type": "integer", "minimum": 0, "maximum": max_preview_bytes},
             "capture_bytes": {"type": "integer", "minimum": 1, "maximum": MAX_CAPTURE_BYTES},
             "artifact": {"type": "object", "properties": {
                 "event_id": {"type": "string", "minLength": 1},

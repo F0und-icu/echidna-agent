@@ -1,0 +1,32 @@
+schema_version = 1
+id = "self-improving"
+name = "Self-improving personal agent"
+
+[instructions]
+persona_file = "persona.md"
+work_file = "work.md"
+method_files = ["method.md"]
+
+[context]
+personal = "configured"
+project = "configured"
+memory = "agent"
+
+[tools]
+read_file = "direct"
+read_files = "direct"
+list_files = "direct"
+search_files = "direct"
+write_file = "direct"
+apply_patch = "direct"
+run_command = "direct"
+tool_search = "direct"
+memory_read = "direct"
+memory_write = "direct"
+inspect_project = "direct"
+
+[rsi]
+persona = true
+methods = true
+improvement = true
+fixed_rules_file = "fixed.md"

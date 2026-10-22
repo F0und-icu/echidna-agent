@@ -6,11 +6,12 @@ mod request;
 mod response;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::error::Error;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_stream::try_stream;
-use eventsource_stream::Eventsource;
+use eventsource_stream::{EventStreamError, Eventsource};
 use futures_util::StreamExt;
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderName, HeaderValue};
 
@@ -24,7 +25,8 @@ use crate::domain::model::{
 };
 use crate::domain::request_audit::RequestAdapterVersion;
 use crate::ports::model::{
-    ModelEventStream, ModelProvider, ModelProviderError, ModelRequest, ModelStreamEvent,
+    ContinuationRetention, ModelEventStream, ModelProvider, ModelProviderError, ModelRequest,
+    ModelStreamEvent,
 };
 
 pub(crate) const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 30_000;
@@ -231,6 +233,31 @@ fn request_encoding_error(error: impl ToString) -> ModelProviderError {
     }
 }
 
+fn response_body_failure(
+    error: reqwest::Error,
+    status: reqwest::StatusCode,
+    elapsed: Duration,
+) -> ModelProviderError {
+    let timed_out = error.is_timeout();
+    let mut io_kind = None;
+    let mut source = error.source();
+    while let Some(cause) = source {
+        if let Some(error) = cause.downcast_ref::<std::io::Error>() {
+            io_kind = Some(error.kind());
+        }
+        source = cause.source();
+    }
+    // Project typed causes only: raw source messages may contain private data.
+    ModelProviderError::TransportFailure {
+        message: format!(
+            "response body read failed before `response.completed`: {} (HTTP {}, elapsed_ms={}, timeout={timed_out}, io_kind={io_kind:?})",
+            error.without_url(),
+            status.as_u16(),
+            elapsed.as_millis(),
+        ),
+    }
+}
+
 impl ModelProvider for ResponsesHttpAdapter {
     fn capabilities(&self) -> ModelCapabilities {
         self.config.capabilities.clone()
@@ -245,7 +272,10 @@ impl ModelProvider for ResponsesHttpAdapter {
         let continuation_requested = request.is_incremental();
         let opaque_scope = request.opaque_continuation_scope().cloned();
         let retained_opaque = OpaqueContinuationStore::references_in(request.input());
-        let opaque_continuations = self.opaque_continuations.clone();
+        let opaque_continuations = match request.continuation_retention() {
+            ContinuationRetention::Session => self.opaque_continuations.clone(),
+            ContinuationRetention::SingleSample => Arc::new(OpaqueContinuationStore::default()),
+        };
         let profile = self.config.wire_profile;
         let request = request::encode_request(
             request,
@@ -309,6 +339,7 @@ impl ModelProvider for ResponsesHttpAdapter {
             if let Some(diagnostics) = &diagnostics {
                 diagnostics.request(&request);
             }
+            let request_started = Instant::now();
             let request_builder = client
                 .post(endpoint)
                 .header(ACCEPT, "text/event-stream")
@@ -389,8 +420,12 @@ impl ModelProvider for ResponsesHttpAdapter {
                     .ok_or_else(|| ModelProviderError::ProtocolFailure {
                         message: "response stream ended before `response.completed`".to_string(),
                     })?
-                    .map_err(|error| ModelProviderError::ProtocolFailure {
-                        message: format!("invalid SSE stream: {error}"),
+                    .map_err(|error| match error {
+                        EventStreamError::Transport(error) =>
+                            response_body_failure(error, status, request_started.elapsed()),
+                        error => ModelProviderError::ProtocolFailure {
+                            message: format!("invalid SSE stream: {error}"),
+                        },
                     })?;
 
                 if event.data.trim().is_empty() {

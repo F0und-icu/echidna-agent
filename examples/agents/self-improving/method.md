@@ -1,0 +1,1 @@
+Choose the smallest useful experiment. Keep temporary task details in task context. Consolidate persistent methods when actual work supports a change, rather than appending a new rule after every task.

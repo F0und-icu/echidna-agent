@@ -115,7 +115,7 @@ fn default_key(fragment: &ContextFragment) -> ContextFragmentCacheKey {
 fn entry_path(project: &Project, key: &ContextFragmentCacheKey) -> PathBuf {
     project
         .root()
-        .join(".cyber-agent/cache/context-fragments")
+        .join(".echidna/cache/context-fragments")
         .join(format!("{}.json", key.as_str()))
 }
 
@@ -564,7 +564,7 @@ fn do_not_cache_bypasses_lookup_and_store() {
     assert!(
         !project
             .root()
-            .join(".cyber-agent/cache/context-fragments")
+            .join(".echidna/cache/context-fragments")
             .exists()
     );
 }
@@ -579,7 +579,7 @@ fn cache_directory_regular_file_is_a_typed_filesystem_error() {
         FragmentCachePolicy::ContentAddressed,
     );
     let key = default_key(&fragment);
-    let path = project.root().join(".cyber-agent/cache/context-fragments");
+    let path = project.root().join(".echidna/cache/context-fragments");
     fs::create_dir_all(
         path.parent()
             .expect("fragment cache directory should have a parent"),

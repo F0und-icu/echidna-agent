@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use support::TemporaryDirectory;
 
 fn research_path(project: &Project) -> std::path::PathBuf {
-    project.root().join(".cyber-agent/research.jsonl")
+    project.root().join(".echidna/research.jsonl")
 }
 
 fn migration_manifest_path(destination: &std::path::Path) -> std::path::PathBuf {
@@ -51,7 +51,7 @@ fn error<T>(result: Result<T, ProjectEventStoreError>) -> ProjectEventStoreError
 
 fn assert_empty_recovery_directory(project: &Project) {
     assert_eq!(
-        fs::read_dir(project.root().join(".cyber-agent/artifacts/recovery"))
+        fs::read_dir(project.root().join(".echidna/artifacts/recovery"))
             .unwrap()
             .count(),
         0
@@ -124,7 +124,7 @@ fn initialized_projects_discover_upward_and_keep_research_isolated() {
 fn project_sentinel_is_parseable_and_leaves_no_durable_temporary_file() {
     let root = TemporaryDirectory::new("project-sentinel");
     let project = Project::initialize(root.path()).unwrap();
-    let control_directory = project.root().join(".cyber-agent");
+    let control_directory = project.root().join(".echidna");
     let configuration: toml::Value = fs::read_to_string(control_directory.join("project.toml"))
         .unwrap()
         .parse()
@@ -142,10 +142,83 @@ fn project_sentinel_is_parseable_and_leaves_no_durable_temporary_file() {
 }
 
 #[test]
+fn canonical_and_legacy_layouts_preserve_identity_and_refuse_two_authorities() {
+    let root = TemporaryDirectory::new("project-layout-contract");
+    let project = Project::initialize(root.path()).unwrap();
+    let canonical = project.root().join(".echidna");
+    let legacy = project.root().join(".cyber-agent");
+    assert!(canonical.join("project.toml").is_file());
+    assert!(!legacy.exists());
+    let config = fs::read(canonical.join("project.toml")).unwrap();
+    // Fixture setup only: establish an empty legacy layout before any
+    // path-bearing facts exist. Product code performs no migration.
+    fs::rename(&canonical, &legacy).unwrap();
+    let discovered = Project::discover(root.path()).unwrap();
+    assert_eq!(discovered.project_id(), project.project_id());
+    let id = discovered.project_id().clone();
+    let stream = ProjectEventStream::Research;
+    {
+        let mut writer = discovered.open_writer().unwrap();
+        let mut store = writer.open_research(None).unwrap();
+        store
+            .append_event(&event(
+                "retained-legacy",
+                &stream.stream_id(),
+                1,
+                json!({"v":42}),
+            ))
+            .unwrap();
+    }
+    let facts = fs::read(legacy.join("research.jsonl")).unwrap();
+    assert!(legacy.join("writer.lock").is_file());
+    assert!(!canonical.exists());
+    assert!(matches!(
+        Project::initialize(root.path()),
+        Err(ProjectEventStoreError::AlreadyInitialized { .. })
+    ));
+    assert_eq!(Project::discover(root.path()).unwrap().project_id(), &id);
+    assert_eq!(fs::read(legacy.join("project.toml")).unwrap(), config);
+    assert_eq!(fs::read(legacy.join("research.jsonl")).unwrap(), facts);
+    fs::create_dir(&canonical).unwrap();
+    for result in [
+        Project::initialize(root.path()),
+        Project::discover(root.path()),
+    ] {
+        assert!(matches!(
+            result,
+            Err(ProjectEventStoreError::ConflictingControlDirectories { .. })
+        ));
+    }
+    assert_eq!(fs::read(legacy.join("research.jsonl")).unwrap(), facts);
+    assert_eq!(fs::read_dir(canonical).unwrap().count(), 0);
+}
+
+#[test]
+fn incomplete_local_layout_does_not_fall_through_to_an_ancestor_project() {
+    for name in [".echidna", ".cyber-agent"] {
+        let root = TemporaryDirectory::new("project-layout-incomplete");
+        Project::initialize(root.path()).unwrap();
+        let child = root.path().join("child");
+        fs::create_dir(&child).unwrap();
+        fs::create_dir(child.join(name)).unwrap();
+        assert!(matches!(
+            Project::discover(&child),
+            Err(ProjectEventStoreError::IncompleteInitialization { .. })
+        ));
+        assert!(matches!(
+            Project::initialize(&child),
+            Err(ProjectEventStoreError::IncompleteInitialization { .. })
+        ));
+        assert_eq!(fs::read_dir(child.join(name)).unwrap().count(), 0);
+        assert_eq!(fs::read_dir(child).unwrap().count(), 1);
+    }
+}
+
+#[test]
 fn discovery_rejects_a_project_id_that_does_not_match_the_canonical_root() {
     let root = TemporaryDirectory::new("project-id-mismatch");
     let project = Project::initialize(root.path()).unwrap();
-    let project_file = project.root().join(".cyber-agent/project.toml");
+    let project_file = project.root().join(".echidna/project.toml");
     let mut configuration: toml::Value =
         toml::from_str(&fs::read_to_string(&project_file).unwrap()).unwrap();
     configuration["project_id"] = toml::Value::String("project-tampered".to_owned());
@@ -177,7 +250,7 @@ fn repeat_init_does_not_truncate_existing_project_facts() {
 #[test]
 fn incomplete_initialization_is_rejected_without_modifying_existing_control_directory() {
     let root = TemporaryDirectory::new("incomplete-init");
-    let control_directory = root.path().join(".cyber-agent");
+    let control_directory = root.path().join(".echidna");
     fs::create_dir(&control_directory).unwrap();
     let canonical_control_directory = fs::canonicalize(&control_directory).unwrap();
     let partial = control_directory.join("partial-init-note");
@@ -321,7 +394,7 @@ fn event_store_port_enforces_strict_sequence_and_session_research_streams() {
     assert!(
         project
             .root()
-            .join(".cyber-agent/sessions/session-a/events.jsonl")
+            .join(".echidna/sessions/session-a/events.jsonl")
             .is_file()
     );
 }
@@ -358,7 +431,7 @@ fn session_stream_namespace_never_collides_with_research() {
 
     let session_events = project
         .root()
-        .join(".cyber-agent/sessions/research/events.jsonl");
+        .join(".echidna/sessions/research/events.jsonl");
     let stored: EventEnvelope<Value> =
         serde_json::from_slice(&fs::read(session_events).unwrap()).unwrap();
     assert_eq!(stored.stream_id, session_stream);
@@ -393,7 +466,7 @@ fn corrupt_final_record_requires_metadata_before_any_mutation_then_recovers() {
     assert_eq!(events[1].payload["truncated_from_offset"], json!(offset));
     let artifact = events[1].payload["recovery_artifact"].as_str().unwrap();
     assert_eq!(
-        fs::read(project.root().join(".cyber-agent").join(artifact)).unwrap(),
+        fs::read(project.root().join(".echidna").join(artifact)).unwrap(),
         tail
     );
     assert!(
@@ -402,7 +475,7 @@ fn corrupt_final_record_requires_metadata_before_any_mutation_then_recovers() {
             .windows(tail.len())
             .any(|window| window == tail)
     );
-    assert_no_durable_temporary_files(&project.root().join(".cyber-agent/artifacts/recovery"));
+    assert_no_durable_temporary_files(&project.root().join(".echidna/artifacts/recovery"));
 }
 
 #[test]
@@ -420,7 +493,7 @@ fn conflicting_existing_recovery_artifact_never_changes_the_source_stream() {
     let digest = blake3::hash(tail).to_hex().to_string();
     let artifact = project
         .root()
-        .join(".cyber-agent/artifacts/recovery")
+        .join(".echidna/artifacts/recovery")
         .join(format!("{digest}.bin"));
     fs::write(&artifact, b"partial-or-conflicting-artifact").unwrap();
 

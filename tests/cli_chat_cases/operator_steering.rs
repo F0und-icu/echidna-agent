@@ -21,10 +21,23 @@ impl TerminalChat {
         no_color: Option<&str>,
         term: &str,
     ) -> Self {
+        Self::start(root, config, no_color, term, None)
+    }
+
+    fn start(
+        root: &std::path::Path,
+        config: &std::path::Path,
+        no_color: Option<&str>,
+        term: &str,
+        agent: Option<&std::path::Path>,
+    ) -> Self {
         let pair = native_pty_system().openpty(PtySize::default()).unwrap();
         let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_echidna"));
         command.cwd(root);
         command.args(["--config", config.to_str().unwrap(), "chat"]);
+        if let Some(agent) = agent {
+            command.args(["--agent", agent.to_str().unwrap()]);
+        }
         command.env("CYBER_AGENT_PRIMARY_API_KEY", "loopback-primary-secret");
         command.env("CYBER_AGENT_VISION_API_KEY", "loopback-vision-secret");
         command.env("TERM", term);
@@ -87,6 +100,71 @@ impl TerminalChat {
             thread::sleep(Duration::from_millis(10));
         }
     }
+}
+
+#[test]
+fn rsi2_terminal_stop_cancels_diagnosis_without_recovery_or_probe_requests() {
+    let root = TemporaryDirectory::new("rsi2-terminal-stop");
+    initialize_project(root.path());
+    let definition = super::agent_evolution::improvement_definition(root.path());
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+    let (observed, requests) = mpsc::channel();
+    let (release, wait) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let mut first = f3_context::accept_before_deadline(&listener, "RSI2 primary");
+        let request = read_http_request(&mut first);
+        observed.send(request).unwrap();
+        let body = text_response("TASK_COMPLETED", "ordinary-completed");
+        write!(first,"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+        drop(first);
+        let mut diagnostic = f3_context::accept_before_deadline(&listener, "RSI2 diagnosis");
+        observed.send(read_http_request(&mut diagnostic)).unwrap();
+        wait.recv_timeout(Duration::from_secs(20)).unwrap();
+        drop(diagnostic);
+        assert!(
+            matches!(listener.accept(),Err(error) if error.kind()==std::io::ErrorKind::WouldBlock)
+        );
+    });
+    let config = write_config(root.path(), &base_url);
+    let mut chat = TerminalChat::start(
+        root.path(),
+        &config,
+        None,
+        "xterm-256color",
+        Some(&definition),
+    );
+    chat.send("[rsi-feedback] Keep future replies concise.\n");
+    requests.recv_timeout(Duration::from_secs(10)).unwrap();
+    let diagnostic = requests.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert!(diagnostic.contains("RSI2 diagnosis"));
+    chat.send("/stop\n");
+    chat.wait_for("[RSI2 inconclusive]");
+    assert!(!String::from_utf8_lossy(&chat.captured).contains("[turn stopped]"));
+    chat.exit();
+    release.send(()).unwrap();
+    server.join().unwrap();
+    let events = session_events(root.path(), &session_id(root.path()));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["event_type"] == "session.request_audit_recorded")
+            .count(),
+        2
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["event_type"] == "session.agent_definition_applied")
+            .count(),
+        0
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| event["event_type"] == "session.resumed")
+    );
 }
 
 impl Drop for TerminalChat {

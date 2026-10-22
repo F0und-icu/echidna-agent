@@ -156,6 +156,7 @@ pub(crate) fn read_artifact_bytes_bounded(
 
 pub(super) fn normalize_for_scope(
     project_root: &Path,
+    control_directory: &str,
     value: Value,
     scope_binding: &ArtifactScopeBinding,
 ) -> Result<(Value, Vec<ResourceKey>), ToolExecutorError> {
@@ -177,7 +178,7 @@ pub(super) fn normalize_for_scope(
         serde_json::to_value(&arguments).expect("ArtifactStoreArgs serialization cannot fail"),
         vec![
             resolver.file(&arguments.source_path),
-            resolver.file(".cyber-agent/research.jsonl"),
+            resolver.project_file(control_directory, "research.jsonl"),
         ],
     ))
 }

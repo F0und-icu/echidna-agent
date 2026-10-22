@@ -21,6 +21,7 @@ use super::{
 };
 
 const MAX_SESSION_SUMMARY_BYTES: usize = 8 * 1024;
+const MAX_EXTENDED_SESSION_SUMMARY_BYTES: usize = 64 * 1024;
 
 /// Bounded lossy continuation prose. It is never parsed into Research facts.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -73,13 +74,14 @@ impl NarrativeSummary {
     }
 }
 
-/// Caller-supplied Summary content. Bound Sessions produce v3; the legacy
-/// constructor retains exact v2 behavior for unbound historical consumers.
+/// Caller-supplied Summary content. Original limits preserve v2/v3 creation;
+/// extended limits produce v4 without changing historical reader semantics.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionSummaryDraft {
     evidence_spine: Option<EvidenceSpine>,
     task_references: Option<SessionTaskReferences>,
     narrative: NarrativeSummary,
+    byte_limit: usize,
 }
 
 impl SessionSummaryDraft {
@@ -91,6 +93,7 @@ impl SessionSummaryDraft {
             evidence_spine: Some(evidence_spine),
             task_references: None,
             narrative,
+            byte_limit: MAX_SESSION_SUMMARY_BYTES,
         };
         draft.validate_intrinsic()?;
         Ok(draft)
@@ -109,6 +112,7 @@ impl SessionSummaryDraft {
             evidence_spine,
             task_references: Some(task_references),
             narrative,
+            byte_limit: MAX_SESSION_SUMMARY_BYTES,
         };
         draft.validate_intrinsic()?;
         Ok(draft)
@@ -116,6 +120,12 @@ impl SessionSummaryDraft {
 
     pub fn narrative(&self) -> &NarrativeSummary {
         &self.narrative
+    }
+
+    pub(crate) fn with_byte_limit(mut self, byte_limit: usize) -> Result<Self, SessionError> {
+        validate_byte_limit(byte_limit)?;
+        self.byte_limit = byte_limit;
+        Ok(self)
     }
 
     pub(crate) fn task_references(&self) -> Option<&SessionTaskReferences> {
@@ -172,6 +182,18 @@ struct SessionSummaryV3 {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
+struct SessionSummaryV4 {
+    schema_version: u16,
+    revision: u64,
+    fingerprint: String,
+    byte_limit: usize,
+    task_references: Option<SessionTaskReferences>,
+    evidence_spine: Option<EvidenceSpine>,
+    narrative: NarrativeSummary,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 struct LegacySessionSummaryV1 {
     schema_version: u16,
     revision: u64,
@@ -203,6 +225,7 @@ enum SessionSummaryVersion {
     LegacyV1(LegacySessionSummaryV1),
     CurrentV2(SessionSummaryV2),
     CurrentV3(Box<SessionSummaryV3>),
+    CurrentV4(Box<SessionSummaryV4>),
 }
 
 /// Deletable derived Summary carried by one Compaction fact.
@@ -220,6 +243,7 @@ impl Serialize for SessionSummary {
             SessionSummaryVersion::LegacyV1(summary) => summary.serialize(serializer),
             SessionSummaryVersion::CurrentV2(summary) => summary.serialize(serializer),
             SessionSummaryVersion::CurrentV3(summary) => summary.serialize(serializer),
+            SessionSummaryVersion::CurrentV4(summary) => summary.serialize(serializer),
         }
     }
 }
@@ -247,6 +271,10 @@ impl<'de> Deserialize<'de> for SessionSummary {
                 .map(Box::new)
                 .map(SessionSummaryVersion::CurrentV3)
                 .map_err(serde::de::Error::custom)?,
+            4 => serde_json::from_value::<SessionSummaryV4>(value)
+                .map(Box::new)
+                .map(SessionSummaryVersion::CurrentV4)
+                .map_err(serde::de::Error::custom)?,
             _ => {
                 return Err(serde::de::Error::custom(format!(
                     "unsupported Session Summary schema version {schema_version}"
@@ -264,9 +292,21 @@ impl SessionSummary {
         context: &CompactionValidationContext<'_>,
     ) -> Result<Self, SessionError> {
         draft.validate_against(context)?;
-        let version = if let Some(task_references) = draft.task_references {
-            let mut summary = SessionSummaryV3 {
+        let version = if draft.byte_limit > MAX_SESSION_SUMMARY_BYTES {
+            let mut summary = SessionSummaryV4 {
                 schema_version: CURRENT_SESSION_SUMMARY_SCHEMA_VERSION,
+                revision,
+                fingerprint: String::new(),
+                byte_limit: draft.byte_limit,
+                task_references: draft.task_references,
+                evidence_spine: draft.evidence_spine,
+                narrative: draft.narrative,
+            };
+            summary.fingerprint = expected_v4_fingerprint(&summary)?;
+            SessionSummaryVersion::CurrentV4(Box::new(summary))
+        } else if let Some(task_references) = draft.task_references {
+            let mut summary = SessionSummaryV3 {
+                schema_version: 3,
                 revision,
                 fingerprint: String::new(),
                 task_references,
@@ -313,7 +353,7 @@ impl SessionSummary {
                 }
             }
             SessionSummaryVersion::CurrentV3(summary) => {
-                if summary.schema_version != CURRENT_SESSION_SUMMARY_SCHEMA_VERSION {
+                if summary.schema_version != 3 {
                     return Err(unsupported_summary_schema(summary.schema_version));
                 }
                 summary.task_references.validate_intrinsic()?;
@@ -322,6 +362,27 @@ impl SessionSummary {
                 }
                 summary.narrative.validate()?;
                 if summary.fingerprint != expected_v3_fingerprint(summary)? {
+                    return Err(SessionError::CompactionFingerprintMismatch);
+                }
+            }
+            SessionSummaryVersion::CurrentV4(summary) => {
+                if summary.schema_version != CURRENT_SESSION_SUMMARY_SCHEMA_VERSION {
+                    return Err(unsupported_summary_schema(summary.schema_version));
+                }
+                validate_byte_limit(summary.byte_limit)?;
+                if summary.task_references.is_none() && summary.evidence_spine.is_none() {
+                    return Err(SessionError::CompactionSummaryFieldRequired {
+                        field: "summary.references",
+                    });
+                }
+                if let Some(task) = &summary.task_references {
+                    task.validate_intrinsic()?;
+                }
+                if let Some(spine) = &summary.evidence_spine {
+                    spine.validate_intrinsic()?;
+                }
+                summary.narrative.validate()?;
+                if summary.fingerprint != expected_v4_fingerprint(summary)? {
                     return Err(SessionError::CompactionFingerprintMismatch);
                 }
             }
@@ -334,6 +395,7 @@ impl SessionSummary {
             SessionSummaryVersion::LegacyV1(_) => 1,
             SessionSummaryVersion::CurrentV2(_) => 2,
             SessionSummaryVersion::CurrentV3(_) => 3,
+            SessionSummaryVersion::CurrentV4(_) => 4,
         }
     }
 
@@ -342,6 +404,7 @@ impl SessionSummary {
             SessionSummaryVersion::LegacyV1(summary) => summary.revision,
             SessionSummaryVersion::CurrentV2(summary) => summary.revision,
             SessionSummaryVersion::CurrentV3(summary) => summary.revision,
+            SessionSummaryVersion::CurrentV4(summary) => summary.revision,
         }
     }
 
@@ -350,6 +413,7 @@ impl SessionSummary {
             SessionSummaryVersion::LegacyV1(summary) => &summary.fingerprint,
             SessionSummaryVersion::CurrentV2(summary) => &summary.fingerprint,
             SessionSummaryVersion::CurrentV3(summary) => &summary.fingerprint,
+            SessionSummaryVersion::CurrentV4(summary) => &summary.fingerprint,
         }
     }
 
@@ -358,6 +422,7 @@ impl SessionSummary {
             SessionSummaryVersion::LegacyV1(_) => None,
             SessionSummaryVersion::CurrentV2(summary) => Some(&summary.evidence_spine),
             SessionSummaryVersion::CurrentV3(summary) => summary.evidence_spine.as_ref(),
+            SessionSummaryVersion::CurrentV4(summary) => summary.evidence_spine.as_ref(),
         }
     }
 
@@ -366,12 +431,14 @@ impl SessionSummary {
             SessionSummaryVersion::LegacyV1(_) => None,
             SessionSummaryVersion::CurrentV2(summary) => Some(&summary.narrative),
             SessionSummaryVersion::CurrentV3(summary) => Some(&summary.narrative),
+            SessionSummaryVersion::CurrentV4(summary) => Some(&summary.narrative),
         }
     }
 
     pub(crate) fn task_references(&self) -> Option<&SessionTaskReferences> {
         match &self.version {
             SessionSummaryVersion::CurrentV3(summary) => Some(&summary.task_references),
+            SessionSummaryVersion::CurrentV4(summary) => summary.task_references.as_ref(),
             _ => None,
         }
     }
@@ -380,25 +447,15 @@ impl SessionSummary {
         &self,
         context: &CompactionValidationContext<'_>,
     ) -> Result<(), SessionError> {
-        match &self.version {
-            SessionSummaryVersion::LegacyV1(_) => Ok(()),
-            SessionSummaryVersion::CurrentV2(summary) => {
-                summary.evidence_spine.validate_against(context)
-            }
-            SessionSummaryVersion::CurrentV3(summary) => {
-                summary
-                    .task_references
-                    .validate_against(context.task.ok_or_else(|| {
-                        super::task::invalid_task(
-                            "task Summary requires exact Session validation facts",
-                        )
-                    })?)?;
-                if let Some(spine) = &summary.evidence_spine {
-                    spine.validate_against(context)?;
-                }
-                Ok(())
-            }
+        if let Some(task) = self.task_references() {
+            task.validate_against(context.task.ok_or_else(|| {
+                super::task::invalid_task("task Summary requires exact Session validation facts")
+            })?)?;
         }
+        if let Some(spine) = self.evidence_spine() {
+            spine.validate_against(context)?;
+        }
+        Ok(())
     }
 
     pub(crate) const fn requires_reference_validation(&self) -> bool {
@@ -423,7 +480,7 @@ impl SessionSummary {
             )?;
             let freshness = FreshnessIdentity::new(task.source().stream_hash())
                 .map_err(context_provenance_error)?
-                .with_producer_version("session-summary:3");
+                .with_producer_version(format!("session-summary:{}", self.schema_version()));
             return ContextProvenance::new(
                 ContextSlot::Summary,
                 ContextOrigin::SessionProjection,
@@ -442,7 +499,7 @@ impl SessionSummary {
         let freshness = FreshnessIdentity::new(spine.source().stream_hash())
             .map_err(context_provenance_error)?
             .with_target_snapshot(spine.target_snapshot_refs()[0].clone())
-            .with_producer_version("session-summary:2");
+            .with_producer_version(format!("session-summary:{}", self.schema_version()));
         ContextProvenance::new(
             ContextSlot::Summary,
             ContextOrigin::SessionProjection,
@@ -471,11 +528,12 @@ impl SessionSummary {
                 message: error.to_string(),
             })?
             .len();
-        if actual > MAX_SESSION_SUMMARY_BYTES {
-            Err(SessionError::CompactionSummaryTooLarge {
-                actual,
-                maximum: MAX_SESSION_SUMMARY_BYTES,
-            })
+        let maximum = match &self.version {
+            SessionSummaryVersion::CurrentV4(summary) => summary.byte_limit,
+            _ => MAX_SESSION_SUMMARY_BYTES,
+        };
+        if actual > maximum {
+            Err(SessionError::CompactionSummaryTooLarge { actual, maximum })
         } else {
             Ok(())
         }
@@ -532,6 +590,23 @@ fn expected_v3_fingerprint(value: &SessionSummaryV3) -> Result<String, SessionEr
     let mut value = value.clone();
     value.fingerprint.clear();
     fingerprint_value(&value)
+}
+
+fn expected_v4_fingerprint(value: &SessionSummaryV4) -> Result<String, SessionError> {
+    let mut value = value.clone();
+    value.fingerprint.clear();
+    fingerprint_value(&value)
+}
+
+fn validate_byte_limit(byte_limit: usize) -> Result<(), SessionError> {
+    if !(MAX_SESSION_SUMMARY_BYTES..=MAX_EXTENDED_SESSION_SUMMARY_BYTES).contains(&byte_limit) {
+        return Err(SessionError::CompactionSummaryByteLimit {
+            actual: byte_limit,
+            minimum: MAX_SESSION_SUMMARY_BYTES,
+            maximum: MAX_EXTENDED_SESSION_SUMMARY_BYTES,
+        });
+    }
+    Ok(())
 }
 
 fn expected_legacy_fingerprint(value: &LegacySessionSummaryV1) -> Result<String, SessionError> {

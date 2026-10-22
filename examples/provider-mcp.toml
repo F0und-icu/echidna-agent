@@ -1,4 +1,4 @@
-# Text model plus explicitly configured remote HTTP MCP tools.
+# Text model plus explicitly configured HTTP or Unix stdio MCP tools.
 # This file contains no credentials. Copy it outside the repository before use.
 # Each MCP server is discovered only when `chat` starts; `doctor` remains offline.
 schema_version = 1
@@ -40,5 +40,23 @@ credential_ref = "CYBER_AGENT_MCP_EXAMPLE_API_KEY"
 # Optional; defaults to 60000 and must be from 1 through 86400000.
 timeout_ms = 60000
 
+# Optional local stdio server. Remove/replace the HTTP entry above if unused.
+# Exactly one url or command selects transport for each server.
+# [mcp_servers.local]
+# command = "python3"
+# args = ["/absolute/path/to/server.py", "--transport", "stdio"]
+# protocol_version = "2025-11-25"
+# cwd = "."
+# env = { MY_TOOL_SETTING = "explicit-value" }
+# timeout_ms = 60000
+# Bare commands use PATH. Relative command paths/cwd resolve from this file's
+# directory; cwd defaults there. args/env remain literal: no shell/$VAR expansion.
+# Child env inherits only PATH, HOME, USER, LOGNAME, TMPDIR, TMP, TEMP, LANG,
+# LC_ALL, LC_CTYPE, TZ, plus explicit env. Provider/vendor keys are not inherited.
+# credential_ref is HTTP-only. Never commit real environment secrets.
+
 [runtime]
 model_request_limit_per_turn = 32
+# Optional: compact after a normally completed Turn when fresh next-Turn
+# planner demand reaches 80% (or context is truncated/excluded). Default false.
+# auto_compact = true

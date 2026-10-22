@@ -219,7 +219,7 @@ async fn generic_registry_binds_artifacts_to_its_session_and_rejects_target_attr
     );
 
     let raw_event: Value = serde_json::from_str(
-        fs::read_to_string(project.root().join(".cyber-agent/research.jsonl"))
+        fs::read_to_string(project.root().join(".echidna/research.jsonl"))
             .unwrap()
             .lines()
             .next()
@@ -419,26 +419,21 @@ async fn agent_memory_is_namespaced_and_has_an_independent_revision_chain() {
     assert_eq!(reviewer_read.result.status, ToolResultStatus::Succeeded);
     assert!(reviewer_read.result.output["content"].is_null());
     assert_eq!(
-        fs::read_to_string(project.root().join(".cyber-agent/memory/core.md")).unwrap(),
+        fs::read_to_string(project.root().join(".echidna/memory/core.md")).unwrap(),
         "project memory\n"
     );
     assert_eq!(
-        fs::read_to_string(
-            project
-                .root()
-                .join(".cyber-agent/memory/agents/writer/core.md"),
-        )
-        .unwrap(),
+        fs::read_to_string(project.root().join(".echidna/memory/agents/writer/core.md"),).unwrap(),
         "writer second\n"
     );
     assert!(
         !project
             .root()
-            .join(".cyber-agent/memory/agents/reviewer/core.md")
+            .join(".echidna/memory/agents/reviewer/core.md")
             .exists()
     );
 
-    let scopes = fs::read_to_string(project.root().join(".cyber-agent/research.jsonl"))
+    let scopes = fs::read_to_string(project.root().join(".echidna/research.jsonl"))
         .unwrap()
         .lines()
         .map(|line| {
@@ -466,11 +461,11 @@ async fn agent_memory_read_rejects_symlinked_namespace_ancestors_without_events(
         fs::create_dir_all(outside_document.parent().unwrap()).unwrap();
         fs::write(&outside_document, "outside agent memory\n").unwrap();
 
-        let namespace = project.root().join(".cyber-agent").join(namespace);
+        let namespace = project.root().join(".echidna").join(namespace);
         fs::create_dir_all(namespace.parent().unwrap()).unwrap();
         symlink(outside.path(), &namespace).unwrap();
 
-        let stream = project.root().join(".cyber-agent/research.jsonl");
+        let stream = project.root().join(".echidna/research.jsonl");
         let before_stream = fs::read(&stream).unwrap();
         let tools = agent_tools(
             &project,

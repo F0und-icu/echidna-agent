@@ -264,7 +264,7 @@ fn run_chat(
 }
 
 fn only_session_id(project: &std::path::Path) -> String {
-    let mut sessions = fs::read_dir(project.join(".cyber-agent/sessions"))
+    let mut sessions = fs::read_dir(project.join(".echidna/sessions"))
         .unwrap()
         .map(|entry| entry.unwrap().file_name().into_string().unwrap())
         .collect::<Vec<_>>();
@@ -275,7 +275,7 @@ fn only_session_id(project: &std::path::Path) -> String {
 fn session_events(project: &std::path::Path, session: &str) -> Vec<Value> {
     fs::read_to_string(
         project
-            .join(".cyber-agent/sessions")
+            .join(".echidna/sessions")
             .join(session)
             .join("events.jsonl"),
     )
@@ -427,7 +427,7 @@ fn model_history_checkpoint_failure_stops_before_tool_execution() {
     let session = only_session_id(root.path());
     let events_path = root
         .path()
-        .join(".cyber-agent/sessions")
+        .join(".echidna/sessions")
         .join(&session)
         .join("events.jsonl");
     fs::set_permissions(&events_path, fs::Permissions::from_mode(0o444)).unwrap();

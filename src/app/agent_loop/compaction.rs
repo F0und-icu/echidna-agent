@@ -3,9 +3,11 @@
 use crate::domain::context::BaselineInvalidationReason;
 use crate::domain::events::StreamId;
 use crate::domain::history::ConversationHistory;
+use crate::domain::model::ContentItem;
 use crate::domain::session::{
-    CompactionValidationContext, SessionCompaction, SessionLifecycle, SessionState,
+    CompactionValidationContext, SessionCompaction, SessionLifecycle, SessionState, SessionSummary,
 };
+use crate::domain::tools::DeferredActivationSet;
 use crate::ports::model::ModelProvider;
 use crate::ports::tool::ToolExecutor;
 
@@ -36,6 +38,16 @@ where
     Provider: ModelProvider + ?Sized,
     Tools: ToolExecutor + ?Sized,
 {
+    /// Recompile the next-Turn logical input, including the final completed
+    /// assistant output, without sampling or mutating Provider delivery state.
+    /// Known required/rendered budget failures mean compaction may be useful;
+    /// all other errors retain their original failure path.
+    pub(crate) fn fresh_compaction_context_probe(
+        &self,
+    ) -> Result<Option<crate::domain::context::ContextPlan>, AgentLoopError> {
+        self.compile_compaction_context(self.history.items(), self.session_summary.as_ref())
+    }
+
     /// Compile a proposed next-Turn context without changing runtime state or
     /// contacting a Provider. The regular Context owner budgets all prompts,
     /// tools, facts and retained History; a tiny future input is only a probe,
@@ -45,49 +57,12 @@ where
         compaction: &SessionCompaction,
         require_reduction: bool,
     ) -> Result<bool, AgentLoopError> {
-        use crate::domain::context::{ContextDecision, ContextFragmentSource, ContextPlannerError};
-        use crate::domain::model::ContentItem;
-        use crate::domain::tools::DeferredActivationSet;
-
-        let capabilities = self.provider.capabilities();
-        let budget = self.context_planner.default_budget(&capabilities)?;
-        let prompt = self
-            .pending_prompt_composition
-            .as_ref()
-            .unwrap_or(&self.prompt_composition);
-        let exposure = prompt.tool_exposure_for_catalog(&self.tools.catalog())?;
-        let tool_plan = self
-            .tools
-            .resolve_tool_plan(&exposure, &DeferredActivationSet::default())?;
-        let empty_provenance = std::collections::BTreeMap::new();
-        let compile = |items: &[ContentItem], summary| {
-            let mut history = items.to_vec();
-            history.push(ContentItem::user_text("Continue."));
-            context_state::compile_context(context_state::ContextCompilationInput {
-                correction_feedback: &[],
-                prompt_composition: prompt,
-                world_state: self.world_state.as_ref(),
-                project_snapshot: self.project_snapshot.as_ref(),
-                project_memory_core: self.project_memory_core.as_ref(),
-                session_summary: summary,
-                history: &history,
-                history_provenance: &empty_provenance,
-                turn_history_start: items.len(),
-                planner: &self.context_planner,
-                cache: None,
-                budget,
-                capabilities: &capabilities,
-                tool_specs: tool_plan.advertised_specs(),
-                prior_manifest: None,
-            })
-            .map(|(plan, _)| plan)
-        };
-        let candidate = match compile(compaction.retained_history(), Some(compaction.summary())) {
-            Ok(plan) => plan,
-            Err(AgentLoopError::ContextPlanner(
-                ContextPlannerError::RequiredFragmentsExceedBudget { .. }
-                | ContextPlannerError::RenderedInputExceedsBudget { .. },
-            )) => return Ok(false),
+        use crate::domain::context::{ContextDecision, ContextFragmentSource};
+        let candidate = match self
+            .compile_compaction_context(compaction.retained_history(), Some(compaction.summary()))
+        {
+            Ok(Some(plan)) => plan,
+            Ok(None) => return Ok(false),
             Err(error) => return Err(error),
         };
         let complete = candidate
@@ -106,12 +81,9 @@ where
         if !require_reduction {
             return Ok(true);
         }
-        let previous = match compile(self.history.items(), self.session_summary.as_ref()) {
-            Ok(plan) => plan,
-            Err(AgentLoopError::ContextPlanner(
-                ContextPlannerError::RequiredFragmentsExceedBudget { .. }
-                | ContextPlannerError::RenderedInputExceedsBudget { .. },
-            )) => return Ok(true),
+        let previous = match self.fresh_compaction_context_probe() {
+            Ok(Some(plan)) => plan,
+            Ok(None) => return Ok(true),
             Err(error) => return Err(error),
         };
         // Compare planner demand rather than serialized event bytes or item
@@ -126,6 +98,51 @@ where
                     .sum::<u64>()
         };
         Ok(demand(&candidate) < demand(&previous))
+    }
+
+    fn compile_compaction_context(
+        &self,
+        items: &[ContentItem],
+        summary: Option<&SessionSummary>,
+    ) -> Result<Option<crate::domain::context::ContextPlan>, AgentLoopError> {
+        use crate::domain::context::ContextPlannerError;
+        let capabilities = self.provider.capabilities();
+        let budget = self.context_planner.default_budget(&capabilities)?;
+        let prompt = self
+            .pending_prompt_composition
+            .as_ref()
+            .unwrap_or(&self.prompt_composition);
+        let exposure = prompt.tool_exposure_for_catalog(&self.tools.catalog())?;
+        let tool_plan = self
+            .tools
+            .resolve_tool_plan(&exposure, &DeferredActivationSet::default())?;
+        let mut history = items.to_vec();
+        history.push(ContentItem::user_text("Continue."));
+        let empty_provenance = std::collections::BTreeMap::new();
+        match context_state::compile_context(context_state::ContextCompilationInput {
+            correction_feedback: &[],
+            prompt_composition: prompt,
+            world_state: self.world_state.as_ref(),
+            project_snapshot: self.project_snapshot.as_ref(),
+            project_memory_core: self.project_memory_core.as_ref(),
+            session_summary: summary,
+            history: &history,
+            history_provenance: &empty_provenance,
+            turn_history_start: items.len(),
+            planner: &self.context_planner,
+            cache: None,
+            budget,
+            capabilities: &capabilities,
+            tool_specs: tool_plan.advertised_specs(),
+            prior_manifest: None,
+        }) {
+            Ok((plan, _)) => Ok(Some(plan)),
+            Err(AgentLoopError::ContextPlanner(
+                ContextPlannerError::RequiredFragmentsExceedBudget { .. }
+                | ContextPlannerError::RenderedInputExceedsBudget { .. },
+            )) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     /// Verifies the active Session/Primary binding before a caller appends a

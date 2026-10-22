@@ -30,7 +30,7 @@ fn replace_same_metadata(path: &Path, content: &str) {
 
 fn snapshot_fingerprint(root: &Path) -> Value {
     let snapshot: Value = serde_json::from_slice(
-        &fs::read(root.join(".cyber-agent/cache/project-snapshot.json")).unwrap(),
+        &fs::read(root.join(".echidna/cache/project-snapshot.json")).unwrap(),
     )
     .unwrap();
     assert_eq!(snapshot["source_fingerprint"]["kind"], "filesystem");
@@ -88,7 +88,7 @@ fn four_cases(repetitions: usize, emit: bool) {
                 let harness = TemporaryDirectory::new("delivery-harness");
                 initialize_project(root.path());
                 fs::write(root.path().join("source.txt"), SOURCE_BEFORE).unwrap();
-                let memory = root.path().join(".cyber-agent/memory/core.md");
+                let memory = root.path().join(".echidna/memory/core.md");
                 fs::create_dir_all(memory.parent().unwrap()).unwrap();
                 fs::write(&memory, MEMORY_BEFORE).unwrap();
                 let log = harness.path().join("external.log");
@@ -154,7 +154,7 @@ fn four_cases(repetitions: usize, emit: bool) {
                     assert_eq!(session_id(root.path()), session);
                     let event_path = root
                         .path()
-                        .join(".cyber-agent/sessions")
+                        .join(".echidna/sessions")
                         .join(&session)
                         .join("events.jsonl");
                     let events = fs::read(&event_path).unwrap();
@@ -222,7 +222,7 @@ fn four_cases(repetitions: usize, emit: bool) {
                             .reconstruct(|blob| {
                                 fs::read(
                                     root.path()
-                                        .join(".cyber-agent/artifacts/blobs/sha256")
+                                        .join(".echidna/artifacts/blobs/sha256")
                                         .join(blob.as_str()),
                                 )
                             })
@@ -285,8 +285,7 @@ fn four_cases(repetitions: usize, emit: bool) {
                         assert_eq!(fingerprint, old_fingerprint);
                     }
                     let manifest: Value = serde_json::from_slice(
-                        &fs::read(root.path().join(".cyber-agent/cache/file-manifest.json"))
-                            .unwrap(),
+                        &fs::read(root.path().join(".echidna/cache/file-manifest.json")).unwrap(),
                     )
                     .unwrap();
                     assert!(

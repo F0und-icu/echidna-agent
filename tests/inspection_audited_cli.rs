@@ -34,7 +34,7 @@ struct FileBlobStore {
 
 impl FileBlobStore {
     fn new(project_root: &Path) -> Self {
-        let root = project_root.join(".cyber-agent/artifacts/blobs/sha256");
+        let root = project_root.join(".echidna/artifacts/blobs/sha256");
         fs::create_dir_all(&root).unwrap();
         Self { root }
     }
@@ -236,11 +236,11 @@ fn audited_prompt_metrics_are_read_only_and_missing_blob_is_explicit() {
         metrics
     );
     assert_eq!(project_file_bytes(root.path()), before_inspection);
-    assert!(!root.path().join(".cyber-agent/cache").exists());
+    assert!(!root.path().join(".echidna/cache").exists());
 
     fs::remove_file(
         root.path()
-            .join(".cyber-agent/artifacts/blobs/sha256")
+            .join(".echidna/artifacts/blobs/sha256")
             .join(&blob_ids[0]),
     )
     .unwrap();
@@ -260,7 +260,7 @@ fn corrupt_session_stream_is_reported_without_repair_or_mutation() {
     record_audit(&root);
     let stream = root
         .path()
-        .join(".cyber-agent/sessions/inspection-session/events.jsonl");
+        .join(".echidna/sessions/inspection-session/events.jsonl");
     let mut bytes = fs::read(&stream).unwrap();
     bytes.extend_from_slice(b"{corrupt-tail\n");
     fs::write(&stream, &bytes).unwrap();
@@ -317,7 +317,7 @@ fn inspection_rejects_a_symlinked_session_event_stream() {
 
     let root = TemporaryDirectory::new("inspection-session-symlink");
     record_audit(&root);
-    let session = root.path().join(".cyber-agent/sessions/inspection-session");
+    let session = root.path().join(".echidna/sessions/inspection-session");
     let stream = session.join("events.jsonl");
     let retained = session.join("retained-events.jsonl");
     fs::rename(&stream, &retained).unwrap();

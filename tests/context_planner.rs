@@ -125,9 +125,12 @@ fn large_windows_use_bounded_headroom_without_a_hidden_input_cap() {
         (128, 16, 16),
         (32768, 4096, 4096),
         (65536, 8192, 8192),
-        (1_048_576, 8192, 16384),
-        (2_097_152, 8192, 16384),
-        (u32::MAX, 8192, 16384),
+        (65537, 8192, 8192),
+        (131072, 16384, 16384),
+        (272000, 34000, 34000),
+        (1_048_576, 65536, 131072),
+        (2_097_152, 65536, 131072),
+        (u32::MAX, 65536, 131072),
     ] {
         let mut caps = capabilities();
         caps.context_window = window;
@@ -140,11 +143,50 @@ fn large_windows_use_bounded_headroom_without_a_hidden_input_cap() {
 }
 
 #[test]
-fn capped_budget_policy_invalidates_fingerprint_even_when_small_budget_is_unchanged() {
+fn long_window_headroom_keeps_declared_output_support_separate() {
+    let planner = ContextPlanner::current();
+    for (declared, expected_reserve) in [
+        (None, 34_000),
+        (Some(16_384), 34_000),
+        (Some(100_000), 100_000),
+    ] {
+        let mut caps = capabilities();
+        caps.context_window = 272_000;
+        caps.max_output_tokens = declared;
+        let budget = planner.default_budget(&caps).unwrap();
+        assert_eq!(budget.reserved_output_tokens(), expected_reserve);
+        assert_eq!(budget.reserved_tool_loop_tokens(), 34_000);
+        let plan = planner
+            .compile(
+                vec![fragment(
+                    "user",
+                    ContextFragmentSource::UserInput,
+                    ContextFragmentPriority::Required,
+                )],
+                budget,
+                &caps,
+                Vec::new(),
+                ModelRequestRequirements::default(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(plan.model_input().requirements.max_output_tokens, declared);
+    }
+    let mut caps = capabilities();
+    caps.context_window = u32::MAX;
+    caps.max_output_tokens = Some(u32::MAX - 1);
+    assert!(matches!(
+        planner.default_budget(&caps),
+        Err(ContextPlannerError::InvalidBudget { .. })
+    ));
+}
+
+#[test]
+fn capacity_budget_policy_invalidates_fingerprint_even_when_small_budget_is_unchanged() {
     let old = ContextPlanner::new(ContextPlannerVersions::new(
         "context-planner:1",
         "utf8-rendered-channel-budget:2",
-        "output-and-tool-loop-eighths:1",
+        "capped-output-and-tool-loop-eighths:2",
     ));
     let current = ContextPlanner::current();
     let caps = capabilities();

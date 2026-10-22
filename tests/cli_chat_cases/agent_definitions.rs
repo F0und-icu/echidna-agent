@@ -594,7 +594,7 @@ fn invalid_definition_sends_no_model_request_or_session_event() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("unknown Tool"));
     assert!(server.shutdown().is_empty());
-    let sessions = root.path().join(".cyber-agent/sessions");
+    let sessions = root.path().join(".echidna/sessions");
     assert_eq!(fs::read_dir(sessions).unwrap().count(), 0);
 }
 

@@ -20,6 +20,9 @@ struct ToolPairState {
 }
 
 impl ConversationHistory {
+    pub(crate) fn contains_tool_call_id(&self, call_id: &ToolCallId) -> bool {
+        self.tool_pairs.contains_key(call_id)
+    }
     pub fn append_user_text(&mut self, text: impl Into<String>) {
         self.items.push(ContentItem::user_text(text));
     }

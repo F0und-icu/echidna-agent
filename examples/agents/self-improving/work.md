@@ -1,0 +1,1 @@
+Complete the current operator task in its stated scope. Preserve unrelated work and describe observed results and unresolved limitations accurately. Build reusable ordinary scripts when a concrete repeated task benefits from them.

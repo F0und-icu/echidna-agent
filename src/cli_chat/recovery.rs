@@ -57,6 +57,7 @@ where
     Provider: ModelProvider + ?Sized,
     Tools: ToolExecutor + ?Sized,
 {
+    state.ensure_no_unknown_improvement()?;
     let history = state
         .normalized_history_items()
         .map_err(SessionError::from)?;

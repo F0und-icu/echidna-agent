@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::domain::agent_evolution::AgentRsi;
 use crate::domain::canonical_json::canonical_blake3_hash;
 use crate::domain::domain_profile::DomainProfile;
 use crate::domain::research_control::ResearchPhase;
@@ -129,6 +130,11 @@ pub enum InstructionSourceLocator {
     },
     Builtin {
         template: BuiltinAgentTemplate,
+        resource: String,
+    },
+    Evolution {
+        agent_id: String,
+        parent_digest: String,
         resource: String,
     },
 }
@@ -386,6 +392,8 @@ pub struct AgentDefinition {
     tools: AgentToolExposure,
     research: Option<AgentResearchDefinition>,
     source_locator: DefinitionSourceLocator,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rsi: Option<AgentRsi>,
 }
 
 impl AgentDefinition {
@@ -398,6 +406,7 @@ impl AgentDefinition {
         context: AgentContextSelection,
         tools: AgentToolExposure,
         research: Option<AgentResearchDefinition>,
+        rsi: Option<AgentRsi>,
     ) -> Result<Self, AgentDefinitionError> {
         let mut value = Self {
             schema_version: AGENT_DEFINITION_SCHEMA_VERSION,
@@ -409,6 +418,7 @@ impl AgentDefinition {
             tools,
             research,
             source_locator,
+            rsi,
         };
         value.digest = value.expected_digest()?;
         value.validate()?;
@@ -437,6 +447,71 @@ impl AgentDefinition {
 
     pub fn source_locator(&self) -> &DefinitionSourceLocator {
         &self.source_locator
+    }
+
+    pub(crate) fn rsi(&self) -> Option<&AgentRsi> {
+        self.rsi.as_ref()
+    }
+
+    pub(crate) fn with_source_locator(mut self, source: &Self) -> Self {
+        self.source_locator = source.source_locator.clone();
+        self
+    }
+
+    pub(crate) fn with_evolution(
+        &self,
+        persona: Option<String>,
+        methods: Option<Vec<String>>,
+        state: crate::domain::agent_evolution::EvolutionState,
+    ) -> Result<Self, AgentDefinitionError> {
+        let mut definition = self.clone();
+        let rsi =
+            definition
+                .rsi
+                .as_mut()
+                .ok_or_else(|| AgentDefinitionError::CanonicalEncoding {
+                    message: "RSI is not enabled".to_owned(),
+                })?;
+        if let Some(persona) = persona {
+            if !rsi.persona {
+                return Err(AgentDefinitionError::CanonicalEncoding {
+                    message: "persona is not RSI-editable".to_owned(),
+                });
+            }
+            definition.instructions.persona = InstructionSnapshot::loaded(
+                persona,
+                InstructionSourceLocator::Evolution {
+                    agent_id: self.id.as_str().to_owned(),
+                    parent_digest: state.parent_digest.clone(),
+                    resource: "persona".to_owned(),
+                },
+            )?;
+        }
+        if let Some(methods) = methods {
+            if !rsi.methods {
+                return Err(AgentDefinitionError::CanonicalEncoding {
+                    message: "methods are not RSI-editable".to_owned(),
+                });
+            }
+            definition.instructions.methods = methods
+                .into_iter()
+                .enumerate()
+                .map(|(index, content)| {
+                    InstructionSnapshot::loaded(
+                        content,
+                        InstructionSourceLocator::Evolution {
+                            agent_id: self.id.as_str().to_owned(),
+                            parent_digest: state.parent_digest.clone(),
+                            resource: format!("method:{index}"),
+                        },
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        rsi.state = Some(state);
+        definition.digest = definition.expected_digest()?;
+        definition.validate()?;
+        Ok(definition)
     }
 
     pub fn tool_exposure_for(
@@ -535,6 +610,13 @@ impl AgentDefinition {
             return Err(AgentDefinitionError::InvalidName);
         }
         self.instructions.validate()?;
+        if let Some(rsi) = &self.rsi {
+            rsi.validate()
+                .map_err(|message| AgentDefinitionError::CanonicalEncoding { message })?;
+            if let Some(fixed) = &rsi.fixed_rules {
+                fixed.validate()?;
+            }
+        }
         if let Some(research) = &self.research {
             research.validate()?;
         }
@@ -583,6 +665,13 @@ impl AgentDefinition {
                         .map(|(phase, prompt)| (*phase, prompt.content()))
                         .collect(),
                 }),
+            rsi: self.rsi.as_ref().map(|rsi| DefinitionSemanticRsi {
+                persona: rsi.persona,
+                methods: rsi.methods,
+                improvement: rsi.improvement,
+                fixed_rules: rsi.fixed_rules.as_ref().map(InstructionSnapshot::content),
+                state: rsi.state.as_ref(),
+            }),
         })
         .map(AgentDefinitionDigest::from_hash)
         .map_err(|source| AgentDefinitionError::CanonicalEncoding {
@@ -611,6 +700,19 @@ struct DefinitionSemanticIdentity<'a> {
     context: &'a AgentContextSelection,
     tools: &'a AgentToolExposure,
     research: Option<DefinitionSemanticResearch<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rsi: Option<DefinitionSemanticRsi<'a>>,
+}
+
+#[derive(Serialize)]
+struct DefinitionSemanticRsi<'a> {
+    persona: bool,
+    methods: bool,
+    #[serde(skip_serializing_if = "crate::domain::agent_evolution::is_false")]
+    improvement: bool,
+    fixed_rules: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state: Option<&'a crate::domain::agent_evolution::EvolutionState>,
 }
 
 #[derive(Serialize)]
@@ -655,6 +757,14 @@ impl AgentDefinitionBinding {
 
     pub fn definition(&self) -> &AgentDefinition {
         &self.definition
+    }
+
+    pub(crate) fn replacing_definition(
+        &self,
+        definition: AgentDefinition,
+    ) -> Result<Self, AgentDefinitionError> {
+        self.reload_compatible_with(&definition)?;
+        Self::new(definition, self.personal.clone(), self.project.clone())
     }
 
     pub fn personal(&self) -> Option<&InstructionSnapshot> {
@@ -704,6 +814,14 @@ impl AgentDefinitionBinding {
         }
         if self.definition.context.memory != candidate.context.memory {
             return Err(AgentDefinitionError::ReloadMemoryScopeChanged);
+        }
+        if self.definition.rsi.is_some() != candidate.rsi.is_some() {
+            return Err(AgentDefinitionError::ReloadRsiCapabilityChanged);
+        }
+        if self.definition.rsi.as_ref().map(|rsi| rsi.improvement)
+            != candidate.rsi.as_ref().map(|rsi| rsi.improvement)
+        {
+            return Err(AgentDefinitionError::ReloadRsiCapabilityChanged);
         }
         let current_research = self
             .definition
@@ -755,7 +873,7 @@ fn validate_instruction_content(
     Ok(())
 }
 
-fn is_blake3_digest(value: &str) -> bool {
+pub(crate) fn is_blake3_digest(value: &str) -> bool {
     value.len() == blake3::OUT_LEN * 2
         && value
             .bytes()
@@ -817,6 +935,8 @@ pub enum AgentDefinitionError {
     ReloadAgentIdChanged { current: String, candidate: String },
     #[error("Agent reload changes the durable Memory scope")]
     ReloadMemoryScopeChanged,
+    #[error("reload cannot switch RSI capability; use /agent use or start a new Session")]
+    ReloadRsiCapabilityChanged,
     #[error("Agent reload changes the fixed Research domain or phase contract")]
     ReloadResearchContractChanged,
 }

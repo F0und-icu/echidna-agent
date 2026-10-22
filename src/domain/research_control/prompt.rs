@@ -25,6 +25,8 @@ pub struct PromptComposition {
     /// sampling or introduce a second renderer.
     #[serde(skip)]
     legacy_replay_instructions: Option<String>,
+    #[serde(skip)]
+    evolution_session: Option<(String, String)>,
 }
 
 impl Default for PromptComposition {
@@ -43,6 +45,7 @@ impl PromptComposition {
             phase: ResearchPhase::Mapping,
             binding: None,
             legacy_replay_instructions: None,
+            evolution_session: None,
         }
     }
 
@@ -106,6 +109,11 @@ impl PromptComposition {
 
     pub const fn with_domain_profile(mut self, domain: DomainProfile) -> Self {
         self.domain = domain;
+        self
+    }
+
+    pub(crate) fn with_evolution_session(mut self, session_id: &str, pending_path: String) -> Self {
+        self.evolution_session = Some((session_id.to_owned(), pending_path));
         self
     }
 
@@ -228,6 +236,63 @@ impl PromptComposition {
         Ok(fragments)
     }
 
+    pub(crate) fn applicable_improvement(
+        &self,
+        task: &str,
+    ) -> Result<Option<ContextFragment>, ResearchControlError> {
+        use crate::domain::context::{
+            AuthorityLevel, ContextOrigin, ContextProvenance, ContextReferences, ContextSlot,
+            FreshnessIdentity, RetentionClass, SemanticClass,
+        };
+        let Some(binding) = &self.binding else {
+            return Ok(None);
+        };
+        let Some(rsi) = binding.definition().rsi().filter(|rsi| rsi.improvement) else {
+            return Ok(None);
+        };
+        let Some(state) = &rsi.state else {
+            return Ok(None);
+        };
+        let task = task.to_lowercase();
+        let matching = state
+            .experiences
+            .iter()
+            .filter(|experience| task.contains(&experience.cue.to_lowercase()))
+            .collect::<Vec<_>>();
+        if matching.is_empty() {
+            return Ok(None);
+        }
+        let references = matching
+            .iter()
+            .flat_map(|experience| experience.references.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let text = serde_json::to_string(&serde_json::json!({"kind":"rsi_applicable_experience_v2","source_lineage":state.base_source_digest,"entries":matching,"limitation":"Derived guidance from one local reference_match pair; not current facts or general correctness. Revalidate when requested."})).expect("validated RSI experience serializes");
+        let provenance = ContextProvenance::new(
+            ContextSlot::RetrievedContext,
+            ContextOrigin::SessionProjection,
+            SemanticClass::DerivedProjection,
+            AuthorityLevel::DerivedNonEvidence,
+            RetentionClass::Stable,
+            FreshnessIdentity::new(binding.definition().digest().as_str())?
+                .with_producer_version("rsi-experience:2"),
+            ContextReferences::new(Vec::new(), Vec::new(), Vec::new(), references)?,
+        )?;
+        Ok(Some(
+            ContextFragment::new(
+                ContextFragmentId::new("rsi:applicable-experience:2")?,
+                ContextFragmentSource::RetrievedMemory,
+                ContextFragmentPriority::High,
+                FragmentCachePolicy::DoNotCache,
+                ContextFragmentContent::ContentItems {
+                    items: vec![crate::domain::model::ContentItem::user_text(text)],
+                },
+            )?
+            .with_provenance(provenance)?,
+        ))
+    }
+
     fn bound_fragments(
         &self,
         binding: &AgentDefinitionBinding,
@@ -249,6 +314,47 @@ impl PromptComposition {
             ContextFragmentPriority::Required,
             &binding_facts,
         )?);
+        if let Some(rsi) = definition.rsi() {
+            let (session, pending) = self
+                .evolution_session
+                .as_ref()
+                .map(|(session, pending)| (session.as_str(), pending.as_str()))
+                .unwrap_or(("definition-preflight", "<runtime-provided-pending-path>"));
+            let tools = rsi
+                .state
+                .as_ref()
+                .map(|state| state.tools.as_slice())
+                .unwrap_or(&[]);
+            let protocol = format!(
+                "{}\nRuntime RSI binding: agent_id={id}; session_id={session}; parent_digest={}; pending_path={pending}; editable persona={}; methods={}.\nPublished ordinary script index: {}",
+                include_str!("../../../assets/prompts/rsi.md"),
+                definition.digest().as_str(),
+                rsi.persona,
+                rsi.methods,
+                serde_json::to_string(tools).expect("validated script index serializes")
+            );
+            fragments.push(content_identified_instruction_fragment(
+                "prompt:agent:00:rsi-protocol:1",
+                ContextFragmentSource::BasePrompt,
+                ContextFragmentPriority::Required,
+                &protocol,
+            )?);
+            if rsi.improvement {
+                fragments.push(content_identified_instruction_fragment(
+                    "prompt:agent:00:rsi-improvement:2",
+                    ContextFragmentSource::BasePrompt,
+                    ContextFragmentPriority::Required,
+                    include_str!("../../../assets/prompts/rsi-improvement-v2.md"),
+                )?);
+            }
+            if let Some(fixed) = &rsi.fixed_rules {
+                fragments.push(bound_instruction_fragment(
+                    "prompt:agent:00:rsi-fixed-rules:1",
+                    ContextFragmentSource::BasePrompt,
+                    fixed,
+                )?);
+            }
+        }
         fragments.push(bound_instruction_fragment(
             &format!(
                 "prompt:agent:01:{id}:persona:{}",

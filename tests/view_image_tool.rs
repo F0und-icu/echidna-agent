@@ -77,7 +77,7 @@ fn view_args(event_id: &str, artifact_id: &str, source_path: &str) -> Value {
 }
 
 fn research_events(project: &Project) -> Vec<Value> {
-    fs::read_to_string(project.root().join(".cyber-agent/research.jsonl"))
+    fs::read_to_string(project.root().join(".echidna/research.jsonl"))
         .unwrap()
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
@@ -178,7 +178,7 @@ async fn large_image_automatically_publishes_a_lineage_linked_derivative() {
     let derived_bytes = fs::read(
         project
             .root()
-            .join(".cyber-agent/artifacts/blobs/sha256")
+            .join(".echidna/artifacts/blobs/sha256")
             .join(derived_blob_id),
     )
     .unwrap();
@@ -229,7 +229,7 @@ async fn non_image_fails_without_blob_or_artifact_facts_and_ordinary_artifact_st
     assert!(
         !project
             .root()
-            .join(".cyber-agent/artifacts/blobs/sha256")
+            .join(".echidna/artifacts/blobs/sha256")
             .exists()
     );
 

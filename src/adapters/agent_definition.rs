@@ -14,6 +14,7 @@ use crate::domain::agent_definition::{
     DefinitionSourceLocator, InstructionSnapshot, InstructionSourceLocator,
     MAX_AGENT_RESOURCE_BYTES,
 };
+use crate::domain::agent_evolution::AgentRsi;
 use crate::domain::domain_profile::DomainProfile;
 use crate::domain::research_control::ResearchPhase;
 use crate::domain::tools::{ToolExposure, ToolName, ToolSpec};
@@ -272,6 +273,23 @@ where
         .map(|path| load_resource(path))
         .collect::<Result<Vec<_>, _>>()?;
     let instructions = AgentInstructions::new(persona, work, methods).map_err(E::from)?;
+    let rsi = raw
+        .rsi
+        .map(|rsi| {
+            let fixed_rules = rsi
+                .fixed_rules_file
+                .as_ref()
+                .map(|path| load_resource(path))
+                .transpose()?;
+            Ok::<_, E>(AgentRsi {
+                persona: rsi.persona,
+                methods: rsi.methods,
+                improvement: rsi.improvement,
+                fixed_rules,
+                state: None,
+            })
+        })
+        .transpose()?;
     let tools = AgentToolExposure::new(
         raw.tools
             .into_iter()
@@ -312,6 +330,7 @@ where
         ),
         tools,
         research,
+        rsi,
     )
     .map_err(E::from)
 }
@@ -440,6 +459,17 @@ struct RawDefinition {
     context: RawContext,
     tools: BTreeMap<String, ToolExposure>,
     research: Option<RawResearch>,
+    rsi: Option<RawRsi>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRsi {
+    persona: bool,
+    methods: bool,
+    #[serde(default)]
+    improvement: bool,
+    fixed_rules_file: Option<PathBuf>,
 }
 
 #[derive(Deserialize)]

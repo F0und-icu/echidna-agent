@@ -23,7 +23,7 @@ use crate::domain::tools::ToolSpec;
 
 use fingerprint::{apply_second_level, first_level};
 
-const CACHE_DIRECTORY: &str = ".cyber-agent/cache";
+const CACHE_DIRECTORY: &str = "cache";
 const SNAPSHOT_FILE: &str = "project-snapshot.json";
 const MANIFEST_FILE: &str = "file-manifest.json";
 const TOOL_CAPABILITIES_FILE: &str = "tool-capabilities.json";
@@ -123,7 +123,7 @@ impl<'project> LocalProjectSnapshot<'project> {
         let prior_manifest = self.load_verified_manifest_for_reuse()?;
         let entries = match first_level.entries {
             Some(entries) => entries,
-            None => fingerprint::collect_entries(self.project.root())?,
+            None => fingerprint::collect_entries(self.project)?,
         };
         let (entries, hashed_paths) = apply_second_level(
             self.project.root(),
@@ -367,7 +367,7 @@ impl<'project> LocalProjectSnapshot<'project> {
     }
 
     fn cache_directory_existing(&self) -> Result<Option<PathBuf>, LocalProjectSnapshotError> {
-        let path = self.project.root().join(CACHE_DIRECTORY);
+        let path = self.project.control_directory().join(CACHE_DIRECTORY);
         match fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 Err(LocalProjectSnapshotError::CacheSymlink { path })
@@ -380,7 +380,7 @@ impl<'project> LocalProjectSnapshot<'project> {
     }
 
     fn ensure_cache_directory(&self) -> Result<PathBuf, LocalProjectSnapshotError> {
-        let control = self.project.root().join(".cyber-agent");
+        let control = self.project.control_directory();
         ensure_directory(&control)?;
         let cache = control.join("cache");
         ensure_directory(&cache)?;

@@ -27,7 +27,7 @@ pub(super) fn first_level(project: &Project) -> Result<FirstLevel, LocalProjectS
     match run_git(root, ["rev-parse", "--is-inside-work-tree"]) {
         Ok(output) if output.trim() == "true" => {
             let mut control_entries = Vec::new();
-            collect_control_entries(root, &mut control_entries)?;
+            collect_control_entries(project, &mut control_entries)?;
             control_entries.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
             let control_hash = facts_metadata_hash(&control_entries);
             let metadata = (|| -> Result<(String, Vec<u8>, String, String), String> {
@@ -43,6 +43,8 @@ pub(super) fn first_level(project: &Project) -> Result<FirstLevel, LocalProjectS
                         ".",
                         ":(exclude).cyber-agent",
                         ":(exclude).cyber-agent/**",
+                        ":(exclude).echidna",
+                        ":(exclude).echidna/**",
                         ":(exclude)target",
                         ":(exclude)target/**",
                     ],
@@ -90,7 +92,7 @@ pub(super) fn first_level(project: &Project) -> Result<FirstLevel, LocalProjectS
         }
         Ok(_) | Err(_) if root.join(".git").exists() => {
             let mut control_entries = Vec::new();
-            collect_control_entries(root, &mut control_entries)?;
+            collect_control_entries(project, &mut control_entries)?;
             control_entries.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
             let control_hash = facts_metadata_hash(&control_entries);
             Ok(FirstLevel {
@@ -106,7 +108,7 @@ pub(super) fn first_level(project: &Project) -> Result<FirstLevel, LocalProjectS
             })
         }
         Ok(_) | Err(_) => {
-            let entries = collect_entries(root)?;
+            let entries = collect_entries(project)?;
             let facts_hash = facts_metadata_hash(&entries);
             Ok(FirstLevel {
                 fingerprint: ProjectFingerprint {
@@ -124,26 +126,26 @@ pub(super) fn first_level(project: &Project) -> Result<FirstLevel, LocalProjectS
 }
 
 pub(super) fn collect_entries(
-    root: &Path,
+    project: &Project,
 ) -> Result<Vec<FileManifestEntry>, LocalProjectSnapshotError> {
+    let root = project.root();
     let mut entries = Vec::new();
     collect_entries_at(root, root, true, &mut entries)?;
-    collect_control_entries(root, &mut entries)?;
+    collect_control_entries(project, &mut entries)?;
     entries.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
     Ok(entries)
 }
 
 fn collect_control_entries(
-    root: &Path,
+    project: &Project,
     entries: &mut Vec<FileManifestEntry>,
 ) -> Result<(), LocalProjectSnapshotError> {
-    for path in [
-        root.join(".cyber-agent/project.toml"),
-        root.join(".cyber-agent/research.jsonl"),
-    ] {
+    let root = project.root();
+    let control = project.control_directory();
+    for path in [control.join("project.toml"), control.join("research.jsonl")] {
         append_required_control_file(root, &path, entries)?;
     }
-    let memory = root.join(".cyber-agent/memory");
+    let memory = control.join("memory");
     match fs::symlink_metadata(&memory) {
         Ok(metadata) => {
             append_entry(root, &memory, entries)?;
@@ -541,6 +543,8 @@ fn is_excluded(relative: &str) -> bool {
         || relative.starts_with("target/")
         || relative == ".cyber-agent"
         || relative.starts_with(".cyber-agent/")
+        || relative == ".echidna"
+        || relative.starts_with(".echidna/")
 }
 
 fn run_git<const N: usize>(root: &Path, arguments: [&str; N]) -> Result<String, String> {

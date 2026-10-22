@@ -9,6 +9,8 @@
 mod compaction;
 mod context;
 mod definition;
+mod evolution;
+mod improvement;
 mod input;
 mod recovery;
 mod theme;
@@ -28,6 +30,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use crate::adapters::artifact_store::LocalArtifactStore;
 use crate::adapters::fragment_cache::LocalFragmentCache;
 use crate::adapters::project_event_store::{Project, ProjectEventStream};
+use crate::adapters::research_projection::CompactionValidationFactsError;
 use crate::adapters::session_compaction::{
     SessionCompactionFacts, load_historical_session_compaction_facts, load_resume_compaction_facts,
     load_session_compaction_facts,
@@ -49,7 +52,7 @@ use crate::domain::request_audit::{
     RequestAuditAttempt, RequestAuditBinding, RequestAuditManifest, RequestAuditRunContext,
 };
 use crate::domain::research_control::{ResearchPhase, ResearchPhaseSelection};
-use crate::domain::session::{SessionEvent, SessionLifecycle, SessionState};
+use crate::domain::session::{SessionError, SessionEvent, SessionLifecycle, SessionState};
 use crate::domain::tools::ToolExecutionOutcome;
 use crate::ports::EventSource;
 use crate::provider_composition::ProviderComposition;
@@ -98,6 +101,8 @@ pub(crate) async fn run(
             ));
         }
         let mut session = DurableChatSession::new(project.clone(), session_id.clone(), binding)?;
+        crate::adapters::agent_evolution::EvolutionStore::new(&session.project, &session.binding)
+            .prepare(&session.binding)?;
         let (session_state, provider_session, mut disposition, compaction_validation) =
             session.start_or_resume(explicit_resume, composition, false, &discovered_mcp)?;
         let domain = requested_domain.unwrap_or_else(|| {
@@ -114,7 +119,14 @@ pub(crate) async fn run(
                 .unwrap_or(DomainProfile::Source)
         });
 
-        let tools = session.bound_tools(&discovered_mcp)?;
+        let tools = session.bound_tools(
+            &discovered_mcp,
+            composition
+                .agent_profile()
+                .primary()
+                .capabilities()
+                .context_window,
+        )?;
         let mut context_cache = context::ChatContextCache::default();
         let mut agent = AgentLoop::with_primary_context(
             composition.primary_provider(),
@@ -126,8 +138,10 @@ pub(crate) async fn run(
         .with_fragment_cache(Arc::new(LocalFragmentCache::for_project(&session.project)))
         .with_output_store(LocalArtifactStore::for_project(&session.project))
         .with_prompt_composition(definition::prompt_for_state(
+            &session.project,
             &session.binding,
             &session_state,
+            session_id.as_str(),
         )?);
         if research_enabled {
             agent.queue_domain_profile(domain);
@@ -323,7 +337,8 @@ pub(crate) async fn run(
                     let catalog = crate::adapters::tools::ToolRegistry::for_project_with_mcp(
                         session.project.root(),
                         &discovered_mcp,
-                    )?;
+                    )?
+                    .with_project(&session.project);
                     let candidate = match crate::cli_agent::select_binding(
                         Some(Path::new(path)),
                         composition,
@@ -362,7 +377,8 @@ pub(crate) async fn run(
                 let catalog = crate::adapters::tools::ToolRegistry::for_project_with_mcp(
                     session.project.root(),
                     &discovered_mcp,
-                )?;
+                )?
+                .with_project(&session.project);
                 let candidate = match definition::reload_candidate(
                     &session.binding,
                     path.map(Path::new),
@@ -374,6 +390,19 @@ pub(crate) async fn run(
                         println!("Agent reload rejected: {error}");
                         continue;
                     }
+                };
+                let candidate = match crate::adapters::agent_evolution::EvolutionStore::new(
+                    &session.project,
+                    &candidate,
+                )
+                .select(candidate)
+                {
+                    Ok(candidate) => candidate,
+                    Err(crate::adapters::agent_evolution::EvolutionError::Rejected(message)) => {
+                        println!("Agent reload rejected: {message}");
+                        continue;
+                    }
+                    Err(error) => return Err(error.into()),
                 };
                 let candidate_session = DurableChatSession::new(
                     session.project.clone(),
@@ -396,8 +425,10 @@ pub(crate) async fn run(
                     candidate_session.start_or_resume(true, composition, true, &discovered_mcp)?;
                 let validation = facts.as_ref().map(|facts| facts.context());
                 agent.queue_prompt_composition(definition::prompt_for_state(
+                    &session.project,
                     &candidate_session.binding,
                     &state,
+                    session_id.as_str(),
                 )?);
                 agent.resume_from_session(&state, provider_session, validation.as_ref())?;
                 session.binding = candidate_session.binding;
@@ -408,6 +439,36 @@ pub(crate) async fn run(
                     session.binding.definition().id().as_str(),
                     session.binding.definition().digest().as_str()
                 );
+                continue;
+            }
+            if line == "/rsi reconcile" {
+                if session.binding.definition().rsi().is_none() {
+                    println!("RSI is not enabled for this Agent.");
+                    continue;
+                }
+                if tools.has_active_processes() || !pending_images.is_empty() {
+                    println!("RSI reconciliation requires an idle boundary with no queued images.");
+                    continue;
+                }
+                agent
+                    .history()
+                    .ensure_all_tool_calls_paired()
+                    .map_err(crate::domain::session::SessionError::from)?;
+                session.validate_stopped_runtime(&agent)?;
+                match crate::adapters::agent_evolution::EvolutionStore::new(
+                    &session.project,
+                    &session.binding,
+                )
+                .reconcile(&session.binding)
+                {
+                    Ok(()) => println!(
+                        "RSI publication pointer agrees with this durable binding; no request, execution or Provider reset occurred."
+                    ),
+                    Err(crate::adapters::agent_evolution::EvolutionError::Rejected(message)) => {
+                        println!("RSI reconciliation rejected: {message}")
+                    }
+                    Err(error) => return Err(error.into()),
+                }
                 continue;
             }
             if line == "/agent use" {
@@ -438,7 +499,19 @@ pub(crate) async fn run(
                 }
                 let current = context_cache.refresh(&session.project, &tools, &session.binding)?;
                 agent.refresh_current_context(current)?;
-                println!("{}", session.compact(&mut agent)?.message());
+                println!(
+                    "{}",
+                    session
+                        .compact(
+                            &mut agent,
+                            composition
+                                .agent_profile()
+                                .primary()
+                                .capabilities()
+                                .context_window
+                        )?
+                        .message()
+                );
                 continue;
             }
             if line == "/image" {
@@ -665,6 +738,8 @@ pub(crate) async fn run(
                         message: error.to_string(),
                     })
             };
+            let improvement_task = line.clone();
+            let improvement_history_start = improvement::history_start(&session)?;
             let outcome = {
                 let turn = agent.run_turn_audited_with_context_refresh_and_vision_stages(
                     line,
@@ -693,9 +768,88 @@ pub(crate) async fn run(
             };
 
             tool_output.borrow_mut().finish_turn();
+            let mut auto_compacted = false;
             match outcome {
                 Ok(AgentTurnOutcome::Completed { .. }) => {
                     println!();
+                    input::interruptible(
+                        improvement::after_completed(
+                            &session,
+                            &agent,
+                            &tools,
+                            &improvement_task,
+                            improvement_history_start,
+                            pending_images.is_empty(),
+                            &request_budget,
+                            signal_cancellation.clone(),
+                            &audit_context,
+                            composition,
+                            &discovered_mcp,
+                        ),
+                        &signal_cancellation,
+                        &mut lines,
+                        terminal_input,
+                        &mut input_closed,
+                        &mut pending_input,
+                    )
+                    .await??;
+                    if evolution::apply_completed(
+                        &mut session,
+                        &mut agent,
+                        &tools,
+                        composition,
+                        &discovered_mcp,
+                        pending_images.is_empty(),
+                    )? {
+                        disposition = SessionDisposition::Resumed;
+                        context_cache = context::ChatContextCache::default();
+                    }
+                    if composition.runtime().auto_compact && !signal_cancellation.is_cancelled() {
+                        let current =
+                            context_cache.refresh(&session.project, &tools, &session.binding)?;
+                        agent.refresh_current_context(current)?;
+                        let should_compact = match agent.fresh_compaction_context_probe()? {
+                            Some(plan) => {
+                                compaction::ContextPressure::from_plan(&plan).should_remind()
+                            }
+                            None => true,
+                        };
+                        if should_compact {
+                            match session.compact(
+                                &mut agent,
+                                composition
+                                    .agent_profile()
+                                    .primary()
+                                    .capabilities()
+                                    .context_window,
+                            ) {
+                                Ok(summary) => {
+                                    println!("{}", summary.automatic_message());
+                                    auto_compacted = true;
+                                }
+                                Err(ChatError::CompactionFacts(
+                                    CompactionValidationFactsError::ResearchStreamEmpty,
+                                )) => {
+                                    println!(
+                                        "Automatic completed-Turn compaction deferred: the Project Research stream is empty; no Compaction was appended and Provider delivery state was retained."
+                                    );
+                                }
+                                Err(ChatError::Session(
+                                    SessionError::CompactionCurrentTargetRequired,
+                                )) => {
+                                    println!(
+                                        "Automatic completed-Turn compaction deferred: the current Project has no TargetSnapshot; no Compaction was appended and Provider delivery state was retained."
+                                    );
+                                }
+                                Err(ChatError::CompactionNotUseful) => {
+                                    println!(
+                                        "Automatic completed-Turn compaction deferred: no smaller usable next-Turn Context was found; no Compaction was appended and Provider delivery state was retained."
+                                    );
+                                }
+                                Err(error) => return Err(error),
+                            }
+                        }
+                    }
                 }
                 Ok(AgentTurnOutcome::Cancelled { .. }) => {
                     println!("\n[request cancelled]");
@@ -714,7 +868,7 @@ pub(crate) async fn run(
             if !recovery_required {
                 recovery::report_budget(&request_budget);
             }
-            if let Some(plan) = agent.last_context_plan() {
+            if !auto_compacted && let Some(plan) = agent.last_context_plan() {
                 let pressure = compaction::ContextPressure::from_plan(plan);
                 if pressure.should_remind() {
                     println!("{}", pressure.message());
@@ -802,6 +956,7 @@ impl DurableChatSession {
         let mut projection =
             SessionProjection::replay(EventSource::read_events(&store, &stream_id)?)?;
         if explicit_resume {
+            projection.state().ensure_no_unknown_improvement()?;
             self.preflight_binding(projection.state(), composition, discovered_mcp)?;
         }
         let sequence = store.next_sequence()?;
@@ -844,7 +999,7 @@ impl DurableChatSession {
                             .map_err(ChatError::ResearchProjection)?;
                         compaction.validate_references(&historical.context())?;
                         facts = load_session_compaction_facts(&self.project, projection.state())
-                            .map_err(ChatError::ResearchProjection)?;
+                            .map_err(ChatError::CompactionFacts)?;
                         let rebuilt = self.rebuild_compaction(
                             projection.state(),
                             &facts,
@@ -1298,6 +1453,8 @@ fn event_id(project_id: &ProjectId, session_id: &StreamId, sequence: u64, kind: 
 
 #[derive(Debug, Error)]
 pub(crate) enum ChatError {
+    #[error(transparent)]
+    Evolution(#[from] crate::adapters::agent_evolution::EvolutionError),
     #[error("Agent definition: {message}")]
     Definition { message: String },
     #[error("Session has an unresolved stopped Turn; resume its Session explicitly")]
@@ -1326,6 +1483,8 @@ pub(crate) enum ChatError {
     Research(#[from] crate::domain::research::ResearchError),
     #[error("Research projection is invalid: {0}")]
     ResearchProjection(String),
+    #[error("Research projection is invalid: {0}")]
+    CompactionFacts(CompactionValidationFactsError),
     #[error(transparent)]
     WorldState(#[from] crate::domain::world_state::WorldStateError),
     #[error("Session `{session_id}` does not exist in the current project")]

@@ -1,0 +1,1 @@
+Preserve the operator's current scope, historical observations and honest execution status. These rules are operator-owned and cannot be changed by RSI candidates. A successful test or structural publication does not by itself establish that a new prompt or script improves task quality.

@@ -51,6 +51,28 @@ fn service_as(store: &Path, base: &str, account: &str) -> SubscriptionAuthServic
     .expect("synthetic endpoint service")
 }
 
+#[test]
+fn both_project_runtime_directories_are_rejected_as_auth_store_paths() {
+    let root = TemporaryDirectory::new("auth-project-directory-isolation");
+    for name in [".echidna", ".cyber-agent"] {
+        let store = root.path().join(name).join("auth");
+        let result = SubscriptionAuthService::with_endpoints(
+            store.clone(),
+            "personal".to_owned(),
+            endpoints("http://127.0.0.1:1"),
+        );
+        let error = match result {
+            Ok(_) => panic!("project runtime directory must not become an auth store"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.to_string(),
+            "subscription authentication store path must be an absolute private path"
+        );
+        assert!(!store.exists());
+    }
+}
+
 #[tokio::test]
 async fn signed_loopback_login_uses_pkce_and_models_preserve_server_order() {
     let directory = TemporaryDirectory::new("subscription-auth-success");

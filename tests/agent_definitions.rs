@@ -345,7 +345,7 @@ fn configured_definition_path_selects_the_exported_agent_for_a_new_session() {
     assert!(initialized.status.success());
     let chat = command(root.path(), &["--config", config.to_str().unwrap(), "chat"]);
     assert!(chat.status.success(), "stderr: {:?}", chat.stderr);
-    let session = fs::read_dir(root.path().join(".cyber-agent/sessions"))
+    let session = fs::read_dir(root.path().join(".echidna/sessions"))
         .unwrap()
         .next()
         .unwrap()
@@ -374,7 +374,7 @@ fn resume_rejects_a_tampered_durable_definition_snapshot() {
             .status
             .success()
     );
-    let events_path = fs::read_dir(root.path().join(".cyber-agent/sessions"))
+    let events_path = fs::read_dir(root.path().join(".echidna/sessions"))
         .unwrap()
         .next()
         .unwrap()

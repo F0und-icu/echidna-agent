@@ -386,6 +386,108 @@ mod release_regression {
         });
     }
 
+    #[test]
+    fn codex_body_failure_diagnostics_are_typed_and_private() {
+        if let Ok(case) = std::env::var(CHILD_ENV) {
+            run_body_failure_child(&case);
+            return;
+        }
+        for (case, expected) in [
+            ("timeout", "timeout=true, io_kind=None"),
+            ("chunk", "timeout=false, io_kind=Some(InvalidInput)"),
+        ] {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "release_regression::codex_body_failure_diagnostics_are_typed_and_private",
+                    "--nocapture",
+                ])
+                .env(CHILD_ENV, case)
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8(output.stderr).unwrap();
+            assert!(output.status.success(), "{case}: {stderr}");
+            for field in [
+                "response body read failed",
+                "HTTP 200",
+                "elapsed_ms=",
+                expected,
+            ] {
+                assert!(stderr.contains(field), "{case}: {stderr}");
+            }
+            for secret in [
+                BEARER_SECRET,
+                "transport-url-canary",
+                "transport-body-canary",
+                "transport-frame-canary",
+                "workspace-summary-fixture",
+            ] {
+                assert!(!stderr.contains(secret), "{case}: {stderr}");
+            }
+        }
+    }
+
+    fn run_body_failure_child(case: &str) {
+        use std::time::Duration;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base_url = format!(
+            "http://{}/transport-url-canary?secret=transport-url-canary",
+            listener.local_addr().unwrap()
+        );
+        let (release, wait) = mpsc::channel();
+        let chunked = case == "chunk";
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let _request = read_request(&mut socket);
+            let event = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"transport-body-canary\"}\n\n";
+            if chunked {
+                write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{event}\r\nZ-transport-frame-canary\r\n", event.len()).unwrap();
+            } else {
+                write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 1000\r\n\r\n{event}").unwrap();
+            }
+            socket.flush().unwrap();
+            let _ = wait.recv_timeout(Duration::from_secs(15));
+        });
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let provider = ResponsesHttpAdapter::new(
+                ResponsesHttpConfig::new(
+                    base_url,
+                    "fixture-model",
+                    "codex_subscription:fixture",
+                    capabilities(),
+                )
+                .with_codex_subscription_profile()
+                .with_timeouts(2_000, 2_000),
+                Arc::new(FixtureCredentialSource),
+            )
+            .with_cli_output(
+                Some("primary"),
+                #[cfg(debug_assertions)]
+                true,
+            );
+            let input = ModelInputIR::current(
+                "Fixture instruction.",
+                vec![ContentItem::user_text("Fixture input.")],
+                ModelRequestRequirements::default(),
+            );
+            let mut stream = provider.stream(ModelRequest::full(input)).unwrap();
+            assert!(matches!(
+                stream.next().await,
+                Some(Ok(ModelStreamEvent::Event(ModelEvent::TextDelta { .. })))
+            ));
+            let error = stream.next().await.unwrap().unwrap_err();
+            assert!(matches!(
+                error,
+                crate::ports::model::ModelProviderError::TransportFailure { .. }
+            ));
+            eprintln!("{error}");
+            assert!(stream.next().await.is_none());
+        });
+        release.send(()).unwrap();
+        server.join().unwrap();
+    }
+
     fn capabilities() -> ModelCapabilities {
         ModelCapabilities {
             text_input: true,

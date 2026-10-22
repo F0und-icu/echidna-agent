@@ -3,6 +3,65 @@ use echidna::domain::model::ContentItem;
 
 const REMOTE_TOOL: &str = "remote.e2e";
 
+#[test]
+fn rsi_lineage_discovers_exact_mcp_names_only_when_explicitly_requested() {
+    let root = TemporaryDirectory::new("rsi-lineage-mcp");
+    let harness = TemporaryDirectory::new("rsi-lineage-mcp-config");
+    initialize_project(root.path());
+    let definition = writing_agent(root.path(), "writer");
+    set_remote_exposure(&definition, "deferred");
+    let manifest = definition.join("agent.toml");
+    fs::write(
+        &manifest,
+        format!(
+            "{}\n[rsi]\npersona=true\nmethods=true\n",
+            fs::read_to_string(&manifest).unwrap()
+        ),
+    )
+    .unwrap();
+    let offline = mcp_config(
+        harness.path(),
+        "http://127.0.0.1:1/v1",
+        "http://127.0.0.1:1/mcp",
+    );
+    let invoke = |config: &std::path::Path, discover: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_echidna"));
+        command.current_dir(root.path()).args([
+            "--config",
+            config.to_str().unwrap(),
+            "agent",
+            "lineage",
+            definition.to_str().unwrap(),
+        ]);
+        if discover {
+            command.arg("--discover-mcp");
+        }
+        command.output().unwrap()
+    };
+    let output = invoke(&offline, false);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unknown Tool"));
+    let remote = spawn_responses_server(vec![(200, catalog_response())]);
+    let config = mcp_config(harness.path(), "http://127.0.0.1:1/v1", &remote.base_url);
+    let output = invoke(&config, true);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()["status"],
+        "lineage_selected"
+    );
+    let requests = take_requests(remote, 1, "RSI lineage MCP catalog");
+    assert_eq!(requests[0]["method"], "tools/list");
+    assert!(
+        root.path()
+            .join(".echidna/evolution/technical-writing/active.json")
+            .exists()
+    );
+}
+
 fn local_name() -> String {
     format!(
         "mcp__fixture__{}",

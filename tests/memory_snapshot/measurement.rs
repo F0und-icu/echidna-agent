@@ -15,12 +15,12 @@ const CACHE_FILES: [&str; 3] = [
     "tool-capabilities.json",
 ];
 const SOURCE: &str = "source-000.txt";
-const MEMORY: &str = ".cyber-agent/memory/core.md";
+const MEMORY: &str = ".echidna/memory/core.md";
 
 pub(super) fn cache_contents(root: &Path) -> Vec<Vec<u8>> {
     CACHE_FILES
         .iter()
-        .map(|name| fs::read(root.join(".cyber-agent/cache").join(name)).unwrap())
+        .map(|name| fs::read(root.join(".echidna/cache").join(name)).unwrap())
         .collect()
 }
 
@@ -88,7 +88,7 @@ async fn four_cases(repetitions: usize, file_count: usize, file_bytes: usize, em
                     )
                     .unwrap();
                 }
-                fs::create_dir_all(project.root().join(".cyber-agent/memory")).unwrap();
+                fs::create_dir_all(project.root().join(".echidna/memory")).unwrap();
                 fs::write(project.root().join(MEMORY), "currency=USD\n").unwrap();
                 fs::write(logs.path().join("run.log"), b"initial log\n").unwrap();
                 if git {
