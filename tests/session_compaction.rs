@@ -391,6 +391,28 @@ fn compaction_event(
     )
 }
 
+fn v4_compaction_event(
+    state: &SessionState,
+    facts: &CompactionFacts,
+    id: &str,
+    sequence: u64,
+    byte_limit: usize,
+) -> EventEnvelope<Value> {
+    let mut event = compaction_event(state, facts, id, sequence);
+    event.payload["schema_version"] = json!(4);
+    let summary = event.payload["summary"]
+        .as_object_mut()
+        .expect("compaction summary must be an object");
+    summary.insert("schema_version".to_owned(), json!(4));
+    summary.insert("byte_limit".to_owned(), json!(byte_limit));
+    summary.insert("fingerprint".to_owned(), Value::String(String::new()));
+    let fingerprint = blake3::hash(&serde_json::to_vec(summary).unwrap())
+        .to_hex()
+        .to_string();
+    summary.insert("fingerprint".to_owned(), Value::String(fingerprint));
+    event
+}
+
 #[test]
 fn summary_v2_rebuilds_reference_only_continuation_without_rewriting_history() {
     let facts = CompactionFacts::new("summary-v2");
@@ -428,6 +450,50 @@ fn summary_v2_rebuilds_reference_only_continuation_without_rewriting_history() {
         .reduce(events.into_iter().chain(std::iter::once(compacted)))
         .unwrap();
     assert_eq!(replayed, state);
+}
+
+#[test]
+fn summary_v4_records_its_selected_byte_limit_without_task_references() {
+    let facts = CompactionFacts::new("summary-v4");
+    let events = source_events();
+    let state = SessionReducer.reduce(events.clone()).unwrap();
+    let v4 = v4_compaction_event(&state, &facts, "compaction-v4", 9, 16 * 1024);
+
+    let replayed = SessionReducer
+        .reduce(events.into_iter().chain(std::iter::once(v4.clone())))
+        .unwrap();
+    let summary = replayed.latest_compaction().unwrap().summary();
+    assert_eq!(summary.schema_version(), 4);
+    assert_eq!(summary.revision(), 1);
+    let encoded = serde_json::to_value(summary).unwrap();
+    assert_eq!(encoded, v4.payload["summary"]);
+    assert_eq!(encoded["byte_limit"], json!(16 * 1024));
+    assert!(encoded.get("task_references").is_none());
+    assert!(encoded.get("agent_definition").is_none());
+
+    let mut invalid_limit = v4.clone();
+    invalid_limit.payload["summary"]["byte_limit"] = json!(8 * 1024 - 1);
+    assert!(
+        SessionReducer
+            .reduce(
+                source_events()
+                    .into_iter()
+                    .chain(std::iter::once(invalid_limit))
+            )
+            .is_err()
+    );
+
+    let mut tampered_limit = v4;
+    tampered_limit.payload["summary"]["byte_limit"] = json!(24 * 1024);
+    assert!(
+        SessionReducer
+            .reduce(
+                source_events()
+                    .into_iter()
+                    .chain(std::iter::once(tampered_limit))
+            )
+            .is_err()
+    );
 }
 
 #[test]

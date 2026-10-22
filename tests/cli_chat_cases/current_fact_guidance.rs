@@ -9,9 +9,9 @@ fn task_scope_is_delivered_in_a_fresh_session_and_on_resume_with_old_project_fac
     initialize_project(root.path());
     let project = Project::discover(root.path()).unwrap();
     append_research_snapshot(&project, "old-report-target");
-    let research_path = root.path().join(".cyber-agent/research.jsonl");
+    let research_path = root.path().join(".echidna/research.jsonl");
     let research_before = fs::read(&research_path).unwrap();
-    let memory = root.path().join(".cyber-agent/memory/core.md");
+    let memory = root.path().join(".echidna/memory/core.md");
     fs::create_dir_all(memory.parent().unwrap()).unwrap();
     fs::write(
         &memory,
@@ -138,7 +138,7 @@ fn repeated_compaction_then_process_resume_refreshes_facts_without_reexecuting_c
     let settings = root.path().join("src/report-settings");
     fs::write(&settings, "currency=USD\n").unwrap();
     let snapshot = append_research_snapshot(&project, "report-settings");
-    let memory = root.path().join(".cyber-agent/memory/core.md");
+    let memory = root.path().join(".echidna/memory/core.md");
     fs::create_dir_all(memory.parent().unwrap()).unwrap();
     fs::write(&memory, "report.currency=USD\n").unwrap();
     // Bounded old prose makes production compaction measurably useful. These
@@ -407,7 +407,7 @@ fn resume_delivers_current_memory_alongside_old_prose_without_rewriting_history(
     let root = TemporaryDirectory::new("current-fact-guidance");
     let harness = TemporaryDirectory::new("current-fact-provider");
     initialize_project(root.path());
-    let memory = root.path().join(".cyber-agent/memory/core.md");
+    let memory = root.path().join(".echidna/memory/core.md");
     fs::create_dir_all(memory.parent().unwrap()).unwrap();
     fs::write(&memory, "report.currency=USD\n").unwrap();
     let server = spawn_responses_server(vec![

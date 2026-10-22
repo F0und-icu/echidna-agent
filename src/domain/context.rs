@@ -3,6 +3,7 @@
 mod baseline;
 mod canonical;
 mod planner;
+mod window_policy;
 
 pub use baseline::{BaselineAssessment, BaselineInvalidationReason, ProviderSession};
 pub use canonical::{
@@ -23,3 +24,4 @@ pub use planner::{
 };
 
 pub(crate) use planner::{estimate_audit_component_tokens, tool_schema_token_cost};
+pub(crate) use window_policy::ContextWindowPolicy;

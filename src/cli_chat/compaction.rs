@@ -9,7 +9,9 @@ use crate::adapters::research_projection::{
 use crate::adapters::tools::ToolRegistry;
 use crate::app::agent_loop::AgentLoop;
 use crate::app::session::SessionProjection;
-use crate::domain::context::{ContextDecision, ContextDecisionManifest, ContextPlan};
+use crate::domain::context::{
+    ContextDecision, ContextDecisionManifest, ContextPlan, ContextWindowPolicy,
+};
 use crate::domain::session::{
     SessionCompaction, SessionError, SessionEvent, SessionState, SessionSummaryDraft,
 };
@@ -18,7 +20,6 @@ use crate::ports::model::ModelProvider;
 
 use super::{ChatError, DurableChatSession, event_id, occurred_at};
 
-const MAX_REFERENCE_ITEMS_PER_KIND: usize = 32;
 const WARNING_PERCENT: u64 = 80;
 
 pub(super) struct AppliedCompactionSummary {
@@ -69,11 +70,22 @@ impl DurableChatSession {
             tools,
             composition,
         )?)?;
-        let (_, candidate) = select_compaction(state, facts, |candidate| {
-            preview
-                .preflight_compaction(candidate, false)
-                .map_err(ChatError::from)
-        })?;
+        let (_, candidate) = select_compaction(
+            state,
+            facts,
+            ContextWindowPolicy::for_window(
+                composition
+                    .agent_profile()
+                    .primary()
+                    .capabilities()
+                    .context_window,
+            ),
+            |candidate| {
+                preview
+                    .preflight_compaction(candidate, false)
+                    .map_err(ChatError::from)
+            },
+        )?;
         Ok(candidate)
     }
 
@@ -84,6 +96,7 @@ impl DurableChatSession {
     pub(super) fn compact<Provider>(
         &self,
         agent: &mut AgentLoop<'_, '_, Provider, ToolRegistry>,
+        policy: ContextWindowPolicy,
     ) -> Result<AppliedCompactionSummary, ChatError>
     where
         Provider: ModelProvider + ?Sized,
@@ -106,11 +119,12 @@ impl DurableChatSession {
         // these read-only facts and the new Compaction Event are composed.
         let facts =
             load_compaction_validation_facts(&self.project).map_err(ChatError::CompactionFacts)?;
-        let (draft, compaction) = select_compaction(projection.state(), &facts, |candidate| {
-            agent
-                .preflight_compaction(candidate, true)
-                .map_err(ChatError::from)
-        })?;
+        let (draft, compaction) =
+            select_compaction(projection.state(), &facts, policy, |candidate| {
+                agent
+                    .preflight_compaction(candidate, true)
+                    .map_err(ChatError::from)
+            })?;
         let validation = facts.context();
         let result = AppliedCompactionSummary {
             revision: compaction.summary().revision(),
@@ -146,20 +160,23 @@ impl DurableChatSession {
 pub(super) fn select_compaction(
     state: &SessionState,
     facts: &CompactionValidationFacts,
+    policy: ContextWindowPolicy,
     mut fits: impl FnMut(&SessionCompaction) -> Result<bool, ChatError>,
 ) -> Result<(SessionSummaryDraft, SessionCompaction), ChatError> {
     let history = state
         .full_normalized_history()
         .map_err(SessionError::from)?;
-    let mut references = MAX_REFERENCE_ITEMS_PER_KIND;
+    let mut references = policy.compaction_reference_items();
     loop {
-        let draft = facts.compose_session_summary_draft(
-            &history,
-            state
-                .latest_compaction()
-                .map(|compaction| compaction.summary()),
-            references,
-        )?;
+        let draft = facts
+            .compose_session_summary_draft(
+                &history,
+                state
+                    .latest_compaction()
+                    .map(|compaction| compaction.summary()),
+                references,
+            )?
+            .with_byte_limit(policy.summary_bytes())?;
         let mut retained = state
             .normalized_history_items()
             .map_err(SessionError::from)?

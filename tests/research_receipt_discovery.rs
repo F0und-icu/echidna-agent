@@ -179,7 +179,7 @@ fn append_receipt(project: &Project, session: &str, receipt_id: &str, execution_
 }
 
 fn research_line_count(project: &Project) -> usize {
-    fs::read_to_string(project.root().join(".cyber-agent/research.jsonl"))
+    fs::read_to_string(project.root().join(".echidna/research.jsonl"))
         .unwrap()
         .lines()
         .count()
@@ -560,7 +560,7 @@ async fn same_size_session_tampering_with_preserved_mtime_is_revalidated_and_rej
 
     let path = project
         .root()
-        .join(".cyber-agent/sessions/session-tamper/events.jsonl");
+        .join(".echidna/sessions/session-tamper/events.jsonl");
     let metadata = fs::metadata(&path).unwrap();
     let modified = metadata.modified().unwrap();
     let mut bytes = fs::read(&path).unwrap();

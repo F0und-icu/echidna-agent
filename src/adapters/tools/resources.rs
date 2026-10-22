@@ -24,6 +24,10 @@ impl<'a> ResourceKeyResolver<'a> {
         ResourceKey::file(self.normalized_path(path).display().to_string())
     }
 
+    pub(super) fn project_file(&self, control_directory: &str, path: &str) -> ResourceKey {
+        self.file(&format!("{control_directory}/{path}"))
+    }
+
     pub(super) fn output(&self, path: &str) -> ResourceKey {
         ResourceKey::output(self.normalized_path(path).display().to_string())
     }

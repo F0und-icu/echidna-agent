@@ -12,10 +12,10 @@ use thiserror::Error;
 
 use crate::adapters::file_diff::replacement_diff as audit_replacement_diff;
 use crate::adapters::project_event_store::{Project, replace_durable_file, sync_directory};
+use crate::domain::context::ContextWindowPolicy;
 use crate::domain::memory::MemoryPath;
 
 const MEMORY_DIRECTORY: &str = "memory";
-pub(crate) const MAX_CORE_MEMORY_BYTES: usize = 64 * 1024;
 const MAX_RETRIEVAL_MEMORY_DOCUMENTS: usize = 64;
 const MAX_RETRIEVAL_MEMORY_DOCUMENT_BYTES: u64 = 64 * 1024;
 
@@ -35,11 +35,22 @@ pub(crate) struct RetrievalMemoryDocument {
 
 pub(crate) struct LocalProjectMemory<'project> {
     project: &'project Project,
+    core_memory_byte_limit: usize,
 }
 
 impl<'project> LocalProjectMemory<'project> {
     pub(crate) fn new(project: &'project Project) -> Self {
-        Self { project }
+        Self::with_window_policy(project, ContextWindowPolicy::for_window(32_768))
+    }
+
+    pub(crate) fn with_window_policy(
+        project: &'project Project,
+        policy: ContextWindowPolicy,
+    ) -> Self {
+        Self {
+            project,
+            core_memory_byte_limit: policy.core_memory_bytes(),
+        }
     }
 
     pub(crate) fn read(
@@ -191,10 +202,7 @@ impl<'project> LocalProjectMemory<'project> {
     }
 
     fn memory_root(&self) -> PathBuf {
-        self.project
-            .root()
-            .join(".cyber-agent")
-            .join(MEMORY_DIRECTORY)
+        self.project.control_directory().join(MEMORY_DIRECTORY)
     }
 
     fn document_path(&self, path: &MemoryPath) -> PathBuf {
@@ -285,11 +293,11 @@ impl<'project> LocalProjectMemory<'project> {
         path: &MemoryPath,
         size_bytes: u64,
     ) -> Result<(), LocalProjectMemoryError> {
-        if path.as_str() == "core.md" && size_bytes > MAX_CORE_MEMORY_BYTES as u64 {
+        if path.as_str() == "core.md" && size_bytes > self.core_memory_byte_limit as u64 {
             Err(LocalProjectMemoryError::CoreTooLarge {
                 path: self.document_path(path),
                 size_bytes,
-                max_bytes: MAX_CORE_MEMORY_BYTES,
+                max_bytes: self.core_memory_byte_limit,
             })
         } else {
             Ok(())

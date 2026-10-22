@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use super::headers::{HeaderBinding, encode_header_value, request_headers};
 use super::{McpError, McpProtocolVersion};
 
-const MAX_HTTP_BODY_BYTES: usize = 2 * 1024 * 1024;
+pub(super) const MAX_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const MCP_PROTOCOL_VERSION: HeaderName = HeaderName::from_static("mcp-protocol-version");
 const MCP_METHOD: HeaderName = HeaderName::from_static("mcp-method");
@@ -273,7 +273,7 @@ impl McpClient {
                 let chunk = chunk.map_err(|error| std::io::Error::other(error.to_string()))?;
                 let total =
                     size.fetch_add(chunk.len() as u64, Ordering::Relaxed) + chunk.len() as u64;
-                if total > MAX_HTTP_BODY_BYTES as u64 {
+                if total > MAX_MESSAGE_BYTES as u64 {
                     return Err(std::io::Error::other("MCP response exceeds 2 MiB"));
                 }
                 Ok(chunk)
@@ -344,7 +344,7 @@ impl McpClient {
     }
 }
 
-fn decode_message(value: Value, expected_id: &str) -> Result<CompletedCall, McpError> {
+pub(super) fn decode_message(value: Value, expected_id: &str) -> Result<CompletedCall, McpError> {
     if value.get("jsonrpc").and_then(Value::as_str) != Some("2.0")
         || value.get("id").and_then(Value::as_str) != Some(expected_id)
     {
@@ -381,7 +381,7 @@ fn is_notification(value: &Value) -> bool {
 async fn bounded_json(response: reqwest::Response) -> Result<Value, McpError> {
     if response
         .content_length()
-        .is_some_and(|length| length > MAX_HTTP_BODY_BYTES as u64)
+        .is_some_and(|length| length > MAX_MESSAGE_BYTES as u64)
     {
         return Err(McpError::Protocol {
             message: "MCP response exceeds 2 MiB".to_owned(),
@@ -393,7 +393,7 @@ async fn bounded_json(response: reqwest::Response) -> Result<Value, McpError> {
         let chunk = chunk.map_err(|error| McpError::Transport {
             message: error.to_string(),
         })?;
-        if bytes.len().saturating_add(chunk.len()) > MAX_HTTP_BODY_BYTES {
+        if bytes.len().saturating_add(chunk.len()) > MAX_MESSAGE_BYTES {
             return Err(McpError::Protocol {
                 message: "MCP response exceeds 2 MiB".to_owned(),
             });

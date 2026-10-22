@@ -70,7 +70,7 @@ fn m5_session_list_show_export_and_end_use_the_existing_durable_stream() {
         .output()
         .unwrap();
     assert!(chat.status.success());
-    let session = fs::read_dir(directory.path().join(".cyber-agent/sessions"))
+    let session = fs::read_dir(directory.path().join(".echidna/sessions"))
         .unwrap()
         .next()
         .unwrap()
@@ -294,7 +294,7 @@ fn doctor_and_chat_share_the_explicit_provider_configuration_path_without_a_cred
     assert!(output.contains("EOF received"));
     assert!(!output.contains("Question. Observe. Verify."));
     assert!(!output.contains('\u{1b}'));
-    assert!(directory.path().join(".cyber-agent/project.toml").is_file());
+    assert!(directory.path().join(".echidna/project.toml").is_file());
 }
 
 #[test]
@@ -314,7 +314,7 @@ fn chat_requires_an_initialized_project_and_does_not_create_one() {
             .unwrap()
             .contains("no Cyber Agent project was found")
     );
-    assert!(!directory.path().join(".cyber-agent").exists());
+    assert!(!directory.path().join(".echidna").exists());
 }
 
 #[test]
@@ -367,11 +367,6 @@ fn init_creates_a_real_isolated_project_in_the_current_directory() {
             .unwrap()
             .starts_with("project-")
     );
-    assert!(directory.path().join(".cyber-agent/project.toml").is_file());
-    assert!(
-        directory
-            .path()
-            .join(".cyber-agent/research.jsonl")
-            .is_file()
-    );
+    assert!(directory.path().join(".echidna/project.toml").is_file());
+    assert!(directory.path().join(".echidna/research.jsonl").is_file());
 }

@@ -1032,7 +1032,7 @@ async fn agent_loop_executes_research_update_through_the_fixed_registry() {
         executions[0].result.output["event_type"],
         "research.target_snapshot_recorded"
     );
-    let persisted = fs::read_to_string(project.root.join(".cyber-agent/research.jsonl")).unwrap();
+    let persisted = fs::read_to_string(project.root.join(".echidna/research.jsonl")).unwrap();
     assert!(persisted.contains("research.target_snapshot_recorded"));
     assert!(persisted.contains("snapshot-agent-loop"));
     assert_eq!(agent.history().ensure_all_tool_calls_paired(), Ok(()));
@@ -1073,7 +1073,7 @@ async fn agent_loop_executes_inspect_project_through_the_fixed_registry() {
     assert!(
         project
             .root
-            .join(".cyber-agent/cache/project-snapshot.json")
+            .join(".echidna/cache/project-snapshot.json")
             .is_file()
     );
     assert_eq!(agent.history().ensure_all_tool_calls_paired(), Ok(()));
@@ -1156,7 +1156,7 @@ async fn agent_loop_executes_artifact_store_through_the_fixed_registry() {
         executions[0].result.output["event_type"],
         "artifact.created"
     );
-    let persisted = fs::read_to_string(project.root.join(".cyber-agent/research.jsonl")).unwrap();
+    let persisted = fs::read_to_string(project.root.join(".echidna/research.jsonl")).unwrap();
     assert!(persisted.contains("artifact.created"));
     assert!(persisted.contains("artifact-agent-loop"));
     assert_eq!(agent.history().ensure_all_tool_calls_paired(), Ok(()));

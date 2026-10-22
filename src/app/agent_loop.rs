@@ -1731,7 +1731,7 @@ pub enum ContinuationRejection {
     ResearchProjectionChanged,
     #[error("PROJECT_PROJECTION_CHANGED: full Project projections are not both retained")]
     ProjectProjectionChanged,
-    #[error("CORE_MEMORY_CHANGED: Core Memory was replaced and has no append-only representation")]
+    #[error("CORE_MEMORY_CHANGED: Core Memory changed without a proven complete replacement")]
     CoreMemoryChanged,
     #[error(
         "BASELINE_REJECTED: {reason:?} is incompatible with this exact reasoning/state-diff replay"

@@ -2,6 +2,7 @@
 
 use super::{decode_arguments, invalid_arguments, invalid_plan};
 use crate::adapters::{artifact_store::LocalArtifactStore, project_event_store::Project};
+use crate::domain::context::ContextWindowPolicy;
 use crate::domain::{
     artifacts::BlobId,
     tools::{ResourceKey, ToolExecutionOutcome, ToolExecutionPlan},
@@ -12,9 +13,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::Path;
 
-const MAX_READ_BYTES: usize = 16 * 1024;
 fn default_limit() -> usize {
-    4096
+    ContextWindowPolicy::for_window(32_768).readback_default_bytes()
 }
 
 #[derive(Deserialize, Serialize)]
@@ -27,12 +27,20 @@ struct Args {
     max_bytes: usize,
 }
 
-pub(super) fn normalize(value: Value) -> Result<(Value, Vec<ResourceKey>), ToolExecutorError> {
+pub(super) fn normalize(
+    mut value: Value,
+    policy: ContextWindowPolicy,
+) -> Result<(Value, Vec<ResourceKey>), ToolExecutorError> {
+    if let Some(arguments) = value.as_object_mut() {
+        arguments
+            .entry("max_bytes")
+            .or_insert(json!(policy.readback_default_bytes()));
+    }
     let args: Args = decode_arguments("read_output", value)?;
-    if args.max_bytes == 0 || args.max_bytes > MAX_READ_BYTES {
+    if args.max_bytes == 0 || args.max_bytes > policy.readback_max_bytes() {
         return Err(invalid_arguments(
             "read_output",
-            "max_bytes must be 1..=16384",
+            format!("max_bytes must be 1..={}", policy.readback_max_bytes()),
         ));
     }
     Ok((
@@ -41,8 +49,12 @@ pub(super) fn normalize(value: Value) -> Result<(Value, Vec<ResourceKey>), ToolE
     ))
 }
 
-pub(super) async fn execute(root: &Path, plan: ToolExecutionPlan) -> ToolExecutionOutcome {
-    let (normalized, _) = match normalize(plan.call.arguments.clone()) {
+pub(super) async fn execute(
+    root: &Path,
+    plan: ToolExecutionPlan,
+    policy: ContextWindowPolicy,
+) -> ToolExecutionOutcome {
+    let (normalized, _) = match normalize(plan.call.arguments.clone(), policy) {
         Ok(value) => value,
         Err(error) => return invalid_plan(plan, error),
     };
@@ -72,10 +84,11 @@ pub(super) async fn execute(root: &Path, plan: ToolExecutionPlan) -> ToolExecuti
 }
 
 pub(super) fn input_schema() -> Value {
+    let max_read_bytes = ContextWindowPolicy::for_window(32_768).readback_max_bytes();
     json!({"type":"object","properties":{
         "blob_id":{"type":"string","pattern":"^[0-9a-f]{64}$"},
         "offset":{"type":"integer","minimum":0},
-        "max_bytes":{"type":"integer","minimum":1,"maximum":MAX_READ_BYTES}
+        "max_bytes":{"type":"integer","minimum":1,"maximum":max_read_bytes}
     },"required":["blob_id"],"additionalProperties":false})
 }
 

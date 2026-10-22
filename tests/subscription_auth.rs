@@ -51,6 +51,27 @@ fn service_as(store: &Path, base: &str, account: &str) -> SubscriptionAuthServic
     .expect("synthetic endpoint service")
 }
 
+#[test]
+fn subscription_auth_rejects_canonical_and_legacy_project_control_directories() {
+    let directory = TemporaryDirectory::new("subscription-project-store-rejection");
+    for control_directory in [".echidna", ".cyber-agent"] {
+        let control_directory = directory.path().join(control_directory);
+        std::fs::create_dir(&control_directory).unwrap();
+        let store = canonical_temp_path(control_directory.join("auth-store"));
+        let error = SubscriptionAuthService::with_endpoints(
+            store,
+            "personal".to_owned(),
+            endpoints("http://127.0.0.1:1"),
+        )
+        .err()
+        .expect("project control directories must not hold subscription authentication");
+        assert_eq!(
+            error.to_string(),
+            "subscription authentication store path must be an absolute private path"
+        );
+    }
+}
+
 #[tokio::test]
 async fn signed_loopback_login_uses_pkce_and_models_preserve_server_order() {
     let directory = TemporaryDirectory::new("subscription-auth-success");

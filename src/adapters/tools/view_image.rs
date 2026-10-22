@@ -60,6 +60,7 @@ impl ViewImageToolInput {
 
 pub(super) fn normalize(
     project_root: &Path,
+    control_directory: &str,
     value: Value,
 ) -> Result<(Value, Vec<ResourceKey>), ToolExecutorError> {
     let arguments: ViewImageToolInput = decode_arguments("view_image", value)?;
@@ -69,7 +70,7 @@ pub(super) fn normalize(
         serde_json::to_value(&arguments).expect("ViewImageArgs serialization cannot fail"),
         vec![
             resolver.file(&arguments.source_path),
-            resolver.file(".cyber-agent/research.jsonl"),
+            resolver.project_file(control_directory, "research.jsonl"),
         ],
     ))
 }

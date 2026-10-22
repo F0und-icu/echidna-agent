@@ -273,7 +273,7 @@ fn rejection_checkpoint_failure_is_fatal_before_regeneration() {
             .unwrap();
         read_http_request(&mut socket);
         let events = target
-            .join(".cyber-agent/sessions")
+            .join(".echidna/sessions")
             .join(session_id(&target))
             .join("events.jsonl");
         fs::set_permissions(events, fs::Permissions::from_mode(0o444)).unwrap();

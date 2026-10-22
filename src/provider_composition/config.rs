@@ -59,13 +59,27 @@ impl ProviderConfigV1 {
         let mut config: Self = toml::from_str(&encoded).map_err(|source| {
             ProviderCompositionError::DecodeConfiguration {
                 path: path.to_path_buf(),
-                message: redact_inline_api_key(source.to_string()),
+                message: configuration_decode_diagnostic(&source),
             }
         })?;
         config.prompts.validate()?;
         config
             .prompts
             .resolve_relative_to(path.parent().unwrap_or_else(|| Path::new(".")));
+        if config
+            .mcp_servers
+            .values()
+            .any(|server| server.command.is_some())
+        {
+            let parent = std::path::absolute(path.parent().unwrap_or_else(|| Path::new(".")))
+                .map_err(|source| ProviderCompositionError::ReadConfiguration {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
+            for server in config.mcp_servers.values_mut() {
+                server.resolve_relative_to(&parent);
+            }
+        }
         Ok(config)
     }
 
@@ -308,18 +322,16 @@ pub(super) struct AgentProfileDefinition {
     pub(super) generation: u64,
 }
 
-fn redact_inline_api_key(message: String) -> String {
-    message
-        .lines()
-        .map(|line| {
-            let Some(key_offset) = line.find("api_key") else {
-                return line.to_owned();
-            };
-            if !line[key_offset + "api_key".len()..].contains('=') {
-                return line.to_owned();
-            }
-            format!("{}api_key = \"<redacted>\"", &line[..key_offset])
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+fn configuration_decode_diagnostic(error: &toml::de::Error) -> String {
+    let category = ["unknown field", "missing field", "unknown variant"]
+        .into_iter()
+        .find(|category| error.message().starts_with(category))
+        .unwrap_or("invalid configuration");
+    match error.span() {
+        Some(span) => format!(
+            "{category} at bytes {}..{}; input details <redacted>",
+            span.start, span.end
+        ),
+        None => format!("{category}; input details <redacted> (position unavailable)"),
+    }
 }

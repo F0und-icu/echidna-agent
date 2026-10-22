@@ -13,6 +13,7 @@ use crate::adapters::project_memory::{
     LocalProjectMemory, MemoryDocument, content_hash, replacement_diff,
 };
 use crate::adapters::research_projection::load_reference_catalog;
+use crate::domain::context::ContextWindowPolicy;
 use crate::domain::events::{EventEnvelope, EventId, EventType, OccurredAt};
 use crate::domain::memory::{
     MemoryEvent, MemoryPath, MemoryReducer, MemoryRevision, MemoryState, validate_content_hash,
@@ -48,6 +49,7 @@ struct MemoryWriteArgs {
 
 pub(super) fn normalize_read(
     project_root: &Path,
+    control_directory: &str,
     value: Value,
 ) -> Result<(Value, Vec<ResourceKey>), ToolExecutorError> {
     let arguments: MemoryReadArgs = decode_arguments("memory_read", value)?;
@@ -55,12 +57,13 @@ pub(super) fn normalize_read(
     require_event_metadata("memory_read", &arguments.event_id, &arguments.occurred_at)?;
     Ok((
         serde_json::to_value(&arguments).expect("MemoryReadArgs serialization cannot fail"),
-        memory_resources(project_root, &path),
+        memory_resources(project_root, control_directory, &path),
     ))
 }
 
 pub(super) fn normalize_write(
     project_root: &Path,
+    control_directory: &str,
     value: Value,
 ) -> Result<(Value, Vec<ResourceKey>), ToolExecutorError> {
     let arguments: MemoryWriteArgs = decode_arguments("memory_write", value)?;
@@ -69,13 +72,14 @@ pub(super) fn normalize_write(
     validate_expected_hash("memory_write", arguments.expected_hash.as_deref())?;
     Ok((
         serde_json::to_value(&arguments).expect("MemoryWriteArgs serialization cannot fail"),
-        memory_resources(project_root, &path),
+        memory_resources(project_root, control_directory, &path),
     ))
 }
 
 pub(super) async fn execute_read(
     project_root: &Path,
     plan: ToolExecutionPlan,
+    policy: ContextWindowPolicy,
 ) -> ToolExecutionOutcome {
     let arguments: MemoryReadArgs =
         match decode_arguments("memory_read", plan.call.arguments.clone()) {
@@ -111,7 +115,7 @@ pub(super) async fn execute_read(
         Ok(states) => states,
         Err(error) => return memory_failure(plan, "memory_state_invalid", error),
     };
-    let memory = LocalProjectMemory::new(&project);
+    let memory = LocalProjectMemory::with_window_policy(&project, policy);
     let document = match memory.read(&path) {
         Ok(document) => document,
         Err(error) => return memory_failure(plan, "memory_read_failed", error),
@@ -154,6 +158,7 @@ pub(super) async fn execute_read(
 pub(super) async fn execute_write(
     project_root: &Path,
     plan: ToolExecutionPlan,
+    policy: ContextWindowPolicy,
 ) -> ToolExecutionOutcome {
     let arguments: MemoryWriteArgs =
         match decode_arguments("memory_write", plan.call.arguments.clone()) {
@@ -196,7 +201,7 @@ pub(super) async fn execute_write(
     if research_state.has_event_id(&event_id) {
         return duplicate_event(plan, event_id);
     }
-    let memory = LocalProjectMemory::new(&project);
+    let memory = LocalProjectMemory::with_window_policy(&project, policy);
     if let Err(error) = memory.validate_content(&path, &arguments.content) {
         return memory_failure(plan, "memory_content_too_large", error);
     }
@@ -292,11 +297,15 @@ pub(super) async fn execute_write(
     )
 }
 
-fn memory_resources(project_root: &Path, path: &MemoryPath) -> Vec<ResourceKey> {
+fn memory_resources(
+    project_root: &Path,
+    control_directory: &str,
+    path: &MemoryPath,
+) -> Vec<ResourceKey> {
     let resolver = ResourceKeyResolver::new(project_root);
     vec![
-        resolver.file(&format!(".cyber-agent/memory/{}", path.as_str())),
-        resolver.file(".cyber-agent/research.jsonl"),
+        resolver.project_file(control_directory, &format!("memory/{}", path.as_str())),
+        resolver.project_file(control_directory, "research.jsonl"),
     ]
 }
 
@@ -522,8 +531,8 @@ pub(super) fn read_input_schema() -> Value {
     schema::read_input_schema()
 }
 
-pub(super) fn write_input_schema() -> Value {
-    schema::write_input_schema()
+pub(super) fn write_input_schema(max_core_characters: usize) -> Value {
+    schema::write_input_schema(max_core_characters)
 }
 
 pub(super) fn output_schema() -> Value {

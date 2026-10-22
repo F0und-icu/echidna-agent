@@ -125,9 +125,9 @@ fn large_windows_use_bounded_headroom_without_a_hidden_input_cap() {
         (128, 16, 16),
         (32768, 4096, 4096),
         (65536, 8192, 8192),
-        (1_048_576, 8192, 16384),
-        (2_097_152, 8192, 16384),
-        (u32::MAX, 8192, 16384),
+        (1_048_576, 65_536, 131_072),
+        (2_097_152, 65_536, 131_072),
+        (u32::MAX, 65_536, 131_072),
     ] {
         let mut caps = capabilities();
         caps.context_window = window;

@@ -31,6 +31,7 @@ pub(crate) fn tool_schema_token_cost(specs: &[ToolSpec]) -> Result<u32, ContextP
 use serde::Serialize;
 
 use super::canonical::{RequestHash, canonical_tool_schemas};
+use super::window_policy::ContextWindowPolicy;
 use crate::domain::model::{ModelCapabilities, ModelInputIR, ModelRequestRequirements};
 use crate::domain::tools::ToolSpec;
 
@@ -94,14 +95,14 @@ impl ContextPlanner {
         &self,
         capabilities: &ModelCapabilities,
     ) -> Result<ContextBudget, ContextPlannerError> {
-        let reserve = capabilities.context_window / 8;
+        let policy = ContextWindowPolicy::for_window(capabilities.context_window);
         let output_limit = capabilities.resolve_output_token_limit(None)?.unwrap_or(0);
-        // Headroom grows with small windows, not indefinitely with model capacity.
-        // Chat, Compaction and scoped Vision all resolve this same policy.
+        // Chat, Compaction and scoped Vision share explicit-window defaults.
+        // A reservation does not create Provider output-limit support.
         let budget = ContextBudget::new(
             capabilities.context_window,
-            reserve.min(8_192).max(output_limit),
-            reserve.min(16_384),
+            policy.output_reserve_tokens().max(output_limit),
+            policy.tool_loop_reserve_tokens(),
         )?;
         if output_limit > 0 && budget.input_token_limit() == 0 {
             return Err(ContextPlannerError::InvalidBudget {

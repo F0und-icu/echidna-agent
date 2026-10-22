@@ -119,17 +119,19 @@ enum ResearchUpdateOperation {
 
 pub(super) fn normalize_get(
     project_root: &Path,
+    control_directory: &str,
     value: Value,
 ) -> Result<(Value, Vec<ResourceKey>), ToolExecutorError> {
     let arguments = decode_get_arguments(value)?;
     Ok((
         serde_json::to_value(arguments).expect("ResearchGetArgs serialization cannot fail"),
-        research_resource(project_root),
+        research_resource(project_root, control_directory),
     ))
 }
 
 pub(super) fn normalize_update(
     project_root: &Path,
+    control_directory: &str,
     value: Value,
 ) -> Result<(Value, Vec<ResourceKey>), ToolExecutorError> {
     let arguments: ResearchUpdateArgs = decode_arguments("research_update", value)?;
@@ -141,7 +143,7 @@ pub(super) fn normalize_update(
     }
     Ok((
         serde_json::to_value(arguments).expect("ResearchUpdateArgs serialization cannot fail"),
-        research_resource(project_root),
+        research_resource(project_root, control_directory),
     ))
 }
 
@@ -347,8 +349,8 @@ pub(super) async fn execute_update(
     )
 }
 
-fn research_resource(project_root: &Path) -> Vec<ResourceKey> {
-    vec![ResourceKeyResolver::new(project_root).file(".cyber-agent/research.jsonl")]
+fn research_resource(project_root: &Path, control_directory: &str) -> Vec<ResourceKey> {
+    vec![ResourceKeyResolver::new(project_root).project_file(control_directory, "research.jsonl")]
 }
 
 pub(super) fn load_state(project_root: &Path) -> Result<ResearchState, String> {

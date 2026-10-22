@@ -13,8 +13,7 @@ pub(super) fn read_input_schema() -> Value {
     })
 }
 
-pub(super) fn write_input_schema() -> Value {
-    let max_core_characters = crate::adapters::project_memory::MAX_CORE_MEMORY_BYTES;
+pub(super) fn write_input_schema(max_core_characters: usize) -> Value {
     json!({
         "type": "object",
         "properties": {
@@ -34,7 +33,9 @@ pub(super) fn write_input_schema() -> Value {
                 "properties": {
                     "content": {
                         "maxLength": max_core_characters,
-                        "description": "core.md is limited to 65536 UTF-8 bytes; non-ASCII content may reach the byte limit before this character limit"
+                        "description": format!(
+                            "core.md is limited to {max_core_characters} UTF-8 bytes; non-ASCII content may reach the byte limit before this character limit"
+                        )
                     }
                 }
             }

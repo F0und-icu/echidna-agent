@@ -19,7 +19,6 @@ use crate::domain::project::ProjectId;
 use crate::ports::context::{ContextFragmentCache, ContextFragmentCacheError};
 
 const CACHE_SCHEMA_VERSION: u16 = 2;
-const CONTROL_DIRECTORY: &str = ".cyber-agent";
 const CACHE_DIRECTORY: &str = "cache";
 const CONTEXT_FRAGMENTS_DIRECTORY: &str = "context-fragments";
 
@@ -38,7 +37,7 @@ impl LocalFragmentCache {
     }
 
     fn cache_directory_existing(&self) -> Result<Option<PathBuf>, LocalFragmentCacheError> {
-        let control = self.project.root().join(CONTROL_DIRECTORY);
+        let control = self.project.control_directory();
         if directory_if_exists(&control)?.is_none() {
             return Ok(None);
         }
@@ -51,7 +50,7 @@ impl LocalFragmentCache {
     }
 
     fn ensure_cache_directory(&self) -> Result<PathBuf, LocalFragmentCacheError> {
-        let control = self.project.root().join(CONTROL_DIRECTORY);
+        let control = self.project.control_directory();
         if directory_if_exists(&control)?.is_none() {
             return Err(LocalFragmentCacheError::ControlDirectoryMissing { path: control });
         }

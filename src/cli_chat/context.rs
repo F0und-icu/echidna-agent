@@ -19,7 +19,7 @@ use crate::adapters::tools::ToolRegistry;
 use crate::app::agent_loop::CurrentContextState;
 use crate::domain::context::{
     ContextFragment, ContextFragmentContent, ContextFragmentId, ContextFragmentPriority,
-    ContextFragmentSource, FragmentCachePolicy,
+    ContextFragmentSource, ContextWindowPolicy, FragmentCachePolicy,
 };
 use crate::domain::memory::MemoryPath;
 use crate::domain::model::{ContentItem, MessageRole};
@@ -54,7 +54,16 @@ impl ChatContextCache {
             .inspect(&tools.specs(), &[], "context-refresh")
             .map_err(ChatContextRefreshError::ProjectSnapshot)?;
         let project_snapshot = ProjectSnapshotContext::new(snapshot.snapshot)?;
-        let core_memory = load_core_memory(project)?;
+        let core_memory = load_core_memory(
+            project,
+            ContextWindowPolicy::for_window(
+                composition
+                    .agent_profile()
+                    .primary()
+                    .capabilities()
+                    .context_window,
+            ),
+        )?;
         let (personal_prompt, project_prompt) = load_prompts(composition.prompt_sources())?;
         Ok(CurrentContextState::new(
             world_state,
@@ -132,9 +141,12 @@ fn digest_file(path: &Path) -> Result<String, ChatContextRefreshError> {
     Ok(blake3::hash(&bytes).to_hex().to_string())
 }
 
-fn load_core_memory(project: &Project) -> Result<Option<ContextFragment>, ChatContextRefreshError> {
+fn load_core_memory(
+    project: &Project,
+    policy: ContextWindowPolicy,
+) -> Result<Option<ContextFragment>, ChatContextRefreshError> {
     let path = MemoryPath::parse("core.md").expect("core.md is a fixed supported Memory path");
-    let document = LocalProjectMemory::new(project).read(&path)?;
+    let document = LocalProjectMemory::with_window_policy(project, policy).read(&path)?;
     match document.content {
         None => Ok(None),
         Some(content) if content.is_empty() => {

@@ -11,6 +11,8 @@ use crate::domain::project::ProjectId;
 /// Errors from project discovery, JSONL persistence, recovery, and export.
 #[derive(Debug, Error)]
 pub enum ProjectEventStoreError {
+    #[error("both .echidna and .cyber-agent control directories exist at `{project_root}`")]
+    ConflictingControlDirectories { project_root: PathBuf },
     #[error("project is already initialized at `{project_file}`")]
     AlreadyInitialized { project_file: PathBuf },
     #[error("incomplete project initialization exists at `{control_directory}`")]

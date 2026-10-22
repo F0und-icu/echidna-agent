@@ -422,12 +422,7 @@ async fn research_get_is_never_persistently_cached_and_rerun_stays_explicit() {
             .iter()
             .all(|spec| spec.cache_policy == ToolCachePolicy::None)
     );
-    assert!(
-        !project
-            .root()
-            .join(".cyber-agent/cache/tool-results")
-            .exists()
-    );
+    assert!(!project.root().join(".echidna/cache/tool-results").exists());
 
     let rerun = execute(
         &tools,

@@ -159,6 +159,32 @@ export CYBER_AGENT_MCP_EXAMPLE_API_KEY='replace-with-your-MCP-key'
 远程工具初始为延迟项，通过已有工具搜索流程暴露。它们的 schema 与参数按值传给服务端，
 MCP 输出在核验前仍只是传输输出。远端断线或结果不完整会停止本轮，不会虚构收据或重放调用。
 
+#### 可选本地 stdio MCP 工具
+
+同一个 [MCP 模板](examples/provider-mcp.toml) 也支持 Unix stdio 服务器，每项在 `url`
+和 `command` 中选一个。stdio 当前使用 `protocol_version = "2025-11-25"`：
+
+```toml
+[mcp_servers.local]
+command = "python3"
+args = ["/absolute/path/to/server.py", "--transport", "stdio"]
+protocol_version = "2025-11-25"
+env = { MY_TOOL_SETTING = "explicit-value" }
+timeout_ms = 60000
+```
+
+裸命令通过 `PATH` 查找；相对命令路径和可选 `cwd` 相对配置文件所在目录解析，默认
+工作目录也是该目录。参数和环境变量保持字面值，不经过 shell 或 `$VAR` 展开。
+子进程只继承 `PATH`、`HOME`、`USER`、`LOGNAME`、`TMPDIR`、`TMP`、`TEMP`、`LANG`、
+`LC_ALL`、`LC_CTYPE`、`TZ`，再叠加显式 `env`，不会隐式继承 Provider/vendor 密钥。
+stdio 不接受 HTTP 的 `credential_ref`；真实环境密钥留在仓库外配置。
+
+`doctor` 不启动子进程。Chat 发现工具后复用同一连接；每个 JSON-RPC 换行帧最多 2 MiB，
+每次请求的收发总量最多 8 MiB，目录保持 64 页、1024 项、8 MiB 限制。
+stderr 持续排空，只保留字节计数和 I/O 错误类型。取消、超时、EOF 或协议错误会关闭
+连接并终止进程组，不自动重启或重放；已发送而没有最终结果的调用仍按未知执行结果处理。
+退出时同步回收直接子进程，并终止同组后代；主动脱离该进程组的后代不在此清理范围。
+
 #### ChatGPT 订阅登录
 
 使用 [订阅模板](examples/provider-chatgpt-subscription.toml)，在仓库外保存自己的配置。
@@ -304,6 +330,9 @@ cd ../echidna-research
 "$ECHIDNA_BIN" --config "$HOME/.config/echidna/provider.toml" chat
 ```
 
+`init` 会在此目录创建 `.echidna/`，保存项目事件、Session、Artifact 和 Memory。
+已有完整的 `.cyber-agent/` 项目仍可原地读取，不会迁移或复制；同一项目根目录不要同时保留两个控制目录。
+
 `doctor` 在本地检查配置，不读取环境变量密钥、不发送模型请求，也不验证密钥有效性或远端服务可达性；
 进入 `chat` 提交任务后才使用所配置的模型。
 
@@ -369,7 +398,7 @@ Echidna 将执行、预算、Session 和恢复留在一个内核中。模型、�
 | [纯文本配置](examples/provider.toml) | 主模型、能力声明与环境变量密钥引用 |
 | [单模型多模态配置](examples/provider-multimodal.toml) | 主模型直接处理文本与图像 |
 | [文本 + 视觉配置](examples/provider-text-vision.toml) | 两个模型的独立服务、能力与密钥配置 |
-| [远程 MCP 配置](examples/provider-mcp.toml) | 显式 Streamable HTTP 工具与专用 MCP 凭据引用 |
+| [MCP 配置](examples/provider-mcp.toml) | HTTP 与本地 stdio 工具、专用凭据引用和显式子进程环境 |
 | [原理图原图](assets/architecture-overview.svg) | 可放大的执行与持久化流程图 |
 | [更新记录](CHANGELOG.md) | 功能变化与兼容性说明 |
 

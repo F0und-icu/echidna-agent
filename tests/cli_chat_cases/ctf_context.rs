@@ -17,7 +17,6 @@ fn ctf_r2a_isolates_prompt_memory_state_and_combined_continuation_changes() {
         (Change::Project, false),
         (Change::Research, false),
         (Change::PromptAndProject, false),
-        (Change::CoreMemory, true),
         (Change::PromptAndProject, true),
     ] {
         let root = TemporaryDirectory::new("ctf-r2a-context");
@@ -26,18 +25,15 @@ fn ctf_r2a_isolates_prompt_memory_state_and_combined_continuation_changes() {
         let project = Project::discover(root.path()).unwrap();
         append_research_snapshot(&project, "r2a-before");
         fs::write(root.path().join("target.txt"), "original target\n").unwrap();
-        fs::create_dir_all(root.path().join(".cyber-agent/memory")).unwrap();
+        fs::create_dir_all(root.path().join(".echidna/memory")).unwrap();
         fs::write(
-            root.path().join(".cyber-agent/memory/core.md"),
+            root.path().join(".echidna/memory/core.md"),
             "memory before\n",
         )
         .unwrap();
         fs::write(harness.path().join("personal.md"), "prompt before\n").unwrap();
-        let rejected = match change {
-            Change::CoreMemory => Some("CORE_MEMORY_CHANGED"),
-            Change::PromptAndProject => Some("BASELINE_REJECTED: PromptChanged"),
-            _ => None,
-        };
+        let rejected = matches!(change, Change::PromptAndProject)
+            .then_some("BASELINE_REJECTED: PromptChanged");
         let request_count = if rejected.is_some() && !recover { 1 } else { 2 };
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -67,7 +63,7 @@ fn ctf_r2a_isolates_prompt_memory_state_and_combined_continuation_changes() {
                     match change {
                         Change::ExternalPrompt => fs::write(&prompt, "prompt after\n").unwrap(),
                         Change::CoreMemory => {
-                            fs::write(target.join(".cyber-agent/memory/core.md"), "memory after\n")
+                            fs::write(target.join(".echidna/memory/core.md"), "memory after\n")
                                 .unwrap()
                         }
                         Change::Project => {
@@ -181,6 +177,7 @@ fn ctf_r2a_isolates_prompt_memory_state_and_combined_continuation_changes() {
                 ),
                 Change::Project => assert!(second.to_string().contains("changed target")),
                 Change::Research => assert!(second.to_string().contains("snapshot-r2a-after")),
+                Change::CoreMemory => assert!(second.to_string().contains("memory after")),
                 _ => unreachable!(),
             }
         }

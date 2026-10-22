@@ -2,6 +2,7 @@
 /target/
 /dist/
 **/.cyber-agent/
+**/.echidna/
 .env
 .env.*
 !.env.example

@@ -72,7 +72,15 @@ pub(crate) async fn run(
     let session = DurableChatSession::new(project, session_id.clone())?;
     let tools = composition
         .discover_chat_tools(session.project.root())
-        .await?;
+        .await?
+        .with_project(&session.project)
+        .with_context_window(
+            composition
+                .agent_profile()
+                .primary()
+                .capabilities()
+                .context_window,
+        );
     let (session_state, provider_session, mut disposition, compaction_validation) =
         session.start_or_resume(explicit_resume, composition, &tools)?;
     let domain = requested_domain.unwrap_or_else(|| session_state.effective_domain_profile());
@@ -239,7 +247,21 @@ pub(crate) async fn run(
             }
             let current = context_cache.refresh(&session.project, &tools, composition)?;
             agent.refresh_current_context(current)?;
-            println!("{}", session.compact(&mut agent)?.message());
+            println!(
+                "{}",
+                session
+                    .compact(
+                        &mut agent,
+                        crate::domain::context::ContextWindowPolicy::for_window(
+                            composition
+                                .agent_profile()
+                                .primary()
+                                .capabilities()
+                                .context_window,
+                        ),
+                    )?
+                    .message()
+            );
             continue;
         }
         if line == "/image" {
@@ -492,7 +514,16 @@ pub(crate) async fn run(
                         Err(error) => return Err(ChatError::Agent(error)),
                     };
                     if should_compact {
-                        match session.compact(&mut agent) {
+                        match session.compact(
+                            &mut agent,
+                            crate::domain::context::ContextWindowPolicy::for_window(
+                                composition
+                                    .agent_profile()
+                                    .primary()
+                                    .capabilities()
+                                    .context_window,
+                            ),
+                        ) {
                             Err(ChatError::CompactionFacts(
                                 CompactionValidationFactsError::ResearchStreamEmpty,
                             )) => {

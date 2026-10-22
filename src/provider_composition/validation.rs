@@ -82,23 +82,65 @@ fn validate_mcp_server(id: &str, server: &McpServerConfig) -> Result<(), Provide
                 .to_owned(),
         });
     }
-    let url = reqwest::Url::parse(&server.url).map_err(|error| {
-        ProviderCompositionError::InvalidMcpServer {
-            server: id.to_owned(),
-            message: error.to_string(),
+    let invalid = |message: &str| ProviderCompositionError::InvalidMcpServer {
+        server: id.to_owned(),
+        message: message.to_owned(),
+    };
+    match (&server.url, &server.command) {
+        (Some(url), None) => {
+            if server.args.is_some() || server.env.is_some() || server.cwd.is_some() {
+                return Err(invalid("args, env and cwd require a stdio command"));
+            }
+            let url = reqwest::Url::parse(url).map_err(|error| {
+                ProviderCompositionError::InvalidMcpServer {
+                    server: id.to_owned(),
+                    message: error.to_string(),
+                }
+            })?;
+            if !matches!(url.scheme(), "http" | "https")
+                || !url.username().is_empty()
+                || url.password().is_some()
+                || url.query().is_some()
+                || url.fragment().is_some()
+            {
+                return Err(ProviderCompositionError::InvalidMcpServer {
+                    server: id.to_owned(),
+                    message:
+                        "expected an absolute http(s) URL without credentials, query, or fragment"
+                            .to_owned(),
+                });
+            }
         }
-    })?;
-    if !matches!(url.scheme(), "http" | "https")
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-    {
-        return Err(ProviderCompositionError::InvalidMcpServer {
-            server: id.to_owned(),
-            message: "expected an absolute http(s) URL without credentials, query, or fragment"
-                .to_owned(),
-        });
+        (None, Some(command)) => {
+            if !cfg!(unix) {
+                return Err(invalid("stdio MCP requires Unix"));
+            }
+            if server.protocol_version
+                != crate::adapters::mcp_http::McpProtocolVersion::Legacy20251125
+            {
+                return Err(invalid("stdio MCP supports only protocol 2025-11-25"));
+            }
+            if server.credential_ref.is_some() {
+                return Err(invalid(
+                    "credential_ref is HTTP-only; use explicit stdio env",
+                ));
+            }
+            if command.as_os_str().is_empty()
+                || command.as_os_str().as_encoded_bytes().contains(&0)
+                || server.args.iter().flatten().any(|arg| arg.contains('\0'))
+                || server.env.iter().flatten().any(|(key, value)| {
+                    key.is_empty() || key.contains(['=', '\0']) || value.contains('\0')
+                })
+                || server.cwd.as_ref().is_some_and(|cwd| {
+                    cwd.as_os_str().is_empty() || cwd.as_os_str().as_encoded_bytes().contains(&0)
+                })
+            {
+                return Err(invalid(
+                    "stdio command, arguments, environment or cwd are invalid",
+                ));
+            }
+        }
+        _ => return Err(invalid("select exactly one MCP url or command")),
     }
     if server.timeout_ms == 0 || server.timeout_ms > 86_400_000 {
         return Err(ProviderCompositionError::InvalidTimeout {

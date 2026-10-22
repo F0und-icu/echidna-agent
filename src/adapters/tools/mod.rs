@@ -24,13 +24,15 @@ mod view_image;
 pub(crate) use view_image::ViewImageToolInput;
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::adapters::mcp_http::{McpCatalogTool, McpError};
+use crate::adapters::project_event_store::Project;
+use crate::domain::context::ContextWindowPolicy;
 use crate::domain::tools::{
     ExecutionId, ResolvedToolPlan, ResourceKey, ToolCachePolicy, ToolCall, ToolDeterminism,
     ToolEffect, ToolExecutionOutcome, ToolExecutionPlan, ToolExposure, ToolName, ToolOutputPolicy,
@@ -85,10 +87,12 @@ enum RegisteredTool {
 
 pub struct ToolRegistry {
     project_root: PathBuf,
+    control_directory_name: &'static str,
     tools: BTreeMap<ToolName, RegisteredTool>,
     jobs: job::BackgroundJobs,
     ptys: pty::PtySessions,
     active_leases: ActiveProcessLeases,
+    window_policy: ContextWindowPolicy,
 }
 
 impl ToolRegistry {
@@ -138,10 +142,12 @@ impl ToolRegistry {
         .collect();
         Self {
             project_root,
+            control_directory_name: Project::DEFAULT_CONTROL_DIRECTORY,
             tools,
             jobs: job::BackgroundJobs::new(),
             ptys: pty::PtySessions::new(),
             active_leases: ActiveProcessLeases::new(),
+            window_policy: ContextWindowPolicy::for_window(32_768),
         }
     }
 
@@ -172,7 +178,18 @@ impl ToolRegistry {
         Ok(registry)
     }
 
-    fn canonical_spec(name: &ToolName, tool: &RegisteredTool) -> ToolSpec {
+    pub(crate) fn with_project(mut self, project: &Project) -> Self {
+        self.project_root = project.root().to_path_buf();
+        self.control_directory_name = project.control_directory_name();
+        self
+    }
+
+    pub(crate) fn with_context_window(mut self, window_tokens: u32) -> Self {
+        self.window_policy = ContextWindowPolicy::for_window(window_tokens);
+        self
+    }
+
+    fn canonical_spec(&self, name: &ToolName, tool: &RegisteredTool) -> ToolSpec {
         if let RegisteredTool::Mcp { spec, .. } = tool {
             debug_assert_eq!(&spec.name, name);
             return spec.as_ref().clone();
@@ -182,6 +199,29 @@ impl ToolRegistry {
         };
         let tool = *tool;
         let mut builtin_spec = tool.spec();
+        if let Some(template) = &mut builtin_spec.resource_key_template {
+            *template = template.replace(
+                Project::DEFAULT_CONTROL_DIRECTORY,
+                self.control_directory_name,
+            );
+        }
+        builtin_spec.output_policy.max_bytes = self.window_policy.tool_output_bytes();
+        match tool {
+            BuiltinTool::HttpRequest => {
+                builtin_spec.input_schema["properties"]["preview_bytes"]["maximum"] =
+                    json!(self.window_policy.readback_max_bytes());
+            }
+            BuiltinTool::ReadOutput => {
+                builtin_spec.input_schema["properties"]["max_bytes"]["maximum"] =
+                    json!(self.window_policy.readback_max_bytes());
+            }
+            BuiltinTool::MemoryWrite => {
+                builtin_spec.input_schema = with_execution_control(memory::write_input_schema(
+                    self.window_policy.core_memory_bytes(),
+                ));
+            }
+            _ => {}
+        }
         if matches!(
             tool,
             BuiltinTool::RunCommand
@@ -219,7 +259,7 @@ impl ToolRegistry {
     fn canonical_specs(&self) -> Vec<ToolSpec> {
         self.tools
             .iter()
-            .map(|(name, tool)| Self::canonical_spec(name, tool))
+            .map(|(name, tool)| self.canonical_spec(name, tool))
             .collect()
     }
 
@@ -249,8 +289,7 @@ impl ToolRegistry {
                 message: error.to_string(),
             }
         })?;
-        let (normalized_arguments, resource_keys) =
-            tool.normalize(&self.project_root, arguments)?;
+        let (normalized_arguments, resource_keys) = tool.normalize(self, arguments)?;
         call.arguments = normalized_arguments;
         let mut plan = ToolExecutionPlan::new_with_rerun_reason(
             execution_id,
@@ -291,7 +330,7 @@ impl ToolExecutor for ToolRegistry {
             .ok_or_else(|| ToolExecutorError::UnknownTool {
                 tool_name: call.name.to_string(),
             })?;
-        let spec = Self::canonical_spec(&call.name, tool);
+        let spec = self.canonical_spec(&call.name, tool);
         self.plan_with_spec(execution_id, call, &spec, None)
     }
 
@@ -370,15 +409,7 @@ impl ToolRegistry {
                 if tool == BuiltinTool::RunCommands && observer.is_some() {
                     command::execute_batch_observed(&self.project_root, plan, observer).await
                 } else {
-                    tool.execute(
-                        &self.project_root,
-                        &self.jobs,
-                        &self.ptys,
-                        &self.active_leases,
-                        &specs,
-                        plan,
-                    )
-                    .await
+                    tool.execute(self, &specs, plan).await
                 }
             })
             .await
@@ -467,9 +498,10 @@ impl BuiltinTool {
 
     fn normalize(
         self,
-        project_root: &Path,
+        registry: &ToolRegistry,
         arguments: Value,
     ) -> Result<(Value, Vec<ResourceKey>), ToolExecutorError> {
+        let project_root = &registry.project_root;
         match self {
             Self::ReadFile => filesystem::normalize_read_file(project_root, arguments),
             Self::ReadFiles => filesystem::normalize_read_files(project_root, arguments),
@@ -478,7 +510,7 @@ impl BuiltinTool {
             Self::WriteFile => file_write::normalize_write_file(project_root, arguments),
             Self::ApplyPatch => file_write::normalize_apply_patch(project_root, arguments),
             Self::RunCommand => command::normalize_one(project_root, arguments),
-            Self::ReadOutput => read_output::normalize(arguments),
+            Self::ReadOutput => read_output::normalize(arguments, registry.window_policy),
             Self::RunCommands => command::normalize_batch(project_root, arguments),
             Self::StartJob => job::normalize_start(project_root, arguments),
             Self::PollJob => job::normalize_poll(arguments),
@@ -489,28 +521,45 @@ impl BuiltinTool {
             Self::InputPty => pty::normalize_input(arguments),
             Self::ResizePty => pty::normalize_resize(arguments),
             Self::StopPty => pty::normalize_stop(arguments),
-            Self::ArtifactStore => artifact::normalize(project_root, arguments),
-            Self::ViewImage => view_image::normalize(project_root, arguments),
-            Self::HttpRequest => http_request::normalize(project_root, arguments),
+            Self::ArtifactStore => {
+                artifact::normalize(project_root, registry.control_directory_name, arguments)
+            }
+            Self::ViewImage => {
+                view_image::normalize(project_root, registry.control_directory_name, arguments)
+            }
+            Self::HttpRequest => http_request::normalize(
+                project_root,
+                registry.control_directory_name,
+                arguments,
+                registry.window_policy,
+            ),
             Self::InspectEnvironment => environment::normalize(project_root, arguments),
-            Self::MemoryRead => memory::normalize_read(project_root, arguments),
-            Self::MemoryWrite => memory::normalize_write(project_root, arguments),
-            Self::InspectProject => snapshot::normalize(project_root, arguments),
-            Self::ResearchGet => research::normalize_get(project_root, arguments),
-            Self::ResearchUpdate => research::normalize_update(project_root, arguments),
+            Self::MemoryRead => {
+                memory::normalize_read(project_root, registry.control_directory_name, arguments)
+            }
+            Self::MemoryWrite => {
+                memory::normalize_write(project_root, registry.control_directory_name, arguments)
+            }
+            Self::InspectProject => {
+                snapshot::normalize(project_root, registry.control_directory_name, arguments)
+            }
+            Self::ResearchGet => {
+                research::normalize_get(project_root, registry.control_directory_name, arguments)
+            }
+            Self::ResearchUpdate => {
+                research::normalize_update(project_root, registry.control_directory_name, arguments)
+            }
             Self::ToolSearch => tool_search::normalize(arguments),
         }
     }
 
     async fn execute(
         self,
-        project_root: &Path,
-        jobs: &job::BackgroundJobs,
-        ptys: &pty::PtySessions,
-        active_leases: &ActiveProcessLeases,
+        registry: &ToolRegistry,
         specs: &[ToolSpec],
         plan: ToolExecutionPlan,
     ) -> ToolExecutionOutcome {
+        let project_root = &registry.project_root;
         match self {
             Self::ReadFile => filesystem::execute_read_file(project_root, plan).await,
             Self::ReadFiles => filesystem::execute_read_files(project_root, plan).await,
@@ -519,23 +568,37 @@ impl BuiltinTool {
             Self::WriteFile => file_write::execute_write_file(project_root, plan).await,
             Self::ApplyPatch => file_write::execute_apply_patch(project_root, plan).await,
             Self::RunCommand => command::execute_one(project_root, plan).await,
-            Self::ReadOutput => read_output::execute(project_root, plan).await,
+            Self::ReadOutput => {
+                read_output::execute(project_root, plan, registry.window_policy).await
+            }
             Self::RunCommands => command::execute_batch(project_root, plan).await,
-            Self::StartJob => job::execute_start(project_root, jobs, active_leases, plan).await,
-            Self::PollJob => job::execute_poll(jobs, plan).await,
-            Self::InputJob => job::execute_input(jobs, plan).await,
-            Self::StopJob => job::execute_stop(jobs, plan).await,
-            Self::StartPty => pty::execute_start(project_root, ptys, active_leases, plan).await,
-            Self::PollPty => pty::execute_poll(ptys, plan).await,
-            Self::InputPty => pty::execute_input(ptys, plan).await,
-            Self::ResizePty => pty::execute_resize(ptys, plan).await,
-            Self::StopPty => pty::execute_stop(ptys, plan).await,
+            Self::StartJob => {
+                job::execute_start(project_root, &registry.jobs, &registry.active_leases, plan)
+                    .await
+            }
+            Self::PollJob => job::execute_poll(&registry.jobs, plan).await,
+            Self::InputJob => job::execute_input(&registry.jobs, plan).await,
+            Self::StopJob => job::execute_stop(&registry.jobs, plan).await,
+            Self::StartPty => {
+                pty::execute_start(project_root, &registry.ptys, &registry.active_leases, plan)
+                    .await
+            }
+            Self::PollPty => pty::execute_poll(&registry.ptys, plan).await,
+            Self::InputPty => pty::execute_input(&registry.ptys, plan).await,
+            Self::ResizePty => pty::execute_resize(&registry.ptys, plan).await,
+            Self::StopPty => pty::execute_stop(&registry.ptys, plan).await,
             Self::ArtifactStore => artifact::execute(project_root, plan).await,
             Self::ViewImage => view_image::execute(project_root, plan).await,
-            Self::HttpRequest => http_request::execute(project_root, plan).await,
+            Self::HttpRequest => {
+                http_request::execute(project_root, plan, registry.window_policy).await
+            }
             Self::InspectEnvironment => environment::execute(project_root, plan).await,
-            Self::MemoryRead => memory::execute_read(project_root, plan).await,
-            Self::MemoryWrite => memory::execute_write(project_root, plan).await,
+            Self::MemoryRead => {
+                memory::execute_read(project_root, plan, registry.window_policy).await
+            }
+            Self::MemoryWrite => {
+                memory::execute_write(project_root, plan, registry.window_policy).await
+            }
             Self::InspectProject => snapshot::execute(project_root, specs, plan).await,
             Self::ResearchGet => research::execute_get(project_root, plan).await,
             Self::ResearchUpdate => research::execute_update(project_root, plan).await,
@@ -907,7 +970,7 @@ impl BuiltinTool {
                 artifact::input_schema(),
                 artifact::output_schema(),
                 ToolParallelism::ResourceLocked,
-                Some("file:{source_path},file:.cyber-agent/research.jsonl"),
+                Some("file:{source_path},file:.echidna/research.jsonl"),
                 ToolEffect::LocalMutation,
                 ToolRetryPolicy::NeverAutoRetry,
                 ToolDeterminism::EnvironmentDependent,
@@ -918,7 +981,7 @@ impl BuiltinTool {
                 view_image::input_schema(),
                 view_image::output_schema(),
                 ToolParallelism::ResourceLocked,
-                Some("file:{source_path},file:.cyber-agent/research.jsonl"),
+                Some("file:{source_path},file:.echidna/research.jsonl"),
                 ToolEffect::LocalMutation,
                 ToolRetryPolicy::NeverAutoRetry,
                 ToolDeterminism::EnvironmentDependent,
@@ -929,7 +992,7 @@ impl BuiltinTool {
                 http_request::input_schema(),
                 http_request::output_schema(),
                 ToolParallelism::ResourceLocked,
-                Some("file:.cyber-agent/research.jsonl"),
+                Some("file:.echidna/research.jsonl"),
                 ToolEffect::ExternalMutation,
                 ToolRetryPolicy::NeverAutoRetry,
                 ToolDeterminism::Nondeterministic,
@@ -951,7 +1014,7 @@ impl BuiltinTool {
                 memory::read_input_schema(),
                 memory::output_schema(),
                 ToolParallelism::ResourceLocked,
-                Some("file:.cyber-agent/memory/{path},file:.cyber-agent/research.jsonl"),
+                Some("file:.echidna/memory/{path},file:.echidna/research.jsonl"),
                 ToolEffect::LocalMutation,
                 ToolRetryPolicy::NeverAutoRetry,
                 ToolDeterminism::EnvironmentDependent,
@@ -959,10 +1022,12 @@ impl BuiltinTool {
             ),
             Self::MemoryWrite => spec(
                 "memory_write",
-                memory::write_input_schema(),
+                memory::write_input_schema(
+                    ContextWindowPolicy::for_window(32_768).core_memory_bytes(),
+                ),
                 memory::output_schema(),
                 ToolParallelism::ResourceLocked,
-                Some("file:.cyber-agent/memory/{path},file:.cyber-agent/research.jsonl"),
+                Some("file:.echidna/memory/{path},file:.echidna/research.jsonl"),
                 ToolEffect::LocalMutation,
                 ToolRetryPolicy::NeverAutoRetry,
                 ToolDeterminism::EnvironmentDependent,
@@ -973,7 +1038,7 @@ impl BuiltinTool {
                 snapshot::input_schema(),
                 snapshot::output_schema(),
                 ToolParallelism::ResourceLocked,
-                Some("file:.cyber-agent/cache"),
+                Some("file:.echidna/cache"),
                 ToolEffect::LocalMutation,
                 ToolRetryPolicy::NeverAutoRetry,
                 ToolDeterminism::EnvironmentDependent,
@@ -984,7 +1049,7 @@ impl BuiltinTool {
                 research::get_input_schema(),
                 research::get_output_schema(),
                 ToolParallelism::Parallel,
-                Some("file:.cyber-agent/research.jsonl"),
+                Some("file:.echidna/research.jsonl"),
                 ToolEffect::ReadOnly,
                 ToolRetryPolicy::ReplaySafe,
                 ToolDeterminism::Deterministic,
@@ -995,7 +1060,7 @@ impl BuiltinTool {
                 research::update_input_schema(),
                 research::update_output_schema(),
                 ToolParallelism::ResourceLocked,
-                Some("file:.cyber-agent/research.jsonl"),
+                Some("file:.echidna/research.jsonl"),
                 ToolEffect::LocalMutation,
                 ToolRetryPolicy::NeverAutoRetry,
                 ToolDeterminism::EnvironmentDependent,

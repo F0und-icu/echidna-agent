@@ -121,7 +121,7 @@ fn ctf_r3b1_session_append_failure_does_not_ack_or_launch_the_next_child() {
             "run_commands",
             json!({"mode":"serial","commands":[
                 {"argv":["sh","-c","printf FIRST"]},
-                {"argv":["sh","-c","chmod 400 .cyber-agent/sessions/*/events.jsonl; printf SECOND"]},
+                {"argv":["sh","-c","chmod 400 .echidna/sessions/*/events.jsonl; printf SECOND"]},
                 {"argv":["sh","-c","printf x > forbidden-next"]}
             ]}),
             "event-failure-response",
@@ -135,7 +135,7 @@ fn ctf_r3b1_session_append_failure_does_not_ack_or_launch_the_next_child() {
     let session = session_id(root.path());
     fs::set_permissions(
         root.path()
-            .join(".cyber-agent/sessions")
+            .join(".echidna/sessions")
             .join(&session)
             .join("events.jsonl"),
         fs::Permissions::from_mode(0o600),
@@ -189,7 +189,7 @@ fn ctf_r3b1_completed_child_survives_killed_batch_and_resume_without_rerun() {
         let session = session_id(root.path());
         let events_path = root
             .path()
-            .join(".cyber-agent/sessions")
+            .join(".echidna/sessions")
             .join(&session)
             .join("events.jsonl");
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -253,7 +253,7 @@ fn ctf_r3b1_completed_child_survives_killed_batch_and_resume_without_rerun() {
         assert_eq!(
             fs::read(
                 root.path()
-                    .join(".cyber-agent/artifacts/blobs/sha256")
+                    .join(".echidna/artifacts/blobs/sha256")
                     .join(blob)
             )
             .unwrap(),
@@ -305,7 +305,7 @@ fn ctf_r3b1_failed_publication_stops_before_next_serial_child_and_preserves_prio
         } else {
             b"SECOND".as_slice()
         };
-        let blobs = root.path().join(".cyber-agent/artifacts/blobs/sha256");
+        let blobs = root.path().join(".echidna/artifacts/blobs/sha256");
         fs::create_dir_all(&blobs).unwrap();
         fs::write(
             blobs.join(format!("{:x}", Sha256::digest(bytes))),
@@ -512,7 +512,7 @@ fn ec_k4_incomplete_batch_capture_publication_failure_is_fatal_before_parent_rec
     let root = TemporaryDirectory::new("ec-k4-incomplete-batch-publication");
     let harness = TemporaryDirectory::new("ec-k4-incomplete-batch-publication-provider");
     initialize_project(root.path());
-    let blob_directory = root.path().join(".cyber-agent/artifacts/blobs/sha256");
+    let blob_directory = root.path().join(".echidna/artifacts/blobs/sha256");
     fs::create_dir_all(&blob_directory).unwrap();
     fs::write(
         blob_directory.join(format!("{:x}", Sha256::digest(b"HELD_CHILD"))),

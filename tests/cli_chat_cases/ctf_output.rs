@@ -7,7 +7,7 @@ fn ctf_r3a2_blob_failure_never_records_a_durable_receipt_or_tool_result() {
         let root = TemporaryDirectory::new("r3a2-cli-publication-failure");
         let harness = TemporaryDirectory::new("r3a2-failure-config");
         initialize_project(root.path());
-        let blob_directory = root.path().join(".cyber-agent/artifacts/blobs/sha256");
+        let blob_directory = root.path().join(".echidna/artifacts/blobs/sha256");
         fs::create_dir_all(&blob_directory).unwrap();
         // A same-sized conflicting Blob exercises first/second publication
         // failure in the actual CLI durability path without a public test hook.
@@ -164,7 +164,7 @@ fn ctf_r3a2_durable_output_can_be_read_after_explicit_resume() {
     assert_eq!(captures[0]["complete"], true);
     let blob_path = root
         .path()
-        .join(".cyber-agent/artifacts/blobs/sha256")
+        .join(".echidna/artifacts/blobs/sha256")
         .join(&blob_id);
     assert_eq!(fs::read(&blob_path).unwrap(), expected);
     // Exercise exact binary readback via the production Tool adapter on the

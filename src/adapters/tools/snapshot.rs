@@ -23,6 +23,7 @@ struct InspectProjectArgs {
 
 pub(super) fn normalize(
     project_root: &Path,
+    control_directory: &str,
     value: Value,
 ) -> Result<(Value, Vec<ResourceKey>), ToolExecutorError> {
     let arguments: InspectProjectArgs = decode_arguments("inspect_project", value)?;
@@ -34,7 +35,7 @@ pub(super) fn normalize(
     }
     Ok((
         serde_json::to_value(arguments).expect("InspectProjectArgs serialization cannot fail"),
-        vec![ResourceKeyResolver::new(project_root).file(".cyber-agent/cache")],
+        vec![ResourceKeyResolver::new(project_root).project_file(control_directory, "cache")],
     ))
 }
 

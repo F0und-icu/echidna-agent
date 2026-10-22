@@ -240,7 +240,7 @@ fn append_artifact_for(project: &Project, artifact_id: &str, snapshot_id: &str) 
 }
 
 fn research_line_count(project: &Project) -> usize {
-    fs::read_to_string(project.root().join(".cyber-agent/research.jsonl"))
+    fs::read_to_string(project.root().join(".echidna/research.jsonl"))
         .unwrap()
         .lines()
         .count()
@@ -793,7 +793,7 @@ async fn v1_evidence_vectors_upcast_conservatively_without_rewriting_the_stream(
         }}),
     );
 
-    let stream_path = project.root().join(".cyber-agent/research.jsonl");
+    let stream_path = project.root().join(".echidna/research.jsonl");
     let before = fs::read(&stream_path).unwrap();
     let get = execute(&tools, "legacy-get", "research_get", json!({})).await;
     assert_eq!(get.result.status, ToolResultStatus::Succeeded);
@@ -901,7 +901,7 @@ async fn evidence_gap_projection_is_stable_read_only_and_distinguishes_unknown_f
     .await;
     assert_eq!(complete_finding.result.status, ToolResultStatus::Succeeded);
 
-    let stream_path = project.root().join(".cyber-agent/research.jsonl");
+    let stream_path = project.root().join(".echidna/research.jsonl");
     let before = fs::read(&stream_path).unwrap();
     let first = execute(&tools, "gap-first", "research_get", json!({})).await;
     let second = execute(&tools, "gap-second", "research_get", json!({})).await;

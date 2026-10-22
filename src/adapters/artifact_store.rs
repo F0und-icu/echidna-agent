@@ -20,18 +20,18 @@ use crate::ports::artifact::{ArtifactStore, StoredBlob};
 
 use error::LocalArtifactStoreError;
 
-const BLOB_PATH_SEGMENTS: [&str; 4] = [".cyber-agent", "artifacts", "blobs", "sha256"];
+const BLOB_PATH_SEGMENTS: [&str; 3] = ["artifacts", "blobs", "sha256"];
 const HASH_BUFFER_BYTES: usize = 64 * 1024;
 
 /// A project-isolated local Artifact Blob Store.
 pub(crate) struct LocalArtifactStore {
-    project_root: PathBuf,
+    project: Project,
 }
 
 impl LocalArtifactStore {
     pub(crate) fn for_project(project: &Project) -> Self {
         Self {
-            project_root: project.root().to_path_buf(),
+            project: project.clone(),
         }
     }
 }
@@ -195,14 +195,16 @@ impl LocalArtifactStore {
     fn blob_directory(&self) -> PathBuf {
         BLOB_PATH_SEGMENTS
             .into_iter()
-            .fold(self.project_root.clone(), |path, segment| {
+            .fold(self.project.control_directory(), |path, segment| {
                 path.join(segment)
             })
     }
 
     fn inspect_blob_directory(&self) -> Result<(), LocalArtifactStoreError> {
-        let mut current = self.project_root.clone();
-        for segment in BLOB_PATH_SEGMENTS {
+        let mut current = self.project.root().to_path_buf();
+        for segment in
+            std::iter::once(self.project.control_directory_name()).chain(BLOB_PATH_SEGMENTS)
+        {
             current.push(segment);
             match fs::symlink_metadata(&current) {
                 Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -234,8 +236,10 @@ enum ExistingBlob {
 
 impl LocalArtifactStore {
     fn ensure_blob_directory(&self) -> Result<PathBuf, LocalArtifactStoreError> {
-        let mut current = self.project_root.clone();
-        for segment in BLOB_PATH_SEGMENTS {
+        let mut current = self.project.root().to_path_buf();
+        for segment in
+            std::iter::once(self.project.control_directory_name()).chain(BLOB_PATH_SEGMENTS)
+        {
             current.push(segment);
             ensure_directory_component(&current)?;
         }

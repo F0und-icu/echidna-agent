@@ -1455,6 +1455,14 @@ pub enum SessionError {
     CompactionSummaryEntryDuplicate { field: &'static str, value: String },
     #[error("Session Compaction Summary is {actual} bytes, above the {maximum}-byte local bound")]
     CompactionSummaryTooLarge { actual: usize, maximum: usize },
+    #[error(
+        "Session Compaction Summary byte limit {actual} is outside the supported {minimum}..={maximum} range"
+    )]
+    CompactionSummaryByteLimit {
+        actual: usize,
+        minimum: usize,
+        maximum: usize,
+    },
     #[error("Session Compaction requires a current TargetSnapshot in the Project Research stream")]
     CompactionCurrentTargetRequired,
     #[error("Session Compaction requires non-empty resumable History with a user goal")]

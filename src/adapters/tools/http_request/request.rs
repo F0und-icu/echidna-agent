@@ -115,7 +115,10 @@ pub(super) struct PreparedRequest {
     pub(super) headers: HeaderMap,
 }
 
-pub(super) fn validate(arguments: &HttpRequestArgs) -> Result<(), ToolExecutorError> {
+pub(super) fn validate(
+    arguments: &HttpRequestArgs,
+    max_preview_bytes: usize,
+) -> Result<(), ToolExecutorError> {
     if arguments.url.len() > MAX_URL_BYTES {
         return Err(invalid_arguments(
             "http_request",
@@ -179,10 +182,10 @@ pub(super) fn validate(arguments: &HttpRequestArgs) -> Result<(), ToolExecutorEr
             "`max_redirects` must be at most 5",
         ));
     }
-    if arguments.preview_bytes > MAX_PREVIEW_BYTES {
+    if arguments.preview_bytes > max_preview_bytes {
         return Err(invalid_arguments(
             "http_request",
-            "`preview_bytes` must be at most 16384",
+            format!("`preview_bytes` must be at most {max_preview_bytes}"),
         ));
     }
     if arguments.capture_bytes > MAX_CAPTURE_BYTES {

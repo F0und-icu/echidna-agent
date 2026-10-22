@@ -46,11 +46,11 @@ async fn changed_case(case: &str) {
     let (_temp, project) = initialized_project(case);
     let root = project.root();
     let path = if case == "memory" {
-        ".cyber-agent/memory/core.md"
+        ".echidna/memory/core.md"
     } else {
         "source.txt"
     };
-    fs::create_dir_all(root.join(".cyber-agent/memory")).unwrap();
+    fs::create_dir_all(root.join(".echidna/memory")).unwrap();
     fs::write(root.join(path), "alpha=10\n").unwrap();
     if case.starts_with("git") {
         fs::write(root.join("anchor.txt"), "anchor\n").unwrap();
@@ -93,10 +93,9 @@ async fn changed_case(case: &str) {
         result["snapshot"]["source_fingerprint"] == first["snapshot"]["source_fingerprint"],
         !matches!(case, "git_clean" | "filesystem_rebuild")
     );
-    let persisted: Value = serde_json::from_slice(
-        &fs::read(root.join(".cyber-agent/cache/file-manifest.json")).unwrap(),
-    )
-    .unwrap();
+    let persisted: Value =
+        serde_json::from_slice(&fs::read(root.join(".echidna/cache/file-manifest.json")).unwrap())
+            .unwrap();
     assert_eq!(persisted, result["file_manifest"]);
     let bytes = cache_contents(root);
     let warm = inspect(root, json!([path]), "later-warm").await;

@@ -386,9 +386,9 @@ fn guidance_shadow_is_byte_stable_read_only_and_ranks_typed_critical_gap_closure
         "guidance-candidates-reversed.json",
         candidates.clone().into_iter().rev().collect(),
     );
-    let research_path = root.path().join(".cyber-agent/research.jsonl");
+    let research_path = root.path().join(".echidna/research.jsonl");
     let research_before = fs::read(&research_path).unwrap();
-    let tree_before = tree_contents(&root.path().join(".cyber-agent"));
+    let tree_before = tree_contents(&root.path().join(".echidna"));
 
     let first = run(&root, &command(&candidate_path));
     assert!(first.status.success(), "stderr: {:?}", first.stderr);
@@ -400,9 +400,9 @@ fn guidance_shadow_is_byte_stable_read_only_and_ranks_typed_critical_gap_closure
     );
     assert_eq!(fs::read(&research_path).unwrap(), research_before);
     assert_eq!(
-        tree_contents(&root.path().join(".cyber-agent")),
+        tree_contents(&root.path().join(".echidna")),
         tree_before,
-        "guidance must not change any .cyber-agent file or file list"
+        "guidance must not change any .echidna file or file list"
     );
     let reordered = run(&root, &command(&reversed_path));
     assert!(reordered.status.success(), "stderr: {:?}", reordered.stderr);

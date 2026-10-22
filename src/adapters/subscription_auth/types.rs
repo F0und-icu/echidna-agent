@@ -221,7 +221,7 @@ pub(super) fn validate_constructor_input(
             matches!(
                 component,
                 Component::Normal(name)
-                    if matches!(name.to_str(), Some(".codex" | ".cyber-agent" | ".git"))
+                    if matches!(name.to_str(), Some(".codex" | ".cyber-agent" | ".echidna" | ".git"))
             )
         })
     {

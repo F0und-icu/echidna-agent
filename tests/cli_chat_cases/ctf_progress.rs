@@ -31,7 +31,7 @@ fn ctf_r3b2_unread_tool_preview_does_not_block_child_durability() {
     let session = session_id(root.path());
     let path = root
         .path()
-        .join(".cyber-agent/sessions")
+        .join(".echidna/sessions")
         .join(&session)
         .join("events.jsonl");
     let deadline = Instant::now() + Duration::from_secs(10);

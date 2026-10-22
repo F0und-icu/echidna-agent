@@ -77,7 +77,7 @@ fn inspection_commands_read_initialized_project_without_building_snapshot_or_ses
     assert_eq!(snapshot["disposition"], "full_rebuild");
     assert_eq!(snapshot["reason"], "cache_absent");
     assert!(snapshot["project_id"].as_str().is_some());
-    assert!(!directory.path().join(".cyber-agent/cache").exists());
+    assert!(!directory.path().join(".echidna/cache").exists());
 }
 
 #[tokio::test]
@@ -97,7 +97,7 @@ async fn snapshot_inspection_validates_cache_without_rebuilding_or_rewriting_it(
     let outcome = tools.execute(plan).await.expect("Tool execution completes");
     assert_eq!(outcome.result.status, ToolResultStatus::Succeeded);
 
-    let cache = project.root().join(".cyber-agent/cache");
+    let cache = project.root().join(".echidna/cache");
     let before = file_bytes(&cache);
     let hit = run(&directory, &["snapshot"]);
     assert_eq!(hit["status"], "ok");
@@ -137,7 +137,7 @@ async fn snapshot_inspection_reports_a_current_hit_after_an_incremental_cache_re
         assert_eq!(outcome.result.status, ToolResultStatus::Succeeded);
     }
 
-    let cache = project.root().join(".cyber-agent/cache");
+    let cache = project.root().join(".echidna/cache");
     let before = file_bytes(&cache);
     let report = run(&directory, &["snapshot"]);
     assert_eq!(report["status"], "ok");

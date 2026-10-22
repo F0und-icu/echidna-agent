@@ -339,6 +339,10 @@ cd ../echidna-research
 "$ECHIDNA_BIN" --config "$HOME/.config/echidna/provider.toml" chat
 ```
 
+`init` creates `.echidna/` in this directory for project events, sessions, Artifacts, and
+Memory. Existing complete `.cyber-agent/` projects remain readable in place without migration
+or copying; do not keep both control directories at one project root.
+
 `doctor` checks configuration locally. It does not read environment-variable keys, send model
 requests, or verify key validity or remote service availability. The configured model is used
 when you submit a task in `chat`.
