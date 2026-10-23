@@ -4608,6 +4608,68 @@ fn rejected_incremental_text_is_not_presented_before_the_full_fallback() {
 }
 
 #[test]
+fn transport_retry_marks_discarded_primary_output_and_persists_only_the_recovered_sample() {
+    let project = TemporaryDirectory::new("cli-chat-transport-retry");
+    initialize_project(project.path());
+    let interrupted = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"discarded transport text\"}\n\n";
+    let server = spawn_responses_server(vec![
+        (200, interrupted.to_owned()),
+        (
+            200,
+            text_response("recovered transport answer", "response-recovered"),
+        ),
+    ]);
+    let config = write_config(project.path(), &server.base_url);
+
+    let output = run_chat(
+        project.path(),
+        &config,
+        "recover this request\n/exit\n",
+        &[],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = String::from_utf8(output.stdout).unwrap();
+    assert!(output.contains("partial primary output discarded; retry 1/2"));
+    assert!(output.contains("recovered transport answer"));
+
+    let first = server.requests.recv().unwrap();
+    let second = server.requests.recv().unwrap();
+    server.join();
+    assert_eq!(
+        first.split("\r\n\r\n").nth(1),
+        second.split("\r\n\r\n").nth(1),
+        "retry reuses the exact rendered request body"
+    );
+
+    let session = session_id(project.path());
+    let events = session_events(project.path(), &session);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["event_type"] == "session.request_audit_recorded")
+            .count(),
+        2
+    );
+    let history = events
+        .iter()
+        .filter(|event| event["event_type"] == "session.history_item_recorded")
+        .map(|event| &event["payload"]["item"])
+        .collect::<Vec<_>>();
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[0]["text"], "recover this request");
+    assert_eq!(history[1]["text"], "recovered transport answer");
+    assert!(
+        history
+            .iter()
+            .all(|item| item["text"] != "discarded transport text")
+    );
+}
+
+#[test]
 fn chat_runtime_lease_rejects_a_second_process_for_the_same_project() {
     let project = TemporaryDirectory::new("cli-chat-runtime-lease-same-project");
     initialize_project(project.path());

@@ -15,6 +15,13 @@ use crate::terminal_content::escaped_text;
 
 static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
 
+pub(super) fn discarded_partial_response(role: &str, retry: usize) {
+    let _ = writeln!(
+        io::stdout().lock(),
+        "\n[response interrupted; partial {role} output discarded; retry {retry}/2]"
+    );
+}
+
 pub(super) struct RequestOutput {
     role: &'static str,
     request_id: u64,

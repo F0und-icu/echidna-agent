@@ -502,6 +502,7 @@ fn known_sample_failure(error: &ChatError) -> bool {
             error,
             ChatError::Agent(
                 AgentLoopError::Model(_)
+                    | AgentLoopError::ModelRequestLimit { .. }
                     | AgentLoopError::ImprovementResponse { .. }
                     | AgentLoopError::ImprovementCancelled
             )

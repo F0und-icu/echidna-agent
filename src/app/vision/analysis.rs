@@ -6,7 +6,8 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use crate::app::cancellation::AgentCancellation;
-use crate::app::model_streaming::{ModelStreamOutcome, ModelStreamingService};
+use crate::app::model_retry::{ModelRetryError, prepare_and_consume_with_retry};
+use crate::app::model_streaming::{ModelStreamOutcome, ModelStreamingError};
 use crate::domain::artifacts::ArtifactId;
 use crate::domain::canonical_json::canonical_blake3_hash;
 use crate::domain::context::{
@@ -220,9 +221,9 @@ where
         self
     }
 
-    /// Audits one exact full request before the sole Provider call. Every
-    /// failure after that audit carries a terminal failure fact; no fallback
-    /// or continuation is attempted.
+    /// Audits each physical full-request attempt before dispatch. Failed
+    /// transport samples never commit Vision output; no fallback or
+    /// continuation is attempted.
     pub async fn analyze_image<Record, RecordError>(
         &self,
         input: VisionAnalysisInput,
@@ -255,65 +256,131 @@ where
         .map_err(|error| VisionAnalysisError::AuditShape {
             message: error.to_string(),
         })?;
-        let attempt = RequestAuditAttempt::new(
-            audit_context,
-            input.model.clone(),
-            input.provider_profile.clone(),
-            capabilities,
-            model_input.clone(),
-            model_input.clone(),
-            RequestAuditDelivery::full(
-                crate::domain::context::BaselineInvalidationReason::NoBaseline,
-            ),
+        let request = ModelRequest::full(model_input.clone()).with_opaque_continuation_scope(
+            OpaqueContinuationScope::for_provider_session(&input.provider_session),
+        );
+        let mut final_audit = None;
+        let mut discard_events = |_event: &ModelEvent| Ok::<(), ModelStreamingError>(());
+        let provider = self.provider;
+        let outcome = match prepare_and_consume_with_retry(
+            provider,
+            cancellation,
+            || {
+                provider
+                    .prepare(request.clone())
+                    .map_err(ModelStreamingError::Provider)
+            },
+            || {
+                let attempt = RequestAuditAttempt::new(
+                    audit_context,
+                    input.model.clone(),
+                    input.provider_profile.clone(),
+                    capabilities.clone(),
+                    model_input.clone(),
+                    model_input.clone(),
+                    RequestAuditDelivery::full(
+                        crate::domain::context::BaselineInvalidationReason::NoBaseline,
+                    ),
+                )
+                .and_then(|attempt| {
+                    attempt.bind_scoped_no_tool_context(&context_plan, &no_tool_plan)
+                })
+                .map_err(|error| VisionAnalysisError::AuditShape {
+                    message: error.to_string(),
+                })?;
+                if let Some(budget) = &self.request_budget {
+                    budget
+                        .admit(ProviderSessionRole::Vision)
+                        .map_err(|limit| VisionAnalysisError::RequestLimit { limit })?;
+                }
+                let audit =
+                    record_audit(attempt).map_err(|error| VisionAnalysisError::AuditCommit {
+                        message: error.to_string(),
+                    })?;
+                if audit.model() != &input.model
+                    || audit.profile() != &input.provider_profile
+                    || audit.capability_mapping().semantic_hash().as_str() != input.capability_hash
+                {
+                    final_audit = Some(audit);
+                    return Err(VisionAnalysisError::AuditIdentityMismatch);
+                }
+                final_audit = Some(audit);
+                Ok(())
+            },
+            &mut discard_events,
         )
-        .and_then(|attempt| attempt.bind_scoped_no_tool_context(&context_plan, &no_tool_plan))
-        .map_err(|error| VisionAnalysisError::AuditShape {
-            message: error.to_string(),
-        })?;
-        if let Some(budget) = &self.request_budget {
-            budget
-                .admit(ProviderSessionRole::Vision)
-                .map_err(|limit| VisionAnalysisError::RequestLimit { limit })?;
-        }
-        let audit = record_audit(attempt).map_err(|error| VisionAnalysisError::AuditCommit {
-            message: error.to_string(),
-        })?;
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(ModelRetryError::Attempt(VisionAnalysisError::RequestLimit { limit })) => {
+                let Some(audit) = final_audit.as_ref() else {
+                    return Err(VisionAnalysisError::RequestLimit { limit });
+                };
+                let request_input_hash = audit
+                    .full_logical_input()
+                    .semantic_hash()
+                    .as_str()
+                    .to_owned();
+                let limit_error = VisionAnalysisError::RequestLimit { limit };
+                return Err(VisionAnalysisError::RequestLimitAfterAttempt {
+                    limit,
+                    failure: Box::new(attempt_failure(
+                        &input,
+                        &task_hash,
+                        audit.audit_event_id(),
+                        &request_input_hash,
+                        "request_limit",
+                        limit_error,
+                    )),
+                });
+            }
+            Err(ModelRetryError::Attempt(error @ VisionAnalysisError::AuditCommit { .. })) => {
+                return Err(error);
+            }
+            Err(ModelRetryError::Attempt(error)) => {
+                let Some(audit) = final_audit.as_ref() else {
+                    return Err(error);
+                };
+                let request_input_hash = audit
+                    .full_logical_input()
+                    .semantic_hash()
+                    .as_str()
+                    .to_owned();
+                let error_code = match error {
+                    VisionAnalysisError::AuditIdentityMismatch => "audit_identity_mismatch",
+                    _ => "retry_attempt_failed",
+                };
+                return Err(attempt_failed(
+                    &input,
+                    &task_hash,
+                    audit.audit_event_id(),
+                    &request_input_hash,
+                    error_code,
+                    error,
+                ));
+            }
+            Err(ModelRetryError::Streaming(error)) => {
+                let audit = final_audit
+                    .as_ref()
+                    .expect("a streamed Vision request has a durable RequestAudit");
+                return Err(attempt_failed(
+                    &input,
+                    &task_hash,
+                    audit.audit_event_id(),
+                    audit.full_logical_input().semantic_hash().as_str(),
+                    "provider_failure",
+                    error,
+                ));
+            }
+        };
+        let Some(audit) = final_audit.as_ref() else {
+            return Err(VisionAnalysisError::Cancelled);
+        };
         let request_input_hash = audit
             .full_logical_input()
             .semantic_hash()
             .as_str()
             .to_owned();
-        if audit.model() != &input.model
-            || audit.profile() != &input.provider_profile
-            || audit.capability_mapping().semantic_hash().as_str() != input.capability_hash
-        {
-            return Err(attempt_failed(
-                &input,
-                &task_hash,
-                audit.audit_event_id(),
-                &request_input_hash,
-                "audit_identity_mismatch",
-                VisionAnalysisError::AuditIdentityMismatch,
-            ));
-        }
-        let outcome = ModelStreamingService::new(self.provider)
-            .consume(
-                ModelRequest::full(model_input).with_opaque_continuation_scope(
-                    OpaqueContinuationScope::for_provider_session(&input.provider_session),
-                ),
-                cancellation,
-            )
-            .await
-            .map_err(|error| {
-                attempt_failed(
-                    &input,
-                    &task_hash,
-                    audit.audit_event_id(),
-                    &request_input_hash,
-                    "provider_failure",
-                    error,
-                )
-            })?;
         let ModelStreamOutcome::Completed { events, .. } = outcome else {
             return Err(attempt_failed(
                 &input,
@@ -444,19 +511,37 @@ fn attempt_failed(
     error: impl Display,
 ) -> VisionAnalysisError {
     VisionAnalysisError::AttemptFailed {
-        failure: Box::new(VisionAnalysisFailure {
-            schema_version: VISION_FACT_SCHEMA_VERSION,
-            route_event_id: input.route_event_id.clone(),
-            source_artifact_id: input.source_artifact_id.clone(),
-            task_hash: task_hash.to_owned(),
-            provider_profile: input.provider_profile.clone(),
-            capability_hash: input.capability_hash.clone(),
-            provider_session: input.provider_session.clone(),
-            request_audit_event_id: request_audit_event_id.clone(),
-            request_input_hash: request_input_hash.to_owned(),
-            error_code: error_code.to_owned(),
-            message: error.to_string(),
-        }),
+        failure: Box::new(attempt_failure(
+            input,
+            task_hash,
+            request_audit_event_id,
+            request_input_hash,
+            error_code,
+            error,
+        )),
+    }
+}
+
+fn attempt_failure(
+    input: &VisionAnalysisInput,
+    task_hash: &str,
+    request_audit_event_id: &EventId,
+    request_input_hash: &str,
+    error_code: &str,
+    error: impl Display,
+) -> VisionAnalysisFailure {
+    VisionAnalysisFailure {
+        schema_version: VISION_FACT_SCHEMA_VERSION,
+        route_event_id: input.route_event_id.clone(),
+        source_artifact_id: input.source_artifact_id.clone(),
+        task_hash: task_hash.to_owned(),
+        provider_profile: input.provider_profile.clone(),
+        capability_hash: input.capability_hash.clone(),
+        provider_session: input.provider_session.clone(),
+        request_audit_event_id: request_audit_event_id.clone(),
+        request_input_hash: request_input_hash.to_owned(),
+        error_code: error_code.to_owned(),
+        message: error.to_string(),
     }
 }
 
@@ -576,6 +661,13 @@ fn context_error(error: impl Display) -> VisionAnalysisError {
 pub enum VisionAnalysisError {
     #[error("the Agent reached the per-Turn model-request limit of {limit}")]
     RequestLimit { limit: usize },
+    #[error(
+        "the Agent reached the per-Turn model-request limit of {limit} after a durable Vision attempt"
+    )]
+    RequestLimitAfterAttempt {
+        limit: usize,
+        failure: Box<VisionAnalysisFailure>,
+    },
     #[error("Vision input `{field}` must not be empty")]
     RequiredInput { field: &'static str },
     #[error("Vision analysis requires a Vision ProviderSession")]

@@ -7,13 +7,14 @@ mod response;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use async_stream::try_stream;
 use eventsource_stream::{EventStreamError, Eventsource};
 use futures_util::StreamExt;
-use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderName, HeaderValue};
+use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderName, HeaderValue};
 
 use crate::adapters::credentials::{
     AccountBoundCredential, CredentialResolution, CredentialSource, CredentialSourceError,
@@ -26,7 +27,7 @@ use crate::domain::model::{
 use crate::domain::request_audit::RequestAdapterVersion;
 use crate::ports::model::{
     ContinuationRetention, ModelEventStream, ModelProvider, ModelProviderError, ModelRequest,
-    ModelStreamEvent,
+    ModelStreamEvent, PreparedModelRequest,
 };
 
 pub(crate) const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 30_000;
@@ -238,7 +239,22 @@ fn response_body_failure(
     status: reqwest::StatusCode,
     elapsed: Duration,
 ) -> ModelProviderError {
-    let timed_out = error.is_timeout();
+    ModelProviderError::ResponseInterrupted {
+        status: status.as_u16(),
+        elapsed_ms: elapsed.as_millis().try_into().unwrap_or(u64::MAX),
+        timeout: error.is_timeout(),
+        io_kind: source_io_kind(&error),
+    }
+}
+
+fn connection_failure(error: &reqwest::Error) -> ModelProviderError {
+    ModelProviderError::ConnectionFailure {
+        timeout: error.is_timeout(),
+        io_kind: source_io_kind(error),
+    }
+}
+
+fn source_io_kind(error: &reqwest::Error) -> String {
     let mut io_kind = None;
     let mut source = error.source();
     while let Some(cause) = source {
@@ -247,15 +263,8 @@ fn response_body_failure(
         }
         source = cause.source();
     }
-    // Project typed causes only: raw source messages may contain private data.
-    ModelProviderError::TransportFailure {
-        message: format!(
-            "response body read failed before `response.completed`: {} (HTTP {}, elapsed_ms={}, timeout={timed_out}, io_kind={io_kind:?})",
-            error.without_url(),
-            status.as_u16(),
-            elapsed.as_millis(),
-        ),
-    }
+    // Only the finite error-kind label crosses the Port, never a source message.
+    format!("{io_kind:?}")
 }
 
 impl ModelProvider for ResponsesHttpAdapter {
@@ -264,6 +273,13 @@ impl ModelProvider for ResponsesHttpAdapter {
     }
 
     fn stream(&self, request: ModelRequest) -> Result<ModelEventStream, ModelProviderError> {
+        self.prepare(request)?.stream()
+    }
+
+    fn prepare(
+        &self,
+        request: ModelRequest,
+    ) -> Result<Box<dyn PreparedModelRequest + '_>, ModelProviderError> {
         request.validate_capabilities(&self.config.capabilities)?;
 
         let credential_reference = self.config.credential_reference.clone();
@@ -285,6 +301,8 @@ impl ModelProvider for ResponsesHttpAdapter {
             self.config.codex_reasoning_summary_supported,
             &|reference, scope| opaque_continuations.resolve(reference, scope),
         )?;
+        let request = serde_json::to_value(request).map_err(request_encoding_error)?;
+        let request_body = serde_json::to_vec(&request).map_err(request_encoding_error)?;
         let credential = match (
             profile,
             self.credential_source.resolve(&credential_reference),
@@ -310,22 +328,73 @@ impl ModelProvider for ResponsesHttpAdapter {
                 CredentialForStream::Pending(resolution)
             }
         };
-        let endpoint = self.config.endpoint();
+        Ok(Box::new(PreparedResponsesRequest {
+            client: self.client.clone(),
+            endpoint: self.config.endpoint(),
+            #[cfg(debug_assertions)]
+            request,
+            request_body,
+            credential: Arc::new(Mutex::new(Some(credential))),
+            credential_reference,
+            usage_required,
+            continuation_required,
+            continuation_requested,
+            opaque_scope,
+            retained_opaque,
+            opaque_continuations,
+            profile,
+            cli_role: self.cli_role,
+            partial_text: Arc::new(AtomicBool::new(false)),
+            #[cfg(debug_assertions)]
+            full_debug: self.debug,
+        }))
+    }
+}
+
+struct PreparedResponsesRequest {
+    client: reqwest::Client,
+    endpoint: String,
+    #[cfg(debug_assertions)]
+    request: serde_json::Value,
+    request_body: Vec<u8>,
+    credential: Arc<Mutex<Option<CredentialForStream>>>,
+    credential_reference: String,
+    usage_required: bool,
+    continuation_required: bool,
+    continuation_requested: bool,
+    opaque_scope: Option<OpaqueContinuationScope>,
+    retained_opaque: BTreeSet<OpaqueContinuationReference>,
+    opaque_continuations: Arc<OpaqueContinuationStore>,
+    profile: ResponsesWireProfile,
+    cli_role: Option<&'static str>,
+    partial_text: Arc<AtomicBool>,
+    #[cfg(debug_assertions)]
+    full_debug: bool,
+}
+
+impl PreparedModelRequest for PreparedResponsesRequest {
+    fn stream(&self) -> Result<ModelEventStream, ModelProviderError> {
         let client = self.client.clone();
-        let cli_role = self.cli_role;
+        let endpoint = self.endpoint.clone();
         #[cfg(debug_assertions)]
-        let full_debug = self.debug;
+        let request = self.request.clone();
+        let request_body = self.request_body.clone();
+        let credential = Arc::clone(&self.credential);
+        let credential_reference = self.credential_reference.clone();
+        let usage_required = self.usage_required;
+        let continuation_required = self.continuation_required;
+        let continuation_requested = self.continuation_requested;
+        let opaque_scope = self.opaque_scope.clone();
+        let retained_opaque = self.retained_opaque.clone();
+        let opaque_continuations = Arc::clone(&self.opaque_continuations);
+        let profile = self.profile;
+        let cli_role = self.cli_role;
+        let partial_text = Arc::clone(&self.partial_text);
+        #[cfg(debug_assertions)]
+        let full_debug = self.full_debug;
 
         let stream = try_stream! {
-            let credential = match credential {
-                CredentialForStream::Ready(credential) => credential,
-                CredentialForStream::Pending(resolution) => {
-                    validate_credential(resolution.await, &credential_reference)?
-                }
-                CredentialForStream::PendingAccountBound(resolution) => {
-                    validate_account_bound_credential(resolution.await, &credential_reference)?
-                }
-            };
+            let credential = prepared_credential(&credential, &credential_reference).await?;
             let StreamCredential {
                 bearer,
                 authorization,
@@ -343,17 +412,24 @@ impl ModelProvider for ResponsesHttpAdapter {
             let request_builder = client
                 .post(endpoint)
                 .header(ACCEPT, "text/event-stream")
-                .header(AUTHORIZATION, authorization);
+                .header(AUTHORIZATION, authorization)
+                .header(CONTENT_TYPE, "application/json")
+                .body(request_body);
             let request_builder = match account_id {
                 Some(account_id) => request_builder.header(CHATGPT_ACCOUNT_ID, account_id),
                 None => request_builder,
             };
             let response = request_builder
-                .json(&request)
                 .send()
                 .await
-                .map_err(|error| ModelProviderError::TransportFailure {
-                    message: error.to_string(),
+                .map_err(|error| {
+                    if error.is_connect() || error.is_timeout() {
+                        connection_failure(&error)
+                    } else {
+                        ModelProviderError::TransportFailure {
+                            message: "request transport failed before a response".to_owned(),
+                        }
+                    }
                 })?;
 
             let status = response.status();
@@ -417,8 +493,11 @@ impl ModelProvider for ResponsesHttpAdapter {
                 let event = response_events
                     .next()
                     .await
-                    .ok_or_else(|| ModelProviderError::ProtocolFailure {
-                        message: "response stream ended before `response.completed`".to_string(),
+                    .ok_or_else(|| ModelProviderError::ResponseInterrupted {
+                        status: status.as_u16(),
+                        elapsed_ms: request_started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+                        timeout: false,
+                        io_kind: "None".to_owned(),
                     })?
                     .map_err(|error| match error {
                         EventStreamError::Transport(error) =>
@@ -472,6 +551,9 @@ impl ModelProvider for ResponsesHttpAdapter {
                     if let Some(diagnostics) = &mut diagnostics {
                         diagnostics.model_event(&model_event);
                     }
+                    if matches!(model_event, crate::domain::model::ModelEvent::TextDelta { .. }) {
+                        partial_text.store(true, Ordering::Relaxed);
+                    }
                     yield ModelStreamEvent::Event(model_event);
                 }
                 if let Some(completion) = completion {
@@ -486,6 +568,14 @@ impl ModelProvider for ResponsesHttpAdapter {
         };
 
         Ok(Box::pin(stream))
+    }
+
+    fn retrying(&self, retry: usize) {
+        if self.partial_text.swap(false, Ordering::Relaxed)
+            && let Some(role) = self.cli_role
+        {
+            cli_output::discarded_partial_response(role, retry);
+        }
     }
 }
 
@@ -502,10 +592,44 @@ enum CredentialForStream {
     ),
 }
 
+#[derive(Clone)]
 struct StreamCredential {
     bearer: String,
     authorization: HeaderValue,
     account_id: Option<HeaderValue>,
+}
+
+async fn prepared_credential(
+    credential: &Arc<Mutex<Option<CredentialForStream>>>,
+    credential_reference: &str,
+) -> Result<StreamCredential, ModelProviderError> {
+    let unresolved_credential = credential
+        .lock()
+        .map_err(|_| ModelProviderError::CredentialSourceFailure {
+            credential_ref: credential_reference.to_owned(),
+            message: "prepared credential state is unavailable".to_owned(),
+        })?
+        .take()
+        .ok_or_else(|| ModelProviderError::CredentialSourceFailure {
+            credential_ref: credential_reference.to_owned(),
+            message: "prepared credential is already in use".to_owned(),
+        })?;
+    let resolved_credential = match unresolved_credential {
+        CredentialForStream::Ready(credential) => credential,
+        CredentialForStream::Pending(resolution) => {
+            validate_credential(resolution.await, credential_reference)?
+        }
+        CredentialForStream::PendingAccountBound(resolution) => {
+            validate_account_bound_credential(resolution.await, credential_reference)?
+        }
+    };
+    *credential
+        .lock()
+        .map_err(|_| ModelProviderError::CredentialSourceFailure {
+            credential_ref: credential_reference.to_owned(),
+            message: "prepared credential state is unavailable".to_owned(),
+        })? = Some(CredentialForStream::Ready(resolved_credential.clone()));
+    Ok(resolved_credential)
 }
 
 fn validate_credential(

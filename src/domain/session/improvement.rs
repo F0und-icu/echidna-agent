@@ -189,7 +189,7 @@ pub(super) fn apply(
                     items,
                     original_call_ids,
                 } => {
-                    if !state.request_audits.iter().any(|audit| audit.audit_event_id() == audit_event_id && audit.improvement_scope() == Some(provider_session))
+                    if state.request_audits.iter().rev().find(|audit| audit.improvement_scope() == Some(provider_session)).is_none_or(|audit| audit.audit_event_id() != audit_event_id)
                         || provider_session.id != ProviderSessionId::new(format!("rsi:{}:{stage:?}",activity.attempt_id))
                         || provider_session.role != ProviderSessionRole::Primary
                         || state.primary_provider_session.as_ref() == Some(provider_session)
@@ -363,6 +363,7 @@ pub(crate) fn scoped_call_id(
 pub(super) fn validate_audit_scope(
     state: &SessionState,
     scope: &ProviderSessionRef,
+    manifest: &RequestAuditManifest,
 ) -> Result<(), SessionError> {
     let started = state
         .improvement_records
@@ -379,10 +380,6 @@ pub(super) fn validate_audit_scope(
     if records
         .iter()
         .any(|record| matches!(record.activity.fact, ImprovementFact::Finished { .. }))
-        || state
-            .request_audits
-            .iter()
-            .any(|audit| audit.improvement_scope() == Some(scope))
     {
         return Err(SessionError::InvalidImprovementActivity);
     }
@@ -412,7 +409,20 @@ pub(super) fn validate_audit_scope(
     if scope.id != ProviderSessionId::new(format!("rsi:{attempt}:{stage:?}"))
         || scope.role != ProviderSessionRole::Primary
         || scope.generation != 0
+        || records.iter().any(|record| {
+            matches!(record.activity.fact,
+                ImprovementFact::Sample {stage:seen,..} | ImprovementFact::Results {stage:seen,..}
+                    if seen == stage)
+        })
     {
+        return Err(SessionError::InvalidImprovementActivity);
+    }
+    let audits = state
+        .request_audits
+        .iter()
+        .filter(|audit| audit.improvement_scope() == Some(scope))
+        .collect::<Vec<_>>();
+    if audits.len() >= 3 || audits.iter().any(|audit| !manifest.repeats_request(audit)) {
         return Err(SessionError::InvalidImprovementActivity);
     }
     Ok(())

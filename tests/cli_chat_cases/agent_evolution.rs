@@ -22,6 +22,238 @@ fn improvement_fixture(root: &std::path::Path) {
     .unwrap();
 }
 
+fn repeated_rsi_audit(prefix: &[Value], audit: &Value, id: &str) -> Vec<Value> {
+    let mut repeated = audit.clone();
+    repeated["event_id"] = json!(id);
+    repeated["sequence"] = json!(prefix.last().unwrap()["sequence"].as_u64().unwrap() + 1);
+    repeated["payload"]["audit_event_id"] = json!(id);
+    let mut events = prefix.to_vec();
+    events.push(repeated);
+    events
+}
+
+fn assert_rejected_rsi_events(events: Vec<Value>, case: &str) {
+    let parsed = events
+        .into_iter()
+        .map(|event| serde_json::from_value::<EventEnvelope<Value>>(event).unwrap())
+        .collect::<Vec<_>>();
+    assert!(
+        SessionReducer.reduce(parsed).is_err(),
+        "RSI retry fixture accepted {case}"
+    );
+}
+
+fn assert_rsi_retry_audit_integrity(events: &[Value]) {
+    let audits = events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| {
+            event["event_type"] == "session.request_audit_recorded"
+                && !event["payload"]["improvement_scope"].is_null()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        audits.len(),
+        3,
+        "two diagnosis attempts and one Old attempt"
+    );
+    let (second_index, second_audit) = audits[1];
+    let third = repeated_rsi_audit(
+        &events[..=second_index],
+        second_audit,
+        "fixture-third-diagnosis-audit",
+    );
+    SessionReducer
+        .reduce(
+            third
+                .iter()
+                .cloned()
+                .map(|event| serde_json::from_value::<EventEnvelope<Value>>(event).unwrap()),
+        )
+        .expect("a pending exact request permits its third physical attempt");
+    assert_rejected_rsi_events(
+        repeated_rsi_audit(&third, second_audit, "fixture-fourth-diagnosis-audit"),
+        "fourth physical attempt",
+    );
+    for (field, replacement) in [
+        ("/model/model_id", json!("other-model")),
+        ("/profile/generation", json!(99)),
+        ("/binding/project_id", json!("other-project")),
+        ("/capability_mapping/semantic_hash", json!("0".repeat(64))),
+        ("/full_logical_input/semantic_hash", json!("0".repeat(64))),
+        ("/delivered_input/semantic_hash", json!("0".repeat(64))),
+        ("/resolved_tool_plan_fingerprint", json!("0".repeat(64))),
+        (
+            "/improvement_scope",
+            audits[2].1["payload"]["improvement_scope"].clone(),
+        ),
+    ] {
+        let mut changed = third.clone();
+        *changed.last_mut().unwrap()["payload"]
+            .pointer_mut(field)
+            .unwrap() = replacement;
+        assert_rejected_rsi_events(changed, field);
+    }
+    let mut changed_inputs = third.clone();
+    let request = &mut changed_inputs.last_mut().unwrap()["payload"];
+    request["full_logical_input"]["semantic_hash"] = json!("0".repeat(64));
+    request["delivered_input"]["semantic_hash"] = json!("0".repeat(64));
+    assert_rejected_rsi_events(
+        changed_inputs,
+        "matching but changed logical/delivered input",
+    );
+    let sample = events
+        .iter()
+        .position(|event| {
+            event["payload"]["fact"]["kind"] == "sample"
+                && event["payload"]["fact"]["stage"] == "diagnosis"
+        })
+        .unwrap();
+    let mut stale = events[..=sample].to_vec();
+    stale[sample]["payload"]["fact"]["audit_event_id"] = audits[0].1["event_id"].clone();
+    assert_rejected_rsi_events(stale, "sample bound to superseded audit");
+    for terminal in [
+        sample,
+        events
+            .iter()
+            .position(|event| event["payload"]["fact"]["kind"] == "finished")
+            .unwrap(),
+    ] {
+        assert_rejected_rsi_events(
+            repeated_rsi_audit(
+                &events[..=terminal],
+                second_audit,
+                "fixture-reopened-diagnosis",
+            ),
+            "completed stage or finished activity reopened",
+        );
+    }
+}
+
+#[test]
+fn rsi_retry_budget_exhaustion_closes_activity_without_executing_a_partial_probe() {
+    let root = TemporaryDirectory::new("rsi-retry-budget");
+    initialize_project(root.path());
+    let definition = improvement_definition(root.path());
+    improvement_fixture(root.path());
+    let marker = root.path().join("partial-probe-must-not-run");
+    let marker_for_response = marker.clone();
+    let server = server(
+        move |step, request| match step {
+            0 => tool(
+                "main-failed",
+                "run_command",
+                json!({"argv":["/bin/sh","probe.sh","fail"]}),
+            ),
+            1 => tool(
+                "main-reference",
+                "run_command",
+                json!({"argv":["/bin/sh","probe.sh","good"],"code_inputs":["probe.sh"]}),
+            ),
+            2 => text_response("ORDINARY_TASK_COMPLETED", "ordinary-complete"),
+            3 => {
+                assert!(request.to_string().contains("RSI2 diagnosis"));
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"discarded incomplete diagnosis\"}\n\n".to_owned()
+            }
+            4 => text_response(&improvement_candidate().to_string(), "diagnosis-recovered"),
+            5 => {
+                assert!(request.to_string().contains("Arm=Old"));
+                format!(
+                    "data: {}\n\n",
+                    json!({"type":"response.output_item.done","output_index":0,"item":{
+                        "type":"function_call","call_id":"partial-probe","name":"run_command",
+                        "arguments":json!({"argv":["/usr/bin/touch",marker_for_response]}).to_string()
+                    }})
+                )
+            }
+            _ => unreachable!(),
+        },
+        6,
+    );
+    let config = write_config(root.path(), &server.base_url);
+    fs::write(
+        &config,
+        format!(
+            "{}\n[runtime]\nmodel_request_limit_per_turn = 6\n",
+            fs::read_to_string(&config).unwrap()
+        ),
+    )
+    .unwrap();
+    let output = run_chat(
+        root.path(),
+        &config,
+        "Complete the CSV aggregation task.\n/resume\n/exit\n",
+        &["--agent", definition.to_str().unwrap()],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let requests = server.requests.try_iter().collect::<Vec<_>>();
+    assert_eq!(requests.len(), 6);
+    assert_eq!(
+        request_body(&requests[3]),
+        request_body(&requests[4]),
+        "diagnosis retries keep exact logical request bytes"
+    );
+    server.join();
+    assert!(
+        !marker.exists(),
+        "partial probe call cannot dispatch before completion"
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("[RSI2 inconclusive]"));
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("No stopped Turn needs recovery; no ProviderSession was replaced."),
+        "an inconclusive maintenance sample must not stop the completed operator Turn"
+    );
+    let session = session_id(root.path());
+    let resumed = run_chat(
+        root.path(),
+        &config,
+        "/agent\n/exit\n",
+        &["--resume", &session],
+    );
+    assert!(
+        resumed.status.success(),
+        "explicit resume must accept the closed RSI activity: {}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    assert!(String::from_utf8_lossy(&resumed.stdout).contains("Resumed session"));
+    let events = session_events(root.path(), &session);
+    assert_rsi_retry_audit_integrity(&events);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["event_type"] == "tool.execution_receipt_recorded")
+            .count(),
+        2,
+        "only the two original ordinary commands executed"
+    );
+    let facts = events
+        .iter()
+        .filter(|event| event["event_type"] == "session.rsi_activity_recorded")
+        .map(|event| &event["payload"]["fact"])
+        .collect::<Vec<_>>();
+    assert!(
+        facts
+            .iter()
+            .any(|fact| fact["kind"] == "finished" && fact["disposition"] == "inconclusive")
+    );
+    assert!(
+        facts
+            .iter()
+            .all(|fact| fact["stage"] != "old" && fact["stage"] != "new"),
+        "no incomplete arm sample or result becomes durable"
+    );
+    assert!(
+        events
+            .iter()
+            .all(|event| event["event_type"] != "session.agent_definition_applied")
+    );
+}
+
 #[test]
 fn rsi2_reference_match_uses_actual_scoped_commands_and_only_adopts_a_local_gain() {
     for case in [
@@ -378,6 +610,16 @@ fn assert_rsi2_strict_activity(events: &[Value]) {
                 && event["payload"]["fact"]["stage"] == "old"
         })
         .unwrap();
+    let old_audit = events
+        .iter()
+        .find(|event| event["event_id"] == events[old]["payload"]["fact"]["audit_event_id"])
+        .unwrap();
+    for terminal in [old, old_result] {
+        assert_rejected_rsi_events(
+            repeated_rsi_audit(&events[..=terminal], old_audit, "fixture-reopened-old-arm"),
+            "Old sample or results already committed",
+        );
+    }
     let first_audit = events
         .iter()
         .find(|event| event["event_type"] == "session.request_audit_recorded")

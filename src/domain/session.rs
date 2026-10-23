@@ -1086,7 +1086,7 @@ fn apply_session_event(
         }
         SessionEvent::RequestAuditRecorded { manifest } => {
             if let Some(scope) = manifest.improvement_scope() {
-                improvement::validate_audit_scope(state, scope)?;
+                improvement::validate_audit_scope(state, scope, &manifest)?;
             }
             require_transition(
                 state.lifecycle,

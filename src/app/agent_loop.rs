@@ -59,8 +59,9 @@ use crate::ports::tool::{ToolExecutor, ToolExecutorError};
 
 use super::cancellation::AgentCancellation;
 use super::context_compilation::{ContextCacheSummary, ContextCompilationError};
+use super::model_retry::{ModelRetryError, prepare_and_consume_with_retry};
 use super::model_sample::ModelSample;
-use super::model_streaming::{ModelStreamOutcome, ModelStreamingError, ModelStreamingService};
+use super::model_streaming::{ModelStreamOutcome, ModelStreamingError, ModelStreamingEventStage};
 use super::tool_scheduler::{ScheduledToolResult, execute_batch};
 use compaction::AppliedCompaction;
 use request_audit::RequestAuditStage;
@@ -1028,19 +1029,8 @@ where
             self.last_baseline_assessment = Some(assessment.clone());
             let (request, request_delivery_map) =
                 self.request_for_assessment(&delivery_input, &delivery_map, &assessment)?;
-            request_budget
-                .admit(ProviderSessionRole::Primary)
-                .map_err(|limit| AgentLoopError::ModelRequestLimit { limit })?;
             self.last_context_plan = Some(plan.clone());
             self.last_sampling_step_plan = Some(sampling_step.clone());
-            self.record_request_audit_attempt(
-                &mut audit,
-                &sampling_step,
-                &full_input,
-                &request,
-                &request_delivery_map,
-                &assessment,
-            )?;
             let mut forward_text_delta = |event: &crate::domain::model::ModelEvent| {
                 if let (crate::domain::model::ModelEvent::TextDelta { text }, Some(stage)) =
                     (event, text_delta.as_deref_mut())
@@ -1052,32 +1042,37 @@ where
                 Ok(())
             };
             let stream = if request.is_incremental() {
-                let mut incremental_text_deltas = Vec::new();
-                let mut buffer_incremental_text = |event: &crate::domain::model::ModelEvent| {
-                    if let crate::domain::model::ModelEvent::TextDelta { text } = event {
-                        incremental_text_deltas.push(text.clone());
-                    }
-                    Ok(())
-                };
-                match ModelStreamingService::new(self.provider)
-                    .consume_with_event_stage(
+                let mut discard_events =
+                    |_event: &crate::domain::model::ModelEvent| Ok::<(), ModelStreamingError>(());
+                match self
+                    .consume_prepared_request_with_retry(
                         request.clone(),
                         cancellation.clone(),
-                        &mut buffer_incremental_text,
+                        &request_budget,
+                        &mut audit,
+                        &sampling_step,
+                        &full_input,
+                        &request_delivery_map,
+                        &assessment,
+                        &mut discard_events,
                     )
                     .await
                 {
                     Ok(outcome) => {
-                        for text in incremental_text_deltas {
-                            if let Some(stage) = text_delta.as_deref_mut() {
-                                stage(&text)?;
+                        if let ModelStreamOutcome::Completed { events, .. } = &outcome {
+                            for event in events {
+                                if let crate::domain::model::ModelEvent::TextDelta { text } = event
+                                    && let Some(stage) = text_delta.as_deref_mut()
+                                {
+                                    stage(text)?;
+                                }
                             }
                         }
                         Ok(outcome)
                     }
-                    Err(ModelStreamingError::Provider(
+                    Err(AgentLoopError::Model(ModelStreamingError::Provider(
                         ModelProviderError::ContinuationRejected { .. },
-                    )) => {
+                    ))) => {
                         self.provider_session
                             .reset(BaselineInvalidationReason::ProviderRejected);
                         let fallback_assessment = BaselineAssessment::FullRequest {
@@ -1102,9 +1097,6 @@ where
                                 InternalRequestMetadata::default(),
                             )?;
                         }
-                        request_budget
-                            .admit(ProviderSessionRole::Primary)
-                            .map_err(|limit| AgentLoopError::ModelRequestLimit { limit })?;
                         let fallback_request = ModelRequest::full(delivery_input.clone())
                             .with_opaque_continuation_scope(
                                 OpaqueContinuationScope::for_provider_session(
@@ -1112,37 +1104,39 @@ where
                                 ),
                             );
                         delivery_map.validate_against(&delivery_input)?;
-                        self.record_request_audit_attempt(
+                        self.consume_prepared_request_with_retry(
+                            fallback_request,
+                            cancellation.clone(),
+                            &request_budget,
                             &mut audit,
                             &sampling_step,
                             &full_input,
-                            &fallback_request,
                             &delivery_map,
                             &fallback_assessment,
-                        )?;
-                        ModelStreamingService::new(self.provider)
-                            .consume_with_event_stage(
-                                fallback_request,
-                                cancellation.clone(),
-                                &mut forward_text_delta,
-                            )
-                            .await
+                            &mut forward_text_delta,
+                        )
+                        .await
                     }
                     Err(error) => Err(error),
                 }
             } else {
-                ModelStreamingService::new(self.provider)
-                    .consume_with_event_stage(
-                        request.clone(),
-                        cancellation.clone(),
-                        &mut forward_text_delta,
-                    )
-                    .await
+                self.consume_prepared_request_with_retry(
+                    request.clone(),
+                    cancellation.clone(),
+                    &request_budget,
+                    &mut audit,
+                    &sampling_step,
+                    &full_input,
+                    &request_delivery_map,
+                    &assessment,
+                    &mut forward_text_delta,
+                )
+                .await
             };
             let stream = match stream {
-                Err(ModelStreamingError::Provider(ModelProviderError::InvalidToolArguments {
-                    diagnostic,
-                })) => {
+                Err(AgentLoopError::Model(ModelStreamingError::Provider(
+                    ModelProviderError::InvalidToolArguments { diagnostic },
+                ))) => {
                     // No model sample has committed and no sibling ToolCall
                     // has dispatched. Persist rejection before any correction.
                     if let Some(stage) = durability.as_deref_mut() {
@@ -1275,6 +1269,51 @@ where
 
         Err(AgentLoopError::ModelRequestLimit {
             limit: request_budget.limit(),
+        })
+    }
+
+    // Keep the existing immutable audit inputs explicit at this fixed stage.
+    #[allow(clippy::too_many_arguments)]
+    async fn consume_prepared_request_with_retry(
+        &self,
+        request: ModelRequest,
+        cancellation: AgentCancellation,
+        request_budget: &ModelRequestBudget,
+        audit: &mut Option<RequestAuditStage<'_>>,
+        sampling_step: &SamplingStepPlan,
+        full_input: &ModelInputIR,
+        delivery_map: &ContextDeliveryMap,
+        assessment: &BaselineAssessment,
+        event_stage: &mut ModelStreamingEventStage<'_>,
+    ) -> Result<ModelStreamOutcome, AgentLoopError> {
+        let provider = self.provider;
+        prepare_and_consume_with_retry(
+            provider,
+            cancellation,
+            || {
+                provider
+                    .prepare(request.clone())
+                    .map_err(ModelStreamingError::Provider)
+            },
+            || {
+                request_budget
+                    .admit(ProviderSessionRole::Primary)
+                    .map_err(|limit| AgentLoopError::ModelRequestLimit { limit })?;
+                self.record_request_audit_attempt(
+                    audit,
+                    sampling_step,
+                    full_input,
+                    &request,
+                    delivery_map,
+                    assessment,
+                )
+            },
+            event_stage,
+        )
+        .await
+        .map_err(|error| match error {
+            ModelRetryError::Attempt(error) => error,
+            ModelRetryError::Streaming(error) => AgentLoopError::Model(error),
         })
     }
 

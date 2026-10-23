@@ -176,11 +176,49 @@ pub enum ModelStreamEvent {
 pub type ModelEventStream =
     Pin<Box<dyn Stream<Item = Result<ModelStreamEvent, ModelProviderError>> + Send>>;
 
+/// One encoded Provider request retained for bounded retries of an
+/// uncompleted transport attempt. Implementations may retain credentials and
+/// wire bytes here so retrying does not repeat credential maintenance or
+/// request encoding.
+pub trait PreparedModelRequest {
+    fn stream(&self) -> Result<ModelEventStream, ModelProviderError>;
+
+    /// Reports a discarded incomplete attempt through the Provider's existing
+    /// presentation boundary. Ordinary Providers have no presentation work.
+    fn retrying(&self, _retry: usize) {}
+}
+
+struct StreamPreparedModelRequest<'provider, Provider: ?Sized> {
+    provider: &'provider Provider,
+    request: ModelRequest,
+}
+
+impl<Provider> PreparedModelRequest for StreamPreparedModelRequest<'_, Provider>
+where
+    Provider: ModelProvider + ?Sized,
+{
+    fn stream(&self) -> Result<ModelEventStream, ModelProviderError> {
+        self.provider.stream(self.request.clone())
+    }
+}
+
 /// Provider-neutral boundary for a configured model implementation.
 pub trait ModelProvider: Send + Sync {
     fn capabilities(&self) -> ModelCapabilities;
 
     fn stream(&self, request: ModelRequest) -> Result<ModelEventStream, ModelProviderError>;
+
+    /// Prepares one logical request. The default preserves existing providers
+    /// by delegating each physical attempt to their single-attempt stream.
+    fn prepare(
+        &self,
+        request: ModelRequest,
+    ) -> Result<Box<dyn PreparedModelRequest + '_>, ModelProviderError> {
+        Ok(Box::new(StreamPreparedModelRequest {
+            provider: self,
+            request,
+        }))
+    }
 }
 
 /// Errors crossing the Model Port without exposing a transport protocol.
@@ -201,6 +239,17 @@ pub enum ModelProviderError {
     RequestEncodingFailure { message: String },
     #[error("model transport failed: {message}")]
     TransportFailure { message: String },
+    #[error("model connection failed: timeout={timeout}, io_kind={io_kind}")]
+    ConnectionFailure { timeout: bool, io_kind: String },
+    #[error(
+        "model response interrupted: status={status}, elapsed_ms={elapsed_ms}, timeout={timeout}, io_kind={io_kind}"
+    )]
+    ResponseInterrupted {
+        status: u16,
+        elapsed_ms: u64,
+        timeout: bool,
+        io_kind: String,
+    },
     #[error("model HTTP request failed with status {status}")]
     HttpFailure { status: u16 },
     #[error("model stream protocol failed: {message}")]

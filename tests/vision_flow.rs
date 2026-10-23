@@ -373,13 +373,13 @@ async fn secondary_path_commits_route_audit_observation_then_primary_without_sen
                 ),
                 route_occurred_at: occurred_at(2),
                 analysis: vision_input(&vision_capabilities),
-                audit: VisionEventStamp::new(EventId::new("vision-audit"), occurred_at(3)),
-                terminal: VisionEventStamp::new(EventId::new("vision-observation"), occurred_at(4)),
             },
             &context,
             AgentCancellation::new(),
             &mut projection,
             &mut sink,
+            || VisionEventStamp::new(EventId::new("vision-audit"), occurred_at(3)),
+            || VisionEventStamp::new(EventId::new("vision-observation"), occurred_at(4)),
         )
         .await
         .unwrap();
@@ -768,13 +768,13 @@ async fn failed_secondary_attempt_has_one_audit_and_one_terminal_failure_without
                 ),
                 route_occurred_at: occurred_at(2),
                 analysis: vision_input(&vision_capabilities),
-                audit: VisionEventStamp::new(EventId::new("vision-audit"), occurred_at(3)),
-                terminal: VisionEventStamp::new(EventId::new("vision-failed"), occurred_at(4)),
             },
             &context,
             AgentCancellation::new(),
             &mut projection,
             &mut sink,
+            || VisionEventStamp::new(EventId::new("vision-audit"), occurred_at(3)),
+            || VisionEventStamp::new(EventId::new("vision-failed"), occurred_at(4)),
         )
         .await
         .unwrap_err();
@@ -785,6 +785,90 @@ async fn failed_secondary_attempt_has_one_audit_and_one_terminal_failure_without
     assert_eq!(projection.state().request_audits().len(), 1);
     assert_eq!(projection.state().vision_failures().len(), 1);
     assert!(projection.state().vision_observations().is_empty());
+}
+
+#[tokio::test]
+async fn secondary_retry_keeps_one_route_and_binds_the_observation_to_the_final_audit() {
+    let primary_capabilities = capabilities(false, false);
+    let vision_capabilities = capabilities(true, false);
+    let vision_provider = ScriptedProvider::new(
+        vision_capabilities.clone(),
+        [
+            vec![Err(ModelProviderError::ConnectionFailure {
+                timeout: false,
+                io_kind: "Some(ConnectionReset)".to_owned(),
+            })],
+            completed(
+                r#"{"schema_version":2,"summary":"Recovered Vision response.","extracted_text":null,"regions":[],"task_observations":[],"uncertainty":["transport was interrupted"]}"#,
+                "vision-retry-success",
+            ),
+        ],
+    );
+    let binding = binding();
+    let context = audit_context(binding.clone());
+    let mut projection = projection(&binding);
+    let mut sink = EventLog::default();
+    let blobs = MemoryBlobs::default();
+    let mut audit_sequence = 0_u64;
+
+    let output = VisionSessionService::new(&blobs, binding)
+        .analyze_image(
+            &vision_provider,
+            VisionSecondaryRequest {
+                route: route(
+                    "vision-route-retry",
+                    "artifact:original",
+                    &primary_capabilities,
+                    &vision_capabilities,
+                    VisionMode::SecondaryTool,
+                    VisionRoute::SecondaryTool,
+                    VisionRouteReason::ForcedSecondaryTool,
+                ),
+                route_occurred_at: occurred_at(2),
+                analysis: VisionAnalysisInput {
+                    route_event_id: EventId::new("vision-route-retry"),
+                    observation_id: VisionObservationId::new("observation:vision-retry"),
+                    ..vision_input(&vision_capabilities)
+                },
+            },
+            &context,
+            AgentCancellation::new(),
+            &mut projection,
+            &mut sink,
+            || {
+                audit_sequence += 1;
+                VisionEventStamp::new(
+                    EventId::new(format!("vision-audit-retry-{audit_sequence}")),
+                    occurred_at(2 + audit_sequence),
+                )
+            },
+            || VisionEventStamp::new(EventId::new("vision-observation-retry"), occurred_at(5)),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(vision_provider.requests().len(), 2);
+    assert_eq!(projection.state().vision_routes().len(), 1);
+    assert_eq!(projection.state().request_audits().len(), 2);
+    assert_eq!(projection.state().vision_observations().len(), 1);
+    assert!(projection.state().vision_failures().is_empty());
+    assert_eq!(
+        output.observation.request_audit_event_id,
+        EventId::new("vision-audit-retry-2"),
+        "the final observation cannot identify the abandoned sample"
+    );
+    assert_eq!(
+        sink.events
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "vision.route_decided",
+            "session.request_audit_recorded",
+            "session.request_audit_recorded",
+            "vision.observation_recorded",
+        ]
+    );
 }
 
 #[tokio::test]
@@ -837,19 +921,18 @@ async fn targeted_reanalysis_appends_new_observations_and_replay_validates_raw_b
                     task: "Inspect the complete screenshot.".to_owned(),
                     ..vision_input(&vision_capabilities)
                 },
-                audit: VisionEventStamp::new(
-                    EventId::new("vision-audit-targeted-1"),
-                    occurred_at(3),
-                ),
-                terminal: VisionEventStamp::new(
-                    EventId::new("vision-observation-targeted-1"),
-                    occurred_at(4),
-                ),
             },
             &context,
             AgentCancellation::new(),
             &mut projection,
             &mut sink,
+            || VisionEventStamp::new(EventId::new("vision-audit-targeted-1"), occurred_at(3)),
+            || {
+                VisionEventStamp::new(
+                    EventId::new("vision-observation-targeted-1"),
+                    occurred_at(4),
+                )
+            },
         )
         .await
         .unwrap();
@@ -878,19 +961,18 @@ async fn targeted_reanalysis_appends_new_observations_and_replay_validates_raw_b
                     task: "Inspect only the debug control.".to_owned(),
                     ..vision_input(&vision_capabilities)
                 },
-                audit: VisionEventStamp::new(
-                    EventId::new("vision-audit-targeted-2"),
-                    occurred_at(6),
-                ),
-                terminal: VisionEventStamp::new(
-                    EventId::new("vision-observation-targeted-2"),
-                    occurred_at(7),
-                ),
             },
             &context,
             AgentCancellation::new(),
             &mut projection,
             &mut sink,
+            || VisionEventStamp::new(EventId::new("vision-audit-targeted-2"), occurred_at(6)),
+            || {
+                VisionEventStamp::new(
+                    EventId::new("vision-observation-targeted-2"),
+                    occurred_at(7),
+                )
+            },
         )
         .await
         .unwrap();
@@ -933,19 +1015,18 @@ async fn targeted_reanalysis_appends_new_observations_and_replay_validates_raw_b
                     task: "Inspect another region.".to_owned(),
                     ..vision_input(&vision_capabilities)
                 },
-                audit: VisionEventStamp::new(
-                    EventId::new("vision-audit-targeted-3"),
-                    occurred_at(9),
-                ),
-                terminal: VisionEventStamp::new(
-                    EventId::new("vision-observation-targeted-3"),
-                    occurred_at(10),
-                ),
             },
             &context,
             AgentCancellation::new(),
             &mut projection,
             &mut sink,
+            || VisionEventStamp::new(EventId::new("vision-audit-targeted-3"), occurred_at(9)),
+            || {
+                VisionEventStamp::new(
+                    EventId::new("vision-observation-targeted-3"),
+                    occurred_at(10),
+                )
+            },
         )
         .await
         .unwrap_err();

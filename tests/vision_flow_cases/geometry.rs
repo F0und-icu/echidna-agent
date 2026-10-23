@@ -48,13 +48,13 @@ async fn run_reply(input: VisionAnalysisInput, raw: String) -> Run {
                 ),
                 route_occurred_at: occurred_at(2),
                 analysis: input,
-                audit: VisionEventStamp::new(EventId::new("vision-audit"), occurred_at(3)),
-                terminal: VisionEventStamp::new(EventId::new("vision-terminal"), occurred_at(4)),
             },
             &audit_context(binding),
             AgentCancellation::new(),
             &mut projection,
             &mut sink,
+            || VisionEventStamp::new(EventId::new("vision-audit"), occurred_at(3)),
+            || VisionEventStamp::new(EventId::new("vision-terminal"), occurred_at(4)),
         )
         .await;
     Run {

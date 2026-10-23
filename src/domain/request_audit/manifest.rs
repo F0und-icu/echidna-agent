@@ -437,6 +437,13 @@ pub struct RequestAuditManifest {
 }
 
 impl RequestAuditManifest {
+    /// A physical retry has a fresh audit identity and identical request facts.
+    pub(crate) fn repeats_request(&self, original: &Self) -> bool {
+        let mut repeated = self.clone();
+        repeated.audit_event_id = original.audit_event_id.clone();
+        repeated == *original
+    }
+
     pub(crate) fn improvement_scope(&self) -> Option<&crate::domain::context::ProviderSessionRef> {
         self.improvement_scope.as_ref()
     }

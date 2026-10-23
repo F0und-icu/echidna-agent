@@ -149,22 +149,43 @@ impl<Provider: ModelProvider + ?Sized, Tools: ToolExecutor + ?Sized>
         )?
         .bind_sampling_step(&step, step.context_plan().delivery_map().clone())?
         .bind_improvement_scope(provider_session.reference().clone());
-        input
-            .request_budget
-            .admit(ProviderSessionRole::Primary)
-            .map_err(|limit| AgentLoopError::ModelRequestLimit { limit })?;
-        let audit_event_id = record_attempt(attempt)?;
         let request = ModelRequest::full(model_input)
             .with_opaque_continuation_scope(OpaqueContinuationScope::for_provider_session(
                 provider_session.reference(),
             ))
             .with_continuation_retention(ContinuationRetention::SingleSample);
-        let outcome = ModelStreamingService::new(self.provider)
-            .consume(request, input.cancellation.clone())
-            .await?;
+        let mut final_audit = None;
+        let mut discard_events =
+            |_event: &crate::domain::model::ModelEvent| Ok::<(), ModelStreamingError>(());
+        let provider = self.provider;
+        let outcome = prepare_and_consume_with_retry(
+            provider,
+            input.cancellation.clone(),
+            || {
+                provider
+                    .prepare(request.clone())
+                    .map_err(ModelStreamingError::Provider)
+            },
+            || {
+                input
+                    .request_budget
+                    .admit(ProviderSessionRole::Primary)
+                    .map_err(|limit| AgentLoopError::ModelRequestLimit { limit })?;
+                final_audit = Some(record_attempt(attempt.clone())?);
+                Ok(())
+            },
+            &mut discard_events,
+        )
+        .await
+        .map_err(|error| match error {
+            ModelRetryError::Attempt(error) => error,
+            ModelRetryError::Streaming(error) => AgentLoopError::Model(error),
+        })?;
         let ModelStreamOutcome::Completed { events, .. } = outcome else {
             return Err(AgentLoopError::ImprovementCancelled);
         };
+        let audit_event_id = final_audit
+            .expect("a completed RSI sample has a successful attempt's durable RequestAudit");
         let sample = ModelSample::from_events(events);
         let original_ids = sample
             .tool_calls()

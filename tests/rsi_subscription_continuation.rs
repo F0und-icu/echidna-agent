@@ -34,7 +34,7 @@ mod continuation_regression {
     use crate::domain::session::ImprovementStage;
     use crate::ports::model::{
         ContinuationRetention, ModelEventStream, ModelProvider, ModelProviderError, ModelRequest,
-        ModelStreamEvent, ProviderResponseId,
+        ModelStreamEvent, PreparedModelRequest, ProviderResponseId,
     };
 
     struct FixtureCredential;
@@ -69,11 +69,37 @@ mod continuation_regression {
         }
 
         fn stream(&self, request: ModelRequest) -> Result<ModelEventStream, ModelProviderError> {
+            self.prepare(request)?.stream()
+        }
+
+        fn prepare(
+            &self,
+            request: ModelRequest,
+        ) -> Result<Box<dyn PreparedModelRequest + '_>, ModelProviderError> {
             let single = request.continuation_retention() == ContinuationRetention::SingleSample;
+            Ok(Box::new(ObservedPrepared {
+                inner: self.adapter.prepare(request)?,
+                single,
+                scoped_references: self.scoped_references.clone(),
+                cancel: self.cancel.clone(),
+            }))
+        }
+    }
+
+    struct ObservedPrepared<'provider> {
+        inner: Box<dyn PreparedModelRequest + 'provider>,
+        single: bool,
+        scoped_references: Arc<Mutex<Vec<OpaqueContinuationReference>>>,
+        cancel: Option<AgentCancellation>,
+    }
+
+    impl PreparedModelRequest for ObservedPrepared<'_> {
+        fn stream(&self) -> Result<ModelEventStream, ModelProviderError> {
+            let single = self.single;
             let references = self.scoped_references.clone();
             let cancel = self.cancel.clone();
-            Ok(Box::pin(self.adapter.stream(request)?.inspect(
-                move |event| {
+            Ok(Box::pin(
+                self.inner.stream()?.inspect(move |event| {
                     if single
                         && let Ok(ModelStreamEvent::Event(ModelEvent::OpaqueContinuation {
                             reference,
@@ -84,8 +110,12 @@ mod continuation_regression {
                             cancel.cancel();
                         }
                     }
-                },
-            )))
+                }),
+            ))
+        }
+
+        fn retrying(&self, retry: usize) {
+            self.inner.retrying(retry);
         }
     }
 

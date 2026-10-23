@@ -63,6 +63,16 @@ changes remain available in Git history.
 
 ### Added
 
+- Retry uncompleted model connection/response transport failures at most twice,
+  with cancellable 500ms/1000ms backoff. Each attempt uses the original shared
+  budget and its own request audit while retaining prepared request credentials,
+  content and continuation. Abandoned partial output is marked as discarded;
+  only a successful complete sample commits. HTTP/protocol/credential errors and
+  Tool execution are not retried; exhaustion preserves explicit recovery. RSI
+  keeps SingleSample isolation and original arm/command ownership.
+  RSI samples bind the last identical pending-scope audit (at most3 attempts).
+  Older persona binaries cannot resume these repeated-audit RSI sessions.
+
 - R6-03: bounded Base Contract v2 guidance for same-scope current facts and
   requested answer format. Historical audit bytes remain unchanged; offline
   delivery coverage does not establish improved real-model adherence.
