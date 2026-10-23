@@ -242,8 +242,10 @@ fn transport_deadline_config_rejects_zero_and_unbounded_values_before_credential
 }
 
 #[tokio::test]
-async fn configured_read_deadline_bounds_headers_and_partial_sse_without_retry() {
-    use futures_util::StreamExt;
+async fn configured_deadlines_retry_header_and_partial_sse_timeouts() {
+    use echidna::adapters::tools::ToolRegistry;
+    use echidna::app::agent_loop::{AgentLoop, AgentLoopError};
+    use echidna::app::cancellation::AgentCancellation;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio::time::{Duration, timeout};
@@ -252,18 +254,15 @@ async fn configured_read_deadline_bounds_headers_and_partial_sse_without_retry()
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut bytes = [0; 8192];
-            assert!(socket.read(&mut bytes).await.unwrap() > 0);
-            if send_partial_sse {
-                socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n").await.unwrap();
+            for _ in 0..3 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = [0; 8192];
+                assert!(socket.read(&mut bytes).await.unwrap() > 0);
+                if send_partial_sse {
+                    socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n").await.unwrap();
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
             }
-            // Keep the first request open. A timeout must not resubmit it.
-            assert!(
-                timeout(Duration::from_millis(400), listener.accept())
-                    .await
-                    .is_err()
-            );
         });
         let credentials = Arc::new(RecordingCredentialSource::default());
         let config = valid_config()
@@ -274,35 +273,33 @@ async fn configured_read_deadline_bounds_headers_and_partial_sse_without_retry()
                 1,
             );
         let composition = load("provider-deadline", &config, credentials.clone()).unwrap();
-        let mut stream = composition
-            .primary_provider()
-            .stream(ModelRequest::full(ModelInputIR::current(
-                "fixture",
-                vec![ContentItem::user_text("fixture")],
-                ModelRequestRequirements::default(),
-            )))
-            .unwrap();
-        let error = timeout(Duration::from_secs(3), async {
-            loop {
-                match stream.next().await {
-                    Some(Err(error)) => break error,
-                    Some(Ok(_)) => {}
-                    None => panic!("stalled response must fail explicitly"),
-                }
-            }
-        })
+        let directory = TemporaryDirectory::new("provider-deadline-retry");
+        let tools = ToolRegistry::for_project(directory.path());
+        let mut agent = AgentLoop::new(composition.primary_provider(), &tools);
+        let error = timeout(
+            Duration::from_secs(5),
+            agent.run_turn("fixture", AgentCancellation::new()),
+        )
         .await
-        .expect("configured deadline must bound the stalled request");
+        .expect("configured deadline must bound and retry the stalled request")
+        .unwrap_err();
         assert!(matches!(
             error,
-            ModelProviderError::TransportFailure { .. }
-                | ModelProviderError::ProtocolFailure { .. }
+            AgentLoopError::Model(
+                echidna::app::model_streaming::ModelStreamingError::Provider(
+                    ModelProviderError::ConnectionFailure { timeout: true, .. }
+                        | ModelProviderError::ResponseInterrupted { timeout: true, .. }
+                )
+            )
         ));
         assert_eq!(
             credentials.references(),
             vec!["CYBER_AGENT_PRIMARY_API_KEY"]
         );
-        drop(stream);
+        assert_eq!(
+            agent.history().items(),
+            &[ContentItem::user_text("fixture")]
+        );
         server.await.unwrap();
     }
 }

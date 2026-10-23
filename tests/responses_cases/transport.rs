@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn truncated_body_is_transport_failure_without_committing_or_executing_the_sample() {
+async fn incomplete_body_retries_then_preserves_atomic_model_sample_boundaries() {
     for profile in ["standard", "siwc", "codex"] {
         let mut call = json!({"type":"function_call", "call_id":"uncommitted-call",
             "name":"write_file", "arguments":"{\"path\":\"must-not-exist.txt\",\"content\":\"uncommitted\",\"expected_hash\":null}"});
@@ -20,8 +20,8 @@ async fn truncated_body_is_transport_failure_without_committing_or_executing_the
             .iter()
             .map(|event| format!("data: {event}\n\n"))
             .collect::<String>();
-        let (base_url, request, server) =
-            spawn_sse_server_chunked_with_declared_length(200, &body, 17, body.len() + 1).await;
+        let (base_url, mut requests, server) =
+            spawn_sse_sequence_server(vec![body.clone(), body.clone(), body]).await;
         let ordinary = FakeCredentialSource::value(Some(FIXTURE_SECRET));
         let account = AccountBoundCredentialSource::new(
             "codex_subscription:fixture",
@@ -42,21 +42,19 @@ async fn truncated_body_is_transport_failure_without_committing_or_executing_the
             .await
             .unwrap_err();
         assert!(
-            matches!(error,
-            echidna::app::agent_loop::AgentLoopError::Model(
-                ModelStreamingError::Provider(ModelProviderError::TransportFailure { ref message }))
-                if message.contains("response body read failed before `response.completed`")),
+            matches!(
+                &error,
+                echidna::app::agent_loop::AgentLoopError::Model(ModelStreamingError::Provider(
+                    ModelProviderError::ResponseInterrupted {
+                        status: 200,
+                        timeout: false,
+                        io_kind,
+                        ..
+                    }
+                )) if io_kind == "None"
+            ),
             "{profile}: {error}"
         );
-        let diagnostic = error.to_string();
-        for expected in [
-            "HTTP 200",
-            "elapsed_ms=",
-            "timeout=false",
-            "io_kind=Some(UnexpectedEof)",
-        ] {
-            assert!(diagnostic.contains(expected), "{profile}: {diagnostic}");
-        }
         assert_eq!(
             agent.history().items(),
             &[ContentItem::user_text("read once")]
@@ -67,7 +65,12 @@ async fn truncated_body_is_transport_failure_without_committing_or_executing_the
         } else {
             assert_eq!(ordinary.references().len(), 1);
         }
-        request.await.unwrap();
+        let mut captured = Vec::new();
+        for _ in 0..3 {
+            captured.push(requests.recv().await.unwrap());
+        }
+        assert_eq!(captured[0].body, captured[1].body);
+        assert_eq!(captured[1].body, captured[2].body);
         server.await.unwrap();
     }
 }

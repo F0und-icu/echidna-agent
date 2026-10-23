@@ -47,8 +47,6 @@ pub struct VisionSecondaryRequest {
     pub route: VisionRouteRecord,
     pub route_occurred_at: OccurredAt,
     pub analysis: VisionAnalysisInput,
-    pub audit: VisionEventStamp,
-    pub terminal: VisionEventStamp,
 }
 
 /// Route-validated Secondary work after the durable route commit. Keeping
@@ -56,8 +54,6 @@ pub struct VisionSecondaryRequest {
 /// before a remote request without duplicating route/audit/terminal rules.
 pub(crate) struct PreparedVisionSecondaryRequest {
     analysis: VisionAnalysisInput,
-    audit: VisionEventStamp,
-    terminal: VisionEventStamp,
     primary_profile: crate::domain::context::ModelProfile,
     primary_capability_hash: String,
 }
@@ -65,13 +61,12 @@ pub(crate) struct PreparedVisionSecondaryRequest {
 pub(crate) enum PreparedVisionSecondaryTerminal {
     Observation {
         observation: Box<VisionObservation>,
-        terminal: VisionEventStamp,
         primary_profile: crate::domain::context::ModelProfile,
         primary_capability_hash: String,
     },
     Failure {
         failure: Box<VisionAnalysisFailure>,
-        terminal: VisionEventStamp,
+        request_limit: Option<usize>,
     },
 }
 
@@ -149,10 +144,12 @@ where
         )?)
     }
 
-    /// Commits a new Secondary route, then exactly one RequestAudit and one
-    /// Observation/Failure terminal. Each targeted re-analysis uses a new
-    /// request value, so old observations are never overwritten.
-    pub async fn analyze_image<VisionProvider, S>(
+    /// Commits a new Secondary route, then one RequestAudit per physical
+    /// attempt and one Observation/Failure terminal. Each targeted re-analysis
+    /// uses a new request value, so old observations are never overwritten.
+    // Separate caller-owned audit and terminal stamps preserve real event time.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn analyze_image<VisionProvider, S, AuditStamp, TerminalStamp>(
         &self,
         provider: &VisionProvider,
         request: VisionSecondaryRequest,
@@ -160,28 +157,27 @@ where
         cancellation: AgentCancellation,
         projection: &mut SessionProjection,
         sink: &mut S,
+        mut fresh_audit_stamp: AuditStamp,
+        terminal_stamp: TerminalStamp,
     ) -> Result<VisionSessionOutcome, VisionSessionError>
     where
         VisionProvider: ModelProvider + ?Sized,
         S: EventSink<serde_json::Value>,
         S::Error: std::fmt::Debug,
+        AuditStamp: FnMut() -> VisionEventStamp,
+        TerminalStamp: FnOnce() -> VisionEventStamp,
     {
         let prepared = self.prepare_secondary(request, projection, sink)?;
         let audit_service = RequestAuditService::new(self.blobs, self.binding.clone());
         let terminal = self
-            .analyze_prepared(
-                provider,
-                prepared,
-                audit_context,
-                cancellation,
-                |attempt, stamp| {
-                    audit_service
-                        .record(attempt, stamp.event_id, stamp.occurred_at, projection, sink)
-                        .map_err(request_audit_message)
-                },
-            )
+            .analyze_prepared(provider, prepared, audit_context, cancellation, |attempt| {
+                let stamp = fresh_audit_stamp();
+                audit_service
+                    .record(attempt, stamp.event_id, stamp.occurred_at, projection, sink)
+                    .map_err(request_audit_message)
+            })
             .await?;
-        self.commit_secondary_terminal(terminal, projection, sink)
+        self.commit_secondary_terminal(terminal, terminal_stamp(), projection, sink)
     }
 
     /// Validates and commits only the Secondary route. The returned typed
@@ -205,8 +201,6 @@ where
 
         Ok(PreparedVisionSecondaryRequest {
             analysis: request.analysis,
-            audit: request.audit,
-            terminal: request.terminal,
             primary_profile,
             primary_capability_hash,
         })
@@ -225,34 +219,32 @@ where
     ) -> Result<PreparedVisionSecondaryTerminal, VisionSessionError>
     where
         VisionProvider: ModelProvider + ?Sized,
-        Record: FnMut(
-            RequestAuditAttempt,
-            VisionEventStamp,
-        ) -> Result<RequestAuditManifest, RecordError>,
+        Record: FnMut(RequestAuditAttempt) -> Result<RequestAuditManifest, RecordError>,
         RecordError: std::fmt::Display,
     {
-        let mut audit_stamp = Some(prepared.audit);
         let analysis = VisionAnalysisService::new(provider, self.blobs)
             .with_request_budget(self.request_budget.clone())
             .analyze_image(prepared.analysis, audit_context, cancellation, |attempt| {
-                let stamp = audit_stamp.take().ok_or_else(|| {
-                    "Vision analysis attempted more than one RequestAudit commit".to_owned()
-                })?;
-                record_audit(attempt, stamp).map_err(|error| error.to_string())
+                record_audit(attempt).map_err(|error| error.to_string())
             })
             .await;
 
         match analysis {
             Ok(output) => Ok(PreparedVisionSecondaryTerminal::Observation {
                 observation: Box::new(output.observation),
-                terminal: prepared.terminal,
                 primary_profile: prepared.primary_profile,
                 primary_capability_hash: prepared.primary_capability_hash,
             }),
             Err(VisionAnalysisError::AttemptFailed { failure }) => {
                 Ok(PreparedVisionSecondaryTerminal::Failure {
                     failure,
-                    terminal: prepared.terminal,
+                    request_limit: None,
+                })
+            }
+            Err(VisionAnalysisError::RequestLimitAfterAttempt { limit, failure }) => {
+                Ok(PreparedVisionSecondaryTerminal::Failure {
+                    failure,
+                    request_limit: Some(limit),
                 })
             }
             Err(error) => Err(VisionSessionError::Analysis(error)),
@@ -264,6 +256,7 @@ where
     pub(crate) fn commit_secondary_terminal<S>(
         &self,
         terminal: PreparedVisionSecondaryTerminal,
+        terminal_stamp: VisionEventStamp,
         projection: &mut SessionProjection,
         sink: &mut S,
     ) -> Result<VisionSessionOutcome, VisionSessionError>
@@ -275,17 +268,16 @@ where
         match terminal {
             PreparedVisionSecondaryTerminal::Observation {
                 observation,
-                terminal,
                 primary_profile,
                 primary_capability_hash,
             } => {
                 let observation = *observation;
-                let observation_event_id = terminal.event_id.clone();
+                let observation_event_id = terminal_stamp.event_id.clone();
                 self.append_terminal(
                     SessionEvent::VisionObservationRecorded {
                         observation: observation.clone(),
                     },
-                    terminal,
+                    terminal_stamp,
                     projection,
                     sink,
                 )?;
@@ -300,15 +292,23 @@ where
                     primary_context,
                 })
             }
-            PreparedVisionSecondaryTerminal::Failure { failure, terminal } => {
+            PreparedVisionSecondaryTerminal::Failure {
+                failure,
+                request_limit,
+            } => {
                 self.append_terminal(
                     SessionEvent::VisionAnalysisFailed {
                         failure: (*failure).clone(),
                     },
-                    terminal,
+                    terminal_stamp,
                     projection,
                     sink,
                 )?;
+                if let Some(limit) = request_limit {
+                    return Err(VisionSessionError::Analysis(
+                        VisionAnalysisError::RequestLimit { limit },
+                    ));
+                }
                 Err(VisionSessionError::AnalysisFailed { failure })
             }
         }
@@ -444,13 +444,6 @@ fn validate_secondary_request(request: &VisionSecondaryRequest) -> Result<(), Vi
             message: "Vision analysis provider identity does not match the selected route"
                 .to_owned(),
         });
-    }
-    let route_id = &request.route.route_event_id;
-    if route_id == &request.audit.event_id
-        || route_id == &request.terminal.event_id
-        || request.audit.event_id == request.terminal.event_id
-    {
-        return Err(VisionSessionError::EventIdentityCollision);
     }
     Ok(())
 }

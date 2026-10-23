@@ -12,7 +12,7 @@ use echidna::adapters::credentials::{
 use echidna::adapters::project_event_store::Project;
 use echidna::adapters::responses::{ResponsesHttpAdapter, ResponsesHttpConfig};
 use echidna::adapters::tools::ToolRegistry;
-use echidna::app::agent_loop::{AgentLoop, AgentTurnOutcome};
+use echidna::app::agent_loop::{AgentLoop, AgentLoopError, AgentTurnOutcome};
 use echidna::app::cancellation::AgentCancellation;
 use echidna::app::model_streaming::{
     ModelStreamCancellation, ModelStreamOutcome, ModelStreamingError, ModelStreamingService,
@@ -1496,11 +1496,7 @@ async fn codex_keepalive_is_inert_and_preserves_response_completion_and_failure(
             "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"keepalive-response\"}}\n\n",
             None,
         ),
-        (
-            "eof",
-            "",
-            Some("response stream ended before `response.completed`"),
-        ),
+        ("eof", "", Some("model response interrupted")),
         (
             "malformed",
             "data: {not-json}\n\n",
@@ -1548,6 +1544,17 @@ async fn codex_keepalive_is_inert_and_preserves_response_completion_and_failure(
             .await;
         if let Some(expected_error) = expected_error {
             let error = outcome.expect_err("heartbeat must not complete a failed response");
+            if case == "eof" {
+                assert!(matches!(
+                    &error,
+                    ModelStreamingError::Provider(ModelProviderError::ResponseInterrupted {
+                        status: 200,
+                        timeout: false,
+                        io_kind,
+                        ..
+                    }) if io_kind == "None"
+                ));
+            }
             assert!(
                 error.to_string().contains(expected_error),
                 "{case}: {error}"
@@ -1664,11 +1671,7 @@ async fn codex_metadata_annotation_does_not_complete_or_mask_later_stream_errors
     let metadata_canary = "codex-metadata-terminal-canary";
     let summary_canary = "codex-summary-terminal-canary";
     let terminals = [
-        (
-            "eof",
-            String::new(),
-            "response stream ended before `response.completed`",
-        ),
+        ("eof", String::new(), "model response interrupted"),
         (
             "malformed",
             "data: {not-json}\n\n".to_owned(),
@@ -1731,6 +1734,17 @@ async fn codex_metadata_annotation_does_not_complete_or_mask_later_stream_errors
             .await
             .expect_err("{case}: metadata must not fabricate a completed response");
         let visible_error = error.to_string();
+        if case == "eof" {
+            assert!(matches!(
+                &error,
+                ModelStreamingError::Provider(ModelProviderError::ResponseInterrupted {
+                    status: 200,
+                    timeout: false,
+                    io_kind,
+                    ..
+                }) if io_kind == "None"
+            ));
+        }
         assert!(
             visible_error.contains(expected_error),
             "{case}: {visible_error}"
@@ -2254,8 +2268,12 @@ async fn incomplete_subscription_stream_does_not_commit_opaque_references() {
     };
     assert!(matches!(
         stream.next().await,
-        Some(Err(ModelProviderError::ProtocolFailure { message }))
-            if message.contains("ended before `response.completed`")
+        Some(Err(ModelProviderError::ResponseInterrupted {
+            status: 200,
+            timeout: false,
+            io_kind,
+            ..
+        })) if io_kind == "None"
     ));
     request.await.unwrap();
     server.await.unwrap();
@@ -3266,7 +3284,7 @@ async fn nullable_reasoning_never_commits_or_executes_without_a_valid_completion
         "content":[{"type":"reasoning_text","text":"Changed in the snapshot."}]
     });
     let terminals = [
-        ("eof", String::new(), "ended before `response.completed`"),
+        ("eof", String::new(), "model response interrupted"),
         (
             "failed",
             format!(
@@ -3302,7 +3320,9 @@ async fn nullable_reasoning_never_commits_or_executes_without_a_valid_completion
 
     for (case, terminal, expected_error) in terminals {
         let body = format!("{prefix}{terminal}");
-        let (base_url, request_receiver, server) = spawn_sse_server(200, &body).await;
+        let attempts = if case == "eof" { 3 } else { 1 };
+        let (base_url, mut request_receiver, server) =
+            spawn_sse_sequence_server(vec![body; attempts]).await;
         let credentials = FakeCredentialSource::value(Some(FIXTURE_SECRET));
         let mut full_only_capabilities = capabilities();
         full_only_capabilities.incremental_input = false;
@@ -3332,10 +3352,23 @@ async fn nullable_reasoning_never_commits_or_executes_without_a_valid_completion
             error.to_string().contains(expected_error),
             "{case}: {error}"
         );
+        if case == "eof" {
+            assert!(matches!(
+                error,
+                AgentLoopError::Model(ModelStreamingError::Provider(
+                    ModelProviderError::ResponseInterrupted {
+                        status: 200,
+                        timeout: false,
+                        io_kind,
+                        ..
+                    }
+                )) if io_kind == "None"
+            ));
+        }
         assert_eq!(
             credentials.references(),
             vec![FIXTURE_CREDENTIAL_REFERENCE.to_owned()],
-            "{case}: the failed sample must not trigger an automatic retry"
+            "{case}: one prepared logical request must resolve its credential once"
         );
         assert_eq!(
             agent.history().items(),
@@ -3346,7 +3379,9 @@ async fn nullable_reasoning_never_commits_or_executes_without_a_valid_completion
             !directory.path().join("must-not-exist.txt").exists(),
             "{case}: the uncommitted ToolCall must not execute"
         );
-        request_receiver.await.unwrap();
+        for _ in 0..attempts {
+            request_receiver.recv().await.unwrap();
+        }
         server.await.unwrap();
     }
 }
@@ -3821,10 +3856,6 @@ async fn malformed_unknown_and_uncompleted_streams_are_protocol_errors() {
             "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"content\":[{\"type\":\"future_reasoning\",\"text\":\"opaque\"}]}}\n\n",
             "unsupported completed reasoning content `future_reasoning`",
         ),
-        (
-            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
-            "ended before `response.completed`",
-        ),
     ];
 
     for (body, expected_message) in cases {
@@ -3847,6 +3878,31 @@ async fn malformed_unknown_and_uncompleted_streams_are_protocol_errors() {
         let _ = request_receiver.await.unwrap();
         server.await.unwrap();
     }
+
+    let (base_url, request_receiver, server) = spawn_sse_server(
+        200,
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
+    )
+    .await;
+    let provider = adapter(base_url, FakeCredentialSource::value(Some(FIXTURE_SECRET)));
+    let error = ModelStreamingService::new(&provider)
+        .consume(
+            full(fixture_input(ModelRequestRequirements::default())),
+            ModelStreamCancellation::new(),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        ModelStreamingError::Provider(ModelProviderError::ResponseInterrupted {
+            status: 200,
+            timeout: false,
+            io_kind,
+            ..
+        }) if io_kind == "None"
+    ));
+    let _ = request_receiver.await.unwrap();
+    server.await.unwrap();
 }
 
 #[tokio::test]

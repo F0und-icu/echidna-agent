@@ -11,6 +11,7 @@ mod inspection_prompt;
 mod inspection_shared;
 mod inspection_snapshot;
 pub(crate) mod model_request_budget;
+pub(crate) mod model_retry;
 mod model_sample;
 pub mod model_streaming;
 pub(crate) mod observation;

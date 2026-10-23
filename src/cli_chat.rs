@@ -830,15 +830,6 @@ impl DurableChatSession {
             .map(|_| ())
     }
 
-    fn record_stamped_request_audit(
-        &self,
-        attempt: RequestAuditAttempt,
-        event_id: EventId,
-        occurred_at: OccurredAt,
-    ) -> Result<RequestAuditManifest, ChatError> {
-        self.record_request_audit_manifest(attempt, Some((event_id, occurred_at)))
-    }
-
     fn record_request_audit_manifest(
         &self,
         attempt: RequestAuditAttempt,

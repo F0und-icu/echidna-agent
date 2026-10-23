@@ -372,6 +372,16 @@ Domain guidance does not install analysis tools automatically.
 | `/resume` | Explicitly rebuild the model session after a recoverable stop, then enter a task. |
 | `/exit` | Leave the interactive interface. |
 
+Connection failures and transport interruptions before a complete model response receive
+at most two retries, after 500ms and 1000ms. `/stop` and Ctrl+C can cancel the wait.
+Each attempt consumes the existing request budget and records a separate request audit.
+The request content, credentials, and continuation state stay fixed; each retry generates
+the current response again from the start. Displayed fragments from an abandoned response
+are explicitly marked as discarded. Only a complete successful sample enters history or
+dispatches tools, and completed tools are never replayed. HTTP refusals, protocol errors,
+and credential errors are not retried. After exhaustion, the checkpoint is retained;
+follow the stop message to use `/resume` and enter a new task.
+
 Export a session while preserving references to its process and materials:
 
 ```sh
@@ -394,8 +404,8 @@ understand and maintain it.
 
 The current entrypoint is an interactive CLI. A TUI, a machine-facing worker interface,
 external task queues, and a standalone core SDK remain at the design stage.
-Network interruption recovery still needs work; automatic continuation after arbitrary
-stream interruptions is not guaranteed.
+Network recovery is limited to the bounded retries of incomplete model requests above;
+tool execution retains its existing outcome and recovery rules.
 
 ## Next steps
 

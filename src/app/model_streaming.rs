@@ -8,6 +8,7 @@ use thiserror::Error;
 use crate::domain::model::ModelEvent;
 use crate::ports::model::{
     ModelProvider, ModelProviderError, ModelRequest, ModelResponseCompletion, ModelStreamEvent,
+    PreparedModelRequest,
 };
 
 use super::cancellation::AgentCancellation;
@@ -80,8 +81,25 @@ impl<'provider, Provider: ModelProvider + ?Sized> ModelStreamingService<'provide
         if cancellation.is_cancelled() {
             return Ok(ModelStreamOutcome::Cancelled { events: Vec::new() });
         }
+        let prepared = self.provider.prepare(request)?;
+        self.consume_prepared_with_event_stage(prepared.as_ref(), cancellation, event_stage)
+            .await
+    }
 
-        let mut stream = self.provider.stream(request)?;
+    /// Consumes one physical attempt of a previously prepared logical request.
+    /// Preparation may retain credential and request-encoding state across
+    /// bounded App-owned retries.
+    pub(crate) async fn consume_prepared_with_event_stage(
+        &self,
+        prepared: &dyn PreparedModelRequest,
+        cancellation: ModelStreamCancellation,
+        event_stage: &mut ModelStreamingEventStage<'_>,
+    ) -> Result<ModelStreamOutcome, ModelStreamingError> {
+        if cancellation.is_cancelled() {
+            return Ok(ModelStreamOutcome::Cancelled { events: Vec::new() });
+        }
+
+        let mut stream = prepared.stream()?;
         let mut events = Vec::new();
 
         loop {

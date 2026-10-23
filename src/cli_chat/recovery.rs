@@ -26,7 +26,7 @@ pub(super) fn report_stop(error: &AgentLoopError, budget: &ModelRequestBudget) {
     eprintln!("[turn stopped] {error}");
     report_budget(budget);
     println!(
-        "Durable checkpoint retained. Use /resume to rebuild ProviderSession explicitly, then enter a new task. No automatic retry or reasoning discard."
+        "Durable checkpoint retained. Use /resume to rebuild ProviderSession explicitly, then enter a new task. No further automatic retry or reasoning discard."
     );
 }
 

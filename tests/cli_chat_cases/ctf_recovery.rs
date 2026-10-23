@@ -152,21 +152,30 @@ fn ctf_r2b_failed_provider_returns_to_prompt_without_committing_partial_output()
         let root = TemporaryDirectory::new("ctf-r2b-provider");
         let harness = TemporaryDirectory::new("ctf-r2b-harness");
         initialize_project(root.path());
-        let server = spawn_responses_server(vec![response, (200, text_response("recovered", "new-response"))]);
+        let failed_attempts = if response.0 == 200 { 2 } else { 1 };
+        let mut responses = vec![response; failed_attempts];
+        responses.push((200, text_response("recovered", "new-response")));
+        let server = spawn_responses_server(responses);
         let config = write_config(harness.path(), &server.base_url);
         limit_config(&config, Some(2), true);
         let output = f2a_wait_child(spawn_f2a_chat(root.path(), &config,
             "first input\n/resume\nsecond input\n/exit\n", &[]), "R2b provider failure");
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         assert!(String::from_utf8_lossy(&output.stderr).contains("[turn stopped]"));
-        let _ = f2a_request_body(&server.requests, "R2b failed");
+        let first = f2a_request_body(&server.requests, "R2b failed");
+        for _ in 1..failed_attempts {
+            assert_eq!(first, f2a_request_body(&server.requests, "R2b failed retry"));
+        }
         let second = f2a_request_body(&server.requests, "R2b new provider");
         assert!(second.get("previous_response_id").is_none());
         assert!(!second.to_string().contains("uncommitted fragment"));
+        assert!(server.requests.try_recv().is_err());
         f2a_join_server(server, "R2b provider");
         let state = reduced_session(&Project::discover(root.path()).unwrap(), &session_id(root.path()));
-        assert_eq!(state.request_audits().len(), 2);
+        assert_eq!(state.request_audits().len(), failed_attempts + 1);
         assert_eq!(state.execution_receipt_count(), 0);
+        assert!(!serde_json::to_string(state.history().items()).unwrap().contains("uncommitted fragment"));
+        assert_audits_reconstruct(root.path(), &state);
     }
 }
 

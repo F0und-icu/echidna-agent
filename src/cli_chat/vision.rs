@@ -215,18 +215,6 @@ pub(super) async fn prepare_primary_context(
                             .to_owned(),
                     })?;
             let vision_generation = sequence.get();
-            let audit_event_id = event_id(
-                session.project.project_id(),
-                &session.session_id,
-                sequence.get() + 1,
-                "vision-request-audit",
-            );
-            let observation_event_id = event_id(
-                session.project.project_id(),
-                &session.session_id,
-                sequence.get() + 2,
-                "vision-observation",
-            );
             let prepared = service
                 .prepare_secondary(
                     VisionSecondaryRequest {
@@ -257,8 +245,6 @@ pub(super) async fn prepare_primary_context(
                                 generation: vision_generation,
                             },
                         },
-                        audit: VisionEventStamp::new(audit_event_id, occurred_at()),
-                        terminal: VisionEventStamp::new(observation_event_id, occurred_at()),
                     },
                     &mut projection,
                     &mut store,
@@ -273,13 +259,7 @@ pub(super) async fn prepare_primary_context(
                     prepared,
                     &RequestAuditRunContext::new(binding, adapter_version.clone()),
                     cancellation,
-                    |attempt, stamp| {
-                        session.record_stamped_request_audit(
-                            attempt,
-                            stamp.event_id,
-                            stamp.occurred_at,
-                        )
-                    },
+                    |attempt| session.record_request_audit_manifest(attempt, None),
                 )
                 .await
                 .map_err(vision_error)?;
@@ -289,8 +269,18 @@ pub(super) async fn prepare_primary_context(
             let stream_id = ProjectEventStream::Session(session.session_id.clone()).stream_id();
             let mut projection =
                 SessionProjection::replay(EventSource::read_events(&store, &stream_id)?)?;
+            let sequence = store.next_sequence()?;
+            let terminal_stamp = VisionEventStamp::new(
+                event_id(
+                    session.project.project_id(),
+                    &session.session_id,
+                    sequence.get(),
+                    "vision-observation",
+                ),
+                occurred_at(),
+            );
             let outcome = service
-                .commit_secondary_terminal(terminal, &mut projection, &mut store)
+                .commit_secondary_terminal(terminal, terminal_stamp, &mut projection, &mut store)
                 .map_err(vision_error)?;
             Ok(outcome.primary_context)
         }
@@ -320,6 +310,9 @@ fn vision_error(error: crate::app::vision::VisionSessionError) -> ChatError {
         Err(error) => error,
     };
     match error {
+        crate::app::vision::VisionSessionError::Analysis(
+            crate::app::vision::VisionAnalysisError::Cancelled,
+        ) => ChatError::VisionCancelled,
         crate::app::vision::VisionSessionError::AnalysisFailed { failure }
             if failure.error_code == "cancelled" =>
         {

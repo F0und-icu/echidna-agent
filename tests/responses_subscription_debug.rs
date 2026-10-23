@@ -408,8 +408,8 @@ mod release_regression {
             let stderr = String::from_utf8(output.stderr).unwrap();
             assert!(output.status.success(), "{case}: {stderr}");
             for field in [
-                "response body read failed",
-                "HTTP 200",
+                "model response interrupted",
+                "status=200",
                 "elapsed_ms=",
                 expected,
             ] {
@@ -479,7 +479,7 @@ mod release_regression {
             let error = stream.next().await.unwrap().unwrap_err();
             assert!(matches!(
                 error,
-                crate::ports::model::ModelProviderError::TransportFailure { .. }
+                crate::ports::model::ModelProviderError::ResponseInterrupted { .. }
             ));
             eprintln!("{error}");
             assert!(stream.next().await.is_none());

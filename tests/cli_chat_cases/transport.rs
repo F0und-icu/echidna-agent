@@ -21,6 +21,8 @@ fn truncated_http_body_requires_explicit_resume_without_replaying_completed_tool
     let responses = vec![
         (200, completed_tool.clone(), completed_tool.len()),
         (200, interrupted.clone(), interrupted.len() + 1),
+        (200, interrupted.clone(), interrupted.len() + 1),
+        (200, interrupted.clone(), interrupted.len() + 1),
         (200, recovered.clone(), recovered.len()),
     ];
     let server = spawn_responses_server_with_lengths(responses);
@@ -37,10 +39,12 @@ fn truncated_http_body_requires_explicit_resume_without_replaying_completed_tool
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "{stdout}\n{stderr}");
-    assert!(stderr.contains("[turn stopped] model transport failed: response body read failed before `response.completed`"), "{stderr}");
+    assert!(
+        stderr.contains("[turn stopped] model response interrupted: status=200"),
+        "{stderr}"
+    );
     assert!(!stderr.contains("invalid SSE stream: Transport error:"));
     for expected in [
-        "HTTP 200",
         "elapsed_ms=",
         "timeout=false",
         "io_kind=Some(UnexpectedEof)",
@@ -49,13 +53,29 @@ fn truncated_http_body_requires_explicit_resume_without_replaying_completed_tool
     }
     assert!(stdout.contains("Task input not accepted or saved"));
     assert!(stdout.contains("explicit recovery completed"));
-    let _ = f2a_request_body(&server.requests, "completed tool sample");
-    let _ = f2a_request_body(&server.requests, "interrupted followup");
+    let completed = f2a_request_body(&server.requests, "completed tool sample");
+    let interrupted_first = f2a_request_body(&server.requests, "interrupted followup first");
+    let interrupted_second = f2a_request_body(&server.requests, "interrupted followup second");
+    let interrupted_third = f2a_request_body(&server.requests, "interrupted followup third");
     let resumed = f2a_request_body(&server.requests, "explicit recovery");
+    assert!(completed.to_string().contains("original task"));
+    assert_eq!(interrupted_first, interrupted_second);
+    assert_eq!(interrupted_second, interrupted_third);
+    assert_eq!(
+        interrupted_first["previous_response_id"],
+        "completed-response"
+    );
     assert!(resumed.get("previous_response_id").is_none());
-    assert!(resumed.to_string().contains("durable tool result"));
-    for excluded in ["uncommitted fragment", "uncommitted-call", "blocked input"] {
-        assert!(!resumed.to_string().contains(excluded));
+    for request in [
+        &interrupted_first,
+        &interrupted_second,
+        &interrupted_third,
+        &resumed,
+    ] {
+        assert!(request.to_string().contains("durable tool result"));
+        for excluded in ["uncommitted fragment", "uncommitted-call", "blocked input"] {
+            assert!(!request.to_string().contains(excluded));
+        }
     }
     assert!(server.requests.try_recv().is_err());
     f2a_join_server(server, "body transport recovery");
@@ -64,7 +84,7 @@ fn truncated_http_body_requires_explicit_resume_without_replaying_completed_tool
         &Project::discover(root.path()).unwrap(),
         &session_id(root.path()),
     );
-    assert_eq!(state.request_audits().len(), 3);
+    assert_eq!(state.request_audits().len(), 5);
     assert_eq!(state.execution_receipt_count(), 1);
     assert_eq!(state.history().ensure_all_tool_calls_paired(), Ok(()));
     assert_eq!(
