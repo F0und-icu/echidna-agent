@@ -17,7 +17,7 @@ where
 {
     let mut next_state = state.clone();
     let outcome = reducer
-        .apply(&mut next_state, event.clone())
+        .apply_in_place(&mut next_state, event.clone())
         .map_err(AppendAfterDurableError::Session)?;
     if outcome == ApplyOutcome::DuplicateIgnored {
         return Ok(outcome);
@@ -50,6 +50,23 @@ impl SessionProjection {
 
     pub fn state(&self) -> &SessionState {
         &self.state
+    }
+
+    /// Incorporates an already durable, strictly ordered suffix through the
+    /// same transition owner. Any invalid suffix leaves this projection intact.
+    pub(crate) fn ingest_durable(
+        &mut self,
+        events: Vec<EventEnvelope<serde_json::Value>>,
+    ) -> Result<(), SessionError> {
+        if events.is_empty() {
+            return Ok(());
+        }
+        let mut next = self.state.clone();
+        for event in events {
+            self.reducer.apply_in_place(&mut next, event)?;
+        }
+        self.state = next;
+        Ok(())
     }
 
     pub(crate) fn next_event_sequence(

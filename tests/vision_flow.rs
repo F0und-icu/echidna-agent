@@ -797,6 +797,7 @@ async fn secondary_retry_keeps_one_route_and_binds_the_observation_to_the_final_
             vec![Err(ModelProviderError::ConnectionFailure {
                 timeout: false,
                 io_kind: "Some(ConnectionReset)".to_owned(),
+                message: "fixture connection reset".to_owned(),
             })],
             completed(
                 r#"{"schema_version":2,"summary":"Recovered Vision response.","extracted_text":null,"regions":[],"task_observations":[],"uncertainty":["transport was interrupted"]}"#,

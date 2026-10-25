@@ -1,4 +1,7 @@
 #[allow(dead_code)]
+#[path = "../src/model_catalog.rs"]
+mod model_catalog;
+#[allow(dead_code)]
 #[path = "../src/adapters/subscription_auth/mod.rs"]
 mod subscription_auth;
 mod support;

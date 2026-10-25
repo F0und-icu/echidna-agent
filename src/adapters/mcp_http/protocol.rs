@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -301,7 +302,11 @@ impl McpClient {
                     .and_then(Value::as_str)
                     .unwrap_or_default();
                 if method == "notifications/message" || method == "notifications/progress" {
-                    eprintln!("[MCP transport notification: {method}]");
+                    writeln!(
+                        crate::terminal_console::stderr(),
+                        "[MCP transport notification: {method}]"
+                    )
+                    .expect("MCP stderr failed");
                     continue;
                 }
                 return Err(McpError::Protocol {
@@ -331,7 +336,11 @@ impl McpClient {
         let body = if method == "ping" {
             json!({"jsonrpc": "2.0", "id": id, "result": {}})
         } else {
-            eprintln!("[MCP transport unsupported server request: {method}]");
+            writeln!(
+                crate::terminal_console::stderr(),
+                "[MCP transport unsupported server request: {method}]"
+            )
+            .expect("MCP stderr failed");
             json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": "Method not found"}})
         };
         let response = self.post(body, "response", None).await?;

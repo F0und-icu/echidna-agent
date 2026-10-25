@@ -205,7 +205,7 @@ fn generic_auto_compaction_keeps_scoped_memory_persona_rsi_and_one_mcp_catalog()
         assert_eq!(
             events
                 .iter()
-                .filter(|event| event["event_type"] == "tool.execution_receipt_recorded")
+                .filter(|event| event["event_type"] == "tool.execution_outcome_recorded")
                 .count(),
             1,
             "only the actual local memory operation ran"
@@ -410,7 +410,7 @@ fn automatic_compaction_preserves_explicit_recovery_for_failed_and_budget_stoppe
         assert_eq!(
             session_events(root.path(), &session_id(root.path()))
                 .iter()
-                .filter(|event| event["event_type"] == "tool.execution_receipt_recorded")
+                .filter(|event| event["event_type"] == "tool.execution_outcome_recorded")
                 .count(),
             usize::from(budget_stop)
         );

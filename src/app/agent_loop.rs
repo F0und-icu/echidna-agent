@@ -828,7 +828,15 @@ where
         let mut corrections_used = 0;
         let mut correction_feedback = Vec::new();
         let mut turn_has_committed_sample = false;
-        for request_index in 0..request_budget.limit() {
+        let mut next_request_index = 0;
+        loop {
+            let request_index = next_request_index;
+            if let Some(limit) = request_budget.limit()
+                && request_index >= limit
+            {
+                return Err(AgentLoopError::ModelRequestLimit { limit });
+            }
+            next_request_index += 1;
             if cancellation.is_cancelled() {
                 return Ok(AgentTurnOutcome::Cancelled {
                     model_requests: request_budget.counts().primary,
@@ -1266,10 +1274,6 @@ where
                 });
             }
         }
-
-        Err(AgentLoopError::ModelRequestLimit {
-            limit: request_budget.limit(),
-        })
     }
 
     // Keep the existing immutable audit inputs explicit at this fixed stage.

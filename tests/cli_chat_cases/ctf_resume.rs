@@ -215,6 +215,128 @@ fn ctf_r1_repeated_full_resume_repairs_wire_without_fabricating_durable_results(
 }
 
 #[test]
+fn resume_uses_atomic_recorded_result_without_replaying_or_inventing_history() {
+    for complete_outcome in [true, false] {
+        let root = TemporaryDirectory::new("recorded-outcome-resume");
+        let harness = TemporaryDirectory::new("recorded-outcome-harness");
+        initialize_project(root.path());
+        let project = Project::discover(root.path()).unwrap();
+        let id = StreamId::new("known-outcome");
+        let stream = ProjectEventStream::Session(id.clone()).stream_id();
+        let call = ToolCall::new(
+            ToolCallId::new("known-call"),
+            ToolName::new("read_file"),
+            json!({"path":"must-not-run.txt"}),
+        );
+        let receipt = serde_json::from_value(json!({
+            "execution_id":"execution:known-call", "plan_fingerprint":"actual-plan",
+            "status":"succeeded", "exit_reason":null, "output_artifact_ids":[], "environment_change":null
+        })).unwrap();
+        let result = ToolResult {
+            call_id: call.call_id.clone(),
+            tool_name: call.name.clone(),
+            status: ToolResultStatus::Succeeded,
+            output: json!({"text":"OBSERVED_VALUE"}),
+        };
+        let events = vec![
+            SessionEvent::Started {
+                primary_provider_session: ProviderSessionRef {
+                    id: ProviderSessionId::new("old-known-primary"),
+                    role: ProviderSessionRole::Primary,
+                    generation: 1,
+                },
+            },
+            SessionEvent::HistoryItemRecorded {
+                item: ContentItem::user_text("original task"),
+            },
+            SessionEvent::HistoryItemRecorded {
+                item: ContentItem::ToolCall { call },
+            },
+            if complete_outcome {
+                SessionEvent::ExecutionOutcomeRecorded { receipt, result }
+            } else {
+                SessionEvent::ExecutionReceiptRecorded { receipt }
+            },
+        ];
+        {
+            let mut writer = project.open_writer().unwrap();
+            let mut store = writer.open_session(id.clone(), None).unwrap();
+            for (index, event) in events.into_iter().enumerate() {
+                let event = event
+                    .into_envelope(
+                        EventId::new(format!("known-outcome-{index}")),
+                        stream.clone(),
+                        store.next_sequence().unwrap(),
+                        OccurredAt::new("2026-10-25T00:00:00Z"),
+                    )
+                    .unwrap();
+                EventSink::append_event(&mut store, &event).unwrap();
+            }
+        }
+        let path = root
+            .path()
+            .join(".echidna/sessions/known-outcome/events.jsonl");
+        let prefix = fs::read(&path).unwrap();
+        if complete_outcome {
+            let server = spawn_responses_server(vec![(
+                200,
+                text_response("reported known value", "known-resume"),
+            )]);
+            let config = write_config(harness.path(), &server.base_url);
+            let output = f2a_wait_child(
+                spawn_f2a_chat(
+                    root.path(),
+                    &config,
+                    "report previous result\n/exit\n",
+                    &["--session", id.as_str()],
+                ),
+                "atomic outcome Resume",
+            );
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let request = f2a_request_body(&server.requests, "known durable result");
+            let outputs = request["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|item| item["type"] == "function_call_output")
+                .collect::<Vec<_>>();
+            assert_eq!(outputs.len(), 1);
+            assert_eq!(outputs[0]["call_id"], "known-call");
+            assert_eq!(
+                serde_json::from_str::<Value>(outputs[0]["output"].as_str().unwrap()).unwrap(),
+                json!({"status":"succeeded","output":{"text":"OBSERVED_VALUE"}})
+            );
+            f2a_join_server(server, "atomic outcome Resume");
+            assert!(fs::read(&path).unwrap().starts_with(&prefix));
+            let state = reduced_session(&project, id.as_str());
+            assert_eq!(state.execution_receipt_count(), 1);
+            assert!(
+                !state
+                    .history()
+                    .items()
+                    .iter()
+                    .any(|item| matches!(item, ContentItem::ToolResult { .. })),
+                "normalization must not append invented History facts"
+            );
+            assert_audits_reconstruct(root.path(), &state);
+        } else {
+            let config = write_config(harness.path(), "http://127.0.0.1:1");
+            let output = f2a_wait_child(
+                spawn_f2a_chat(root.path(), &config, "/exit\n", &["--session", id.as_str()]),
+                "bare Receipt rejection",
+            );
+            assert!(!output.status.success());
+            assert!(String::from_utf8_lossy(&output.stderr).contains("durable ExecutionReceipt"));
+            assert_eq!(fs::read(&path).unwrap(), prefix);
+        }
+    }
+}
+
+#[test]
 fn ctf_r1_late_real_result_is_rejected_before_provider_request_or_history_rewrite() {
     let root = TemporaryDirectory::new("ctf-r1-late-result");
     let harness = TemporaryDirectory::new("ctf-r1-late-harness");

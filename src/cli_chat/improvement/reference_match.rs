@@ -176,7 +176,7 @@ impl ScratchPair {
 impl Drop for ScratchPair {
     fn drop(&mut self) {
         if let Err(error) = fs::remove_dir_all(&self.root) {
-            eprintln!("[RSI2 scratch retained] {}: {error}", self.root.display());
+            console_eprintln!("[RSI2 scratch retained] {}: {error}", self.root.display());
         }
     }
 }

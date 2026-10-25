@@ -54,8 +54,20 @@ pub(crate) fn scan_stream_bytes(
     expected_stream_id: &StreamId,
     registry: &EventUpcasterRegistry<Value>,
 ) -> Result<StreamScan, ProjectEventStoreError> {
+    scan_stream_suffix_bytes(bytes, path, expected_stream_id, registry, 0, None)
+}
+
+/// A verified prefix supplies the preceding sequence; every suffix record
+/// follows the ordinary scanner's exact envelope/upcast/corruption rules.
+pub(super) fn scan_stream_suffix_bytes(
+    bytes: &[u8],
+    path: &Path,
+    expected_stream_id: &StreamId,
+    registry: &EventUpcasterRegistry<Value>,
+    byte_offset: usize,
+    mut last_sequence: Option<EventSequence>,
+) -> Result<StreamScan, ProjectEventStoreError> {
     let mut events = Vec::new();
-    let mut last_sequence = None;
     let mut record_start = 0_usize;
 
     for (index, byte) in bytes.iter().enumerate() {
@@ -73,7 +85,7 @@ pub(crate) fn scan_stream_bytes(
             Err(RecordProblem::Lexical(_reason)) if final_record => {
                 return Ok(StreamScan::Trailing {
                     last_sequence,
-                    offset: record_start as u64,
+                    offset: (byte_offset + record_start) as u64,
                     valid_prefix: bytes[..record_start].to_vec(),
                     raw_tail: bytes[record_start..].to_vec(),
                 });
@@ -81,14 +93,14 @@ pub(crate) fn scan_stream_bytes(
             Err(RecordProblem::Lexical(reason)) => {
                 return Err(ProjectEventStoreError::NonTailCorruption {
                     path: path.to_path_buf(),
-                    offset: record_start as u64,
+                    offset: (byte_offset + record_start) as u64,
                     reason,
                 });
             }
             Err(RecordProblem::Semantic(reason)) => {
                 return Err(ProjectEventStoreError::InvalidEventRecord {
                     path: path.to_path_buf(),
-                    offset: record_start as u64,
+                    offset: (byte_offset + record_start) as u64,
                     reason,
                 });
             }
@@ -101,13 +113,13 @@ pub(crate) fn scan_stream_bytes(
         return match decode_record(record, expected_stream_id, last_sequence, registry) {
             Ok(_) | Err(RecordProblem::Lexical(_)) => Ok(StreamScan::Trailing {
                 last_sequence,
-                offset: record_start as u64,
+                offset: (byte_offset + record_start) as u64,
                 valid_prefix: bytes[..record_start].to_vec(),
                 raw_tail: record.to_vec(),
             }),
             Err(problem) => Err(ProjectEventStoreError::InvalidEventRecord {
                 path: path.to_path_buf(),
-                offset: record_start as u64,
+                offset: (byte_offset + record_start) as u64,
                 reason: problem.into_reason(),
             }),
         };

@@ -7,6 +7,7 @@ mod protocol;
 mod stdio;
 
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 #[cfg(unix)]
@@ -318,7 +319,11 @@ async fn discover_server(
                 match headers::bindings(&input_schema, remote_name) {
                     Ok(bindings) => bindings,
                     Err(McpError::InvalidAnnotatedTool { message, .. }) => {
-                        eprintln!("[MCP tool excluded: {remote_name}: {message}]");
+                        writeln!(
+                            crate::terminal_console::stderr(),
+                            "[MCP tool excluded: {remote_name}: {message}]"
+                        )
+                        .expect("MCP stderr failed");
                         continue;
                     }
                     Err(error) => return Err(error),

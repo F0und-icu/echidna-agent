@@ -122,6 +122,14 @@ expected_hash:null，更新时使用 memory_read 返回的当前哈希。
 memory_read、memory_write、inspect_project 的 v2 契约由运行时填写本次操作
 时间；调用参数不再接受 occurred_at/observed_at。历史会话与来源时间保持原样。
 
+在 chat 输入 `/memory` 查看实际保存目录、作用域、`core.md` 是否存在及记忆工具
+配置。项目记忆位于 `.echidna/memory/`，Agent 记忆位于
+`.echidna/memory/agents/<agent-id>/`；旧项目继续使用原来的 `.cyber-agent/`。
+首次成功的 `memory_write` 才创建 Markdown，普通回答或压缩不会写入记忆。
+启用记忆的 Agent 会收到写入时机和读写方法的内置指引：保留有复用价值的经验或
+明确要求记住的内容；`core.md` 会自动进入后续上下文，详细笔记需按需读取。
+没有后台模型提取任务，也不保证每轮都会产生记忆。
+
 会话内使用 `/agent` 查看身份和定义摘要；`/agent reload [目录或 agent.toml]`
 显式重载当前身份的指令，保留 History 并重建 Provider 会话。`/agent use <路径>`
 打开新的 Session，旧会话仍可恢复。切换要求没有未配对调用、运行中或停止中的
@@ -394,6 +402,9 @@ echidna --config /absolute/path/codex.toml auth refresh --provider codex
 刷新成功后再显式执行选择命令；若刷新被永久拒绝，需要重新登录。
 `status` 只报告本地记录，不保证服务端仍接受授权。SIWC 和 API Key 保持原有流程。
 
+`auth models` / `auth select-model` 也支持 API Key 或 `credential_ref` 的标准
+Responses 服务（包括 DeepSeek）：从所选 Provider 的 `base_url` 请求 `/models`，
+将下面的配置路径和 `--provider` 换成自己的值即可。登录、状态、刷新、退出仍仅用于订阅。
 可用交互选择器查看目录、选择模型与推理强度，并保存到当前配置：
 
 ```sh
@@ -408,6 +419,8 @@ echidna --config /absolute/path/codex.toml auth select-model --provider codex \
 ```
 
 执行强度支持目录声明的有效字符串，包括未来新增的值；交互选择以当前模型目录为准。
+API Key 目录未声明强度时，可明确输入 `--reasoning-effort` 或在选择器中输入强度，
+程序会提示支持情况未知，服务端仍可能拒绝该值；已声明强度时只接受目录内的值。
 直接配置的 `reasoning_effort` 接受 1–64 个 ASCII 字母、数字、下划线或连字符。
 省略强度时使用服务端默认行为；显式 `none` 是不同的请求值，不等于省略。
 保存会为该 Provider 复制独立能力映射，保留其他模型、注释和凭据。
@@ -416,6 +429,9 @@ echidna --config /absolute/path/codex.toml auth select-model --provider codex \
 输入能力及摘要参数支持声明。缺失字段或未知窗口（包括 `null`）保留当前配置；`max_context_window` 仅展示为
 元数据，不会代替默认窗口。导入仍需通过现有配置和输出预算校验，失败不覆盖原文件。
 不加此选项保持原有选择行为；工具等其余能力仍须显式核实，不按模型名推断。
+仅含模型 ID 的 API Key 目录保留原能力映射，使用 `--apply-capabilities` 会明确失败而不保存。
+API Key 目录可导入实际声明的 `context_window`、`input_modalities`；服务端的
+`max_output_tokens` 和其他协议能力不会变成当前配置的输出预算或 Responses 能力。
 `doctor` 可离线查看生效的强度，下一次启动 `chat` 使用保存的设置。
 该兼容链路依据固定版本 Codex 源码实现，实际账号和服务端支持须通过实测确认。
 失败不会切换模型、付费 API 或自动重跑工具。
@@ -463,7 +479,9 @@ generation = 1
 
 能力声明需要匹配实际服务；设置 `image_input = true` 不会让纯文本模型具备图像能力。
 `context_window` 分别填写各模型的真实窗口；`[runtime].model_request_limit_per_turn`
-默认为 `32`，是每轮主模型与视觉模型共享的请求次数上限。
+默认为 `32`，是每轮主模型与视觉模型共享的请求次数上限。显式设为 `0` 可取消此上限；
+`1..=10000` 保持有限额度。不限请求仍记录真实尝试次数，且不改变上下文容量、取消、
+超时和单次请求的重试上限。
 
 在 Chat 中用 `/image PATH` 选择本地图片。可重复输入该命令；图片按输入顺序排队，下一条普通任务会将整队图片作为同一 Turn 的初始上下文。`primary_direct` 会将每张图片交给主模型，`secondary_tool` 会为每张图片单独保留观察后再请求主模型。后续图片的准备失败、取消或耗尽本轮请求预算时，已保留的图片事实不会丢失，但该任务和队列中的图片不会提交给主模型。队列只存在于当前 Chat 进程；重新启动或 `/resume` 不会自动重放图片处理。
 
@@ -538,6 +556,19 @@ auto_compact = true
 终端回复以 **`Echidna>`** 开头。`NO_COLOR=1` 关闭主题颜色；
 管道输出不会增加品牌欢迎或主题 ANSI。开发构建额外支持 `chat --debug`，
 用于查看请求内容；标准 release 不包含此选项。
+
+所有构建均支持显式保存失败请求的脱敏诊断快照：
+
+```sh
+"$ECHIDNA_BIN" --config "$HOME/.config/echidna/provider.toml" chat --debug-failures ../debug-failures
+```
+
+目录相对于 chat 的实际工作目录解析；建议放在项目目录外。默认不启用，成功或取消的
+请求不保存；每次失败的物理请求（包括后续重试成功前的失败）独立保存一个文件。
+Unix上新目录权限为0700，文件为0600且不覆盖；保存成功或失败均在终端报告，原请求错误和
+重试行为保持不变。快照保留提示词、输入和工具定义，移除认证字段、当前凭据/账户值、
+opaque内容、图片data及URL认证/查询/片段。它是脱敏诊断，不能视为原始网络包或自动
+重放材料；业务文本中的其他未知秘密仍可能保留，请自行决定是否分享。
 
 ## 设计取向
 

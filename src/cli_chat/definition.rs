@@ -6,14 +6,14 @@ use crate::adapters::agent_definition::{
     bind_definition, builtin_definition, builtin_research_binding, load_definition_binding,
 };
 use crate::adapters::mcp_http::McpCatalogTool;
-use crate::adapters::project_event_store::{Project, read_existing_session_events};
+use crate::adapters::project_event_store::Project;
 use crate::adapters::tools::ToolRegistry;
 use crate::app::agent_loop::AgentLoop;
 use crate::domain::agent_definition::{AgentDefinitionBinding, DefinitionSourceLocator};
 use crate::domain::context::{ProviderSession, ProviderSessionId, ProviderSessionRole};
 use crate::domain::events::StreamId;
 use crate::domain::research_control::PromptComposition;
-use crate::domain::session::{SessionReducer, SessionState};
+use crate::domain::session::SessionState;
 use crate::ports::tool::ToolExecutor;
 use crate::provider_composition::ProviderComposition;
 
@@ -32,7 +32,13 @@ pub(super) fn initial_binding(
     requested: Option<&Path>,
     composition: &ProviderComposition,
     discovered_mcp: &[McpCatalogTool],
-) -> Result<AgentDefinitionBinding, ChatError> {
+) -> Result<
+    (
+        AgentDefinitionBinding,
+        Option<super::persistence::CachedSessionProjection>,
+    ),
+    ChatError,
+> {
     let tools = ToolRegistry::for_project_with_mcp(project.root(), discovered_mcp)?
         .with_project(project)
         .with_context_window(
@@ -43,14 +49,22 @@ pub(super) fn initial_binding(
                 .context_window,
         );
     if resume {
-        let events = read_existing_session_events(project, session).map_err(error)?;
-        let state = SessionReducer.reduce(events)?;
-        if let Some(binding) = state.agent_definition_binding() {
+        if !project
+            .existing_session_ids()?
+            .iter()
+            .any(|id| id == session)
+        {
+            return Err(ChatError::SessionNotFound {
+                session_id: session.as_str().to_owned(),
+            });
+        }
+        let projection = super::persistence::CachedSessionProjection::load(project, session)?;
+        if let Some(binding) = projection.state().agent_definition_binding() {
             binding
                 .definition()
                 .validate_for_catalog(&tools.catalog())
                 .map_err(error)?;
-            return Ok(binding.clone());
+            return Ok((binding.clone(), Some(projection)));
         }
         let sources = composition.prompt_sources();
         return builtin_research_binding(
@@ -58,11 +72,13 @@ pub(super) fn initial_binding(
             sources.project_file.as_deref(),
             &tools.catalog(),
         )
+        .map(|binding| (binding, Some(projection)))
         .map_err(error);
     }
     let source = crate::cli_agent::select_binding(requested, composition, &tools).map_err(error)?;
     crate::adapters::agent_evolution::EvolutionStore::new(project, &source)
         .select(source)
+        .map(|binding| (binding, None))
         .map_err(Into::into)
 }
 

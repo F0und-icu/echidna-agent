@@ -188,6 +188,8 @@ fn bound_prompt_reports_agent_identity_and_logical_memory_scope() {
     assert!(generic_instructions.contains(
         "Logical Memory path `core.md` is in the Agent Memory namespace for Agent ID `generic-visible`."
     ));
+    assert!(generic_instructions.contains("Use memory_read before memory_write"));
+    assert!(generic_instructions.contains("Those detail files"));
 
     let research = root.path().join("research");
     let exported = command(
@@ -234,6 +236,7 @@ fn bound_prompt_reports_agent_identity_and_logical_memory_scope() {
         memoryless_instructions
             .contains("Logical Memory path `core.md` is unavailable because Memory is disabled.")
     );
+    assert!(!memoryless_instructions.contains("Use memory_read before memory_write"));
 
     for instructions in [
         generic_instructions,

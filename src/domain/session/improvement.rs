@@ -276,6 +276,12 @@ pub(super) fn apply(
                         let ContentItem::ToolResult { result } = item else {
                             return Err(invalid());
                         };
+                        if state
+                            .recorded_tool_result(&result.call_id)
+                            .is_some_and(|recorded| recorded != result)
+                        {
+                            return Err(invalid());
+                        }
                         history.append_tool_result(result.clone())?;
                         let receipt = state.execution_receipts.iter().find(|record| {
                             record.receipt.execution_id

@@ -18,6 +18,7 @@ pub(crate) use durable_file::{
     remove_durable_temporary_file_best_effort, replace_durable_file, sync_directory,
 };
 pub use error::ProjectEventStoreError;
+pub(crate) use jsonl::SessionStreamCursor;
 pub use jsonl::{JsonlEventStore, RecoveryMetadata};
 pub(crate) use jsonl::{read_existing_research_events, read_existing_session_events};
 pub use migration::ExportMigrationManifest;

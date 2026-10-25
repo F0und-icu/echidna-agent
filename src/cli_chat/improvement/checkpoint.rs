@@ -1,17 +1,9 @@
 //! Durable Session handoff for the fixed improvement stage.
 use super::*;
-use crate::domain::session::SessionReducer;
 
 impl DurableChatSession {
     pub(super) fn improvement_state(&self) -> Result<SessionState, ChatError> {
-        SessionReducer
-            .reduce(
-                crate::adapters::project_event_store::read_existing_session_events(
-                    &self.project,
-                    &self.session_id,
-                )?,
-            )
-            .map_err(ChatError::from)
+        self.durable_state()
     }
 
     pub(super) fn record_improvement(
@@ -19,30 +11,27 @@ impl DurableChatSession {
         attempt_id: &str,
         fact: ImprovementFact,
     ) -> Result<EventId, ChatError> {
-        let mut writer = self.project.open_writer()?;
-        let mut store = writer.open_session(self.session_id.clone(), None)?;
-        let stream_id = ProjectEventStream::Session(self.session_id.clone()).stream_id();
-        let mut projection =
-            SessionProjection::replay(EventSource::read_events(&store, &stream_id)?)?;
-        let sequence = store.next_sequence()?;
-        let id = event_id(
-            self.project.project_id(),
-            &self.session_id,
-            sequence.get(),
-            "rsi-activity",
-        );
-        let event = SessionEvent::ImprovementActivityRecorded {
-            activity: ImprovementActivity {
-                schema_version: 1,
-                attempt_id: attempt_id.to_owned(),
-                fact,
-            },
-        }
-        .into_envelope(id.clone(), stream_id, sequence, occurred_at())?;
-        projection
-            .append(&mut store, event)
-            .map_err(ChatError::from_session_append)?;
-        Ok(id)
+        self.with_projection(|projection, store, stream_id| {
+            let sequence = store.next_sequence()?;
+            let id = event_id(
+                self.project.project_id(),
+                &self.session_id,
+                sequence.get(),
+                "rsi-activity",
+            );
+            let event = SessionEvent::ImprovementActivityRecorded {
+                activity: ImprovementActivity {
+                    schema_version: 1,
+                    attempt_id: attempt_id.to_owned(),
+                    fact,
+                },
+            }
+            .into_envelope(id.clone(), stream_id, sequence, occurred_at())?;
+            projection
+                .append(store, event)
+                .map_err(ChatError::from_session_append)?;
+            Ok(id)
+        })
     }
 
     pub(super) fn finish_improvement(
@@ -52,7 +41,7 @@ impl DurableChatSession {
         reason: impl Into<String>,
     ) -> Result<EventId, ChatError> {
         let reason = reason.into();
-        eprintln!("[RSI2 {disposition}] {reason}");
+        console_eprintln!("[RSI2 {disposition}] {reason}");
         self.record_improvement(
             attempt,
             ImprovementFact::Finished {

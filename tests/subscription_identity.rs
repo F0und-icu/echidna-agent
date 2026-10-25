@@ -2,7 +2,11 @@
 #[path = "../src/adapters/subscription_auth/jwt.rs"]
 mod jwt;
 #[allow(dead_code)]
+#[path = "../src/model_catalog.rs"]
+mod model_catalog;
+#[allow(dead_code)]
 #[path = "../src/adapters/subscription_auth/types.rs"]
+#[allow(unused_imports)]
 mod types;
 
 use base64::Engine;

@@ -87,7 +87,7 @@ fn r5a_raw_capture_hints_distinguish_complete_and_unretained_output() {
         let events = session_events(root.path(), &session_id(root.path()));
         let receipt = events
             .iter()
-            .find(|event| event["event_type"] == "tool.execution_receipt_recorded")
+            .find(|event| event["event_type"] == "tool.execution_outcome_recorded")
             .unwrap();
         let capture = &receipt["payload"]["receipt"]["output_captures"][0];
         assert_eq!(capture["complete"], complete);
@@ -193,7 +193,7 @@ fn f5_tool_views_show_directory_results_partial_failures_and_bounded_text() {
     assert_eq!(
         session_events(root.path(), &session_id(root.path()))
             .iter()
-            .filter(|event| event["event_type"] == "tool.execution_receipt_recorded")
+            .filter(|event| event["event_type"] == "tool.execution_outcome_recorded")
             .count(),
         4
     );

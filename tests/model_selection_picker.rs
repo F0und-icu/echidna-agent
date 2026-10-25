@@ -36,6 +36,7 @@ mod picker_regression {
                 max_context_window: Some(256_000),
                 input_modalities: Some(vec!["text".to_owned(), "future".to_owned()]),
                 supports_reasoning_summary_parameter: Some(true),
+                reasoning_levels_advertised: true,
             },
             SubscriptionModel {
                 slug: "second".to_owned(),
@@ -46,6 +47,7 @@ mod picker_regression {
                 max_context_window: None,
                 input_modalities: None,
                 supports_reasoning_summary_parameter: None,
+                reasoning_levels_advertised: true,
             },
         ]
     }
@@ -98,5 +100,28 @@ mod picker_regression {
             select_effort_choice(&catalog[0], blank.as_deref()).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn absent_api_effort_metadata_accepts_only_explicit_domain_valid_efforts() {
+        let mut model = catalog().remove(1);
+        assert!(select_effort_choice(&model, Some("high")).is_err());
+        model.reasoning_levels_advertised = false;
+        assert_eq!(
+            select_effort_choice(&model, Some("max")).unwrap(),
+            Some(ReasoningEffort::Max)
+        );
+        assert_eq!(
+            select_effort_choice(&model, Some("future-v2")).unwrap(),
+            Some(ReasoningEffort::Custom("future-v2".to_owned()))
+        );
+        assert_eq!(select_effort_choice(&model, None).unwrap(), None);
+        assert_eq!(select_effort_choice(&model, Some("0")).unwrap(), None);
+        for invalid in ["", " space", "a/b", "line\nbreak", &"x".repeat(65)] {
+            assert!(
+                select_effort_choice(&model, Some(invalid)).is_err(),
+                "{invalid:?}"
+            );
+        }
     }
 }

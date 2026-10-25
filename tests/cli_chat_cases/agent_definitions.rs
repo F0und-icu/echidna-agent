@@ -21,6 +21,201 @@ fn export_agent(root: &std::path::Path, name: &str, template: &str) -> std::path
     definition
 }
 
+#[test]
+fn memory_status_is_read_only_and_reports_scope_absence_and_disabled_memory() {
+    for (scope, template) in [
+        ("agent", "technical-writing"),
+        ("project", "builtin-research"),
+        ("none", "technical-writing"),
+    ] {
+        let root = TemporaryDirectory::new("memory-status-no-side-effects");
+        initialize_project(root.path());
+        let definition = export_agent(root.path(), "definition", template);
+        if scope == "none" {
+            let manifest = definition.join("agent.toml");
+            let content = fs::read_to_string(&manifest)
+                .unwrap()
+                .replacen("memory = \"agent\"", "memory = \"none\"", 1)
+                .replacen("memory_read = \"direct\"", "memory_read = \"hidden\"", 1)
+                .replacen("memory_write = \"direct\"", "memory_write = \"hidden\"", 1);
+            fs::write(manifest, content).unwrap();
+        }
+        let config = write_config(root.path(), "http://127.0.0.1:9/v1");
+        let output = run_chat(
+            root.path(),
+            &config,
+            "/memory\n/exit\n",
+            &["--agent", definition.to_str().unwrap()],
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let status = memory_status_values(&stdout).remove(0);
+        assert_eq!(status["automatic_extraction"], false);
+        if scope == "none" {
+            assert_eq!(status["memory"], "disabled");
+            assert!(status.get("core_path").is_none());
+        } else {
+            assert_eq!(status["memory"], "enabled");
+            assert_eq!(status["scope"]["kind"], scope);
+            assert_eq!(status["core_present"], false);
+            assert!(status["core_bytes"].is_null());
+            assert_eq!(
+                status["configured_memory_write"],
+                if scope == "agent" {
+                    "direct"
+                } else {
+                    "deferred"
+                }
+            );
+            let suffix = if scope == "agent" {
+                ".echidna/memory/agents/technical-writing/core.md"
+            } else {
+                ".echidna/memory/core.md"
+            };
+            assert_eq!(
+                status["core_path"],
+                root.path()
+                    .canonicalize()
+                    .unwrap()
+                    .join(suffix)
+                    .to_str()
+                    .unwrap()
+            );
+        }
+        assert!(!root.path().join(".echidna/memory").exists());
+        let project = Project::discover(root.path()).unwrap();
+        let state = reduced_session(&project, &session_id(root.path()));
+        assert!(state.history().items().is_empty());
+        assert!(state.request_audits().is_empty());
+        assert_eq!(state.execution_receipt_count(), 0);
+    }
+}
+
+#[test]
+fn memory_tool_write_becomes_visible_and_refreshes_later_requests_and_resume() {
+    let root = TemporaryDirectory::new("memory-write-refresh-resume");
+    initialize_project(root.path());
+    let definition = export_agent(root.path(), "writer", "technical-writing");
+    let content = "# Durable preference\nUse compact release notes. SOURCE: operator preference.\n";
+    let server = spawn_responses_server(vec![
+        (
+            200,
+            m4_long_flow_tool_response(
+                "read-memory",
+                "memory_read",
+                json!({"path":"core.md", "event_id":"read-core"}),
+                "read-memory-response",
+            ),
+        ),
+        (
+            200,
+            m4_long_flow_tool_response(
+                "write-memory",
+                "memory_write",
+                json!({"path":"core.md", "content":content, "expected_hash":null, "event_id":"save-core"}),
+                "write-memory-response",
+            ),
+        ),
+        (
+            200,
+            text_response("Preference saved.", "memory-saved-response"),
+        ),
+        (
+            200,
+            text_response("Using the saved preference.", "memory-reused-response"),
+        ),
+    ]);
+    let config = write_config(root.path(), &server.base_url);
+    fs::write(
+        &config,
+        fs::read_to_string(&config)
+            .unwrap()
+            .replace("incremental_input = true", "incremental_input = false"),
+    )
+    .unwrap();
+    let output = run_chat(
+        root.path(),
+        &config,
+        "/memory\nRemember my release-note preference.\n/memory\nUse that preference.\n/exit\n",
+        &["--agent", definition.to_str().unwrap()],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let statuses = memory_status_values(&stdout);
+    assert_eq!(statuses.len(), 2);
+    assert_eq!(statuses[0]["core_present"], false);
+    assert_eq!(statuses[1]["core_present"], true);
+    assert_eq!(statuses[1]["core_bytes"], content.len());
+    let requests = (0..4)
+        .map(|_| f2a_request_body(&server.requests, "memory write flow"))
+        .collect::<Vec<_>>();
+    assert!(
+        requests[0]["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("At a meaningful task")
+    );
+    assert!(
+        requests[0]["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("Use memory_read before memory_write")
+    );
+    assert!(
+        requests[3]["input"]
+            .to_string()
+            .contains("Use compact release notes.")
+    );
+    assert!(server.requests.try_recv().is_err());
+    f2a_join_server(server, "memory write flow");
+    assert_eq!(
+        fs::read_to_string(
+            root.path()
+                .join(".echidna/memory/agents/technical-writing/core.md")
+        )
+        .unwrap(),
+        content
+    );
+    assert!(!root.path().join(".echidna/memory/core.md").exists());
+    assert!(
+        fs::read_to_string(root.path().join(".echidna/research.jsonl"))
+            .unwrap()
+            .contains("memory.changed")
+    );
+    let id = session_id(root.path());
+    let project = Project::discover(root.path()).unwrap();
+    let state = reduced_session(&project, &id);
+    assert_eq!(state.execution_receipt_count(), 2);
+    state.history().ensure_all_tool_calls_paired().unwrap();
+    let resumed = run_chat(root.path(), &config, "/memory\n/exit\n", &["--resume", &id]);
+    assert!(
+        resumed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    let restored = memory_status_values(&String::from_utf8_lossy(&resumed.stdout));
+    assert_eq!(restored[0]["core_hash"], statuses[1]["core_hash"]);
+    assert_eq!(restored[0]["core_path"], statuses[1]["core_path"]);
+}
+
+fn memory_status_values(stdout: &str) -> Vec<Value> {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let value: Value = serde_json::from_str(&line[line.find('{')?..]).ok()?;
+            value.get("automatic_extraction").map(|_| value.clone())
+        })
+        .collect()
+}
+
 fn write_definition_config(
     root: &std::path::Path,
     base_url: &str,

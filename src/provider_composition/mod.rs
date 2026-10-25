@@ -5,7 +5,7 @@ mod config;
 mod selection;
 mod validation;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::adapters::credentials::{
@@ -45,6 +45,13 @@ pub struct ProviderComposition {
 /// Provider twice.
 pub(crate) struct ValidatedProviderConfig(ProviderConfigV1);
 
+/// The two existing transports used by explicit catalog commands. Configuration
+/// credentials, never a Provider ID, URL or model name, select this route.
+pub(crate) enum ConfiguredModelCatalog {
+    ApiKey(ResponsesHttpAdapter),
+    Subscription(SubscriptionAuthService),
+}
+
 impl ProviderComposition {
     /// Loads and validates one explicit config path without resolving a
     /// credential or performing network I/O.
@@ -55,6 +62,7 @@ impl ProviderComposition {
         Self::compose(
             Self::load_config(path)?,
             credential_source,
+            None,
             None,
             #[cfg(debug_assertions)]
             false,
@@ -100,7 +108,7 @@ impl ProviderComposition {
     /// Saves an explicit catalog choice through the one configuration-edit
     /// owner. The candidate is reloaded through the normal Config owner before
     /// the original file is atomically replaced.
-    pub(crate) fn select_codex_model(
+    pub(crate) fn select_model(
         path: impl AsRef<Path>,
         provider_id: &str,
         model: &str,
@@ -117,6 +125,41 @@ impl ProviderComposition {
         )
     }
 
+    pub(crate) fn model_catalog(
+        path: impl AsRef<Path>,
+        provider_id: &str,
+        credential_source: Arc<dyn CredentialSource>,
+    ) -> Result<ConfiguredModelCatalog, ProviderCompositionError> {
+        let config = Self::load_config(path)?.0;
+        let definition = config.providers.get(provider_id).ok_or_else(|| {
+            ProviderCompositionError::InvalidSubscription {
+                provider: provider_id.to_owned(),
+                message: "unknown Provider profile".to_owned(),
+            }
+        })?;
+        match definition.credential() {
+            ProviderCredential::Reference(_) | ProviderCredential::Inline(_) => {
+                let (adapter, _) = compose_provider(
+                    provider_id,
+                    definition,
+                    config.capabilities(definition),
+                    credential_source,
+                    None,
+                    None,
+                    #[cfg(debug_assertions)]
+                    false,
+                )?;
+                Ok(ConfiguredModelCatalog::ApiKey(adapter))
+            }
+            ProviderCredential::ChatGptSubscription(subscription) => {
+                subscription_service(subscription).map(ConfiguredModelCatalog::Subscription)
+            }
+            ProviderCredential::CodexSubscription(subscription) => {
+                codex_subscription_service(subscription).map(ConfiguredModelCatalog::Subscription)
+            }
+        }
+    }
+
     /// Binds one validated configuration to an already-discovered Project.
     /// Both Primary and optional Vision Providers retain the one protocol
     /// Adapter construction owner.
@@ -124,12 +167,14 @@ impl ProviderComposition {
         config: ValidatedProviderConfig,
         credential_source: Arc<dyn CredentialSource>,
         project: Project,
+        debug_failures: Option<PathBuf>,
         #[cfg(debug_assertions)] debug: bool,
     ) -> Result<Self, ProviderCompositionError> {
         Self::compose(
             config,
             credential_source,
             Some(project),
+            debug_failures,
             #[cfg(debug_assertions)]
             debug,
         )
@@ -186,6 +231,7 @@ impl ProviderComposition {
         config: ValidatedProviderConfig,
         credential_source: Arc<dyn CredentialSource>,
         project: Option<Project>,
+        debug_failures: Option<PathBuf>,
         #[cfg(debug_assertions)] debug: bool,
     ) -> Result<Self, ProviderCompositionError> {
         let config = config.0;
@@ -205,6 +251,7 @@ impl ProviderComposition {
             #[cfg(debug_assertions)]
             debug,
         )?;
+        let primary = primary.with_failure_capture(debug_failures.as_deref());
         let vision = agent
             .vision
             .as_deref()
@@ -220,17 +267,26 @@ impl ProviderComposition {
                     #[cfg(debug_assertions)]
                     debug,
                 )
+                .map(|(provider, version)| {
+                    (
+                        provider.with_failure_capture(debug_failures.as_deref()),
+                        version,
+                    )
+                })
             })
             .transpose()?;
         let (vision, vision_request_adapter_version) = match vision {
-            Some((provider, version)) => (Some(provider), Some(version)),
+            Some((provider, version)) => (
+                Some(Arc::new(provider) as Arc<dyn ModelProvider>),
+                Some(version),
+            ),
             None => (None, None),
         };
         let agent_profile = config.active_agent_model_profile()?;
 
         Ok(Self {
             agent_profile,
-            primary,
+            primary: Arc::new(primary),
             vision,
             primary_request_adapter_version,
             vision_request_adapter_version,
@@ -250,7 +306,7 @@ fn compose_provider(
     project: Option<&Project>,
     cli_role: Option<&'static str>,
     #[cfg(debug_assertions)] debug: bool,
-) -> Result<(Arc<dyn ModelProvider>, RequestAdapterVersion), ProviderCompositionError> {
+) -> Result<(ResponsesHttpAdapter, RequestAdapterVersion), ProviderCompositionError> {
     let (credential_reference, credential_source) = match definition.credential() {
         ProviderCredential::Reference(reference) => (reference.to_owned(), credential_source),
         ProviderCredential::Inline(value) => {
@@ -314,7 +370,7 @@ fn compose_provider(
                 #[cfg(debug_assertions)]
                 debug,
             );
-            Ok((Arc::new(adapter), request_adapter_version))
+            Ok((adapter, request_adapter_version))
         }
     }
 }

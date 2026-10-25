@@ -9,7 +9,6 @@ use crate::adapters::research_projection::load_research_state;
 use crate::adapters::tools::{ToolRegistry, ViewImageToolInput};
 use crate::app::agent_loop::{AgentLoopError, InitialImagePrimaryContext};
 use crate::app::cancellation::AgentCancellation;
-use crate::app::session::SessionProjection;
 use crate::app::vision::{
     VisionAnalysisInput, VisionDirectRequest, VisionEventStamp, VisionSecondaryRequest,
     VisionSessionService,
@@ -23,7 +22,6 @@ use crate::domain::tools::{ExecutionId, ToolCall, ToolCallId, ToolName, ToolResu
 use crate::domain::vision::{
     VISION_FACT_SCHEMA_VERSION, ViewImageSelection, VisionObservationId, VisionRouteRecord,
 };
-use crate::ports::EventSource;
 use crate::ports::tool::ToolExecutor;
 use crate::provider_composition::ProviderComposition;
 
@@ -107,7 +105,7 @@ pub(super) async fn ingest_image(
             message: error.to_string(),
         })?;
     let outcome = tools.execute(plan).await?;
-    session.record_execution(&outcome)?;
+    session.record_operator_execution_receipt(&outcome)?;
     if outcome.result.status != ToolResultStatus::Succeeded {
         return Err(ChatError::ImageIntake {
             message: outcome.result.output.to_string(),
@@ -161,25 +159,21 @@ pub(super) async fn prepare_primary_context(
 ) -> Result<InitialImagePrimaryContext, ChatError> {
     let decision = require_image_route(composition)?;
     let profile = composition.agent_profile();
-    let mut writer = session.project.open_writer()?;
-    let mut store = writer.open_session(session.session_id.clone(), None)?;
     let stream_id = ProjectEventStream::Session(session.session_id.clone()).stream_id();
-    let mut projection = SessionProjection::replay(EventSource::read_events(&store, &stream_id)?)?;
-    let sequence = store.next_sequence()?;
-    let route_event_id = event_id(
-        session.project.project_id(),
-        &session.session_id,
-        sequence.get(),
-        "vision-route",
-    );
     let binding = RequestAuditBinding::new(session.project.project_id().clone(), stream_id)?;
-    let route = VisionRouteRecord {
+    let source_artifact_id = pending.selection.source_artifact_id.clone();
+    let route_for_sequence = |sequence: crate::domain::events::EventSequence| VisionRouteRecord {
         schema_version: VISION_FACT_SCHEMA_VERSION,
-        route_event_id: route_event_id.clone(),
+        route_event_id: event_id(
+            session.project.project_id(),
+            &session.session_id,
+            sequence.get(),
+            "vision-route",
+        ),
         mode: profile.vision_mode(),
         route: decision.route,
         reason: decision.reason,
-        source_artifact_ids: vec![pending.selection.source_artifact_id.clone()],
+        source_artifact_ids: vec![source_artifact_id.clone()],
         primary_profile: profile.primary().profile().clone(),
         vision_profile: profile.vision().map(|vision| vision.profile().clone()),
         primary_capability_hash: profile.primary().capabilities().semantic_hash(),
@@ -191,18 +185,21 @@ pub(super) async fn prepare_primary_context(
         .with_request_budget(request_budget);
 
     match decision.route {
-        VisionRoute::PrimaryDirect => service
-            .prepare_direct(
-                VisionDirectRequest {
-                    route,
-                    route_occurred_at: occurred_at(),
-                    source_artifact_id: pending.selection.source_artifact_id,
-                    delivery_artifact_id: pending.selection.delivery_artifact_id,
-                },
-                &mut projection,
-                &mut store,
-            )
-            .map_err(vision_error),
+        VisionRoute::PrimaryDirect => session.with_projection(|projection, store, _| {
+            let route = route_for_sequence(store.next_sequence()?);
+            service
+                .prepare_direct(
+                    VisionDirectRequest {
+                        route,
+                        route_occurred_at: occurred_at(),
+                        source_artifact_id: pending.selection.source_artifact_id,
+                        delivery_artifact_id: pending.selection.delivery_artifact_id,
+                    },
+                    projection,
+                    store,
+                )
+                .map_err(vision_error)
+        }),
         VisionRoute::SecondaryTool => {
             let image_geometry = crate::adapters::image::resolve_vision_geometry(
                 &session.project,
@@ -229,44 +226,47 @@ pub(super) async fn prepare_primary_context(
                         message: "secondary_tool resolved without a Vision Adapter identity"
                             .to_owned(),
                     })?;
-            let vision_generation = sequence.get();
-            let prepared = service
-                .prepare_secondary(
-                    VisionSecondaryRequest {
-                        route,
-                        route_occurred_at: occurred_at(),
-                        analysis: VisionAnalysisInput {
-                            observation_id: VisionObservationId::new(format!(
-                                "observation:{}:{}",
-                                session.session_id.as_str(),
-                                sequence.get()
-                            )),
-                            route_event_id,
-                            source_artifact_id: pending.selection.source_artifact_id,
-                            delivery_artifact_id: pending.selection.delivery_artifact_id,
-                            derived_artifact_ids: pending.selection.derived_artifact_ids,
-                            image_geometry,
-                            task: task.to_owned(),
-                            model: vision_profile.model().clone(),
-                            provider_profile: vision_profile.profile().clone(),
-                            capability_hash: vision_profile.capabilities().semantic_hash(),
-                            provider_session: ProviderSessionRef {
-                                id: ProviderSessionId::new(format!(
-                                    "vision:{}:{}",
+            let prepared = session.with_projection(|projection, store, _| {
+                let sequence = store.next_sequence()?;
+                let route = route_for_sequence(sequence);
+                let route_event_id = route.route_event_id.clone();
+                let vision_generation = sequence.get();
+                service
+                    .prepare_secondary(
+                        VisionSecondaryRequest {
+                            route,
+                            route_occurred_at: occurred_at(),
+                            analysis: VisionAnalysisInput {
+                                observation_id: VisionObservationId::new(format!(
+                                    "observation:{}:{}",
                                     session.session_id.as_str(),
-                                    vision_generation
+                                    sequence.get()
                                 )),
-                                role: ProviderSessionRole::Vision,
-                                generation: vision_generation,
+                                route_event_id,
+                                source_artifact_id: pending.selection.source_artifact_id,
+                                delivery_artifact_id: pending.selection.delivery_artifact_id,
+                                derived_artifact_ids: pending.selection.derived_artifact_ids,
+                                image_geometry,
+                                task: task.to_owned(),
+                                model: vision_profile.model().clone(),
+                                provider_profile: vision_profile.profile().clone(),
+                                capability_hash: vision_profile.capabilities().semantic_hash(),
+                                provider_session: ProviderSessionRef {
+                                    id: ProviderSessionId::new(format!(
+                                        "vision:{}:{}",
+                                        session.session_id.as_str(),
+                                        vision_generation
+                                    )),
+                                    role: ProviderSessionRole::Vision,
+                                    generation: vision_generation,
+                                },
                             },
                         },
-                    },
-                    &mut projection,
-                    &mut store,
-                )
-                .map_err(vision_error)?;
-            drop(store);
-            drop(writer);
+                        projection,
+                        store,
+                    )
+                    .map_err(vision_error)
+            })?;
 
             let terminal = service
                 .analyze_prepared(
@@ -279,25 +279,22 @@ pub(super) async fn prepare_primary_context(
                 .await
                 .map_err(vision_error)?;
 
-            let mut writer = session.project.open_writer()?;
-            let mut store = writer.open_session(session.session_id.clone(), None)?;
-            let stream_id = ProjectEventStream::Session(session.session_id.clone()).stream_id();
-            let mut projection =
-                SessionProjection::replay(EventSource::read_events(&store, &stream_id)?)?;
-            let sequence = store.next_sequence()?;
-            let terminal_stamp = VisionEventStamp::new(
-                event_id(
-                    session.project.project_id(),
-                    &session.session_id,
-                    sequence.get(),
-                    "vision-observation",
-                ),
-                occurred_at(),
-            );
-            let outcome = service
-                .commit_secondary_terminal(terminal, terminal_stamp, &mut projection, &mut store)
-                .map_err(vision_error)?;
-            Ok(outcome.primary_context)
+            session.with_projection(|projection, store, _| {
+                let sequence = store.next_sequence()?;
+                let terminal_stamp = VisionEventStamp::new(
+                    event_id(
+                        session.project.project_id(),
+                        &session.session_id,
+                        sequence.get(),
+                        "vision-observation",
+                    ),
+                    occurred_at(),
+                );
+                let outcome = service
+                    .commit_secondary_terminal(terminal, terminal_stamp, projection, store)
+                    .map_err(vision_error)?;
+                Ok(outcome.primary_context)
+            })
         }
         VisionRoute::NoImage | VisionRoute::Rejected => Err(ChatError::VisionComposition {
             message: "an image Turn requires one accepted Direct or Secondary route".to_owned(),

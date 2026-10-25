@@ -26,6 +26,74 @@ mod debug_regression {
     const SSE_SECRET: &str = "subscription-debug-sse-secret";
     const STANDARD_SECRET: &str = "standard-debug-error-marker";
 
+    #[test]
+    fn error_event_debug_never_bypasses_selected_bounded_projection() {
+        const ERROR_CHILD_ENV: &str = "ECHIDNA_ERROR_EVENT_DEBUG_CAPTURE_CHILD";
+        if std::env::var_os(ERROR_CHILD_ENV).is_some() {
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                let base_url = format!("http://{}", listener.local_addr().unwrap());
+                let server = thread::spawn(move || {
+                    for message in [serde_json::json!(format!("useful failure {BEARER_SECRET}{}TAIL_ERROR_CANARY", "x".repeat(8000))),serde_json::Value::Null] {
+                        let body = format!("data: {}\n\n", serde_json::json!({
+                            "type":"error","error":{"code":"server_error","message":message,"param":"input",
+                            "unknown":"RAW_NESTED_ERROR_CANARY"},"unknown":"RAW_ENVELOPE_ERROR_CANARY"
+                        }));
+                        respond_failure(&listener,"200 OK","text/event-stream",&body);
+                    }
+                });
+                let provider = ResponsesHttpAdapter::new(
+                    ResponsesHttpConfig::new(base_url,"fixture-model","chatgpt_subscription:fixture",subscription_capabilities()),
+                    Arc::new(FixtureCredentialSource),
+                ).with_cli_output(Some("primary"),true);
+                for malformed in [false,true] {
+                    let input = ModelInputIR::current("Fixture instruction.",vec![ContentItem::user_text("Fixture input.")],ModelRequestRequirements::default());
+                    let mut stream = provider.stream(ModelRequest::full(input)).unwrap();
+                    let error = stream.next().await.unwrap().unwrap_err();
+                    if malformed {
+                        assert!(matches!(error,ModelProviderError::ProtocolFailure{..}));
+                    } else {
+                        assert!(matches!(error,ModelProviderError::ProviderFailure{..}));
+                    }
+                    eprintln!("captured error: {error}");
+                }
+                server.join().unwrap();
+            });
+            return;
+        }
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "debug_regression::error_event_debug_never_bypasses_selected_bounded_projection",
+                "--nocapture",
+            ])
+            .env(ERROR_CHILD_ENV, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        for required in [
+            "useful failure [redacted]",
+            "[truncated]",
+            "Responses error event `message` must be a string",
+        ] {
+            assert!(stderr.contains(required), "{stderr}");
+        }
+        for excluded in [
+            BEARER_SECRET,
+            "TAIL_ERROR_CANARY",
+            "RAW_NESTED_ERROR_CANARY",
+            "RAW_ENVELOPE_ERROR_CANARY",
+        ] {
+            assert!(!stderr.contains(excluded), "{stderr}");
+        }
+        assert!(!stderr.contains(&"x".repeat(1025)), "{stderr}");
+    }
+
     struct FixtureCredentialSource;
 
     impl CredentialSource for FixtureCredentialSource {

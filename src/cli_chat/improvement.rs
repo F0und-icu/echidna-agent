@@ -136,8 +136,8 @@ pub(super) async fn after_completed<Provider: ModelProvider + ?Sized>(
     if friction.is_empty() {
         return Ok(());
     }
-    if budget.limit().saturating_sub(budget.counts().total()) < 3 {
-        eprintln!("[RSI2 deferred] Fewer than 3 shared admissions remain.");
+    if budget.remaining().is_some_and(|remaining| remaining < 3) {
+        console_eprintln!("[RSI2 deferred] Fewer than 3 shared admissions remain.");
         return Ok(());
     }
     let pending =
@@ -149,7 +149,7 @@ pub(super) async fn after_completed<Provider: ModelProvider + ?Sized>(
                 session.session_id.as_str(),
             ));
     if pending.try_exists()? {
-        eprintln!("[RSI2 deferred] A passive candidate already owns this boundary.");
+        console_eprintln!("[RSI2 deferred] A passive candidate already owns this boundary.");
         return Ok(());
     }
     let attempt = format!(
@@ -165,7 +165,7 @@ pub(super) async fn after_completed<Provider: ModelProvider + ?Sized>(
             friction: friction.clone(),
         },
     )?;
-    eprintln!(
+    console_eprintln!(
         "[RSI2 diagnosis] Inspecting retained friction with the shared Turn budget; /stop can interrupt."
     );
     let prompt = definition::prompt_for_state(
@@ -381,7 +381,7 @@ pub(super) async fn after_completed<Provider: ModelProvider + ?Sized>(
         (ImprovementStage::Old, &roots.old, &prompt),
         (ImprovementStage::New, &roots.new, &trial_prompt),
     ] {
-        eprintln!(
+        console_eprintln!(
             "[RSI2 probe {stage:?}] One fresh sample and at most one command; /stop can interrupt."
         );
         let probe_tools = ToolRegistry::for_project(root)

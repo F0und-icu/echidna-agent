@@ -33,8 +33,8 @@ impl ProviderConfigV1 {
         {
             return Err(ProviderCompositionError::InvalidAgentDefinitionPath);
         }
-        if !(1..=crate::app::model_request_budget::MAX_MODEL_REQUEST_LIMIT)
-            .contains(&self.runtime.model_request_limit_per_turn)
+        if self.runtime.model_request_limit_per_turn
+            > crate::app::model_request_budget::MAX_MODEL_REQUEST_LIMIT
         {
             return Err(ProviderCompositionError::InvalidModelRequestLimit);
         }
@@ -377,7 +377,7 @@ pub enum ProviderCompositionError {
         #[source]
         source: crate::domain::context::ContextPlannerError,
     },
-    #[error("runtime.model_request_limit_per_turn must be between 1 and 10000")]
+    #[error("runtime.model_request_limit_per_turn must be 0 (unlimited) or between 1 and 10000")]
     InvalidModelRequestLimit,
     #[error("configuration field `{field}` must name a non-empty prompt file path")]
     InvalidPromptPath { field: &'static str },

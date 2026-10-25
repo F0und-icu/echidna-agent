@@ -84,6 +84,72 @@ fn ctf_r2b_budget_stop_requires_explicit_resume_without_repeating_input_or_tool(
 }
 
 #[test]
+fn unlimited_budget_completes_more_than_32_steps_with_exact_durable_counts() {
+    let tool_calls = 33usize;
+    let root = TemporaryDirectory::new("unlimited-admission-cli");
+    let harness = TemporaryDirectory::new("unlimited-admission-config");
+    initialize_project(root.path());
+    let mut responses = Vec::new();
+    for index in 0..tool_calls {
+        let path = format!("input-{index}.txt");
+        fs::write(root.path().join(&path), format!("fixture {index}")).unwrap();
+        responses.push((
+            200,
+            m4_long_flow_tool_response(
+                &format!("unlimited-call-{index}"),
+                "read_file",
+                json!({"path":path}),
+                &format!("unlimited-response-{index}"),
+            ),
+        ));
+    }
+    responses.push((
+        200,
+        text_response("UNLIMITED_COMPLETED", "unlimited-complete"),
+    ));
+    let server = spawn_responses_server(responses);
+    let config = write_config(harness.path(), &server.base_url);
+    limit_config(&config, Some(0), false);
+    let output = wait_child_before_deadline(
+        spawn_f2a_chat(
+            root.path(),
+            &config,
+            "complete the bounded fixture\n/exit\n",
+            &[],
+        ),
+        "unlimited admission fixture",
+        Duration::from_secs(180),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stdout}\n{stderr}");
+    assert!(stdout.contains("UNLIMITED_COMPLETED"));
+    assert!(stdout.contains("admitted=34 primary=34 vision=0 remaining=unlimited limit=unlimited"));
+    assert!(!stderr.contains("[turn stopped]"));
+    for _ in 0..=tool_calls {
+        f2a_request_body(&server.requests, "unlimited request");
+    }
+    assert!(server.requests.try_recv().is_err());
+    f2a_join_server(server, "unlimited admission");
+    let project = Project::discover(root.path()).unwrap();
+    let state = reduced_session(&project, &session_id(root.path()));
+    assert_eq!(state.request_audits().len(), 34);
+    assert_eq!(
+        state.execution_receipt_count(),
+        u64::try_from(tool_calls).unwrap()
+    );
+    assert_eq!(state.history().items().len(), 2 + 2 * tool_calls);
+    assert_eq!(state.history().ensure_all_tool_calls_paired(), Ok(()));
+    assert_eq!(
+        state.history().items().last(),
+        Some(&echidna::domain::model::ContentItem::assistant_text(
+            "UNLIMITED_COMPLETED"
+        ))
+    );
+    assert_audits_reconstruct(root.path(), &state);
+}
+
+#[test]
 fn ctf_r2b_default32_and_explicit33_have_no_hidden_primary_cap() {
     for configured in [Some(2), None, Some(33)] {
         let count = configured.unwrap_or(32);

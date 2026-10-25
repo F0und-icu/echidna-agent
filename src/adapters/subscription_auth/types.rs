@@ -54,32 +54,9 @@ pub(crate) enum SubscriptionAuthProtocol {
     Codex,
 }
 
-#[derive(Clone, Debug, Serialize, Eq, PartialEq)]
-pub(crate) struct SubscriptionModel {
-    pub(crate) slug: String,
-    pub(crate) display_name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) default_reasoning_level: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(crate) supported_reasoning_levels: Vec<SubscriptionReasoningLevel>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) context_window: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) max_context_window: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) input_modalities: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) supports_reasoning_summary_parameter: Option<bool>,
-}
-
-/// Bounded catalog metadata returned by the Codex `/models` endpoint. Unknown
-/// effort names remain visible to the operator but cannot become configured
-/// execution settings until the domain contract accepts them.
-#[derive(Clone, Debug, Serialize, Eq, PartialEq)]
-pub(crate) struct SubscriptionReasoningLevel {
-    pub(crate) effort: String,
-    pub(crate) description: String,
-}
+pub(crate) use crate::model_catalog::{
+    CatalogModel as SubscriptionModel, CatalogReasoningLevel as SubscriptionReasoningLevel,
+};
 
 #[derive(Clone, Debug, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]

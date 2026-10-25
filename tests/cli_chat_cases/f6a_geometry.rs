@@ -142,4 +142,9 @@ fn f6a_out_of_bounds_vision_keeps_failed_attempt_and_never_samples_primary() {
             .count(),
         1
     );
+    assert!(
+        !events
+            .iter()
+            .any(|event| event["event_type"] == "tool.execution_outcome_recorded")
+    );
 }

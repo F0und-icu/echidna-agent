@@ -133,6 +133,16 @@ returned by memory_read. Version 2 of memory_read, memory_write and inspect_proj
 uses runtime operation timestamps and rejects caller occurred_at/observed_at
 arguments. Historical sessions and source timestamps remain unchanged.
 
+Use `/memory` in chat to inspect the actual directory, scope, `core.md` presence
+and configured memory tools. Project memory lives in `.echidna/memory/`; Agent
+memory lives in `.echidna/memory/agents/<agent-id>/`. Legacy projects keep their
+existing `.cyber-agent/` layout. The first successful `memory_write` creates a
+document; an ordinary reply or compaction does not save memory. Enabled Agents
+receive built-in guidance to preserve reusable lessons and explicit remember
+requests through the memory tools. `core.md` is refreshed into later context;
+detail notes require explicit reads. There is no background model extraction
+task or guarantee of a memory write on every turn.
+
 Inside chat, `/agent` displays identity and digest. `/agent reload [directory or agent.toml]`
 reloads instructions for the same identity, keeps History, and rebuilds the Provider session.
 `/agent use <path>` opens a new Session and leaves the old one resumable. Changes require
@@ -304,6 +314,10 @@ selection again; a permanently rejected refresh requires a new login. Local
 `status` does not prove the backend still accepts the grant. SIWC and API-key
 flows remain unchanged.
 
+`auth models` / `auth select-model` also support standard Responses services
+configured with an API key or `credential_ref`, including DeepSeek. They query
+`/models` under the selected Provider's `base_url`; substitute your config path
+and provider ID below. Login, status, refresh and logout remain subscription-only.
 Discover models, choose one and its reasoning effort, and save the choice with
 the terminal picker:
 
@@ -320,7 +334,9 @@ echidna --config /absolute/path/codex.toml auth select-model --provider codex \
 ```
 
 Efforts accept valid catalog-advertised strings, including future values; the
-picker requires a value advertised by the selected model. Direct configuration
+picker keeps Codex and advertised API-key levels strict. If an API-key catalog
+does not advertise effort support, enter an explicit `--reasoning-effort` or picker
+value; Echidna reports unknown support and the server may reject it. Direct configuration
 accepts 1–64 ASCII letters, digits, underscores or hyphens. Omitting effort keeps
 the server default; explicit `none` is a different request value. Saving clones an isolated
 capability mapping for the provider and preserves other providers, comments and
@@ -332,7 +348,11 @@ fields or unknown windows (including `null`) preserve existing settings; `max_co
 never replaces the default window. Existing configuration/output-budget checks
 must pass before publication; failures leave the original file intact. Without
 the flag, selection behavior is unchanged. Other declarations such as tool
-support still need explicit review; none are inferred from model names. Offline `doctor` shows the
+support still need explicit review; none are inferred from model names.
+ID-only API-key catalogs preserve the explicit mapping and reject
+`--apply-capabilities` without saving. API-key imports use actual `context_window`
+and `input_modalities`; server `max_output_tokens` and other protocol capabilities
+do not become output budgets or Responses capabilities. Offline `doctor` shows the
 configured effort; a new `chat` uses the saved settings. The protocol
 is based on a pinned Codex source version; actual account/server compatibility
 requires live verification. Failures do not switch models or paid APIs or replay
@@ -390,7 +410,9 @@ automatic failover after a request fails.
 Declarations must match the actual service; setting `image_input = true` cannot give a
 text-only model image support. Set each model's `context_window` to its actual capacity.
 `[runtime].model_request_limit_per_turn` defaults to `32`, a per-turn request limit shared
-by the primary and vision models.
+by the primary and vision models. Set it explicitly to `0` for unlimited admission;
+`1..=10000` retains a finite limit. Attempts are still counted, and context capacity,
+cancellation, deadlines and the per-request retry limit remain unchanged.
 
 In Chat, use `/image PATH` to select a local image. You can repeat the command: images queue in input order and the next ordinary task submits the whole queue as that Turn's initial context. With `primary_direct`, each image reaches the primary; with `secondary_tool`, each image gets its own retained observation before the primary request. If a later image fails, is cancelled, or reaches the shared request limit, earlier durable image facts remain, but the task and queued images are not submitted to the primary. The queue exists only in the current Chat process; restart and `/resume` do not replay image processing.
 
@@ -461,6 +483,23 @@ Export a session while preserving references to its process and materials:
 Terminal replies start with **`Echidna>`**. `NO_COLOR=1` disables theme colors.
 Piped output does not add the branded welcome or theme ANSI sequences. Development builds
 also support `chat --debug` to inspect request content; standard release builds omit it.
+
+All builds support explicit redacted snapshots of failed requests:
+
+```sh
+"$ECHIDNA_BIN" --config "$HOME/.config/echidna/provider.toml" chat --debug-failures ../debug-failures
+```
+
+The directory is relative to chat's actual working directory; choose a location outside
+the project. The feature is off by default. Successful and cancelled attempts save
+nothing; each failed physical attempt gets a separate file, including failures before
+a successful retry. New directories use0700 and files0600 on Unix, without overwriting.
+The terminal reports save success or failure while preserving the original request
+error and retry behavior. Snapshots retain prompts, input and tool definitions, while
+removing authentication fields, active credential/account values, opaque content,
+image data and URL authentication/query/fragment. These are redacted diagnostics,
+not raw network packets or automatically replayable requests. Other unknown secrets
+in business content can remain; review before sharing.
 
 ## Design direction
 

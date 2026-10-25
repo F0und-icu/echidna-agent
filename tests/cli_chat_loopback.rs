@@ -1182,9 +1182,20 @@ fn f2a_secondary_cli_image_is_observed_before_primary_tool_loop_and_remains_audi
     assert_eq!(
         events
             .iter()
+            .filter(
+                |event| event["event_type"] == "tool.execution_outcome_recorded"
+                    && event["payload"]["result"]["call_id"] == "f2a-read-secondary"
+            )
+            .count(),
+        1,
+        "the model result and its Receipt are durable in one fact"
+    );
+    assert_eq!(
+        events
+            .iter()
             .filter(|event| event["event_type"] == "tool.execution_receipt_recorded")
             .count(),
-        2,
+        1,
         "operator view_image and model read_file must each keep a real Receipt"
     );
     assert_eq!(
@@ -1265,9 +1276,20 @@ fn f2a_primary_direct_cli_image_reaches_only_primary_and_keeps_real_tool_receipt
     assert_eq!(
         events
             .iter()
+            .filter(
+                |event| event["event_type"] == "tool.execution_outcome_recorded"
+                    && event["payload"]["result"]["call_id"] == "f2a-read-direct"
+            )
+            .count(),
+        1,
+        "the model result and its Receipt are durable in one fact"
+    );
+    assert_eq!(
+        events
+            .iter()
             .filter(|event| event["event_type"] == "tool.execution_receipt_recorded")
             .count(),
-        2
+        1
     );
 }
 
@@ -1562,7 +1584,7 @@ fn f2a_model_view_image_follow_up_runs_secondary_before_the_next_primary_sample(
     assert_eq!(
         session_events(root.path(), &session)
             .iter()
-            .filter(|event| event["event_type"] == "tool.execution_receipt_recorded")
+            .filter(|event| event["event_type"] == "tool.execution_outcome_recorded")
             .count(),
         1
     );
@@ -2378,14 +2400,14 @@ fn synthetic_long_flow_preserves_authoritative_evidence_across_compaction_and_re
     let raw_session_events = session_events(root.path(), &session);
     let receipt_event_ids = raw_session_events
         .iter()
-        .filter(|event| event["event_type"] == "tool.execution_receipt_recorded")
+        .filter(|event| event["event_type"] == "tool.execution_outcome_recorded")
         .map(|event| event["event_id"].as_str().unwrap().to_owned())
         .collect::<Vec<_>>();
     assert_eq!(receipt_event_ids.len(), 5);
     let artifact_receipt_event_id = raw_session_events
         .iter()
         .find(|event| {
-            event["event_type"] == "tool.execution_receipt_recorded"
+            event["event_type"] == "tool.execution_outcome_recorded"
                 && event["payload"]["receipt"]["execution_id"] == "execution:call-m4-s4-artifact"
         })
         .and_then(|event| event["event_id"].as_str())
@@ -2394,7 +2416,7 @@ fn synthetic_long_flow_preserves_authoritative_evidence_across_compaction_and_re
     let read_receipt_event_id = raw_session_events
         .iter()
         .find(|event| {
-            event["event_type"] == "tool.execution_receipt_recorded"
+            event["event_type"] == "tool.execution_outcome_recorded"
                 && event["payload"]["receipt"]["execution_id"] == "execution:call-m4-s4-read"
         })
         .and_then(|event| event["event_id"].as_str())
@@ -3067,7 +3089,7 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
     let old_artifact_receipt = first_events
         .iter()
         .find(|event| {
-            event["event_type"] == "tool.execution_receipt_recorded"
+            event["event_type"] == "tool.execution_outcome_recorded"
                 && event["payload"]["receipt"]["execution_id"]
                     == "execution:m5-compact-old-artifact"
         })
@@ -3077,7 +3099,7 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
     let artifact_receipt = first_events
         .iter()
         .find(|event| {
-            event["event_type"] == "tool.execution_receipt_recorded"
+            event["event_type"] == "tool.execution_outcome_recorded"
                 && event["payload"]["receipt"]["execution_id"] == "execution:m5-compact-artifact"
         })
         .and_then(|event| event["event_id"].as_str())
@@ -3086,7 +3108,7 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
     let read_receipt = first_events
         .iter()
         .find(|event| {
-            event["event_type"] == "tool.execution_receipt_recorded"
+            event["event_type"] == "tool.execution_outcome_recorded"
                 && event["payload"]["receipt"]["execution_id"] == "execution:m5-compact-read"
         })
         .and_then(|event| event["event_id"].as_str())
@@ -3894,7 +3916,7 @@ fn m5_cli_reports_real_tool_start_and_persisted_terminal_receipt() {
     assert_eq!(
         session_events(project.path(), &session_id(project.path()))
             .iter()
-            .filter(|event| event["event_type"] == "tool.execution_receipt_recorded")
+            .filter(|event| event["event_type"] == "tool.execution_outcome_recorded")
             .count(),
         1
     );
@@ -4016,7 +4038,7 @@ fn m5_cli_labels_deduplicated_tool_calls_without_a_second_start_or_receipt() {
     assert_eq!(
         events
             .iter()
-            .filter(|event| event["event_type"] == "tool.execution_receipt_recorded")
+            .filter(|event| event["event_type"] == "tool.execution_outcome_recorded")
             .count(),
         1,
         "the follower reuses the leader Receipt fact"
@@ -4141,7 +4163,7 @@ fn f3_graceful_interrupt_never_fabricates_a_receipt_for_unobserved_external_effe
     let events = session_events(project.path(), &session_id(project.path()));
     let receipt_statuses = events
         .iter()
-        .filter(|event| event["event_type"] == "tool.execution_receipt_recorded")
+        .filter(|event| event["event_type"] == "tool.execution_outcome_recorded")
         .map(|event| event["payload"]["receipt"]["status"].as_str().unwrap())
         .collect::<Vec<_>>();
     assert_eq!(receipt_statuses, vec!["failed"]);
@@ -4523,7 +4545,7 @@ fn durable_receipt_survives_a_later_provider_failure_without_a_stale_projection_
     assert_eq!(
         events
             .iter()
-            .filter(|event| event["event_type"] == "tool.execution_receipt_recorded")
+            .filter(|event| event["event_type"] == "tool.execution_outcome_recorded")
             .count(),
         1,
         "the cache-owned source Receipt must be replayed and deduplicated"

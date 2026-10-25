@@ -1,5 +1,6 @@
 //! Shared Responses streaming-event wire decoding.
 
+mod error_event;
 mod text;
 
 use serde::Deserialize;
@@ -69,12 +70,15 @@ pub(super) struct ResponseDecoder {
     completed_items: Vec<(Option<usize>, Vec<ModelEvent>)>,
     profile: ResponsesWireProfile,
     opaque_scope: Option<OpaqueContinuationScope>,
+    error_redaction: error_event::ErrorRedaction,
 }
 
 impl ResponseDecoder {
     pub(super) fn new(
         profile: ResponsesWireProfile,
         opaque_scope: Option<OpaqueContinuationScope>,
+        bearer: &str,
+        account_id: Option<&[u8]>,
     ) -> Self {
         Self {
             text: text::TextOutput::default(),
@@ -83,6 +87,7 @@ impl ResponseDecoder {
             completed_items: Vec::new(),
             profile,
             opaque_scope,
+            error_redaction: error_event::ErrorRedaction::new(bearer, account_id),
         }
     }
 
@@ -261,6 +266,12 @@ impl ResponseDecoder {
                 }
                 Ok(decoded)
             }
+            "error" => Err(error_event::decode(
+                data,
+                self.profile,
+                continuation_requested,
+                &self.error_redaction,
+            )),
             "response.failed" => Err(decode_provider_failure(
                 self.profile,
                 event.response,

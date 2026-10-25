@@ -18,11 +18,11 @@ impl Theme {
     pub(super) fn welcome(&self) {
         if self.terminal {
             if self.color {
-                println!("\x1b[35mEchidna\x1b[0m · Local Agent");
+                console_println!("\x1b[35mEchidna\x1b[0m · Local Agent");
             } else {
-                println!("Echidna · Local Agent");
+                console_println!("Echidna · Local Agent");
             }
-            println!("Question. Observe. Verify.");
+            console_println!("Question. Observe. Verify.");
         }
     }
 

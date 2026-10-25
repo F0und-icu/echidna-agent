@@ -25,7 +25,9 @@ pub(crate) enum ModelSelectionError {
     UnknownProvider,
     #[error("model selection Provider configuration is malformed")]
     MalformedProvider,
-    #[error("model selection requires an explicitly configured Codex subscription Provider")]
+    #[error(
+        "model selection requires an explicitly configured API-key or Codex subscription Provider"
+    )]
     UnsupportedProvider,
     #[error("model selection capability mapping is malformed")]
     MalformedCapabilityMapping,
@@ -66,6 +68,11 @@ pub(super) fn edit_model_selection(
             .get("codex_subscription")
             .and_then(Item::as_table_like)
             .is_none()
+            && provider.get("api_key").and_then(Item::as_str).is_none()
+            && provider
+                .get("credential_ref")
+                .and_then(Item::as_str)
+                .is_none()
         {
             return Err(ModelSelectionError::UnsupportedProvider);
         }

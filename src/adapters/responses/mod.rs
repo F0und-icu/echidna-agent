@@ -1,12 +1,16 @@
 //! One provider-neutral Responses HTTP/SSE implementation selected entirely
 //! by explicit configuration.
 
+mod catalog;
 mod cli_output;
+mod failure_capture;
+mod redaction;
 mod request;
 mod response;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -168,6 +172,7 @@ pub struct ResponsesHttpAdapter {
     credential_source: Arc<dyn CredentialSource>,
     image_resolver: Option<Arc<ImageArtifactResolver>>,
     cli_role: Option<&'static str>,
+    failure_capture: Option<PathBuf>,
     opaque_continuations: Arc<OpaqueContinuationStore>,
     #[cfg(debug_assertions)]
     debug: bool,
@@ -198,6 +203,7 @@ impl ResponsesHttpAdapter {
             credential_source,
             image_resolver: None,
             cli_role: None,
+            failure_capture: None,
             opaque_continuations: Arc::new(OpaqueContinuationStore::default()),
             #[cfg(debug_assertions)]
             debug: false,
@@ -226,6 +232,36 @@ impl ResponsesHttpAdapter {
         }
         self
     }
+
+    pub(crate) fn with_failure_capture(mut self, directory: Option<&Path>) -> Self {
+        self.failure_capture = directory.map(Path::to_path_buf);
+        self
+    }
+
+    fn resolve_credential(&self) -> Result<CredentialForStream, ModelProviderError> {
+        let reference = &self.config.credential_reference;
+        match (
+            self.config.wire_profile,
+            self.credential_source.resolve(reference),
+        ) {
+            (
+                ResponsesWireProfile::CodexSubscription,
+                CredentialResolution::PendingAccountBound(resolution),
+            ) => Ok(CredentialForStream::PendingAccountBound(resolution)),
+            (ResponsesWireProfile::CodexSubscription, _) => Err(request_encoding_error(
+                "Codex subscription Responses requires an account-bound credential",
+            )),
+            (_, CredentialResolution::PendingAccountBound(_)) => Err(request_encoding_error(
+                "account-bound credentials require the explicit Codex subscription Responses profile",
+            )),
+            (_, CredentialResolution::Ready(result)) => {
+                validate_credential(result, reference).map(CredentialForStream::Ready)
+            }
+            (_, CredentialResolution::Pending(resolution)) => {
+                Ok(CredentialForStream::Pending(resolution))
+            }
+        }
+    }
 }
 
 fn request_encoding_error(error: impl ToString) -> ModelProviderError {
@@ -247,14 +283,76 @@ fn response_body_failure(
     }
 }
 
-fn connection_failure(error: &reqwest::Error) -> ModelProviderError {
-    ModelProviderError::ConnectionFailure {
-        timeout: error.is_timeout(),
-        io_kind: source_io_kind(error),
+fn request_send_failure(
+    error: &reqwest::Error,
+    elapsed: Duration,
+    request_body_bytes: usize,
+) -> ModelProviderError {
+    let reqwest_kind = if error.is_request() {
+        "request"
+    } else {
+        "other"
+    };
+    let message = format!(
+        "request transport failed (phase=send_or_headers; elapsed_ms={}; request_body_bytes={request_body_bytes}; reqwest_kind={reqwest_kind}; io_kind={}; http_cause={})",
+        elapsed.as_millis(),
+        source_io_kind(error),
+        source_http_cause(error),
+    );
+    // A header EOF can follow an ordinary idle peer close before the pooled
+    // connection driver observes it. It is an uncompleted model attempt, not
+    // an HTTP/protocol response or a reason to replay a local Tool.
+    if error.is_connect()
+        || error.is_timeout()
+        || source_http_error(error)
+            .is_some_and(|error| error.is_incomplete_message() || error.is_closed())
+        || matches!(
+            source_io_error_kind(error),
+            Some(
+                std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::UnexpectedEof
+            )
+        )
+    {
+        ModelProviderError::ConnectionFailure {
+            timeout: error.is_timeout(),
+            io_kind: source_io_kind(error),
+            message,
+        }
+    } else {
+        ModelProviderError::TransportFailure { message }
     }
 }
 
+fn source_http_cause(error: &reqwest::Error) -> &'static str {
+    match source_http_error(error) {
+        Some(error) if error.is_incomplete_message() => "incomplete_message",
+        Some(error) if error.is_closed() => "closed",
+        Some(error) if error.is_parse() => "parse",
+        Some(_) => "other",
+        None => "None",
+    }
+}
+
+fn source_http_error(error: &reqwest::Error) -> Option<&hyper::Error> {
+    let mut source = error.source();
+    while let Some(cause) = source {
+        if let Some(error) = cause.downcast_ref::<hyper::Error>() {
+            return Some(error);
+        }
+        source = cause.source();
+    }
+    None
+}
+
 fn source_io_kind(error: &reqwest::Error) -> String {
+    // Only the finite error-kind label crosses the Port, never a source message.
+    format!("{:?}", source_io_error_kind(error))
+}
+
+fn source_io_error_kind(error: &reqwest::Error) -> Option<std::io::ErrorKind> {
     let mut io_kind = None;
     let mut source = error.source();
     while let Some(cause) = source {
@@ -263,8 +361,7 @@ fn source_io_kind(error: &reqwest::Error) -> String {
         }
         source = cause.source();
     }
-    // Only the finite error-kind label crosses the Port, never a source message.
-    format!("{io_kind:?}")
+    io_kind
 }
 
 impl ModelProvider for ResponsesHttpAdapter {
@@ -303,31 +400,7 @@ impl ModelProvider for ResponsesHttpAdapter {
         )?;
         let request = serde_json::to_value(request).map_err(request_encoding_error)?;
         let request_body = serde_json::to_vec(&request).map_err(request_encoding_error)?;
-        let credential = match (
-            profile,
-            self.credential_source.resolve(&credential_reference),
-        ) {
-            (
-                ResponsesWireProfile::CodexSubscription,
-                CredentialResolution::PendingAccountBound(resolution),
-            ) => CredentialForStream::PendingAccountBound(resolution),
-            (ResponsesWireProfile::CodexSubscription, _) => {
-                return Err(request_encoding_error(
-                    "Codex subscription Responses requires an account-bound credential",
-                ));
-            }
-            (_, CredentialResolution::PendingAccountBound(_)) => {
-                return Err(request_encoding_error(
-                    "account-bound credentials require the explicit Codex subscription Responses profile",
-                ));
-            }
-            (_, CredentialResolution::Ready(result)) => {
-                CredentialForStream::Ready(validate_credential(result, &credential_reference)?)
-            }
-            (_, CredentialResolution::Pending(resolution)) => {
-                CredentialForStream::Pending(resolution)
-            }
-        };
+        let credential = self.resolve_credential()?;
         Ok(Box::new(PreparedResponsesRequest {
             client: self.client.clone(),
             endpoint: self.config.endpoint(),
@@ -344,6 +417,7 @@ impl ModelProvider for ResponsesHttpAdapter {
             opaque_continuations,
             profile,
             cli_role: self.cli_role,
+            failure_capture: self.failure_capture.clone(),
             partial_text: Arc::new(AtomicBool::new(false)),
             #[cfg(debug_assertions)]
             full_debug: self.debug,
@@ -367,6 +441,7 @@ struct PreparedResponsesRequest {
     opaque_continuations: Arc<OpaqueContinuationStore>,
     profile: ResponsesWireProfile,
     cli_role: Option<&'static str>,
+    failure_capture: Option<PathBuf>,
     partial_text: Arc<AtomicBool>,
     #[cfg(debug_assertions)]
     full_debug: bool,
@@ -389,6 +464,7 @@ impl PreparedModelRequest for PreparedResponsesRequest {
         let opaque_continuations = Arc::clone(&self.opaque_continuations);
         let profile = self.profile;
         let cli_role = self.cli_role;
+        let failure_capture = self.failure_capture.clone();
         let partial_text = Arc::clone(&self.partial_text);
         #[cfg(debug_assertions)]
         let full_debug = self.full_debug;
@@ -400,7 +476,24 @@ impl PreparedModelRequest for PreparedResponsesRequest {
                 authorization,
                 account_id,
             } = credential;
+            let capture = failure_capture.map(|directory| failure_capture::FailedRequestCapture::new(
+                directory,
+                cli_role,
+                endpoint.clone(),
+                request_body.clone(),
+                bearer.clone(),
+                account_id.as_ref().map(|value| std::str::from_utf8(value.as_bytes()).expect("account header originated from UTF-8").to_owned()),
+            ));
+            let attempt = try_stream! {
+            let mut decoder = response::ResponseDecoder::new(
+                profile,
+                opaque_scope,
+                &bearer,
+                account_id.as_ref().map(HeaderValue::as_bytes),
+            );
             let mut diagnostics = cli_role.map(|role| cli_output::RequestOutput::new(role, bearer,
+                #[cfg(debug_assertions)]
+                account_id.as_ref().map(|value| std::str::from_utf8(value.as_bytes()).expect("account header originated from UTF-8").to_owned()),
                 #[cfg(debug_assertions)]
                 full_debug,
             ));
@@ -409,6 +502,7 @@ impl PreparedModelRequest for PreparedResponsesRequest {
                 diagnostics.request(&request);
             }
             let request_started = Instant::now();
+            let request_body_bytes = request_body.len();
             let request_builder = client
                 .post(endpoint)
                 .header(ACCEPT, "text/event-stream")
@@ -422,15 +516,7 @@ impl PreparedModelRequest for PreparedResponsesRequest {
             let response = request_builder
                 .send()
                 .await
-                .map_err(|error| {
-                    if error.is_connect() || error.is_timeout() {
-                        connection_failure(&error)
-                    } else {
-                        ModelProviderError::TransportFailure {
-                            message: "request transport failed before a response".to_owned(),
-                        }
-                    }
-                })?;
+                .map_err(|error| request_send_failure(&error, request_started.elapsed(), request_body_bytes))?;
 
             let status = response.status();
             #[cfg(debug_assertions)]
@@ -487,7 +573,6 @@ impl PreparedModelRequest for PreparedResponsesRequest {
                     unreachable!("an HTTP failure is returned through the stream")
                 }
             };
-            let mut decoder = response::ResponseDecoder::new(profile, opaque_scope);
             let mut staged_opaque = BTreeMap::new();
             loop {
                 let event = response_events
@@ -565,6 +650,19 @@ impl PreparedModelRequest for PreparedResponsesRequest {
                     break;
                 }
             }
+            };
+            futures_util::pin_mut!(attempt);
+            while let Some(result) = attempt.next().await {
+                match result {
+                    Ok(event) => yield event,
+                    Err(error) => {
+                        if let Some(capture) = &capture {
+                            capture.record(&error);
+                        }
+                        Err(error)?;
+                    }
+                }
+            }
         };
 
         Ok(Box::pin(stream))
@@ -614,15 +712,8 @@ async fn prepared_credential(
             credential_ref: credential_reference.to_owned(),
             message: "prepared credential is already in use".to_owned(),
         })?;
-    let resolved_credential = match unresolved_credential {
-        CredentialForStream::Ready(credential) => credential,
-        CredentialForStream::Pending(resolution) => {
-            validate_credential(resolution.await, credential_reference)?
-        }
-        CredentialForStream::PendingAccountBound(resolution) => {
-            validate_account_bound_credential(resolution.await, credential_reference)?
-        }
-    };
+    let resolved_credential =
+        resolve_pending_credential(unresolved_credential, credential_reference).await?;
     *credential
         .lock()
         .map_err(|_| ModelProviderError::CredentialSourceFailure {
@@ -630,6 +721,21 @@ async fn prepared_credential(
             message: "prepared credential state is unavailable".to_owned(),
         })? = Some(CredentialForStream::Ready(resolved_credential.clone()));
     Ok(resolved_credential)
+}
+
+async fn resolve_pending_credential(
+    credential: CredentialForStream,
+    credential_reference: &str,
+) -> Result<StreamCredential, ModelProviderError> {
+    match credential {
+        CredentialForStream::Ready(credential) => Ok(credential),
+        CredentialForStream::Pending(resolution) => {
+            validate_credential(resolution.await, credential_reference)
+        }
+        CredentialForStream::PendingAccountBound(resolution) => {
+            validate_account_bound_credential(resolution.await, credential_reference)
+        }
+    }
 }
 
 fn validate_credential(

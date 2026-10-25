@@ -2,10 +2,8 @@
 
 use crate::adapters::agent_evolution::{EvolutionError, EvolutionStore};
 use crate::adapters::mcp_http::McpCatalogTool;
-use crate::adapters::project_event_store::read_existing_session_events;
 use crate::adapters::tools::ToolRegistry;
 use crate::app::agent_loop::AgentLoop;
-use crate::domain::session::SessionReducer;
 use crate::provider_composition::ProviderComposition;
 
 use super::{ChatError, DurableChatSession, definition};
@@ -22,7 +20,9 @@ pub(super) fn apply_completed<Provider: crate::ports::model::ModelProvider + ?Si
         return Ok(false);
     }
     if tools.has_active_processes() || !no_pending_images {
-        eprintln!("[RSI deferred] Active processes or queued images retain pending candidates.");
+        console_eprintln!(
+            "[RSI deferred] Active processes or queued images retain pending candidates."
+        );
         return Ok(false);
     }
     agent
@@ -30,15 +30,13 @@ pub(super) fn apply_completed<Provider: crate::ports::model::ModelProvider + ?Si
         .ensure_all_tool_calls_paired()
         .map_err(crate::domain::session::SessionError::from)?;
     session.validate_stopped_runtime(agent)?;
-    let events = read_existing_session_events(&session.project, &session.session_id)
-        .map_err(definition::error)?;
-    let state = SessionReducer.reduce(events)?;
+    let state = session.durable_state()?;
     let store = EvolutionStore::new(&session.project, &session.binding);
     let candidate = match store.pending(&session.binding, &session.session_id, &state) {
         Ok(Some(candidate)) => candidate,
         Ok(None) => return Ok(false),
         Err(EvolutionError::Rejected(message)) => {
-            eprintln!("[RSI rejected] {message}; candidate retained.");
+            console_eprintln!("[RSI rejected] {message}; candidate retained.");
             return Ok(false);
         }
         Err(error) => return Err(error.into()),
@@ -50,7 +48,7 @@ pub(super) fn apply_completed<Provider: crate::ports::model::ModelProvider + ?Si
     )?;
     if let Err(error) = preview.preflight_binding(&state, composition, discovered_mcp) {
         if is_budget_error(&error) {
-            eprintln!("[RSI rejected] preflight: {error}; candidate retained.");
+            console_eprintln!("[RSI rejected] preflight: {error}; candidate retained.");
             return Ok(false);
         }
         return Err(error);
@@ -74,7 +72,7 @@ pub(super) fn apply_completed<Provider: crate::ports::model::ModelProvider + ?Si
     )?);
     agent.resume_from_session(&state, provider_session, validation.as_ref())?;
     session.binding = preview.binding;
-    eprintln!(
+    console_eprintln!(
         "[RSI applied] revision {}; next request uses the new instructions. Structural publication permits a trial; improvement remains unverified.",
         session.binding.definition().digest().as_str()
     );

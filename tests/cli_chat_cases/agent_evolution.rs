@@ -226,7 +226,7 @@ fn rsi_retry_budget_exhaustion_closes_activity_without_executing_a_partial_probe
     assert_eq!(
         events
             .iter()
-            .filter(|event| event["event_type"] == "tool.execution_receipt_recorded")
+            .filter(|event| event["event_type"] == "tool.execution_outcome_recorded")
             .count(),
         2,
         "only the two original ordinary commands executed"
@@ -534,14 +534,19 @@ fn rsi2_reference_match_uses_actual_scoped_commands_and_only_adopts_a_local_gain
 
 #[test]
 fn rsi2_no_signal_and_insufficient_shared_budget_do_not_add_requests() {
-    for case in ["no-signal", "small-budget", "feedback"] {
+    for case in [
+        "no-signal",
+        "small-budget",
+        "feedback",
+        "unlimited-feedback",
+    ] {
         let root = TemporaryDirectory::new(&format!("rsi2-{case}"));
         initialize_project(root.path());
         let definition = improvement_definition(root.path());
         improvement_fixture(root.path());
         let count = match case {
             "small-budget" => 3,
-            "feedback" => 2,
+            "feedback" | "unlimited-feedback" => 2,
             _ => 1,
         };
         let server = server(
@@ -549,7 +554,7 @@ fn rsi2_no_signal_and_insufficient_shared_budget_do_not_add_requests() {
                 match (case,step) {
             ("small-budget",0)=>tool("failed","run_command",json!({"argv":["/bin/sh","probe.sh","fail"]})),
             ("small-budget",1)=>tool("main-reference","run_command",json!({"argv":["/bin/sh","probe.sh","good"],"code_inputs":["probe.sh"]})),
-            ("feedback",1)=>text_response(&json!({"decision":"no_change","reason":"No trustworthy local contrast for this preference."}).to_string(),"no-change"),
+            ("feedback" | "unlimited-feedback",1)=>text_response(&json!({"decision":"no_change","reason":"No trustworthy local contrast for this preference."}).to_string(),"no-change"),
             _=>text_response("DONE","completed"),
         }
             },
@@ -561,7 +566,12 @@ fn rsi2_no_signal_and_insufficient_shared_budget_do_not_add_requests() {
             content.push_str("\n[runtime]\nmodel_request_limit_per_turn = 5\n");
             fs::write(&config, content).unwrap();
         }
-        let input = if case == "feedback" {
+        if case == "unlimited-feedback" {
+            let mut content = fs::read_to_string(&config).unwrap();
+            content.push_str("\n[runtime]\nmodel_request_limit_per_turn = 0\n");
+            fs::write(&config, content).unwrap();
+        }
+        let input = if matches!(case, "feedback" | "unlimited-feedback") {
             "[rsi-feedback] Persist concise replies.\n/exit\n"
         } else {
             "Complete the ordinary task.\n/exit\n"
@@ -585,8 +595,21 @@ fn rsi2_no_signal_and_insufficient_shared_budget_do_not_add_requests() {
                 .iter()
                 .filter(|event| event["event_type"] == "session.rsi_activity_recorded")
                 .count(),
-            if case == "feedback" { 3 } else { 0 }
+            if matches!(case, "feedback" | "unlimited-feedback") {
+                3
+            } else {
+                0
+            }
         );
+        if case == "unlimited-feedback" {
+            assert!(
+                String::from_utf8_lossy(&output.stdout)
+                    .contains("admitted=2 primary=2 vision=0 remaining=unlimited limit=unlimited")
+            );
+            assert!(
+                !String::from_utf8_lossy(&output.stderr).contains("Fewer than 3 shared admissions")
+            );
+        }
         if case == "small-budget" {
             assert!(
                 String::from_utf8_lossy(&output.stderr).contains("Fewer than 3 shared admissions")
@@ -640,6 +663,9 @@ fn assert_rsi2_strict_activity(events: &[Value]) {
         }
         if event["payload"]["item"]["result"]["call_id"] == "main-failed" {
             event["payload"]["item"]["result"]["call_id"] = scoped_id.clone();
+        }
+        if event["payload"]["result"]["call_id"] == "main-failed" {
+            event["payload"]["result"]["call_id"] = scoped_id.clone();
         }
         if event["payload"]["receipt"]["execution_id"] == "execution:main-failed" {
             event["payload"]["receipt"]["execution_id"] =
@@ -1054,7 +1080,7 @@ fn rsi2_probes_preserve_actual_current_turn_deferred_availability_and_do_not_pro
             assert!(
                 !events
                     .iter()
-                    .any(|event| event["event_type"] == "tool.execution_receipt_recorded")
+                    .any(|event| event["event_type"] == "tool.execution_outcome_recorded")
             );
             assert!(
                 events

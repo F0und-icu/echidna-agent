@@ -3,6 +3,9 @@
 include!("../src/lib.rs");
 mod support;
 
+#[path = "model_transport_retry_cases/runtime.rs"]
+mod chat_runtime_contracts;
+
 mod retry_contracts {
     use std::collections::{BTreeMap, VecDeque};
     use std::convert::Infallible;
@@ -345,6 +348,7 @@ mod retry_contracts {
             vec![Err(ModelProviderError::ConnectionFailure {
                 timeout: false,
                 io_kind: "Some(ConnectionReset)".to_owned(),
+                message: "fixture connection reset".to_owned(),
             })],
             completed("recovered"),
         ]);
@@ -375,6 +379,7 @@ mod retry_contracts {
                 Err(ModelProviderError::ConnectionFailure {
                     timeout: false,
                     io_kind: "Some(ConnectionReset)".to_owned(),
+                    message: "fixture connection reset".to_owned(),
                 }),
             ],
             completed("committed after reconnect"),
@@ -430,6 +435,7 @@ mod retry_contracts {
         let interruption = ModelProviderError::ConnectionFailure {
             timeout: false,
             io_kind: "Some(ConnectionReset)".to_owned(),
+            message: "fixture connection reset".to_owned(),
         };
         for limit in 1..=3 {
             let mut responses = vec![vec![Err(interruption.clone())]; limit];
@@ -455,6 +461,31 @@ mod retry_contracts {
             assert_eq!(provider.stream_calls.load(Ordering::SeqCst), limit);
             assert_eq!(provider.prepare_calls.load(Ordering::SeqCst), 1);
         }
+    }
+
+    #[tokio::test]
+    async fn unlimited_admission_keeps_the_three_attempt_transport_retry_bound() {
+        let interruption = ModelProviderError::ConnectionFailure {
+            timeout: false,
+            io_kind: "Some(ConnectionReset)".to_owned(),
+            message: "fixture connection reset".to_owned(),
+        };
+        let provider = PreparedFixtureProvider::new(vec![vec![Err(interruption.clone())]; 3]);
+        let budget = ModelRequestBudget::new(0);
+        let mut audits = 0;
+        let error = run_with_budget(&provider, &budget, &mut audits)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ModelRetryError::Streaming(ModelStreamingError::Provider(error)) if error == interruption
+        ));
+        assert_eq!(budget.remaining(), None);
+        assert_eq!(budget.counts().primary, 3);
+        assert_eq!(audits, 3);
+        assert_eq!(provider.prepare_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(provider.stream_calls.load(Ordering::SeqCst), 3);
+        assert_eq!(provider.retry_markers.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
@@ -492,6 +523,10 @@ mod retry_contracts {
             vec![Err(ModelProviderError::TransportFailure {
                 message: "fixture generic transport failure".to_owned(),
             })],
+            vec![Err(ModelProviderError::ProviderFailure {
+                code: Some("server_error".to_owned()),
+                message: "Responses SSE error: fixture terminal failure".to_owned(),
+            })],
             Vec::new(),
         ] {
             let provider = PreparedFixtureProvider::new([attempt]);
@@ -514,6 +549,7 @@ mod retry_contracts {
             PreparedFixtureProvider::new([vec![Err(ModelProviderError::ConnectionFailure {
                 timeout: true,
                 io_kind: "None".to_owned(),
+                message: "fixture connection timeout".to_owned(),
             })]]);
         let cancellation = AgentCancellation::new();
         let mut before_attempts = 0;
@@ -606,6 +642,7 @@ mod retry_contracts {
             [vec![Err(ModelProviderError::ConnectionFailure {
                 timeout: false,
                 io_kind: "Some(ConnectionReset)".to_owned(),
+                message: "fixture connection reset".to_owned(),
             })]],
         );
         let binding = vision_binding();
@@ -673,6 +710,7 @@ mod retry_contracts {
             [vec![Err(ModelProviderError::ConnectionFailure {
                 timeout: false,
                 io_kind: "Some(ConnectionReset)".to_owned(),
+                message: "fixture connection reset".to_owned(),
             })]],
         );
         let binding = vision_binding();

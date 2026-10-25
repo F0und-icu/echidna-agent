@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::io;
+use std::io::{self, Write};
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -68,7 +68,7 @@ impl Drop for OwnedProcess {
         let kill_error = self.child.kill().err().map(|error| error.kind());
         let wait_error = self.child.wait().err().map(|error| error.kind());
         if group_error.is_some() || wait_error.is_some() {
-            eprintln!(
+            writeln!(crate::terminal_console::stderr(),
                 "[MCP stdio cleanup: group_io={group_error:?} child_io={kill_error:?} wait_io={wait_error:?} stderr_bytes={} stderr_io={:?}]",
                 self.metadata.bytes.load(Ordering::Relaxed),
                 *self
@@ -76,7 +76,7 @@ impl Drop for OwnedProcess {
                     .error
                     .lock()
                     .expect("MCP stderr mutex poisoned")
-            );
+            ).expect("MCP stderr failed");
         }
     }
 }

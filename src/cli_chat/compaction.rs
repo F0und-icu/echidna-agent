@@ -2,18 +2,15 @@
 //! Context-pressure presentation. Durable facts and Context decisions retain
 //! their existing Domain/App owners.
 
-use crate::adapters::project_event_store::ProjectEventStream;
 use crate::adapters::session_compaction::{SessionCompactionFacts, load_session_compaction_facts};
 use crate::adapters::tools::ToolRegistry;
 use crate::app::agent_loop::AgentLoop;
-use crate::app::session::SessionProjection;
 use crate::domain::context::{
     ContextDecision, ContextDecisionManifest, ContextPlan, ContextWindowPolicy,
 };
 use crate::domain::session::{
     SessionCompaction, SessionError, SessionEvent, SessionState, SessionSummaryDraft,
 };
-use crate::ports::EventSource;
 use crate::ports::model::ModelProvider;
 
 use super::{ChatError, DurableChatSession, event_id, occurred_at};
@@ -103,61 +100,56 @@ impl DurableChatSession {
     where
         Provider: ModelProvider + ?Sized,
     {
-        let mut writer = self.project.open_writer()?;
-        let mut store = writer.open_session(self.session_id.clone(), None)?;
-        let stream_id = ProjectEventStream::Session(self.session_id.clone()).stream_id();
-        let mut projection =
-            SessionProjection::replay(EventSource::read_events(&store, &stream_id)?)?;
+        self.with_projection(|projection, store, stream_id| {
+            agent.validate_compaction_session(projection.state())?;
+            projection
+                .state()
+                .ensure_observed_tool_calls_paired()
+                .map_err(crate::domain::session::SessionError::from)?;
+            super::recovery::validate_runtime_history(projection.state(), agent)?;
 
-        agent.validate_compaction_session(projection.state())?;
-        projection
-            .state()
-            .history()
-            .ensure_all_tool_calls_paired()
-            .map_err(crate::domain::session::SessionError::from)?;
-        super::recovery::validate_runtime_history(projection.state(), agent)?;
+            // The Writer lock freezes both Research and Session appenders while
+            // these read-only facts and the new Compaction Event are composed.
+            let facts = load_session_compaction_facts(&self.project, projection.state())
+                .map_err(ChatError::CompactionFacts)?;
+            let (draft, compaction) = select_compaction(
+                projection.state(),
+                &facts,
+                ContextWindowPolicy::for_window(window_tokens),
+                |candidate| {
+                    agent
+                        .preflight_compaction(candidate, true)
+                        .map_err(ChatError::from)
+                },
+            )?;
+            let validation = facts.context();
+            let result = AppliedCompactionSummary {
+                revision: compaction.summary().revision(),
+                source_history_items: compaction.source_history_item_count(),
+                retained_history_items: compaction.retained_history().len(),
+            };
 
-        // The Writer lock freezes both Research and Session appenders while
-        // these read-only facts and the new Compaction Event are composed.
-        let facts = load_session_compaction_facts(&self.project, projection.state())
-            .map_err(ChatError::CompactionFacts)?;
-        let (draft, compaction) = select_compaction(
-            projection.state(),
-            &facts,
-            ContextWindowPolicy::for_window(window_tokens),
-            |candidate| {
-                agent
-                    .preflight_compaction(candidate, true)
-                    .map_err(ChatError::from)
-            },
-        )?;
-        let validation = facts.context();
-        let result = AppliedCompactionSummary {
-            revision: compaction.summary().revision(),
-            source_history_items: compaction.source_history_item_count(),
-            retained_history_items: compaction.retained_history().len(),
-        };
-
-        // Candidate state cannot affect active Context. It exists only to
-        // prove that the Event applied below contains this exact draft.
-        agent.update_session_summary_candidate(draft);
-        let sequence = store.next_sequence()?;
-        let event = SessionEvent::CompactionCreated { compaction }.into_envelope(
-            event_id(
-                self.project.project_id(),
-                &self.session_id,
-                sequence.get(),
-                "compaction",
-            ),
-            stream_id,
-            sequence,
-            occurred_at(),
-        )?;
-        projection
-            .append(&mut store, event)
-            .map_err(ChatError::from_session_append)?;
-        agent.apply_compaction(projection.state(), Some(&validation))?;
-        Ok(result)
+            // Candidate state cannot affect active Context. It exists only to
+            // prove that the Event applied below contains this exact draft.
+            agent.update_session_summary_candidate(draft);
+            let sequence = store.next_sequence()?;
+            let event = SessionEvent::CompactionCreated { compaction }.into_envelope(
+                event_id(
+                    self.project.project_id(),
+                    &self.session_id,
+                    sequence.get(),
+                    "compaction",
+                ),
+                stream_id,
+                sequence,
+                occurred_at(),
+            )?;
+            projection
+                .append(store, event)
+                .map_err(ChatError::from_session_append)?;
+            agent.apply_compaction(projection.state(), Some(&validation))?;
+            Ok(result)
+        })
     }
 }
 

@@ -292,19 +292,19 @@ fn event_count(events: &[Value], event_type: &str) -> usize {
         .count()
 }
 
-fn wait_for_receipt(project: &std::path::Path, session: &str, expected: usize) {
+fn wait_for_outcome(project: &std::path::Path, session: &str, expected: usize) {
     let deadline = std::time::Instant::now() + WAIT;
     loop {
         let count = session_events(project, session)
             .iter()
-            .filter(|event| event["event_type"] == "tool.execution_receipt_recorded")
+            .filter(|event| event["event_type"] == "tool.execution_outcome_recorded")
             .count();
         if count == expected {
             return;
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "timed out waiting for {expected} durable Receipt(s); observed {count}"
+            "timed out waiting for {expected} durable execution outcome(s); observed {count}"
         );
         thread::sleep(Duration::from_millis(10));
     }
@@ -332,7 +332,7 @@ fn killed_chat_retains_completed_tool_history_and_does_not_replay_the_tool_on_re
 
     let session = only_session_id(root.path());
     let events = session_events(root.path(), &session);
-    assert_eq!(event_count(&events, "tool.execution_receipt_recorded"), 1);
+    assert_eq!(event_count(&events, "tool.execution_outcome_recorded"), 1);
     assert_eq!(event_count(&events, "session.history_item_recorded"), 3);
     let serialized_history = serde_json::to_string(&events).unwrap();
     assert!(serialized_history.contains("f3-durable-read"));
@@ -362,7 +362,7 @@ fn killed_chat_retains_completed_tool_history_and_does_not_replay_the_tool_on_re
     assert_eq!(
         event_count(
             &session_events(root.path(), &session),
-            "tool.execution_receipt_recorded"
+            "tool.execution_outcome_recorded"
         ),
         1,
         "Resume may use the durable Tool result as History but never re-executes it"
@@ -393,24 +393,94 @@ fn fast_completed_tool_receipt_survives_while_a_parallel_slow_tool_is_interrupte
     server.requests.recv_timeout(WAIT).unwrap();
     let session = only_session_id(root.path());
     server.release_tool_response();
-    wait_for_receipt(root.path(), &session, 1);
+    wait_for_outcome(root.path(), &session, 1);
     child.kill().unwrap();
     child.wait().unwrap();
     server.shutdown();
 
     let events = session_events(root.path(), &session);
-    assert_eq!(event_count(&events, "tool.execution_receipt_recorded"), 1);
+    assert_eq!(event_count(&events, "tool.execution_outcome_recorded"), 1);
     assert_eq!(event_count(&events, "session.history_item_recorded"), 3);
     let serialized = serde_json::to_string(&events).unwrap();
     assert!(serialized.contains("execution:f3-fast"));
     assert!(!serialized.contains("execution:f3-slow"));
-
-    let inert = write_config(root.path(), "http://127.0.0.1:1/v1");
-    let resume = run_chat(root.path(), &inert, &session, "/exit\n");
-    assert!(!resume.status.success());
+    let recorded_result = events
+        .iter()
+        .find(|event| event["event_type"] == "tool.execution_outcome_recorded")
+        .unwrap()["payload"]["result"]
+        .clone();
+    assert_eq!(recorded_result["call_id"], "f3-fast");
+    assert_eq!(recorded_result["status"], "succeeded");
+    let events_path = root
+        .path()
+        .join(".echidna/sessions")
+        .join(&session)
+        .join("events.jsonl");
+    let prefix = fs::read(&events_path).unwrap();
+    fs::write(root.path().join("fast.txt"), "CHANGED_AFTER_INTERRUPTION\n").unwrap();
+    let resumed = spawn_text_server("F3_KNOWN_FAST_UNKNOWN_SLOW");
+    let resume_config = write_config(root.path(), &resumed.base_url);
+    let resume = run_chat(
+        root.path(),
+        &resume_config,
+        &session,
+        "report known and unknown results\n/exit\n",
+    );
     assert!(
+        resume.status.success(),
+        "{}",
         String::from_utf8_lossy(&resume.stderr)
-            .contains("has a durable ExecutionReceipt but no paired durable ToolResult")
+    );
+    assert!(String::from_utf8_lossy(&resume.stdout).contains("F3_KNOWN_FAST_UNKNOWN_SLOW"));
+    let request = resumed.requests.recv_timeout(WAIT).unwrap();
+    resumed.join();
+    let request: Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+    let results = request["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["type"] == "function_call_output")
+        .collect::<Vec<_>>();
+    assert_eq!(results.len(), 2);
+    let fast = results
+        .iter()
+        .find(|item| item["call_id"] == "f3-fast")
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(fast["output"].as_str().unwrap()).unwrap(),
+        json!({"status":recorded_result["status"],"output":recorded_result["output"]})
+    );
+    assert!(
+        !fast["output"]
+            .as_str()
+            .unwrap()
+            .contains("CHANGED_AFTER_INTERRUPTION")
+    );
+    let slow = results
+        .iter()
+        .find(|item| item["call_id"] == "f3-slow")
+        .unwrap();
+    let slow: Value = serde_json::from_str(slow["output"].as_str().unwrap()).unwrap();
+    assert_eq!(slow["status"], "cancelled");
+    assert_eq!(slow["output"]["execution_status"], "unknown");
+    assert_eq!(
+        slow["output"]["guidance"],
+        "do_not_assume_no_effect_or_auto_rerun"
+    );
+    assert!(fs::read(&events_path).unwrap().starts_with(&prefix));
+    let after = session_events(root.path(), &session);
+    assert_eq!(
+        event_count(&after, "tool.execution_outcome_recorded"),
+        1,
+        "neither Call was replayed"
+    );
+    assert_eq!(event_count(&after, "tool.execution_receipt_recorded"), 0);
+    assert!(
+        !after.iter().any(
+            |event| event["event_type"] == "session.history_item_recorded"
+                && event["payload"]["item"]["kind"] == "tool_result"
+        ),
+        "recovery must not fabricate or rewrite real ToolResult facts"
     );
 }
 
@@ -441,7 +511,7 @@ fn model_history_checkpoint_failure_stops_before_tool_execution() {
         String::from_utf8_lossy(&output.stderr)
     );
     let events = session_events(root.path(), &session);
-    assert_eq!(event_count(&events, "tool.execution_receipt_recorded"), 0);
+    assert_eq!(event_count(&events, "tool.execution_outcome_recorded"), 0);
     assert_eq!(event_count(&events, "session.history_item_recorded"), 1);
     assert_eq!(
         fs::read_to_string(root.path().join("target.txt")).unwrap(),

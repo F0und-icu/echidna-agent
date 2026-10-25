@@ -183,12 +183,10 @@ impl<'project> LocalProjectMemory<'project> {
         })
     }
 
-    fn memory_root(&self) -> PathBuf {
-        let memory_root = self.base_memory_root();
-        match self.scope.namespace_path() {
-            Some(agent_id) => memory_root.join("agents").join(agent_id),
-            None => memory_root,
-        }
+    pub(crate) fn memory_root(&self) -> PathBuf {
+        self.project
+            .control_directory()
+            .join(self.scope.storage_directory())
     }
 
     fn base_memory_root(&self) -> PathBuf {

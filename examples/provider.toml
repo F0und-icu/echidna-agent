@@ -33,4 +33,5 @@ vision_mode = "disabled"
 generation = 1
 
 [runtime]
+# 0 disables the per-Turn request ceiling; the default is 32.
 model_request_limit_per_turn = 32

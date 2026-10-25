@@ -1,6 +1,7 @@
 //! CLI-only reasoning presentation and compile-time-gated wire diagnostics.
 
-use std::io::{self, Write};
+use crate::terminal_console as console;
+use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(debug_assertions)]
@@ -8,6 +9,8 @@ use serde::Serialize;
 #[cfg(debug_assertions)]
 use serde_json::{Value, json};
 
+#[cfg(debug_assertions)]
+use super::redaction::WireRedaction;
 use crate::domain::model::ModelEvent;
 #[cfg(debug_assertions)]
 use crate::terminal_content::ContentView;
@@ -17,7 +20,7 @@ static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
 
 pub(super) fn discarded_partial_response(role: &str, retry: usize) {
     let _ = writeln!(
-        io::stdout().lock(),
+        console::stdout(),
         "\n[response interrupted; partial {role} output discarded; retry {retry}/2]"
     );
 }
@@ -26,6 +29,8 @@ pub(super) struct RequestOutput {
     role: &'static str,
     request_id: u64,
     credential: String,
+    #[cfg(debug_assertions)]
+    account: Option<String>,
     saw_reasoning: bool,
     pending_reasoning_deltas: String,
     reasoning_line_open: bool,
@@ -43,12 +48,15 @@ impl RequestOutput {
     pub(super) fn new(
         role: &'static str,
         credential: String,
+        #[cfg(debug_assertions)] account: Option<String>,
         #[cfg(debug_assertions)] full: bool,
     ) -> Self {
         Self {
             role,
             request_id: NEXT_REQUEST.fetch_add(1, Ordering::Relaxed),
             credential,
+            #[cfg(debug_assertions)]
+            account,
             saw_reasoning: false,
             pending_reasoning_deltas: String::new(),
             reasoning_line_open: false,
@@ -68,14 +76,13 @@ impl RequestOutput {
         if self.full {
             match serde_json::to_value(request) {
                 Ok(mut value) => {
-                    sanitize_wire(&mut value);
-                    redact_credential(&mut value, &self.credential);
+                    self.sanitize_wire(&mut value);
                     let mode = if value.get("previous_response_id").is_some() {
                         "增量（仅本次发送内容）"
                     } else {
                         "Full"
                     };
-                    let mut stderr = io::stderr().lock();
+                    let mut stderr = console::stderr();
                     let _ = writeln!(
                         stderr,
                         "\n[debug 发送 {} #{} · {mode}]",
@@ -122,6 +129,11 @@ impl RequestOutput {
         if self.full {
             match serde_json::from_str::<Value>(data) {
                 Ok(value) => {
+                    if value.get("type").and_then(Value::as_str) == Some("error") {
+                        // The decoder alone projects this event's selected, bounded
+                        // and credential-redacted fields in every build mode.
+                        return;
+                    }
                     // Routine SSE wrappers are not content. Semantic output is
                     // observed through the existing decoder below, not reparsed here.
                     if let Some(error) = value.get("error").or_else(|| {
@@ -180,7 +192,7 @@ impl RequestOutput {
                 self.end_reasoning_line();
                 #[cfg(debug_assertions)]
                 if self.full && self.role == "vision" {
-                    let mut stderr = io::stderr().lock();
+                    let mut stderr = console::stderr();
                     if !self.vision_text_open {
                         let _ = writeln!(stderr, "[debug Vision 输出 · 未完成]");
                         self.vision_text_open = true;
@@ -219,7 +231,7 @@ impl RequestOutput {
         if starts_part && self.saw_reasoning_summary {
             self.end_reasoning_summary_line();
         }
-        let mut stderr = io::stderr().lock();
+        let mut stderr = console::stderr();
         if !self.saw_reasoning_summary {
             let _ = writeln!(
                 stderr,
@@ -240,14 +252,14 @@ impl RequestOutput {
         self.end_reasoning_line();
         self.end_reasoning_summary_line();
         if self.saw_reasoning_summary {
-            let _ = writeln!(io::stderr().lock(), "[推理摘要已完成]");
+            let _ = writeln!(console::stderr(), "[推理摘要已完成]");
         }
         if self.full_debug() {
             #[cfg(debug_assertions)]
             self.emit("响应已完成", Value::Null);
         } else if self.saw_reasoning {
             self.end_reasoning_line();
-            let _ = writeln!(io::stderr().lock(), "[思考响应已完成]");
+            let _ = writeln!(console::stderr(), "[思考响应已完成]");
         }
     }
 
@@ -262,7 +274,7 @@ impl RequestOutput {
         );
         if self.saw_reasoning_summary {
             let _ = writeln!(
-                io::stderr().lock(),
+                console::stderr(),
                 "[推理摘要未提交：{}]",
                 if protocol_error {
                     "协议解码失败"
@@ -285,7 +297,7 @@ impl RequestOutput {
         }
         if self.saw_reasoning {
             let _ = writeln!(
-                io::stderr().lock(),
+                console::stderr(),
                 "[思考响应未提交：{}]",
                 if protocol_error {
                     "协议解码失败"
@@ -300,7 +312,7 @@ impl RequestOutput {
         if text.is_empty() {
             return;
         }
-        let mut stderr = io::stderr().lock();
+        let mut stderr = console::stderr();
         if !self.saw_reasoning {
             let _ = writeln!(stderr, "[思考 {} #{} · 未完成]", self.role, self.request_id);
             self.saw_reasoning = true;
@@ -315,14 +327,14 @@ impl RequestOutput {
 
     fn end_reasoning_line(&mut self) {
         if self.reasoning_line_open {
-            let _ = writeln!(io::stderr().lock());
+            let _ = writeln!(console::stderr());
             self.reasoning_line_open = false;
         }
     }
 
     fn end_reasoning_summary_line(&mut self) {
         if self.reasoning_summary_line_open {
-            let _ = writeln!(io::stderr().lock());
+            let _ = writeln!(console::stderr());
             self.reasoning_summary_line_open = false;
         }
     }
@@ -340,12 +352,9 @@ impl RequestOutput {
 
     #[cfg(debug_assertions)]
     fn emit(&self, kind: &str, mut payload: Value) {
-        if self.full {
-            sanitize_wire(&mut payload);
-        }
-        redact_credential(&mut payload, &self.credential);
+        self.sanitize_wire(&mut payload);
         let _ = writeln!(
-            io::stderr().lock(),
+            console::stderr(),
             "\n[debug {} #{} · {kind}]\n{}",
             self.role,
             self.request_id,
@@ -356,6 +365,12 @@ impl RequestOutput {
             }
         );
     }
+
+    #[cfg(debug_assertions)]
+    fn sanitize_wire(&self, value: &mut Value) {
+        WireRedaction::new(&[&self.credential, self.account.as_deref().unwrap_or("")])
+            .sanitize(value);
+    }
 }
 
 impl Drop for RequestOutput {
@@ -365,7 +380,7 @@ impl Drop for RequestOutput {
         }
         self.end_reasoning_summary_line();
         if self.saw_reasoning_summary {
-            let _ = writeln!(io::stderr().lock(), "[推理摘要中断：响应未完成]");
+            let _ = writeln!(console::stderr(), "[推理摘要中断：响应未完成]");
         }
         if self.full_debug() {
             self.end_reasoning_line();
@@ -373,45 +388,8 @@ impl Drop for RequestOutput {
             self.emit("响应中断：未观察到完成", Value::Null);
         } else if self.saw_reasoning {
             self.end_reasoning_line();
-            let _ = writeln!(io::stderr().lock(), "[思考中断：响应未完成]");
+            let _ = writeln!(console::stderr(), "[思考中断：响应未完成]");
         }
-    }
-}
-
-#[cfg(debug_assertions)]
-fn sanitize_wire(value: &mut Value) {
-    match value {
-        Value::Object(object) => {
-            for (key, value) in object {
-                if matches!(
-                    key.to_ascii_lowercase().as_str(),
-                    "authorization" | "api_key" | "access_token" | "encrypted_content"
-                ) {
-                    *value = json!("[redacted]");
-                } else {
-                    sanitize_wire(value);
-                }
-            }
-        }
-        Value::Array(items) => items.iter_mut().for_each(sanitize_wire),
-        Value::String(text) if text.starts_with("data:image/") => {
-            *text = format!("[image data omitted; {} encoded bytes]", text.len());
-        }
-        _ => {}
-    }
-}
-
-#[cfg(debug_assertions)]
-fn redact_credential(value: &mut Value, credential: &str) {
-    match value {
-        Value::String(text) => *text = redact_text(text, credential),
-        Value::Array(items) => items
-            .iter_mut()
-            .for_each(|item| redact_credential(item, credential)),
-        Value::Object(object) => object
-            .values_mut()
-            .for_each(|item| redact_credential(item, credential)),
-        _ => {}
     }
 }
 

@@ -3,16 +3,17 @@
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::Path;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use clap::Subcommand;
 use serde::Serialize;
 
-use crate::adapters::subscription_auth::{
-    SubscriptionAuthProtocol, SubscriptionModel, SubscriptionReasoningLevel,
-};
+use crate::adapters::credentials::ProcessEnvironmentCredentialSource;
+use crate::adapters::subscription_auth::SubscriptionAuthProtocol;
 use crate::domain::model::ReasoningEffort;
+use crate::model_catalog::{CatalogModel, CatalogReasoningLevel};
 use crate::provider_composition::CatalogCapabilityImport;
-use crate::provider_composition::ProviderComposition;
+use crate::provider_composition::{ConfiguredModelCatalog, ProviderComposition};
 use crate::terminal_content::escaped_text;
 use crate::{CliError, print_json};
 
@@ -41,19 +42,19 @@ pub(crate) enum AuthCommand {
         #[arg(long, value_name = "PROVIDER_ID")]
         provider: String,
     },
-    /// Fetch models available to the selected account; does not infer capabilities.
+    /// Fetch models advertised by the selected Provider; does not infer capabilities.
     Models {
         #[arg(long, value_name = "PROVIDER_ID")]
         provider: String,
     },
-    /// Select one currently advertised Codex model and optional reasoning effort.
+    /// Select one currently advertised Provider model and optional reasoning effort.
     SelectModel {
         #[arg(long, value_name = "PROVIDER_ID")]
         provider: String,
         /// A slug from the catalog fetched for this command.
         #[arg(long, value_name = "MODEL_SLUG")]
         model: Option<String>,
-        /// A supported, explicitly selectable effort from that same catalog.
+        /// An advertised effort, or an explicit effort when support is not advertised.
         #[arg(long, value_name = "EFFORT")]
         reasoning_effort: Option<String>,
         /// Import the selected catalog model's explicitly advertised capabilities.
@@ -74,12 +75,23 @@ pub(crate) fn run(config: Option<&Path>, command: AuthCommand) -> Result<(), Cli
         | AuthCommand::Models { provider }
         | AuthCommand::SelectModel { provider, .. } => provider.clone(),
     };
-    let service = ProviderComposition::subscription_auth(&config, &provider)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
         .build()
         .map_err(CliError::AuthRuntime)?;
+    if matches!(
+        &command,
+        AuthCommand::Models { .. } | AuthCommand::SelectModel { .. }
+    ) {
+        let source = ProviderComposition::model_catalog(
+            &config,
+            &provider,
+            Arc::new(ProcessEnvironmentCredentialSource),
+        )?;
+        return runtime.block_on(run_model_command(&config, provider, command, source));
+    }
+    let service = ProviderComposition::subscription_auth(&config, &provider)?;
     runtime.block_on(async {
         match command {
             AuthCommand::Login { no_browser, .. } => {
@@ -111,42 +123,67 @@ pub(crate) fn run(config: Option<&Path>, command: AuthCommand) -> Result<(), Cli
                 print_json(&service.refresh_codex().await.map_err(auth_error)?)
             }
             AuthCommand::Logout { .. } => print_json(&service.logout().await.map_err(auth_error)?),
-            AuthCommand::Models { .. } => print_json(&service.models().await.map_err(auth_error)?),
-            AuthCommand::SelectModel {
-                model,
-                reasoning_effort,
-                apply_capabilities,
-                ..
-            } => {
-                if service.protocol() != SubscriptionAuthProtocol::Codex {
-                    return Err(selection_error(
-                        "model selection requires a Codex subscription Provider",
-                    ));
-                }
-                let catalog = service.models().await.map_err(auth_error)?;
-                let (model, effort) =
-                    select_catalog_model(&catalog, model.as_deref(), reasoning_effort.as_deref())?;
-                let capabilities = apply_capabilities.then(|| CatalogCapabilityImport {
-                    context_window: model.context_window,
-                    input_modalities: model.input_modalities.clone(),
-                    supports_reasoning_summary_parameter: model
-                        .supports_reasoning_summary_parameter,
-                });
-                ProviderComposition::select_codex_model(
-                    &config,
-                    &provider,
-                    &model.slug,
-                    effort.clone(),
-                    capabilities,
-                )
-                .map_err(|error| selection_error(&error.to_string()))?;
-                print_json(&SavedModelSelection {
-                    provider,
-                    model: model.slug.clone(),
-                    reasoning_effort: effort.as_ref().map(ReasoningEffort::as_str),
-                })
+            AuthCommand::Models { .. } | AuthCommand::SelectModel { .. } => {
+                unreachable!("catalog commands use their configured catalog route")
             }
         }
+    })
+}
+
+async fn run_model_command(
+    config: &Path,
+    provider: String,
+    command: AuthCommand,
+    source: ConfiguredModelCatalog,
+) -> Result<(), CliError> {
+    let api_key = matches!(&source, ConfiguredModelCatalog::ApiKey(_));
+    let catalog = match source {
+        ConfiguredModelCatalog::ApiKey(adapter) => adapter
+            .models()
+            .await
+            .map_err(|error| selection_error(&error.to_string()))?,
+        ConfiguredModelCatalog::Subscription(service) => {
+            if matches!(&command, AuthCommand::SelectModel { .. })
+                && service.protocol() != SubscriptionAuthProtocol::Codex
+            {
+                return Err(selection_error(
+                    "model selection requires an API-key or Codex subscription Provider",
+                ));
+            }
+            service.models().await.map_err(auth_error)?
+        }
+    };
+    let AuthCommand::SelectModel {
+        model,
+        reasoning_effort,
+        apply_capabilities,
+        ..
+    } = command
+    else {
+        return print_json(&catalog);
+    };
+    let (model, effort) =
+        select_catalog_model(&catalog, model.as_deref(), reasoning_effort.as_deref())?;
+    if apply_capabilities
+        && api_key
+        && model.context_window.is_none()
+        && model.input_modalities.is_none()
+    {
+        return Err(selection_error(
+            "the selected catalog model advertises no importable capabilities; omit --apply-capabilities to preserve the explicit mapping",
+        ));
+    }
+    let capabilities = apply_capabilities.then(|| CatalogCapabilityImport {
+        context_window: model.context_window,
+        input_modalities: model.input_modalities.clone(),
+        supports_reasoning_summary_parameter: model.supports_reasoning_summary_parameter,
+    });
+    ProviderComposition::select_model(config, &provider, &model.slug, effort.clone(), capabilities)
+        .map_err(|error| selection_error(&error.to_string()))?;
+    print_json(&SavedModelSelection {
+        provider,
+        model: model.slug.clone(),
+        reasoning_effort: effort.as_ref().map(ReasoningEffort::as_str),
     })
 }
 
@@ -159,12 +196,12 @@ struct SavedModelSelection<'a> {
 }
 
 fn select_catalog_model<'a>(
-    catalog: &'a [SubscriptionModel],
+    catalog: &'a [CatalogModel],
     requested_model: Option<&str>,
     requested_effort: Option<&str>,
-) -> Result<(&'a SubscriptionModel, Option<ReasoningEffort>), CliError> {
+) -> Result<(&'a CatalogModel, Option<ReasoningEffort>), CliError> {
     if catalog.is_empty() {
-        return Err(selection_error("the current Codex catalog is empty"));
+        return Err(selection_error("the current model catalog is empty"));
     }
     let model_slug = match requested_model {
         Some(model) => model.to_owned(),
@@ -179,12 +216,17 @@ fn select_catalog_model<'a>(
         None if requested_model.is_none() => prompt_effort(model)?,
         None => None,
     };
+    if effort.is_some() && !model.reasoning_levels_advertised {
+        eprintln!(
+            "Reasoning support was not advertised by this catalog; the explicit effort will be sent without a support guarantee."
+        );
+    }
     Ok((model, effort))
 }
 
-fn prompt_model(catalog: &[SubscriptionModel]) -> Result<String, CliError> {
+fn prompt_model(catalog: &[CatalogModel]) -> Result<String, CliError> {
     require_terminal()?;
-    eprintln!("Available Codex models:");
+    eprintln!("Available Provider models:");
     for (index, model) in catalog.iter().enumerate() {
         eprintln!(
             "  {}. {} — {}",
@@ -198,7 +240,7 @@ fn prompt_model(catalog: &[SubscriptionModel]) -> Result<String, CliError> {
 }
 
 pub(crate) fn select_model_choice(
-    catalog: &[SubscriptionModel],
+    catalog: &[CatalogModel],
     choice: &str,
 ) -> Result<String, CliError> {
     if catalog.iter().any(|model| model.slug == choice) {
@@ -215,8 +257,15 @@ pub(crate) fn select_model_choice(
         .ok_or_else(|| selection_error("the selected model number is outside the current catalog"))
 }
 
-fn prompt_effort(model: &SubscriptionModel) -> Result<Option<ReasoningEffort>, CliError> {
+fn prompt_effort(model: &CatalogModel) -> Result<Option<ReasoningEffort>, CliError> {
     require_terminal()?;
+    if !model.reasoning_levels_advertised {
+        eprintln!(
+            "Reasoning support is not advertised by this catalog. Enter an explicit effort, or leave blank for the service default."
+        );
+        let choice = read_choice_or_empty("Reasoning effort (0 or blank uses service default): ")?;
+        return select_effort_choice(model, choice.as_deref());
+    }
     eprintln!(
         "Supported reasoning efforts for {}:",
         escaped_text(&model.slug)
@@ -235,7 +284,7 @@ fn prompt_effort(model: &SubscriptionModel) -> Result<Option<ReasoningEffort>, C
 }
 
 pub(crate) fn select_effort_choice(
-    model: &SubscriptionModel,
+    model: &CatalogModel,
     choice: Option<&str>,
 ) -> Result<Option<ReasoningEffort>, CliError> {
     let Some(choice) = choice else {
@@ -243,6 +292,9 @@ pub(crate) fn select_effort_choice(
     };
     if choice == "0" {
         return Ok(None);
+    }
+    if !model.reasoning_levels_advertised {
+        return parse_supported_effort(model, choice).map(Some);
     }
     match choice.parse::<usize>() {
         Ok(index) => model
@@ -264,7 +316,11 @@ pub(crate) fn select_effort_choice(
     }
 }
 
-fn print_reasoning_level(index: usize, level: &SubscriptionReasoningLevel) {
+fn print_reasoning_level(index: usize, level: &CatalogReasoningLevel) {
+    if level.description.is_empty() {
+        eprintln!("  {}. {}", index, escaped_text(&level.effort));
+        return;
+    }
     eprintln!(
         "  {}. {} — {}",
         index,
@@ -273,14 +329,12 @@ fn print_reasoning_level(index: usize, level: &SubscriptionReasoningLevel) {
     );
 }
 
-fn parse_supported_effort(
-    model: &SubscriptionModel,
-    effort: &str,
-) -> Result<ReasoningEffort, CliError> {
-    if !model
-        .supported_reasoning_levels
-        .iter()
-        .any(|candidate| candidate.effort == effort)
+fn parse_supported_effort(model: &CatalogModel, effort: &str) -> Result<ReasoningEffort, CliError> {
+    if model.reasoning_levels_advertised
+        && !model
+            .supported_reasoning_levels
+            .iter()
+            .any(|candidate| candidate.effort == effort)
     {
         return Err(selection_error(
             "the requested reasoning effort is not supported by the selected model",
@@ -288,7 +342,7 @@ fn parse_supported_effort(
     }
     ReasoningEffort::from_str(effort).map_err(|_| {
         selection_error(
-            "the selected reasoning effort is advertised but not executable by this version of Echidna",
+            "the selected reasoning effort is not executable by this version of Echidna",
         )
     })
 }

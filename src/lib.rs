@@ -25,6 +25,8 @@ mod cli_auth;
 mod cli_chat;
 mod cli_inspection;
 mod cli_session;
+mod model_catalog;
+mod terminal_console;
 mod terminal_content;
 
 #[derive(Debug, Parser)]
@@ -55,6 +57,9 @@ enum CliCommand {
         #[cfg(debug_assertions)]
         #[arg(long)]
         debug: bool,
+        /// Save redacted snapshots of failed Provider requests to this private directory.
+        #[arg(long, value_name = "DIR")]
+        debug_failures: Option<PathBuf>,
         /// Resume one durable Session ID, or `latest`; `--session` is kept as an alias.
         #[arg(
             long = "resume",
@@ -71,7 +76,7 @@ enum CliCommand {
     },
     /// Inspect local configuration and runtime readiness.
     Doctor,
-    /// Manage the explicitly configured Echidna subscription account.
+    /// Manage explicit subscriptions and select configured Provider models.
     Auth {
         #[command(subcommand)]
         command: cli_auth::AuthCommand,
@@ -392,6 +397,7 @@ fn run_chat(
     session: Option<String>,
     domain: Option<CliDomainProfile>,
     phase: Option<CliResearchPhase>,
+    debug_failures: Option<PathBuf>,
     #[cfg(debug_assertions)] debug: bool,
 ) -> Result<(), CliError> {
     let config = config.ok_or(CliError::ChatConfigurationRequired)?;
@@ -402,14 +408,11 @@ fn run_chat(
         config,
         Arc::new(adapters::credentials::ProcessEnvironmentCredentialSource),
         project.clone(),
+        debug_failures,
         #[cfg(debug_assertions)]
         debug,
     )?;
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .map_err(CliError::ChatRuntime)?;
+    let runtime = chat_runtime()?;
     runtime
         .block_on(cli_chat::run(
             project,
@@ -422,6 +425,16 @@ fn run_chat(
         .map_err(|error| CliError::Chat {
             message: error.to_string(),
         })
+}
+
+fn chat_runtime() -> Result<tokio::runtime::Runtime, CliError> {
+    // Session persistence and terminal output may synchronously block the
+    // calling thread. Keep the network driver running independently.
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .map_err(CliError::ChatRuntime)
 }
 
 pub fn run<I, T>(args: I) -> Result<(), CliError>
@@ -438,6 +451,7 @@ where
             session,
             domain,
             phase,
+            debug_failures,
             #[cfg(debug_assertions)]
             debug,
         }) => run_chat(
@@ -446,6 +460,7 @@ where
             session,
             domain,
             phase,
+            debug_failures,
             #[cfg(debug_assertions)]
             debug,
         ),

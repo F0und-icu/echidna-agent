@@ -163,6 +163,16 @@ pub(crate) fn normalize_with_subcommands(
     items: &[ContentItem],
     children: &[super::tools::SubcommandCheckpoint],
 ) -> Result<Vec<ContentItem>, HistoryError> {
+    normalize_with_recorded_results(items, children, &[])
+}
+
+/// Real results may be durable beside their Receipts before the ordered
+/// History checkpoint. Only those recorded values replace uncertainty here.
+pub(crate) fn normalize_with_recorded_results(
+    items: &[ContentItem],
+    children: &[super::tools::SubcommandCheckpoint],
+    recorded_results: &[&ToolResult],
+) -> Result<Vec<ContentItem>, HistoryError> {
     let mut history = ConversationHistory::default();
     for item in items {
         match item {
@@ -206,11 +216,17 @@ pub(crate) fn normalize_with_subcommands(
                 std::mem::take(&mut group),
                 &history,
                 children,
+                recorded_results,
             )?);
         }
         group.append_content_item(item.clone())?;
     }
-    normalized.extend(finish_recovery_group(group, &history, children)?);
+    normalized.extend(finish_recovery_group(
+        group,
+        &history,
+        children,
+        recorded_results,
+    )?);
     Ok(normalized)
 }
 
@@ -218,10 +234,18 @@ fn finish_recovery_group(
     mut group: ConversationHistory,
     complete_input: &ConversationHistory,
     children: &[super::tools::SubcommandCheckpoint],
+    recorded_results: &[&ToolResult],
 ) -> Result<Vec<ContentItem>, HistoryError> {
     for (call_id, tool_name) in group.unpaired_tool_calls_in_call_order() {
         if complete_input.tool_pairs[&call_id].completed {
             return Err(HistoryError::ToolResultAfterUserMessage { call_id });
+        }
+        if let Some(result) = recorded_results
+            .iter()
+            .find(|result| result.call_id == call_id)
+        {
+            group.append_tool_result((*result).clone())?;
+            continue;
         }
         let mut output = serde_json::json!({
             "error": "aborted",

@@ -1255,6 +1255,7 @@ fn siwc_subscription_models(
             max_context_window: None,
             input_modalities: None,
             supports_reasoning_summary_parameter: None,
+            reasoning_levels_advertised: true,
         })
         .collect())
 }
@@ -1314,6 +1315,7 @@ fn codex_subscription_models(
             max_context_window: model.max_context_window,
             input_modalities: model.input_modalities,
             supports_reasoning_summary_parameter: model.supports_reasoning_summary_parameter,
+            reasoning_levels_advertised: true,
         })
         .collect())
 }

@@ -239,8 +239,12 @@ pub enum ModelProviderError {
     RequestEncodingFailure { message: String },
     #[error("model transport failed: {message}")]
     TransportFailure { message: String },
-    #[error("model connection failed: timeout={timeout}, io_kind={io_kind}")]
-    ConnectionFailure { timeout: bool, io_kind: String },
+    #[error("model connection failed: {message}; timeout={timeout}, io_kind={io_kind}")]
+    ConnectionFailure {
+        timeout: bool,
+        io_kind: String,
+        message: String,
+    },
     #[error(
         "model response interrupted: status={status}, elapsed_ms={elapsed_ms}, timeout={timeout}, io_kind={io_kind}"
     )]

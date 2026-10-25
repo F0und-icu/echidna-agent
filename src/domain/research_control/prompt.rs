@@ -314,6 +314,15 @@ impl PromptComposition {
             ContextFragmentPriority::Required,
             &binding_facts,
         )?);
+        if definition.context().memory() != crate::domain::agent_definition::AgentMemoryScope::None
+        {
+            fragments.push(content_identified_instruction_fragment(
+                "prompt:agent:00:memory-protocol:1",
+                ContextFragmentSource::BasePrompt,
+                ContextFragmentPriority::Required,
+                include_str!("../../../assets/prompts/memory-v1.md"),
+            )?);
+        }
         if let Some(rsi) = definition.rsi() {
             let (session, pending) = self
                 .evolution_session

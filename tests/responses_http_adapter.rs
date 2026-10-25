@@ -3359,6 +3359,278 @@ async fn http_rejection_is_a_typed_provider_error() {
     server.await.unwrap();
 }
 
+async fn error_event_fixture(profile: &str, event: Value) -> ModelProviderError {
+    let (base_url, request, server) = spawn_sse_server(200, &format!("data: {event}\n\n")).await;
+    let credentials = FakeCredentialSource::value(Some(FIXTURE_SECRET));
+    let account_credentials = AccountBoundCredentialSource::new(
+        "codex_subscription:fixture",
+        FIXTURE_SECRET,
+        "workspace-error-secret",
+    );
+    let provider = match profile {
+        "standard" => adapter(base_url, credentials.clone()),
+        "siwc" => subscription_adapter(base_url, credentials.clone()),
+        "codex" => codex_subscription_adapter(base_url, account_credentials.clone()),
+        _ => unreachable!("fixed fixture profiles"),
+    };
+    let error = ModelStreamingService::new(&provider)
+        .consume(
+            full(fixture_input(ModelRequestRequirements::default())),
+            ModelStreamCancellation::new(),
+        )
+        .await
+        .unwrap_err();
+    request.await.unwrap();
+    server.await.unwrap();
+    if profile == "codex" {
+        assert_eq!(account_credentials.resolutions(), 1);
+    } else {
+        assert_eq!(credentials.references().len(), 1);
+    }
+    match error {
+        ModelStreamingError::Provider(error) => error,
+        other => panic!("expected a typed Provider error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn error_event_projects_top_level_nested_nullable_and_missing_fields() {
+    for profile in ["standard", "siwc", "codex"] {
+        for (event, code, expected) in [
+            (
+                json!({"type":"error","code":"server_error","message":"temporarily unavailable","param":"reasoning.effort","sequence_number":7,"unknown":"not-visible"}),
+                Some("server_error"),
+                "Responses SSE error (origin=top-level; param=reasoning.effort; sequence_number=7): message=temporarily unavailable",
+            ),
+            (
+                json!({"type":"error","error":{"type":"unknown-type-canary","code":"invalid_request","message":"unsupported input","param":"input","unknown":"not-visible"},"sequence_number":8}),
+                Some("invalid_request"),
+                "Responses SSE error (origin=nested error; param=input; sequence_number=8): message=unsupported input",
+            ),
+            (
+                json!({"type":"error","code":null,"message":"fixture failure","param":null,"sequence_number":1.5}),
+                None,
+                "Responses SSE error (origin=top-level; param=<absent>; sequence_number=1.5): message=fixture failure",
+            ),
+            (
+                json!({"type":"error"}),
+                None,
+                "Responses SSE error (origin=top-level; param=<absent>; sequence_number=<absent>): message=<missing>",
+            ),
+            (
+                json!({"type":"error","error":{"message":" \n\t "}}),
+                None,
+                "Responses SSE error (origin=nested error; param=<absent>; sequence_number=<absent>): message=<empty>",
+            ),
+        ] {
+            assert_eq!(
+                error_event_fixture(profile, event).await,
+                ModelProviderError::ProviderFailure {
+                    code: code.map(str::to_owned),
+                    message: expected.to_owned(),
+                },
+                "{profile}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn error_event_rejects_wrong_typed_fields_without_projecting_values() {
+    for (event, field) in [
+        (json!({"type":"error","message":null}), "message"),
+        (
+            json!({"type":"error","message":{"secret":"MALFORMED_CANARY"}}),
+            "message",
+        ),
+        (json!({"type":"error","code":["MALFORMED_CANARY"]}), "code"),
+        (
+            json!({"type":"error","param":{"secret":"MALFORMED_CANARY"}}),
+            "param",
+        ),
+        (
+            json!({"type":"error","sequence_number":"MALFORMED_CANARY"}),
+            "sequence_number",
+        ),
+        (
+            json!({"type":"error","sequence_number":null}),
+            "sequence_number",
+        ),
+        (json!({"type":"error","error":"MALFORMED_CANARY"}), "error"),
+        (json!({"type":"error","error":null}), "error"),
+        (json!({"type":"error","error":{"message":42}}), "message"),
+    ] {
+        for profile in ["standard", "codex"] {
+            let error = error_event_fixture(profile, event.clone()).await;
+            assert!(
+                matches!(&error, ModelProviderError::ProtocolFailure {message}
+                if message.contains(&format!("`{field}`")))
+            );
+            assert!(!error.to_string().contains("MALFORMED_CANARY"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn error_event_redacts_all_selected_fields_before_bounds_and_escapes_controls() {
+    let account = "workspace-error-secret";
+    for nested in [false, true] {
+        let mut details = json!({
+            "code":format!("{FIXTURE_SECRET}/{account}\u{1b}[31m"),
+            "message":format!("failure {FIXTURE_SECRET}/{account}\r\u{7}"),
+            "param":format!("{FIXTURE_SECRET}/{account}\u{1b}[2J"),
+            "unknown":"UNKNOWN_ERROR_CANARY",
+        });
+        let event = if nested {
+            json!({"type":"error","error":details,"unknown":"UNKNOWN_ENVELOPE_CANARY"})
+        } else {
+            details["type"] = json!("error");
+            details
+        };
+        let error = error_event_fixture("codex", event).await;
+        let visible = error.to_string();
+        for excluded in [
+            FIXTURE_SECRET,
+            account,
+            "UNKNOWN_ERROR_CANARY",
+            "UNKNOWN_ENVELOPE_CANARY",
+            "\u{1b}",
+            "\r",
+            "\u{7}",
+        ] {
+            assert!(!visible.contains(excluded), "{visible:?}");
+        }
+        assert_eq!(visible.matches("[redacted]").count(), 6);
+        assert!(visible.contains("\\u{1b}"));
+        assert!(visible.contains("failure"));
+    }
+    for secret in [FIXTURE_SECRET, account] {
+        let error = error_event_fixture(
+            "codex",
+            json!({
+                "type":"error",
+                "code":format!("{}{secret}TAIL_CANARY", "c".repeat(125)),
+                "message":format!("{}{secret}TAIL_CANARY", "中".repeat(1021)),
+                "param":format!("{}{secret}TAIL_CANARY", "p".repeat(253)),
+            }),
+        )
+        .await;
+        let ModelProviderError::ProviderFailure {
+            code: Some(code),
+            message,
+        } = error
+        else {
+            panic!("expected the bounded Provider failure");
+        };
+        assert_eq!(code.chars().count(), 128 + "... [truncated]".len());
+        assert_eq!(code.matches("[truncated]").count(), 1);
+        assert_eq!(message.matches("[truncated]").count(), 2);
+        assert!(message.chars().count() < 1500);
+        for excluded in [secret, &secret[..3], "TAIL_CANARY"] {
+            assert!(!code.contains(excluded));
+            assert!(!message.contains(excluded));
+        }
+    }
+}
+
+#[tokio::test]
+async fn error_event_is_atomic_for_staged_tools_and_subscription_opaque_reasoning() {
+    for profile in ["standard", "codex"] {
+        let mut events = Vec::new();
+        if profile == "codex" {
+            events.push(
+                json!({"type":"response.output_item.done","output_index":0,"item":{
+                    "type":"reasoning","id":"error-reasoning","status":"completed","content":[],
+                    "encrypted_content":"error-opaque-secret","summary":[]
+                }}),
+            );
+        }
+        events.extend([
+            json!({"type":"response.output_item.done","output_index":1,"item":{
+                "type":"function_call","call_id":"uncommitted-error-call","name":"write_file",
+                "arguments":"{\"path\":\"must-not-exist.txt\",\"content\":\"not committed\",\"expected_hash\":null}"
+            }}),
+            json!({"type":"error","code":"server_error","message":"atomic fixture failed"}),
+        ]);
+        let body = events
+            .iter()
+            .map(|event| format!("data: {event}\n\n"))
+            .collect::<String>();
+        let (base_url, request, server) = spawn_sse_server(200, &body).await;
+        let provider = match profile {
+            "standard" => adapter(base_url, FakeCredentialSource::value(Some(FIXTURE_SECRET))),
+            "codex" => codex_subscription_adapter(
+                base_url,
+                AccountBoundCredentialSource::new(
+                    "codex_subscription:fixture",
+                    FIXTURE_SECRET,
+                    "workspace-error-secret",
+                ),
+            ),
+            _ => unreachable!("fixed fixture profiles"),
+        };
+        let directory = support::TemporaryDirectory::new("error-event-atomic");
+        let tools = ToolRegistry::for_project(directory.path());
+        let mut agent = AgentLoop::new(&provider, &tools);
+        let error = agent
+            .run_turn("reject the failed sample", AgentCancellation::new())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("atomic fixture failed"));
+        assert_eq!(
+            agent.history().items(),
+            &[ContentItem::user_text("reject the failed sample")]
+        );
+        assert!(!directory.path().join("must-not-exist.txt").exists());
+        request.await.unwrap();
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn error_event_preserves_only_exact_standard_incremental_rejection() {
+    for (code, incremental, expected_rejection) in [
+        ("previous_response_not_found", true, true),
+        ("previous_response_not_found", false, false),
+        ("Previous_Response_Not_Found", true, false),
+        ("server_error", true, false),
+    ] {
+        let body = format!(
+            "data: {}\n\n",
+            json!({"type":"error","code":code,"message":"fixture"})
+        );
+        let (base_url, request, server) = spawn_sse_server(200, &body).await;
+        let provider = adapter(base_url, FakeCredentialSource::value(Some(FIXTURE_SECRET)));
+        let input = fixture_input(ModelRequestRequirements::default());
+        let model_request = if incremental {
+            ModelRequest::incremental(input, ProviderResponseId::new("prior-response"))
+        } else {
+            full(input)
+        };
+        let error = ModelStreamingService::new(&provider)
+            .consume(model_request, ModelStreamCancellation::new())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            matches!(
+                error,
+                ModelStreamingError::Provider(ModelProviderError::ContinuationRejected { .. })
+            ),
+            expected_rejection
+        );
+        request.await.unwrap();
+        server.await.unwrap();
+    }
+    assert!(matches!(
+        error_event_fixture(
+            "codex",
+            json!({"type":"error","code":"previous_response_not_found","message":"fixture"})
+        )
+        .await,
+        ModelProviderError::ProviderFailure { .. }
+    ));
+}
+
 #[tokio::test]
 async fn provider_failure_preserves_code_and_message() {
     let body = concat!(
