@@ -5,7 +5,7 @@ use crate::domain::context::{
     ContextFragment, ContextFragmentContent, ContextFragmentId, ContextFragmentPriority,
     ContextFragmentSource, FragmentCachePolicy,
 };
-use crate::domain::model::ModelRequestRequirements;
+use crate::domain::model::{ModelRequestRequirements, ModelUsage};
 use crate::domain::request_audit::RequestAuditDelivery;
 use crate::domain::session::{ImprovementStage, scoped_call_id};
 use crate::domain::tools::{ToolExposure, ToolName};
@@ -29,6 +29,15 @@ pub(crate) struct ImprovementSampleOutput {
     pub(crate) audit_event_id: EventId,
 }
 
+type ImprovementSampleCommit<'a> = dyn FnMut(
+        EventId,
+        crate::domain::context::ProviderSessionRef,
+        Vec<ContentItem>,
+        Vec<crate::domain::tools::ToolCallId>,
+        Option<ModelUsage>,
+    ) -> Result<(), AgentLoopError>
+    + 'a;
+
 impl<Provider: ModelProvider + ?Sized, Tools: ToolExecutor + ?Sized>
     AgentLoop<'_, '_, Provider, Tools>
 {
@@ -37,12 +46,7 @@ impl<Provider: ModelProvider + ?Sized, Tools: ToolExecutor + ?Sized>
         &self,
         input: ImprovementSampleInput<'_, Tools>,
         record_attempt: &mut dyn FnMut(RequestAuditAttempt) -> Result<EventId, AgentLoopError>,
-        record_sample: &mut dyn FnMut(
-            EventId,
-            crate::domain::context::ProviderSessionRef,
-            Vec<ContentItem>,
-            Vec<crate::domain::tools::ToolCallId>,
-        ) -> Result<(), AgentLoopError>,
+        record_sample: &mut ImprovementSampleCommit<'_>,
         durability: &mut ChatDurabilityStage<'_>,
     ) -> Result<ImprovementSampleOutput, AgentLoopError> {
         if input.cancellation.is_cancelled() {
@@ -218,6 +222,7 @@ impl<Provider: ModelProvider + ?Sized, Tools: ToolExecutor + ?Sized>
             provider_session.reference().clone(),
             history.items().to_vec(),
             original_ids,
+            sample.usage(),
         )?;
         let calls = history
             .items()

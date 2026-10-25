@@ -470,6 +470,7 @@ mod opaque_core_memory_continuation {
                     &mut context_refresh,
                     Arc::new(ModelRequestBudget::new(3)),
                 ),
+                None,
             )
             .await
             .expect("opaque continuation with a proven Core Memory replacement completes");

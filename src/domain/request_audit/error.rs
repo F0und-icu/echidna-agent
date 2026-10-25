@@ -37,6 +37,8 @@ pub enum RequestAuditError {
     SamplingContextPlanMismatch,
     #[error("RequestAudit schema and renderer/Tool-plan identity are inconsistent")]
     SamplingIdentityMismatch,
+    #[error("RequestAudit ProviderSession does not match its scoped request identity")]
+    ProviderSessionMismatch,
     #[error("RequestAudit ContextDeliveryMap is invalid: {message}")]
     ContextDeliveryMap { message: String },
     #[error(

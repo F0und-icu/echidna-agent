@@ -857,7 +857,7 @@ mod retry_contracts {
                     audit_ids.push(id.clone());
                     Ok(id)
                 },
-                &mut |audit, scope, items, original_ids| {
+                &mut |audit, scope, items, original_ids, _usage| {
                     samples.push((audit, scope, items, original_ids));
                     Ok(())
                 },

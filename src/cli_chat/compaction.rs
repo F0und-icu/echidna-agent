@@ -15,8 +15,6 @@ use crate::ports::model::ModelProvider;
 
 use super::{ChatError, DurableChatSession, event_id, occurred_at};
 
-const WARNING_PERCENT: u64 = 80;
-
 pub(super) struct AppliedCompactionSummary {
     revision: u64,
     source_history_items: usize,
@@ -100,11 +98,35 @@ impl DurableChatSession {
     where
         Provider: ModelProvider + ?Sized,
     {
+        self.compact_with_boundary(agent, window_tokens, None)
+    }
+
+    pub(super) fn compact_tool_batch<Provider>(
+        &self,
+        agent: &mut AgentLoop<'_, '_, Provider, ToolRegistry>,
+        window_tokens: u32,
+        active: &crate::app::agent_loop::ToolBatchContext<'_>,
+    ) -> Result<AppliedCompactionSummary, ChatError>
+    where
+        Provider: ModelProvider + ?Sized,
+    {
+        self.compact_with_boundary(agent, window_tokens, Some(active))
+    }
+
+    fn compact_with_boundary<Provider>(
+        &self,
+        agent: &mut AgentLoop<'_, '_, Provider, ToolRegistry>,
+        window_tokens: u32,
+        active: Option<&crate::app::agent_loop::ToolBatchContext<'_>>,
+    ) -> Result<AppliedCompactionSummary, ChatError>
+    where
+        Provider: ModelProvider + ?Sized,
+    {
         self.with_projection(|projection, store, stream_id| {
             agent.validate_compaction_session(projection.state())?;
             projection
                 .state()
-                .ensure_observed_tool_calls_paired()
+                .ensure_completed_history()
                 .map_err(crate::domain::session::SessionError::from)?;
             super::recovery::validate_runtime_history(projection.state(), agent)?;
 
@@ -117,9 +139,11 @@ impl DurableChatSession {
                 &facts,
                 ContextWindowPolicy::for_window(window_tokens),
                 |candidate| {
-                    agent
-                        .preflight_compaction(candidate, true)
-                        .map_err(ChatError::from)
+                    match active {
+                        Some(active) => agent.preflight_tool_batch_compaction(candidate, active),
+                        None => agent.preflight_compaction(candidate, true),
+                    }
+                    .map_err(ChatError::from)
                 },
             )?;
             let validation = facts.context();
@@ -250,8 +274,8 @@ impl ContextPressure {
         let estimated_demand =
             u64::from(manifest.fixed_input_tokens()).saturating_add(candidate_tokens);
         let input_limit = manifest.budget().input_token_limit();
-        let threshold_reached = estimated_demand.saturating_mul(100)
-            >= u64::from(input_limit).saturating_mul(WARNING_PERCENT);
+        let working_set = manifest.budget().working_set_input_tokens();
+        let threshold_reached = estimated_demand >= u64::from(working_set);
         let level = if truncations > 0 || exclusions > 0 {
             ContextPressureLevel::Critical
         } else if artifact_references > 0 || threshold_reached {

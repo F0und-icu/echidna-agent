@@ -30,6 +30,7 @@ mod persistence;
 mod recovery;
 mod theme;
 mod tool_output;
+mod usage;
 mod vision;
 
 use std::cell::Cell;
@@ -49,6 +50,7 @@ use crate::adapters::session_compaction::{
     SessionCompactionFacts, load_historical_session_compaction_facts, load_resume_compaction_facts,
     load_session_compaction_facts,
 };
+use crate::adapters::tools::ToolRegistry;
 use crate::app::agent_loop::{
     AgentLoop, AgentLoopError, AgentTurnOutcome, AssistantTextDeltaStage, ChatDurabilityCheckpoint,
     ChatDurabilityStage, CliRuntimeStages, ToolExecutionStartStage, ViewImageFollowUpFuture,
@@ -693,11 +695,15 @@ pub(crate) async fn run(
                         message: error.to_string(),
                     })
             };
+            let accepted_attempt = std::cell::RefCell::new(None);
             let mut record_attempt = |attempt: RequestAuditAttempt| {
                 // Sampling boundaries affect only presentation, never History bytes.
                 end_answer();
                 session
-                    .record_request_audit(attempt)
+                    .record_request_audit_manifest(attempt, None)
+                    .map(|manifest| {
+                        accepted_attempt.replace(Some(manifest.audit_event_id().clone()));
+                    })
                     .map_err(ChatError::into_request_audit_agent_loop_error)
             };
             let mut tool_start = |plan: &crate::domain::tools::ToolExecutionPlan| {
@@ -705,6 +711,21 @@ pub(crate) async fn run(
                 tool_output.borrow_mut().started(plan);
             };
             let mut durability = |checkpoint: ChatDurabilityCheckpoint<'_>| match checkpoint {
+                ChatDurabilityCheckpoint::Usage {
+                    provider_session,
+                    usage,
+                } => {
+                    end_answer();
+                    let audit = accepted_attempt.borrow();
+                    let audit = audit
+                        .as_ref()
+                        .expect("a completed audited sample has an actual attempt");
+                    session
+                        .record_model_usage(audit, provider_session, usage)
+                        .map_err(|error| AgentLoopError::ModelUsageCommit {
+                            message: error.to_string(),
+                        })
+                }
                 ChatDurabilityCheckpoint::ModelSampleRejected {
                     diagnostic,
                     corrections_used,
@@ -783,6 +804,59 @@ pub(crate) async fn run(
             };
             let improvement_task = line.clone();
             let improvement_history_start = improvement::history_start(&session)?;
+            let mut batch_compaction_deferred = false;
+            let mut tool_batch =
+                |agent: &mut AgentLoop<'_, '_, _, ToolRegistry>,
+                 active: &crate::app::agent_loop::ToolBatchContext<'_>| {
+                    if !composition.runtime().auto_compact
+                        || batch_compaction_deferred
+                        || signal_cancellation.is_cancelled()
+                        || !agent.delivery_needs_compaction()?
+                    {
+                        return Ok(());
+                    }
+                    end_answer();
+                    match session.compact_tool_batch(
+                        agent,
+                        composition
+                            .agent_profile()
+                            .primary()
+                            .capabilities()
+                            .context_window,
+                        active,
+                    ) {
+                        Ok(summary) => console_println!(
+                            "Automatic tool-batch compaction applied. {} Current task and Turn budget retained.",
+                            summary.message()
+                        ),
+                        Err(ChatError::CompactionFacts(
+                            CompactionValidationFactsError::ResearchStreamEmpty,
+                        )) => {
+                            console_println!(
+                                "Automatic tool-batch compaction deferred: the Project Research stream is empty; Provider delivery retained."
+                            );
+                            batch_compaction_deferred = true;
+                        }
+                        Err(ChatError::Session(SessionError::CompactionCurrentTargetRequired)) => {
+                            console_println!(
+                                "Automatic tool-batch compaction deferred: no current TargetSnapshot; Provider delivery retained."
+                            );
+                            batch_compaction_deferred = true;
+                        }
+                        Err(ChatError::CompactionNotUseful) => {
+                            console_println!(
+                                "Automatic tool-batch compaction deferred: no smaller usable Context working set; Provider delivery retained."
+                            );
+                            batch_compaction_deferred = true;
+                        }
+                        Err(error) => {
+                            return Err(AgentLoopError::ToolBatchCompaction {
+                                message: error.to_string(),
+                            });
+                        }
+                    }
+                    Ok(())
+                };
             let outcome = {
                 let turn = agent.run_turn_audited_with_context_refresh_and_vision_stages(
                     line,
@@ -798,6 +872,10 @@ pub(crate) async fn run(
                         &mut refresh_context,
                         Arc::clone(&request_budget),
                     ),
+                    composition
+                        .runtime()
+                        .auto_compact
+                        .then_some(&mut tool_batch),
                 );
                 input::interruptible(
                     turn,
@@ -851,12 +929,13 @@ pub(crate) async fn run(
                         let current =
                             context_cache.refresh(&session.project, &tools, &session.binding)?;
                         agent.refresh_current_context(current)?;
-                        let should_compact = match agent.fresh_compaction_context_probe()? {
-                            Some(plan) => {
-                                compaction::ContextPressure::from_plan(&plan).should_remind()
-                            }
-                            None => true,
-                        };
+                        let should_compact = agent.delivery_needs_compaction()?
+                            || match agent.fresh_compaction_context_probe()? {
+                                Some(plan) => {
+                                    compaction::ContextPressure::from_plan(&plan).should_remind()
+                                }
+                                None => true,
+                            };
                         if should_compact {
                             match session.compact(
                                 &mut agent,
@@ -1216,11 +1295,6 @@ impl DurableChatSession {
                 .map_err(ChatError::from_session_append)?;
             Ok(selection.profile())
         })
-    }
-
-    fn record_request_audit(&self, attempt: RequestAuditAttempt) -> Result<(), ChatError> {
-        self.record_request_audit_manifest(attempt, None)
-            .map(|_| ())
     }
 
     fn record_request_audit_manifest(

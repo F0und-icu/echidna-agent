@@ -1,7 +1,7 @@
 use echidna::domain::artifacts::ArtifactId;
 use echidna::domain::model::{
     CapabilityMappingVersion, ContentItem, MessageRole, ModelCapabilities, ModelCapabilityError,
-    ModelInputIR, ModelRequestRequirements, ReasoningEffort,
+    ModelInputIR, ModelRequestRequirements, ModelUsage, ReasoningEffort,
 };
 use echidna::domain::tools::ToolCallId;
 use serde_json::json;
@@ -28,6 +28,29 @@ fn text_input(requirements: ModelRequestRequirements) -> ModelInputIR {
         vec![ContentItem::user_text("test input")],
         requirements,
     )
+}
+
+#[test]
+fn model_usage_preserves_legacy_shape_and_optional_provider_subsets() {
+    let legacy = json!({"input_tokens": 21, "output_tokens": 34});
+    let usage: ModelUsage = serde_json::from_value(legacy.clone()).unwrap();
+    assert_eq!(usage.cached_input_tokens, None);
+    assert_eq!(usage.reasoning_output_tokens, None);
+    assert_eq!(serde_json::to_value(usage).unwrap(), legacy);
+
+    let detailed = ModelUsage {
+        input_tokens: 21,
+        output_tokens: 34,
+        cached_input_tokens: Some(0),
+        reasoning_output_tokens: Some(13),
+    };
+    let encoded = serde_json::to_value(detailed).unwrap();
+    assert_eq!(encoded["cached_input_tokens"], json!(0));
+    assert_eq!(encoded["reasoning_output_tokens"], json!(13));
+    assert_eq!(
+        serde_json::from_value::<ModelUsage>(encoded).unwrap(),
+        detailed
+    );
 }
 
 #[test]

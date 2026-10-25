@@ -171,7 +171,7 @@ pub(super) fn apply(
                     && !state.execution_receipts.iter().any(|record| &record.event_id == id && state.history.items().iter().skip(*history_start).any(|item|matches!(item,ContentItem::ToolResult {result} if ExecutionId::for_model_call(&result.call_id)==record.receipt.execution_id)))) {
                 return Err(invalid());
             }
-            state.history.ensure_all_tool_calls_paired()?;
+            state.ensure_completed_history()?;
         }
         fact => {
             if prior.is_empty()

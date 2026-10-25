@@ -90,6 +90,8 @@ fn mock_fixture_preserves_text_tool_usage_and_completion_order() {
             usage: ModelUsage {
                 input_tokens: 21,
                 output_tokens: 34,
+                cached_input_tokens: None,
+                reasoning_output_tokens: None,
             },
         },
     ];
@@ -128,6 +130,8 @@ fn fixed_event_stage_observes_each_provider_event_in_wire_order_before_atomic_co
             usage: ModelUsage {
                 input_tokens: 8,
                 output_tokens: 5,
+                cached_input_tokens: None,
+                reasoning_output_tokens: None,
             },
         },
     ];

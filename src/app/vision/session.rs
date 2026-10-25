@@ -9,6 +9,7 @@ use crate::app::request_audit::{RequestAuditService, RequestAuditServiceError};
 use crate::app::session::SessionProjection;
 use crate::domain::artifacts::ArtifactId;
 use crate::domain::events::{EventId, OccurredAt};
+use crate::domain::model::ModelUsage;
 use crate::domain::profile::VisionRoute;
 use crate::domain::request_audit::{
     RequestAuditAttempt, RequestAuditBinding, RequestAuditManifest, RequestAuditRunContext,
@@ -61,6 +62,7 @@ pub(crate) struct PreparedVisionSecondaryRequest {
 pub(crate) enum PreparedVisionSecondaryTerminal {
     Observation {
         observation: Box<VisionObservation>,
+        usage: Option<ModelUsage>,
         primary_profile: crate::domain::context::ModelProfile,
         primary_capability_hash: String,
     },
@@ -232,6 +234,7 @@ where
         match analysis {
             Ok(output) => Ok(PreparedVisionSecondaryTerminal::Observation {
                 observation: Box::new(output.observation),
+                usage: output.usage,
                 primary_profile: prepared.primary_profile,
                 primary_capability_hash: prepared.primary_capability_hash,
             }),
@@ -268,6 +271,7 @@ where
         match terminal {
             PreparedVisionSecondaryTerminal::Observation {
                 observation,
+                usage,
                 primary_profile,
                 primary_capability_hash,
             } => {
@@ -290,6 +294,7 @@ where
                 Ok(VisionSessionOutcome {
                     observation,
                     primary_context,
+                    usage,
                 })
             }
             PreparedVisionSecondaryTerminal::Failure {
@@ -472,6 +477,7 @@ where
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VisionSessionOutcome {
+    pub(crate) usage: Option<ModelUsage>,
     pub observation: VisionObservation,
     pub primary_context: InitialImagePrimaryContext,
 }

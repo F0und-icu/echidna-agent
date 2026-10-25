@@ -1,5 +1,6 @@
 mod support;
 
+use std::collections::BTreeSet;
 use std::fs;
 
 use echidna::adapters::project_event_store::Project;
@@ -154,7 +155,48 @@ async fn write_file_is_atomic_auditable_and_rejects_a_stale_preimage() {
     assert_eq!(audit.after_hash.as_deref(), Some(hash(b"first\n").as_str()));
     assert_eq!(audit.after_size, Some(6));
     assert_eq!(audit.actual_diff, "--- notes.txt\n+++ notes.txt\n+first\n");
-    assert_eq!(created.result.output["changes"][0]["after_size"], 6);
+    let expected_change = json!({
+        "path": "notes.txt",
+        "expected_preimage_hash": null,
+        "before_hash": null,
+        "before_size": null,
+        "after_hash": hash(b"first\n"),
+        "after_size": 6,
+    });
+    assert_eq!(created.result.output["changes"][0], expected_change);
+    let visible_change = created.result.output["changes"][0].as_object().unwrap();
+    let visible_fields = visible_change
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let expected_fields = expected_change
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(visible_fields, expected_fields);
+
+    let write_file_spec = tools
+        .catalog()
+        .into_iter()
+        .find(|spec| spec.name == ToolName::new("write_file"))
+        .unwrap();
+    let mutation_schema = &write_file_spec.output_schema["properties"]["changes"]["items"];
+    let schema_fields = mutation_schema["properties"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let required_fields = mutation_schema["required"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|field| field.as_str().unwrap())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(schema_fields, expected_fields);
+    assert_eq!(required_fields, expected_fields);
 
     let stale = execute(
         &tools,
@@ -197,6 +239,35 @@ async fn write_file_audit_marks_a_nonterminated_final_line() {
 }
 
 #[tokio::test]
+async fn write_file_reply_omits_large_diff_while_receipt_retains_it() {
+    let (_root, project) = initialized_project("file-write-compact-reply");
+    let tools = ToolRegistry::for_project(project.root());
+    let content = (0..256)
+        .map(|index| format!("payload-line-{index:04}\n"))
+        .collect::<String>();
+    let expected_diff = format!(
+        "--- large.txt\n+++ large.txt\n{}",
+        content
+            .lines()
+            .map(|line| format!("+{line}\n"))
+            .collect::<String>()
+    );
+
+    let outcome = execute(
+        &tools,
+        "large-write",
+        "write_file",
+        json!({"path": "large.txt", "content": content, "expected_hash": null}),
+    )
+    .await;
+
+    assert_eq!(outcome.result.status, ToolResultStatus::Succeeded);
+    assert!(serde_json::to_vec(&outcome.result.output).unwrap().len() < expected_diff.len());
+    assert!(!outcome.result.output.to_string().contains("payload-line-"));
+    assert_eq!(outcome.receipt.file_mutations[0].actual_diff, expected_diff);
+}
+
+#[tokio::test]
 async fn apply_patch_stages_the_complete_single_file_change_before_publishing() {
     let (_root, project) = initialized_project("file-patch");
     let target = project.root().join("source.txt");
@@ -233,6 +304,11 @@ async fn apply_patch_stages_the_complete_single_file_change_before_publishing() 
     .await;
     assert_eq!(applied.result.status, ToolResultStatus::Succeeded);
     assert_eq!(fs::read(&target).unwrap(), b"alpha\ngamma\n");
+    assert!(
+        applied.result.output["changes"][0]
+            .get("actual_diff")
+            .is_none()
+    );
     let audit = &applied.receipt.file_mutations[0];
     assert_eq!(audit.before_hash.as_deref(), Some(before.as_str()));
     assert_eq!(

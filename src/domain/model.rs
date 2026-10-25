@@ -542,6 +542,50 @@ pub enum ModelCapabilityError {
 pub struct ModelUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// Provider-reported subset of input tokens served from its cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_input_tokens: Option<u64>,
+    /// Provider-reported subset of output tokens used for reasoning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_output_tokens: Option<u64>,
+}
+
+impl ModelUsage {
+    pub(crate) fn validate(self) -> Result<(), ModelUsageError> {
+        if let Some(cached_input_tokens) = self.cached_input_tokens
+            && cached_input_tokens > self.input_tokens
+        {
+            return Err(ModelUsageError::CachedInputExceedsTotal {
+                cached_input_tokens,
+                input_tokens: self.input_tokens,
+            });
+        }
+        if let Some(reasoning_output_tokens) = self.reasoning_output_tokens
+            && reasoning_output_tokens > self.output_tokens
+        {
+            return Err(ModelUsageError::ReasoningOutputExceedsTotal {
+                reasoning_output_tokens,
+                output_tokens: self.output_tokens,
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+pub enum ModelUsageError {
+    #[error("cached input subset {cached_input_tokens} exceeds input total {input_tokens}")]
+    CachedInputExceedsTotal {
+        cached_input_tokens: u64,
+        input_tokens: u64,
+    },
+    #[error(
+        "reasoning output subset {reasoning_output_tokens} exceeds output total {output_tokens}"
+    )]
+    ReasoningOutputExceedsTotal {
+        reasoning_output_tokens: u64,
+        output_tokens: u64,
+    },
 }
 
 /// A provider-neutral event emitted by a model response stream.

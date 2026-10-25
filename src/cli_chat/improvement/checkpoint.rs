@@ -1,5 +1,6 @@
 //! Durable Session handoff for the fixed improvement stage.
 use super::*;
+use crate::domain::context::ProviderSessionRef;
 
 impl DurableChatSession {
     pub(super) fn improvement_state(&self) -> Result<SessionState, ChatError> {
@@ -70,19 +71,29 @@ impl DurableChatSession {
                 .map(|manifest| manifest.audit_event_id().clone())
                 .map_err(ChatError::into_request_audit_agent_loop_error)
         };
-        let mut record_sample = |audit_event_id, provider_session, items, original_call_ids| {
+        let mut record_sample = |audit_event_id: EventId,
+                                 provider_session: ProviderSessionRef,
+                                 items,
+                                 original_call_ids,
+                                 usage| {
             self.record_improvement(
                 attempt,
                 ImprovementFact::Sample {
                     stage,
-                    audit_event_id,
-                    provider_session,
+                    audit_event_id: audit_event_id.clone(),
+                    provider_session: provider_session.clone(),
                     items,
                     original_call_ids,
                 },
             )
-            .map(|_| ())
-            .map_err(ChatError::into_history_checkpoint_agent_loop_error)
+            .map_err(ChatError::into_history_checkpoint_agent_loop_error)?;
+            if let Some(usage) = usage {
+                self.record_model_usage(&audit_event_id, &provider_session, usage)
+                    .map_err(|error| AgentLoopError::ModelUsageCommit {
+                        message: error.to_string(),
+                    })?;
+            }
+            Ok(())
         };
         let mut durability =
             |checkpoint: ChatDurabilityCheckpoint<'_>| -> Result<(), AgentLoopError> {

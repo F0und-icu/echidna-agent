@@ -266,17 +266,7 @@ impl ContextPlanner {
         model_input: &ModelInputIR,
         budget: ContextBudget,
     ) -> Result<(), ContextPlannerError> {
-        let canonical_tools = canonical_tool_schemas(&model_input.tool_specs).map_err(|error| {
-            ContextPlannerError::CanonicalEncoding {
-                message: error.to_string(),
-            }
-        })?;
-        let rendered_input_tokens = fixed_input_tokens(&canonical_tools).saturating_add(
-            estimator::estimate_rendered_channels_tokens(
-                &model_input.instructions,
-                &model_input.content_items,
-            )?,
-        );
+        let rendered_input_tokens = self.estimate_rendered_model_input(model_input)?;
         if rendered_input_tokens > budget.input_token_limit() {
             return Err(ContextPlannerError::RenderedInputExceedsBudget {
                 rendered_input_tokens,
@@ -284,6 +274,23 @@ impl ContextPlanner {
             });
         }
         Ok(())
+    }
+
+    pub(crate) fn estimate_rendered_model_input(
+        &self,
+        model_input: &ModelInputIR,
+    ) -> Result<u32, ContextPlannerError> {
+        let canonical_tools = canonical_tool_schemas(&model_input.tool_specs).map_err(|error| {
+            ContextPlannerError::CanonicalEncoding {
+                message: error.to_string(),
+            }
+        })?;
+        Ok(fixed_input_tokens(&canonical_tools).saturating_add(
+            estimator::estimate_rendered_channels_tokens(
+                &model_input.instructions,
+                &model_input.content_items,
+            )?,
+        ))
     }
 }
 

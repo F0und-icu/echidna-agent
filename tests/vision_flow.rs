@@ -28,7 +28,7 @@ use echidna::domain::context::{
 use echidna::domain::domain_profile::DomainProfile;
 use echidna::domain::events::{EventEnvelope, EventId, EventSequence, OccurredAt, StreamId};
 use echidna::domain::model::{
-    CapabilityMappingVersion, ContentItem, ModelCapabilities, ModelEvent,
+    CapabilityMappingVersion, ContentItem, ModelCapabilities, ModelEvent, ModelUsage,
 };
 use echidna::domain::profile::{VisionMode, VisionRoute, VisionRouteReason};
 use echidna::domain::project::ProjectId;
@@ -37,7 +37,7 @@ use echidna::domain::request_audit::{
     RequestAuditError, RequestAuditManifest, RequestAuditReconstructionError,
     RequestAuditRunContext,
 };
-use echidna::domain::session::{SessionError, SessionEvent};
+use echidna::domain::session::{SessionError, SessionEvent, SessionReducer};
 use echidna::domain::tools::{
     ExecutionId, ToolCall, ToolExecutionOutcome, ToolExecutionPlan, ToolSpec,
 };
@@ -335,14 +335,19 @@ async fn secondary_path_commits_route_audit_observation_then_primary_without_sen
     let primary_capabilities = capabilities(false, false);
     let vision_capabilities = capabilities(true, false);
     let route_committed = Arc::new(AtomicBool::new(false));
-    let vision_provider = ScriptedProvider::new(
-        vision_capabilities.clone(),
-        [completed(
-            r#"{"schema_version":2,"summary":"A debug settings control is visible.","extracted_text":"Debug","regions":[],"task_observations":["debug control"],"uncertainty":["requires runtime validation"]}"#,
-            "vision-response",
-        )],
-    )
-    .requiring_before_stream(route_committed.clone());
+    let usage = ModelUsage {
+        input_tokens: 100,
+        output_tokens: 50,
+        cached_input_tokens: Some(75),
+        reasoning_output_tokens: Some(20),
+    };
+    let mut vision_response = completed(
+        r#"{"schema_version":2,"summary":"A debug settings control is visible.","extracted_text":"Debug","regions":[],"task_observations":["debug control"],"uncertainty":["requires runtime validation"]}"#,
+        "vision-response",
+    );
+    vision_response.insert(1, Ok(ModelStreamEvent::Event(ModelEvent::Usage { usage })));
+    let vision_provider = ScriptedProvider::new(vision_capabilities.clone(), [vision_response])
+        .requiring_before_stream(route_committed.clone());
     let primary_provider = ScriptedProvider::new(
         primary_capabilities.clone(),
         [completed(
@@ -595,6 +600,39 @@ async fn secondary_path_commits_route_audit_observation_then_primary_without_sen
     assert_eq!(primary_provider.requests().len(), 1);
     assert_eq!(sink.events.len(), event_count);
     assert_eq!(blobs.writes(), blob_writes);
+
+    let usage_event = SessionEvent::ModelUsageRecorded {
+        request_audit_event_id: output.observation.request_audit_event_id.clone(),
+        provider_session: output.observation.provider_session.clone(),
+        usage,
+    };
+    let mut before_observation = SessionReducer.reduce(sink.events[..3].to_vec()).unwrap();
+    let rejected = usage_event
+        .clone()
+        .into_envelope(
+            EventId::new("premature-vision-usage"),
+            binding.session_stream_id().clone(),
+            EventSequence::new(4),
+            occurred_at(4),
+        )
+        .unwrap();
+    assert!(matches!(
+        SessionReducer.apply(&mut before_observation, rejected),
+        Err(SessionError::InvalidModelUsageReference { .. })
+    ));
+    let accepted = usage_event
+        .into_envelope(
+            EventId::new("vision-usage"),
+            binding.session_stream_id().clone(),
+            EventSequence::new(sink.events.last().unwrap().sequence.get() + 1),
+            occurred_at(6),
+        )
+        .unwrap();
+    projection.append(&mut sink, accepted).unwrap();
+    assert_eq!(
+        SessionReducer.reduce(sink.events.clone()).unwrap(),
+        *projection.state()
+    );
 }
 
 #[tokio::test]

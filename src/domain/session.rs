@@ -5,7 +5,7 @@
 //! generic envelope remains the owner of schema/upcasting, event identity and
 //! sequence validation.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -21,7 +21,9 @@ use super::events::{
 };
 use super::history::{ConversationHistory, HistoryError, normalize_with_recorded_results};
 use super::model::ContentItem;
-use super::model::{MAX_TOOL_ARGUMENT_CORRECTIONS_PER_TURN, ToolArgumentDiagnostic};
+use super::model::{
+    MAX_TOOL_ARGUMENT_CORRECTIONS_PER_TURN, ModelUsage, ModelUsageError, ToolArgumentDiagnostic,
+};
 use super::request_audit::{RequestAuditError, RequestAuditManifest};
 use super::research_control::{ResearchPhase, ResearchPhaseSelection};
 use super::tools::SubcommandCheckpoint;
@@ -47,6 +49,7 @@ const CACHE_HIT_EVENT_TYPE: &str = "tool.result_cache_hit";
 const STREAM_RECOVERED_EVENT_TYPE: &str = "StreamRecovered";
 const HISTORY_ITEM_RECORDED_EVENT_TYPE: &str = "session.history_item_recorded";
 const MODEL_SAMPLE_REJECTED_EVENT_TYPE: &str = "model.sample_rejected";
+const MODEL_USAGE_RECORDED_EVENT_TYPE: &str = "model.usage_recorded";
 pub(super) const COMPACTION_CREATED_EVENT_TYPE: &str = "session.compaction_created";
 pub(super) const REQUEST_AUDIT_RECORDED_EVENT_TYPE: &str = "session.request_audit_recorded";
 const VISION_ROUTE_DECIDED_EVENT_TYPE: &str = "vision.route_decided";
@@ -89,6 +92,11 @@ pub enum SessionLifecycle {
 /// the Tool domain's `ExecutionReceipt` rather than defining a Session copy.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionEvent {
+    ModelUsageRecorded {
+        request_audit_event_id: EventId,
+        provider_session: ProviderSessionRef,
+        usage: ModelUsage,
+    },
     ExecutionOutcomeRecorded {
         receipt: ExecutionReceipt,
         result: ToolResult,
@@ -180,6 +188,7 @@ impl SessionEvent {
 
     fn event_type(&self) -> EventType {
         match self {
+            Self::ModelUsageRecorded { .. } => EventType::new(MODEL_USAGE_RECORDED_EVENT_TYPE),
             Self::ExecutionOutcomeRecorded { .. } => {
                 EventType::new(EXECUTION_OUTCOME_RECORDED_EVENT_TYPE)
             }
@@ -217,6 +226,16 @@ impl SessionEvent {
 
     fn encode_payload(&self, event_type: &EventType) -> Result<Value, SessionError> {
         let payload = match self {
+            Self::ModelUsageRecorded {
+                request_audit_event_id,
+                provider_session,
+                usage,
+            } => serde_json::to_value(ModelUsagePayload {
+                schema_version: CURRENT_SESSION_PAYLOAD_SCHEMA_VERSION,
+                request_audit_event_id: request_audit_event_id.clone(),
+                provider_session: provider_session.clone(),
+                usage: *usage,
+            }),
             Self::ExecutionOutcomeRecorded { receipt, result } => {
                 serde_json::to_value(ExecutionOutcomePayload {
                     schema_version: CURRENT_SESSION_PAYLOAD_SCHEMA_VERSION,
@@ -292,6 +311,15 @@ impl SessionEvent {
 
     fn decode(event_type: &EventType, payload: Value) -> Result<Self, SessionError> {
         match event_type.as_str() {
+            MODEL_USAGE_RECORDED_EVENT_TYPE => {
+                let payload: ModelUsagePayload = decode_strict_payload(event_type, payload)?;
+                require_current_payload_schema(event_type, payload.schema_version)?;
+                Ok(Self::ModelUsageRecorded {
+                    request_audit_event_id: payload.request_audit_event_id,
+                    provider_session: payload.provider_session,
+                    usage: payload.usage,
+                })
+            }
             "session.rsi_activity_recorded" => {
                 let activity: ImprovementActivity = decode_strict_payload(event_type, payload)?;
                 require_current_payload_schema(event_type, activity.schema_version)?;
@@ -475,6 +503,7 @@ pub struct SessionState {
     used_primary_provider_session_ids: BTreeSet<ProviderSessionId>,
     history: ConversationHistory,
     history_event_ids: Vec<EventId>,
+    recovered_history_item_count: usize,
     resume_count: u64,
     execution_receipt_count: u64,
     execution_receipts: Vec<SessionExecutionReceiptRecord>,
@@ -483,7 +512,8 @@ pub struct SessionState {
     recovery_count: u64,
     latest_compaction: Option<SessionCompaction>,
     request_audits: Vec<RequestAuditManifest>,
-    last_rejected_request: Option<EventId>,
+    model_usage: BTreeMap<EventId, ModelUsage>,
+    rejected_requests: BTreeSet<EventId>,
     vision_routes: Vec<VisionRouteRecord>,
     vision_observations: Vec<VisionObservation>,
     vision_failures: Vec<VisionAnalysisFailure>,
@@ -503,6 +533,7 @@ impl Default for SessionState {
             used_primary_provider_session_ids: BTreeSet::new(),
             history: ConversationHistory::default(),
             history_event_ids: Vec::new(),
+            recovered_history_item_count: 0,
             resume_count: 0,
             execution_receipt_count: 0,
             execution_receipts: Vec::new(),
@@ -511,7 +542,8 @@ impl Default for SessionState {
             recovery_count: 0,
             latest_compaction: None,
             request_audits: Vec::new(),
-            last_rejected_request: None,
+            model_usage: BTreeMap::new(),
+            rejected_requests: BTreeSet::new(),
             vision_routes: Vec::new(),
             vision_observations: Vec::new(),
             vision_failures: Vec::new(),
@@ -578,9 +610,27 @@ impl SessionState {
             .find(|result| &result.call_id == call_id)
     }
 
-    pub(crate) fn ensure_observed_tool_calls_paired(&self) -> Result<(), HistoryError> {
+    /// A completed boundary may retain an explicitly recovered older unknown
+    /// execution, but cannot normalize a newly missing Result or manufacture
+    /// one for a known Receipt. Actual recorded outcomes are already durable.
+    pub(crate) fn ensure_completed_history(&self) -> Result<(), HistoryError> {
+        let recovered_calls = self.history.items()[..self.recovered_history_item_count]
+            .iter()
+            .filter_map(|item| match item {
+                ContentItem::ToolCall { call } => Some(&call.call_id),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
         for (call_id, _) in self.history.unpaired_tool_calls_in_call_order() {
-            if self.recorded_tool_result(&call_id).is_none() {
+            if self.recorded_tool_result(&call_id).is_some() {
+                continue;
+            }
+            if !recovered_calls.contains(&call_id)
+                || self.execution_receipts.iter().any(|record| {
+                    record.receipt.execution_id
+                        == super::tools::ExecutionId::for_model_call(&call_id)
+                })
+            {
                 return Err(HistoryError::MissingToolResult { call_id });
             }
         }
@@ -906,6 +956,62 @@ fn apply_session_event(
     event_id: &EventId,
 ) -> Result<(), SessionError> {
     match event {
+        SessionEvent::ModelUsageRecorded {
+            request_audit_event_id,
+            provider_session,
+            usage,
+        } => {
+            require_transition(
+                state.lifecycle,
+                MODEL_USAGE_RECORDED_EVENT_TYPE,
+                SessionLifecycle::Active,
+            )?;
+            usage.validate()?;
+            let invalid = || SessionError::InvalidModelUsageReference {
+                request_audit_event_id: request_audit_event_id.clone(),
+            };
+            let audit = state
+                .request_audits
+                .iter()
+                .rev()
+                .find(|audit| audit.provider_session() == Some(&provider_session))
+                .ok_or_else(invalid)?;
+            // Usage is recorded at the immediate accepted-sample checkpoint.
+            // An earlier attempt in this exact scope may have failed before
+            // completion, so it cannot stand in for the supplied final audit.
+            if audit.audit_event_id() != &request_audit_event_id
+                || state.model_usage.contains_key(&request_audit_event_id)
+                || state.rejected_requests.contains(&request_audit_event_id)
+            {
+                return Err(invalid());
+            }
+            let accepted = match (provider_session.role, audit.improvement_scope()) {
+                (ProviderSessionRole::Primary, Some(scope)) => {
+                    state.improvement_records.iter().any(|record| {
+                        matches!(
+                            &record.activity.fact,
+                            ImprovementFact::Sample { audit_event_id, provider_session, .. }
+                                if audit_event_id == &request_audit_event_id
+                                    && provider_session == scope
+                        )
+                    })
+                }
+                (ProviderSessionRole::Primary, None) => {
+                    state.primary_provider_session.as_ref() == Some(&provider_session)
+                }
+                (ProviderSessionRole::Vision, None) => {
+                    state.vision_observations.iter().any(|observation| {
+                        observation.request_audit_event_id == request_audit_event_id
+                            && observation.provider_session == provider_session
+                    })
+                }
+                (ProviderSessionRole::Vision, Some(_)) => false,
+            };
+            if !accepted {
+                return Err(invalid());
+            }
+            state.model_usage.insert(request_audit_event_id, usage);
+        }
         SessionEvent::ImprovementActivityRecorded { activity } => {
             improvement::apply(state, activity, event_id)?
         }
@@ -936,7 +1042,7 @@ fn apply_session_event(
                 SessionLifecycle::Active,
             )?;
             if let Some(previous) = &state.agent_definition_binding {
-                state.ensure_observed_tool_calls_paired()?;
+                state.ensure_completed_history()?;
                 previous
                     .reload_compatible_with(binding.definition())
                     .map_err(|error| SessionError::AgentDefinition {
@@ -951,6 +1057,7 @@ fn apply_session_event(
             state.resume_count = increment("resume count", state.resume_count)?;
             state.primary_provider_session = Some(primary_provider_session);
             state.agent_definition_binding = Some(binding);
+            state.recovered_history_item_count = state.history.items().len();
         }
         SessionEvent::SubcommandCheckpointed { checkpoint } => {
             require_transition(
@@ -1017,6 +1124,7 @@ fn apply_session_event(
             record_fresh_primary_provider_session_id(state, &primary_provider_session)?;
             state.resume_count = increment("resume count", state.resume_count)?;
             state.primary_provider_session = Some(primary_provider_session);
+            state.recovered_history_item_count = state.history.items().len();
         }
         SessionEvent::Ended => {
             require_transition(state.lifecycle, "session.ended", SessionLifecycle::Active)?;
@@ -1206,9 +1314,9 @@ fn apply_session_event(
                 MODEL_SAMPLE_REJECTED_EVENT_TYPE,
                 SessionLifecycle::Active,
             )?;
-            state.history.ensure_all_tool_calls_paired()?;
+            state.ensure_completed_history()?;
             if corrections_used > MAX_TOOL_ARGUMENT_CORRECTIONS_PER_TURN
-                || state.last_rejected_request.as_ref() == Some(&request_audit_event_id)
+                || state.rejected_requests.contains(&request_audit_event_id)
                 || state
                     .request_audits
                     .last()
@@ -1216,7 +1324,7 @@ fn apply_session_event(
             {
                 return Err(SessionError::InvalidModelSampleRejection);
             }
-            state.last_rejected_request = Some(request_audit_event_id);
+            state.rejected_requests.insert(request_audit_event_id);
         }
         SessionEvent::RequestAuditRecorded { manifest } => {
             if let Some(scope) = manifest.improvement_scope() {
@@ -1369,6 +1477,15 @@ fn require_research_binding(state: &SessionState) -> Result<(), SessionError> {
         });
     }
     Ok(())
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ModelUsagePayload {
+    schema_version: u16,
+    request_audit_event_id: EventId,
+    provider_session: ProviderSessionRef,
+    usage: ModelUsage,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -1696,6 +1813,12 @@ impl ResearchPhaseSelectedPayload {
 /// Explicit Session schema, stream, payload and transition failures.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum SessionError {
+    #[error(
+        "model usage must reference one accepted request with the same ProviderSession: `{request_audit_event_id}`"
+    )]
+    InvalidModelUsageReference { request_audit_event_id: EventId },
+    #[error(transparent)]
+    ModelUsage(#[from] ModelUsageError),
     #[error(
         "recorded execution outcome does not agree with its pending Call, Receipt or later Result"
     )]

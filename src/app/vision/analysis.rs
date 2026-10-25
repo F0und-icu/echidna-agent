@@ -20,7 +20,7 @@ use crate::domain::context::{
 use crate::domain::events::EventId;
 use crate::domain::model::{
     ContentItem, MessageRole, ModelCapabilityError, ModelEvent, ModelRequestRequirements,
-    OpaqueContinuationScope,
+    ModelUsage, OpaqueContinuationScope,
 };
 use crate::domain::request_audit::{
     RequestAuditAttempt, RequestAuditDelivery, RequestAuditManifest, RequestAuditRunContext,
@@ -190,6 +190,7 @@ impl VisionAnalysisInput {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VisionAnalysisOutput {
     pub observation: VisionObservation,
+    pub(crate) usage: Option<ModelUsage>,
 }
 
 /// A fixed service with no History, tools, continuation, Memory or Research.
@@ -283,7 +284,11 @@ where
                     ),
                 )
                 .and_then(|attempt| {
-                    attempt.bind_scoped_no_tool_context(&context_plan, &no_tool_plan)
+                    attempt
+                        .bind_scoped_no_tool_context(&context_plan, &no_tool_plan)
+                        .map(|attempt| {
+                            attempt.bind_provider_session(input.provider_session.clone())
+                        })
                 })
                 .map_err(|error| VisionAnalysisError::AuditShape {
                     message: error.to_string(),
@@ -391,6 +396,10 @@ where
                 VisionAnalysisError::Cancelled,
             ));
         };
+        let usage = events.iter().rev().find_map(|event| match event {
+            ModelEvent::Usage { usage } => Some(*usage),
+            _ => None,
+        });
         let raw = collect_json_response(events).map_err(|error| {
             attempt_failed(
                 &input,
@@ -480,7 +489,7 @@ where
                     error,
                 )
             })?;
-        Ok(VisionAnalysisOutput { observation })
+        Ok(VisionAnalysisOutput { observation, usage })
     }
 }
 

@@ -7,7 +7,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::domain::model::{
-    ModelEvent, ModelUsage, OpaqueContinuationReference, OpaqueContinuationScope,
+    ModelEvent, ModelUsage, ModelUsageError, OpaqueContinuationReference, OpaqueContinuationScope,
     ToolArgumentDiagnostic, ToolArgumentErrorCategory,
 };
 use crate::domain::tools::{ToolCall, ToolCallId, ToolName};
@@ -658,10 +658,7 @@ fn decode_completed(
     }
     match response.usage {
         Some(usage) => events.push(ModelEvent::Usage {
-            usage: ModelUsage {
-                input_tokens: usage.input_tokens,
-                output_tokens: usage.output_tokens,
-            },
+            usage: usage.into_model_usage()?,
         }),
         None if usage_required => {
             return Err(protocol_error(
@@ -864,6 +861,63 @@ struct CompletedResponse {
 struct ResponseUsage {
     input_tokens: u64,
     output_tokens: u64,
+    #[serde(default)]
+    input_tokens_details: Option<InputTokensDetails>,
+    #[serde(default)]
+    output_tokens_details: Option<OutputTokensDetails>,
+}
+
+impl ResponseUsage {
+    fn into_model_usage(self) -> Result<ModelUsage, ModelProviderError> {
+        let cached_input_tokens = self
+            .input_tokens_details
+            .and_then(|details| details.cached_tokens);
+        let reasoning_output_tokens = self
+            .output_tokens_details
+            .and_then(|details| details.reasoning_tokens);
+        let usage = ModelUsage {
+            input_tokens: self.input_tokens,
+            output_tokens: self.output_tokens,
+            cached_input_tokens,
+            reasoning_output_tokens,
+        };
+        usage.validate().map_err(|error| {
+            let (field, subset, total) = match error {
+                ModelUsageError::CachedInputExceedsTotal {
+                    cached_input_tokens,
+                    input_tokens,
+                } => (
+                    "input_tokens_details.cached_tokens",
+                    cached_input_tokens,
+                    input_tokens,
+                ),
+                ModelUsageError::ReasoningOutputExceedsTotal {
+                    reasoning_output_tokens,
+                    output_tokens,
+                } => (
+                    "output_tokens_details.reasoning_tokens",
+                    reasoning_output_tokens,
+                    output_tokens,
+                ),
+            };
+            protocol_error(format!(
+                "invalid completed response Usage: `{field}` {subset} exceeds total {total}"
+            ))
+        })?;
+        Ok(usage)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct InputTokensDetails {
+    #[serde(default)]
+    cached_tokens: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OutputTokensDetails {
+    #[serde(default)]
+    reasoning_tokens: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]

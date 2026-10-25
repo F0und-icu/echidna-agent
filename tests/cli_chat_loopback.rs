@@ -42,6 +42,8 @@ mod operator_steering;
 mod output_budget;
 #[path = "support/provider_config.rs"]
 mod provider_config;
+#[path = "cli_chat_cases/provider_usage.rs"]
+mod provider_usage;
 mod support;
 #[path = "cli_chat_cases/tool_activation_continuation.rs"]
 mod tool_activation_continuation;
@@ -3622,7 +3624,49 @@ fn m5_compaction_preconditions_never_append_a_partial_fact() {
         &["--session", session_id.as_str()],
     );
     assert!(!rejected.status.success());
-    assert!(String::from_utf8_lossy(&rejected.stderr).contains("has no Tool Result"));
+    // Opening this interrupted legacy Session establishes a real recovery
+    // boundary. Its old unknown Call is allowed, but these few items do not
+    // produce a useful compaction. Raw History remains unchanged.
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("smaller usable next-Turn Context"));
+    let state = reduced_session(&project, session_id.as_str());
+    assert_eq!(state.history().items().len(), 2);
+    assert_eq!(
+        echidna::domain::history::normalize_content_items(state.history().items())
+            .unwrap()
+            .len(),
+        3
+    );
+    let mut writer = project.open_writer().unwrap();
+    let mut store = writer.open_session(session_id.clone(), None).unwrap();
+    let receipt = serde_json::from_value(json!({
+        "execution_id":"execution:m5-incomplete-call",
+        "plan_fingerprint":"known-execution-with-missing-result", "status":"succeeded", "exit_reason":null,
+        "output_artifact_ids":[], "environment_change":null
+    })).unwrap();
+    let event = SessionEvent::ExecutionReceiptRecorded { receipt }
+        .into_envelope(
+            EventId::new("m5-incomplete-bare-receipt"),
+            stream_id,
+            store.next_sequence().unwrap(),
+            OccurredAt::new("2026-08-31T00:03:00Z"),
+        )
+        .unwrap();
+    EventSink::append_event(&mut store, &event).unwrap();
+    drop(store);
+    drop(writer);
+    let rejected = run_chat(
+        incomplete_pair.path(),
+        &offline_config,
+        "/compact\n",
+        &["--session", session_id.as_str()],
+    );
+    assert!(!rejected.status.success());
+    let stderr = String::from_utf8_lossy(&rejected.stderr);
+    assert!(
+        stderr.contains("m5-incomplete-call")
+            && stderr.contains("durable ExecutionReceipt but no paired durable ToolResult"),
+        "{stderr}"
+    );
     assert!(
         session_events(incomplete_pair.path(), session_id.as_str())
             .iter()

@@ -204,6 +204,7 @@ impl RequestAuditDelivery {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RequestAuditAttempt {
     pub(super) improvement_scope: Option<crate::domain::context::ProviderSessionRef>,
+    pub(super) provider_session: Option<crate::domain::context::ProviderSessionRef>,
     pub(super) binding: RequestAuditBinding,
     pub(super) model: ModelIdentity,
     pub(super) profile: ModelProfile,
@@ -242,6 +243,7 @@ impl RequestAuditAttempt {
         Ok(Self {
             binding: context.binding.clone(),
             improvement_scope: None,
+            provider_session: None,
             model,
             profile,
             adapter_version: context.adapter_version.clone(),
@@ -264,6 +266,14 @@ impl RequestAuditAttempt {
         scope: crate::domain::context::ProviderSessionRef,
     ) -> Self {
         self.improvement_scope = Some(scope);
+        self
+    }
+
+    pub(crate) fn bind_provider_session(
+        mut self,
+        provider_session: crate::domain::context::ProviderSessionRef,
+    ) -> Self {
+        self.provider_session = Some(provider_session);
         self
     }
 
@@ -298,6 +308,7 @@ impl RequestAuditAttempt {
         self.prompt_renderer = Some(step.prompt_renderer().clone());
         self.resolved_tool_plan_fingerprint = Some(step.resolved_tool_plan().fingerprint().clone());
         self.context_delivery_map = Some(delivery_map);
+        self.provider_session = Some(step.turn_configuration().turn().provider_session.clone());
         Ok(self)
     }
 
@@ -417,6 +428,8 @@ impl RequestAuditCapabilityMapping {
 pub struct RequestAuditManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) improvement_scope: Option<crate::domain::context::ProviderSessionRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) provider_session: Option<crate::domain::context::ProviderSessionRef>,
     pub(super) schema_version: u16,
     pub(super) audit_event_id: EventId,
     pub(super) binding: RequestAuditBinding,
@@ -446,6 +459,10 @@ impl RequestAuditManifest {
 
     pub(crate) fn improvement_scope(&self) -> Option<&crate::domain::context::ProviderSessionRef> {
         self.improvement_scope.as_ref()
+    }
+
+    pub(crate) fn provider_session(&self) -> Option<&crate::domain::context::ProviderSessionRef> {
+        self.provider_session.as_ref()
     }
     pub const fn schema_version(&self) -> u16 {
         self.schema_version
@@ -540,6 +557,20 @@ impl RequestAuditManifest {
             });
         }
         self.binding.validate()?;
+        if let Some(provider_session) = &self.provider_session {
+            if provider_session.id.to_string().trim().is_empty() {
+                return Err(RequestAuditError::BindingFieldRequired {
+                    field: "provider_session.id",
+                });
+            }
+            if self
+                .improvement_scope
+                .as_ref()
+                .is_some_and(|scope| scope != provider_session)
+            {
+                return Err(RequestAuditError::ProviderSessionMismatch);
+            }
+        }
         if self.adapter_version.as_str().trim().is_empty() {
             return Err(RequestAuditError::AdapterVersionRequired);
         }

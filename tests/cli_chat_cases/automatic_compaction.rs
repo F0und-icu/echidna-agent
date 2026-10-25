@@ -286,6 +286,354 @@ fn automatic_compaction_is_opt_in_and_low_pressure_retains_continuation() {
 }
 
 #[test]
+fn long_tool_loop_compacts_settled_batches_without_replaying_or_losing_task() {
+    let mut measured = Vec::new();
+    for (enabled, incremental) in [(false, false), (true, false), (true, true)] {
+        let root = TemporaryDirectory::new("auto-tool-working-set");
+        initialize_project(root.path());
+        let definition = definition(root.path(), false, None);
+        fs::write(root.path().join("task.png"), png_bytes(9, 7)).unwrap();
+        let mut responses = Vec::new();
+        if incremental {
+            let manifest = definition.join("agent.toml");
+            fs::write(
+                &manifest,
+                fs::read_to_string(&manifest).unwrap().replace(
+                    "run_command = \"direct\"",
+                    "run_command = \"deferred\"\ntool_search = \"direct\"",
+                ),
+            )
+            .unwrap();
+            responses.push((
+                200,
+                m4_long_flow_tool_response(
+                    "activate-command",
+                    "tool_search",
+                    json!({"query":"run_command"}),
+                    "activate-response",
+                ),
+            ));
+        }
+        for index in 0..3 {
+            let mut response = format!(
+                "data: {}\n\n",
+                json!({
+                "type":"response.output_item.done", "output_index":0,
+                "item":{"type":"reasoning", "content":[{"type":"reasoning_text", "text":format!("batch-{index}-reasoning")}]} })
+            );
+            response.push_str(&m4_long_flow_tool_response(
+                &format!("batch-{index}"),
+                "run_command",
+                json!({"argv":["/usr/bin/printf", "%s", "neutral-output ".repeat(7_000)]}),
+                &format!("batch-response-{index}"),
+            ));
+            responses.push((200, response));
+        }
+        responses.push((200, text_response("WORKING-SET-DONE", "batch-final")));
+        let server = spawn_responses_server(responses);
+        let config = config(root.path(), &server.base_url, Some(enabled));
+        fs::write(
+            &config,
+            fs::read_to_string(&config)
+                .unwrap()
+                .replace("context_window = 32768", "context_window = 1048576")
+                .replacen(
+                    "vision_mode = \"secondary_tool\"",
+                    "vision_mode = \"primary_direct\"",
+                    1,
+                )
+                .replacen("image_input = false", "image_input = true", 1)
+                .replace(
+                    "incremental_input = true",
+                    &format!("incremental_input = {incremental}"),
+                ),
+        )
+        .unwrap();
+        let task = "ORIGINAL-ACTIVE-TASK: retain this constraint through every batch";
+        let output = run_chat(
+            root.path(),
+            &config,
+            &format!("/image task.png\n{task}\n/exit\n"),
+            &["--agent", definition.to_str().unwrap()],
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let requests: Vec<_> = (0..4 + usize::from(incremental))
+            .map(|_| request_body(&server.requests.recv_timeout(F2A_WAIT).unwrap()))
+            .collect();
+        assert!(server.requests.try_recv().is_err());
+        server.join();
+        assert!(String::from_utf8_lossy(&output.stdout).contains("WORKING-SET-DONE"));
+        for request in &requests {
+            if !request["previous_response_id"].is_null() {
+                continue;
+            }
+            assert!(json_contains_text(&request["input"], task));
+            let task_count = request["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|item| {
+                    item["role"] == "user"
+                        && item["content"]
+                            .as_array()
+                            .is_some_and(|parts| parts.iter().any(|part| part["text"] == task))
+                })
+                .count();
+            assert_eq!(
+                task_count, 1,
+                "original input is present exactly once per request"
+            );
+            assert_eq!(
+                request["input"]
+                    .to_string()
+                    .matches("\"type\":\"input_image\"")
+                    .count(),
+                1,
+                "original image remains once across reset"
+            );
+        }
+        let project = Project::discover(root.path()).unwrap();
+        let state = reduced_session(&project, &session_id(root.path()));
+        let events = session_events(root.path(), &session_id(root.path()));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event["event_type"] == "tool.execution_outcome_recorded")
+                .count(),
+            3 + usize::from(incremental)
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(
+                    |event| event["event_type"] == "session.history_item_recorded"
+                        && event["payload"]["item"]["text"] == task
+                )
+                .count(),
+            1,
+            "no fabricated repeated user History"
+        );
+        assert_eq!(state.request_audits().len(), 4 + usize::from(incremental));
+        let resets: Vec<_> = state
+            .request_audits()
+            .iter()
+            .enumerate()
+            .filter(|(_, audit)| {
+                audit.delivery().reason()
+                    == echidna::domain::request_audit::RequestAuditDeliveryReason::Full(
+                        echidna::domain::context::BaselineInvalidationReason::CompactionReset,
+                    )
+            })
+            .map(|(index, _)| index)
+            .collect();
+        if enabled {
+            assert!(
+                !resets.is_empty(),
+                "tool-batch pressure must trigger before completion"
+            );
+            assert!(resets.iter().all(|index| *index > 0));
+            for index in resets {
+                assert!(!json_contains_type(&requests[index]["input"], "reasoning"));
+                assert!(requests[index].to_string().len() < requests[index - 1].to_string().len());
+                assert!(
+                    requests[index]["tools"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|tool| tool["name"] == "run_command"),
+                    "deferred activation remains in the same Turn after reset"
+                );
+            }
+        } else {
+            assert!(compactions(root.path()).is_empty());
+        }
+        if !incremental {
+            measured.push(
+                requests
+                    .iter()
+                    .map(|request| request.to_string().len())
+                    .sum::<usize>(),
+            );
+        }
+    }
+    assert!(
+        measured[1] * 100 < measured[0] * 65,
+        "opted-in working set must measurably reduce Full payload bytes: {measured:?}"
+    );
+    eprintln!(
+        "Full request bytes, baseline={} bounded={}",
+        measured[0], measured[1]
+    );
+}
+
+#[test]
+fn tool_batch_compaction_defers_when_original_task_alone_exceeds_working_target() {
+    let root = TemporaryDirectory::new("auto-large-active-task");
+    initialize_project(root.path());
+    let definition = definition(root.path(), false, None);
+    let server = spawn_responses_server(vec![
+        (
+            200,
+            m4_long_flow_tool_response(
+                "once-large-task",
+                "run_command",
+                json!({"argv":["/usr/bin/printf", "%s", "neutral-output ".repeat(7_000)]}),
+                "large-task-tool",
+            ),
+        ),
+        (200, text_response("LARGE-TASK-DONE", "large-task-final")),
+    ]);
+    let config = config(root.path(), &server.base_url, Some(true));
+    fs::write(
+        &config,
+        fs::read_to_string(&config)
+            .unwrap()
+            .replace("context_window = 32768", "context_window = 1048576"),
+    )
+    .unwrap();
+    let task = format!(
+        "Keep this entire operator input: {}",
+        "constraint ".repeat(20_000)
+    );
+    let output = run_chat(
+        root.path(),
+        &config,
+        &format!("{task}\n/exit\n"),
+        &["--agent", definition.to_str().unwrap()],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    server.requests.recv_timeout(F2A_WAIT).unwrap();
+    let second = request_body(&server.requests.recv_timeout(F2A_WAIT).unwrap());
+    assert_eq!(second["previous_response_id"], "large-task-tool");
+    server.join();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("no smaller usable Context working set"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("LARGE-TASK-DONE"));
+    assert!(!stdout.contains("Automatic tool-batch compaction applied"));
+}
+
+#[test]
+fn completed_reasoning_delivery_alone_can_trigger_opted_in_compaction() {
+    let root = TemporaryDirectory::new("auto-reasoning-delivery");
+    initialize_project(root.path());
+    let definition = definition(root.path(), false, None);
+    let first = format!(
+        "data: {}\n\n{}",
+        json!({"type":"response.output_item.done", "item":{"type":"reasoning", "content":[{"type":"reasoning_text", "text":"retained-reasoning ".repeat(18_000)}]}}),
+        text_response("SHORT-FINAL", "large-reasoning")
+    );
+    let server = spawn_responses_server(vec![
+        (200, first),
+        (200, text_response("NEXT-COMPLETE", "next-reasoning")),
+    ]);
+    let config = config(root.path(), &server.base_url, Some(true));
+    fs::write(
+        &config,
+        fs::read_to_string(&config)
+            .unwrap()
+            .replace("context_window = 32768", "context_window = 1048576"),
+    )
+    .unwrap();
+    let output = run_chat(
+        root.path(),
+        &config,
+        "first task\nnext task\n/exit\n",
+        &["--agent", definition.to_str().unwrap()],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    server.requests.recv_timeout(F2A_WAIT).unwrap();
+    let next = request_body(&server.requests.recv_timeout(F2A_WAIT).unwrap());
+    server.join();
+    assert!(next["previous_response_id"].is_null());
+    assert!(!json_contains_type(&next["input"], "reasoning"));
+    assert!(json_contains_text(&next["input"], "next task"));
+    assert_eq!(compactions(root.path()).len(), 1);
+}
+
+#[test]
+fn tool_batch_does_not_compact_when_initial_vision_consumed_the_final_admission() {
+    let root = TemporaryDirectory::new("auto-shared-budget-boundary");
+    initialize_project(root.path());
+    let definition = definition(root.path(), false, None);
+    fs::write(root.path().join("screen.png"), png_bytes(9, 7)).unwrap();
+    let vision = spawn_responses_server(vec![(
+        200,
+        vision_response("neutral fixture", "budget-vision"),
+    )]);
+    let response = format!(
+        "data: {}\n\n{}",
+        json!({"type":"response.output_item.done", "item":{"type":"reasoning", "content":[{"type":"reasoning_text", "text":"preserve-budget-stop-reasoning"}]}}),
+        m4_long_flow_tool_response(
+            "budget-real-tool",
+            "run_command",
+            json!({"argv":["/usr/bin/printf", "%s", "neutral-output ".repeat(10_000)]}),
+            "budget-primary"
+        )
+    );
+    let primary = spawn_responses_server(vec![(200, response)]);
+    let config = write_dual_config(root.path(), &primary.base_url, &vision.base_url);
+    fs::write(
+        &config,
+        format!(
+            "{}\n[runtime]\nauto_compact = true\nmodel_request_limit_per_turn = 2\n",
+            fs::read_to_string(&config)
+                .unwrap()
+                .replace("context_window = 32768", "context_window = 1048576")
+        ),
+    )
+    .unwrap();
+    let output = run_chat(
+        root.path(),
+        &config,
+        "/image screen.png\nComplete this task under the shared budget.\n/exit\n",
+        &["--agent", definition.to_str().unwrap()],
+    );
+    primary.requests.recv_timeout(F2A_WAIT).unwrap();
+    assert!(primary.requests.try_recv().is_err());
+    primary.join();
+    vision.requests.recv_timeout(F2A_WAIT).unwrap();
+    assert!(vision.requests.try_recv().is_err());
+    vision.join();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("per-Turn model-request limit of 2"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let project = Project::discover(root.path()).unwrap();
+    let state = reduced_session(&project, &session_id(root.path()));
+    assert_eq!(state.request_audits().len(), 2);
+    assert_eq!(state.vision_observations().len(), 1);
+    assert_eq!(
+        session_events(root.path(), &session_id(root.path()))
+            .iter()
+            .filter(|event| event["event_type"] == "tool.execution_outcome_recorded")
+            .count(),
+        1
+    );
+    assert!(state.history().items().iter().any(|item| matches!(item, echidna::domain::model::ContentItem::ToolResult { result } if result.call_id.as_str() == "budget-real-tool")));
+    assert!(
+        compactions(root.path()).is_empty(),
+        "a spent shared budget cannot authorize a compaction/reset: {stdout}"
+    );
+}
+
+#[test]
 fn automatic_compaction_runs_after_completed_rsi_diagnosis_without_extra_requests() {
     let root = TemporaryDirectory::new("auto-rsi-completed");
     initialize_project(root.path());

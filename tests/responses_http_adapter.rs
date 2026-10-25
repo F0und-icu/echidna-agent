@@ -57,6 +57,8 @@ const FIXTURE_SECRET: &str = "fixture-secret";
 mod text_finalization;
 #[path = "responses_cases/transport.rs"]
 mod transport;
+#[path = "responses_cases/usage.rs"]
+mod usage;
 const FIXTURE_CREDENTIAL_REFERENCE: &str = "CYBER_AGENT_FIXTURE_API_KEY";
 type CredentialReadResult = Result<Option<String>, CredentialSourceError>;
 
@@ -723,6 +725,8 @@ async fn full_request_and_chunked_sse_decode_to_ordered_model_events() {
                     usage: ModelUsage {
                         input_tokens: 21,
                         output_tokens: 34,
+                        cached_input_tokens: None,
+                        reasoning_output_tokens: None,
                     },
                 },
             ],
@@ -804,6 +808,8 @@ async fn reasoning_extension_tool_usage_and_full_only_completion_share_one_decod
                     usage: ModelUsage {
                         input_tokens: 13,
                         output_tokens: 21,
+                        cached_input_tokens: None,
+                        reasoning_output_tokens: None,
                     },
                 },
             ],

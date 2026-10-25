@@ -35,6 +35,7 @@ pub(super) struct ContextCompilationInput<'a> {
     pub(super) history: &'a [ContentItem],
     pub(super) history_provenance: &'a BTreeMap<usize, ContextProvenance>,
     pub(super) turn_history_start: usize,
+    pub(super) detached_input: Option<(&'a [ContentItem], &'a BTreeMap<usize, ContextProvenance>)>,
     pub(super) planner: &'a ContextPlanner,
     pub(super) cache: Option<&'a dyn ContextFragmentCache>,
     pub(super) budget: ContextBudget,
@@ -117,6 +118,7 @@ pub(super) fn compile_context(
         history,
         history_provenance,
         turn_history_start,
+        detached_input,
         planner,
         cache,
         budget,
@@ -125,7 +127,9 @@ pub(super) fn compile_context(
         prior_manifest,
         correction_feedback,
     } = input;
-    if history.len() <= turn_history_start {
+    if history.len() < turn_history_start
+        || (detached_input.is_none() && history.len() == turn_history_start)
+    {
         return Err(AgentLoopError::ContextStateMismatch);
     }
 
@@ -192,6 +196,15 @@ pub(super) fn compile_context(
         }
         fragments.push(summary_fragment);
     }
+    let (input_items, input_start, input_provenance, updates_start) = match detached_input {
+        Some((items, provenance)) => (items, 0, provenance, turn_history_start),
+        None => (
+            &history[turn_history_start..=turn_history_start],
+            turn_history_start,
+            history_provenance,
+            turn_history_start + 1,
+        ),
+    };
     push_content_fragment(
         &mut fragments,
         ContentFragmentInput {
@@ -207,9 +220,9 @@ pub(super) fn compile_context(
         ContentFragmentInput {
             id: "input:current-user".to_owned(),
             source: ContextFragmentSource::UserInput,
-            items: &history[turn_history_start..=turn_history_start],
-            history_start: turn_history_start,
-            history_provenance,
+            items: input_items,
+            history_start: input_start,
+            history_provenance: input_provenance,
         },
     )?;
     push_content_fragment(
@@ -217,14 +230,14 @@ pub(super) fn compile_context(
         ContentFragmentInput {
             id: "turn:local-updates".to_owned(),
             source: ContextFragmentSource::TurnLocalUpdates,
-            items: &history[turn_history_start + 1..],
-            history_start: turn_history_start + 1,
+            items: &history[updates_start..],
+            history_start: updates_start,
             history_provenance,
         },
     )?;
 
     fragments.extend_from_slice(correction_feedback);
-    if let ContentItem::Text { text, .. } = &history[turn_history_start]
+    if let Some(ContentItem::Text { text, .. }) = input_items.first()
         && let Some(experience) = prompt_composition.applicable_improvement(text)?
     {
         fragments.push(experience);

@@ -55,6 +55,12 @@ impl ContextBudget {
     pub const fn input_token_limit(self) -> u32 {
         self.context_window_tokens - self.reserved_output_tokens - self.reserved_tool_loop_tokens
     }
+
+    /// Repeated input cost is bounded independently of supported capacity,
+    /// using this budget's actual reservations (including explicit output).
+    pub(crate) fn working_set_input_tokens(self) -> u32 {
+        ((u64::from(self.input_token_limit()) * 4 / 5).min(65_536)) as u32
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

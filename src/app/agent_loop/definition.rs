@@ -42,6 +42,7 @@ where
             history: &items,
             history_provenance: &BTreeMap::new(),
             turn_history_start: history.len(),
+            detached_input: None,
             planner: &self.context_planner,
             cache: None,
             budget,

@@ -279,7 +279,7 @@ pub(super) async fn prepare_primary_context(
                 .await
                 .map_err(vision_error)?;
 
-            session.with_projection(|projection, store, _| {
+            let outcome = session.with_projection(|projection, store, _| {
                 let sequence = store.next_sequence()?;
                 let terminal_stamp = VisionEventStamp::new(
                     event_id(
@@ -293,8 +293,16 @@ pub(super) async fn prepare_primary_context(
                 let outcome = service
                     .commit_secondary_terminal(terminal, terminal_stamp, projection, store)
                     .map_err(vision_error)?;
-                Ok(outcome.primary_context)
-            })
+                Ok(outcome)
+            })?;
+            if let Some(usage) = outcome.usage {
+                session.record_model_usage(
+                    &outcome.observation.request_audit_event_id,
+                    &outcome.observation.provider_session,
+                    usage,
+                )?;
+            }
+            Ok(outcome.primary_context)
         }
         VisionRoute::NoImage | VisionRoute::Rejected => Err(ChatError::VisionComposition {
             message: "an image Turn requires one accepted Direct or Secondary route".to_owned(),

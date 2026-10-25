@@ -13,6 +13,18 @@ use crate::ports::tool::ToolExecutor;
 
 use super::{AgentLoop, AgentLoopConfigurationError, AgentLoopError, context_state};
 
+/// Original operator input is retained only in the active Turn's derived
+/// Context after its durable History prefix is compacted. It is never appended
+/// as a second History event.
+pub(crate) struct ToolBatchContext<'a> {
+    pub(super) history_start: usize,
+    pub(super) original_input: &'a [ContentItem],
+    pub(super) input_provenance:
+        &'a std::collections::BTreeMap<usize, crate::domain::context::ContextProvenance>,
+    pub(super) detached: bool,
+    pub(super) tool_specs: &'a [crate::domain::tools::ToolSpec],
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct AppliedCompaction {
     stream_id: StreamId,
@@ -38,6 +50,95 @@ where
     Provider: ModelProvider + ?Sized,
     Tools: ToolExecutor + ?Sized,
 {
+    fn delivery_input_estimate(&self) -> Result<Option<u32>, AgentLoopError> {
+        let Some(mut input) = self.committed_delivery_input.clone() else {
+            return Ok(None);
+        };
+        input
+            .content_items
+            .extend_from_slice(&self.history.items()[self.committed_history_len..]);
+        Ok(Some(
+            self.context_planner.estimate_rendered_model_input(&input)?,
+        ))
+    }
+
+    pub(crate) fn delivery_needs_compaction(&self) -> Result<bool, AgentLoopError> {
+        let threshold = self
+            .context_planner
+            .default_budget(&self.provider.capabilities())?
+            .working_set_input_tokens();
+        Ok(self
+            .delivery_input_estimate()?
+            .is_some_and(|estimate| estimate >= threshold))
+    }
+
+    pub(crate) fn preflight_tool_batch_compaction(
+        &self,
+        candidate: &SessionCompaction,
+        active: &ToolBatchContext<'_>,
+    ) -> Result<bool, AgentLoopError> {
+        use crate::domain::context::{ContextDecision, ContextPlannerError};
+        let retained = candidate.retained_history();
+        // The Session owner selects a suffix. Keep the active input whole, or
+        // detach it whole; never duplicate only its remaining image suffix.
+        if !self.history.items().ends_with(retained) {
+            return Err(AgentLoopError::ContextStateMismatch);
+        }
+        let dropped = self.history.items().len() - retained.len();
+        let (start, detached) = if active.detached {
+            (0, true)
+        } else if dropped <= active.history_start {
+            (active.history_start - dropped, false)
+        } else if dropped >= active.history_start + active.original_input.len() {
+            (0, true)
+        } else {
+            return Ok(false);
+        };
+        let capabilities = self.provider.capabilities();
+        let budget = self.context_planner.default_budget(&capabilities)?;
+        let empty = std::collections::BTreeMap::new();
+        let candidate =
+            match context_state::compile_context(context_state::ContextCompilationInput {
+                prompt_composition: &self.prompt_composition,
+                world_state: self.world_state.as_ref(),
+                project_snapshot: self.project_snapshot.as_ref(),
+                project_memory_core: self.project_memory_core.as_ref(),
+                session_summary: Some(candidate.summary()),
+                history: retained,
+                history_provenance: &empty,
+                turn_history_start: start,
+                detached_input: detached
+                    .then_some((active.original_input, active.input_provenance)),
+                planner: &self.context_planner,
+                cache: None,
+                budget,
+                capabilities: &capabilities,
+                tool_specs: active.tool_specs,
+                prior_manifest: None,
+                correction_feedback: &[],
+            }) {
+                Ok((plan, _)) => plan,
+                Err(AgentLoopError::ContextPlanner(
+                    ContextPlannerError::RequiredFragmentsExceedBudget { .. }
+                    | ContextPlannerError::RenderedInputExceedsBudget { .. },
+                )) => return Ok(false),
+                Err(error) => return Err(error),
+            };
+        if !candidate
+            .context_decision_manifest()
+            .candidates()
+            .iter()
+            .all(|item| matches!(item.decision(), ContextDecision::Include))
+        {
+            return Ok(false);
+        }
+        let target = budget.working_set_input_tokens() / 2;
+        Ok(self
+            .context_planner
+            .estimate_rendered_model_input(&candidate.model_input())?
+            <= target)
+    }
+
     /// Recompile the next-Turn logical input, including the final completed
     /// assistant output, without sampling or mutating Provider delivery state.
     /// Known required/rendered budget failures mean compaction may be useful;
@@ -97,7 +198,9 @@ where
                     .map(|entry| u64::from(entry.token_estimate()))
                     .sum::<u64>()
         };
-        Ok(demand(&candidate) < demand(&previous))
+        let previous_demand =
+            demand(&previous).max(u64::from(self.delivery_input_estimate()?.unwrap_or(0)));
+        Ok(demand(&candidate) < previous_demand)
     }
 
     fn compile_compaction_context(
@@ -129,6 +232,7 @@ where
             history: &history,
             history_provenance: &empty_provenance,
             turn_history_start: items.len(),
+            detached_input: None,
             planner: &self.context_planner,
             cache: None,
             budget,

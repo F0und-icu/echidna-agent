@@ -11,7 +11,14 @@ mod output_capture;
 mod recovery;
 mod request_audit;
 
+pub(crate) use compaction::ToolBatchContext;
 pub(crate) use context_state::CurrentContextState;
+
+type ToolBatchStage<'stage, 'provider, 'tools, Provider, Tools> = dyn FnMut(
+        &mut AgentLoop<'provider, 'tools, Provider, Tools>,
+        &ToolBatchContext<'_>,
+    ) -> Result<(), AgentLoopError>
+    + 'stage;
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -199,6 +206,10 @@ pub type ToolExecutionReceiptStage<'a> =
 /// checkpointed at scheduler completion; and ordered paired Tool Results are
 /// checkpointed before a later model sample.
 pub(crate) enum ChatDurabilityCheckpoint<'a> {
+    Usage {
+        provider_session: &'a crate::domain::context::ProviderSessionRef,
+        usage: crate::domain::model::ModelUsage,
+    },
     ModelSampleRejected {
         diagnostic: &'a crate::domain::model::ToolArgumentDiagnostic,
         corrections_used: u8,
@@ -631,6 +642,7 @@ where
             Vec::new(),
             None,
             StreamingStages::none(),
+            None,
         )
         .await
     }
@@ -653,6 +665,7 @@ where
             Vec::new(),
             None,
             StreamingStages::none(),
+            None,
         )
         .await
     }
@@ -679,6 +692,7 @@ where
             vec![initial_image],
             None,
             StreamingStages::none(),
+            None,
         )
         .await
     }
@@ -703,6 +717,7 @@ where
             Vec::new(),
             Some(follow_up),
             StreamingStages::none(),
+            None,
         )
         .await
     }
@@ -734,6 +749,7 @@ where
                 durability: None,
                 context_refresh: None,
             },
+            None,
         )
         .await
     }
@@ -742,6 +758,7 @@ where
     /// current-facts refresh before every sampling Step. The refresh runs
     /// after the Turn-boundary configuration has been applied and before a
     /// new immutable SamplingStepPlan exists.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn run_turn_audited_with_context_refresh_and_vision_stages(
         &mut self,
         user_text: impl Into<String>,
@@ -750,6 +767,7 @@ where
         audit_context: &RequestAuditRunContext,
         record_attempt: &mut dyn FnMut(RequestAuditAttempt) -> Result<(), AgentLoopError>,
         stages: CliRuntimeStages<'_>,
+        tool_batch: Option<&mut ToolBatchStage<'_, 'provider, 'tools, Provider, Tools>>,
     ) -> Result<AgentTurnOutcome, AgentLoopError> {
         let primary_capability_hash = self.provider.capabilities().semantic_hash();
         let initial_images = initial_images
@@ -770,10 +788,12 @@ where
                 durability: Some(stages.durability),
                 context_refresh: Some(stages.context_refresh),
             },
+            tool_batch,
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn run_turn_inner(
         &mut self,
         user_text: impl Into<String>,
@@ -782,6 +802,7 @@ where
         initial_images: Vec<(ContentItem, ContextProvenance)>,
         mut view_image_follow_up: Option<&mut ViewImageFollowUp<'_>>,
         stages: StreamingStages<'_>,
+        mut tool_batch: Option<&mut ToolBatchStage<'_, 'provider, 'tools, Provider, Tools>>,
     ) -> Result<AgentTurnOutcome, AgentLoopError> {
         let StreamingStages {
             request_budget,
@@ -802,7 +823,7 @@ where
         }
         let user_text = user_text.into();
         let user_provenance = ContextProvenance::operator_input(&user_text)?;
-        let turn_history_start = self.history.items().len();
+        let mut turn_history_start = self.history.items().len();
         self.history.append_user_text(user_text);
         self.history_provenance
             .insert(turn_history_start, user_provenance);
@@ -816,6 +837,13 @@ where
                 &self.history.items()[turn_history_start..],
             ))?;
         }
+        let original_input = self.history.items()[turn_history_start..].to_vec();
+        let input_provenance: BTreeMap<_, _> = self
+            .history_provenance
+            .range(turn_history_start..)
+            .map(|(index, provenance)| (index - turn_history_start, provenance.clone()))
+            .collect();
+        let mut detached_input = false;
         let capabilities = self.provider.capabilities();
         let context_budget = self.context_planner.default_budget(&capabilities)?;
         self.next_turn_sequence += 1;
@@ -876,6 +904,8 @@ where
                     history: self.history.items(),
                     history_provenance: &self.history_provenance,
                     turn_history_start,
+                    detached_input: detached_input
+                        .then_some((original_input.as_slice(), &input_provenance)),
                     planner: &self.context_planner,
                     cache: self.fragment_cache.as_deref(),
                     budget: context_budget,
@@ -1220,6 +1250,14 @@ where
                     .expect("the actual request always has a Baseline assessment"),
                 cache_summary,
             });
+            if let Some(usage) = sample.usage()
+                && let Some(stage) = durability.as_deref_mut()
+            {
+                stage(ChatDurabilityCheckpoint::Usage {
+                    provider_session: self.provider_session.reference(),
+                    usage,
+                })?;
+            }
 
             if tool_calls.is_empty() {
                 return Ok(AgentTurnOutcome::Completed {
@@ -1272,6 +1310,45 @@ where
                     model_requests: request_budget.counts().primary,
                     executions,
                 });
+            }
+            if !cancellation.is_cancelled()
+                && request_budget
+                    .remaining()
+                    .is_none_or(|remaining| remaining > 0)
+                && let Some(stage) = tool_batch.as_deref_mut()
+            {
+                if self.delivery_needs_compaction()?
+                    && let Some(refresh) = context_refresh.as_deref_mut()
+                {
+                    self.refresh_current_context(refresh()?)?;
+                }
+                let before = self.applied_compaction.clone();
+                let previous_len = self.history.items().len();
+                let tool_plan = self
+                    .tools
+                    .resolve_tool_plan(&self.active_tool_exposure_plan, &deferred_activations)?;
+                let active = ToolBatchContext {
+                    history_start: turn_history_start,
+                    original_input: &original_input,
+                    input_provenance: &input_provenance,
+                    detached: detached_input,
+                    tool_specs: tool_plan.advertised_specs(),
+                };
+                stage(self, &active)?;
+                if self.applied_compaction != before {
+                    let dropped = previous_len
+                        .checked_sub(self.history.items().len())
+                        .ok_or(AgentLoopError::ContextStateMismatch)?;
+                    if detached_input || dropped > turn_history_start {
+                        detached_input = true;
+                        turn_history_start = 0;
+                    } else {
+                        turn_history_start -= dropped;
+                        self.history_provenance.extend(input_provenance.iter().map(
+                            |(index, provenance)| (turn_history_start + index, provenance.clone()),
+                        ));
+                    }
+                }
             }
         }
     }
@@ -1669,8 +1746,12 @@ pub enum AgentLoopError {
     RequestAuditCommit { message: String },
     #[error("History checkpoint commit failed: {message}")]
     HistoryCheckpointCommit { message: String },
+    #[error("Provider usage checkpoint commit failed: {message}")]
+    ModelUsageCommit { message: String },
     #[error("current Context refresh failed: {message}")]
     ContextRefresh { message: String },
+    #[error("durable tool-batch compaction failed: {message}")]
+    ToolBatchCompaction { message: String },
     #[error("Execution Receipt commit failed: {message}")]
     ExecutionReceiptCommit { message: String },
     #[error("assistant text presentation failed: {message}")]

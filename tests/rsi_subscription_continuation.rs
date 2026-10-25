@@ -160,7 +160,11 @@ mod continuation_regression {
             })
             .collect::<Vec<_>>();
         events.push(json!({"type":"response.completed","response":{
-            "id":id,"status":"completed","output":items}}));
+        "id":id,"status":"completed","output":items,"usage":{
+            "input_tokens":100,"output_tokens":50,
+            "input_tokens_details":{"cached_tokens":75},
+            "output_tokens_details":{"reasoning_tokens":20}
+        }}}));
         events
             .into_iter()
             .map(|event| format!("data: {event}\n\n"))
@@ -334,7 +338,16 @@ mod continuation_regression {
                         audit_context: &audit_context,
                     },
                     &mut |_| Ok(EventId::new(format!("audit-{stage:?}"))),
-                    &mut |_, _, items, _| {
+                    &mut |_, _, items, _, usage| {
+                        assert_eq!(
+                            usage,
+                            Some(crate::domain::model::ModelUsage {
+                                input_tokens: 100,
+                                output_tokens: 50,
+                                cached_input_tokens: Some(75),
+                                reasoning_output_tokens: Some(20),
+                            })
+                        );
                         observed_samples.extend(items);
                         Ok(())
                     },
