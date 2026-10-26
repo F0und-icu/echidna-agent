@@ -198,3 +198,18 @@ pub(super) fn lock_captured_output(
 ) -> MutexGuard<'_, CapturedOutput> {
     output.lock().unwrap_or_else(|error| error.into_inner())
 }
+
+pub(super) fn stream_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "offset": {"type": "integer", "minimum": 0},
+            "next_offset": {"type": "integer", "minimum": 0},
+            "data": {"type": "string"},
+            "truncated": {"type": "boolean"},
+            "read_error": {"type": ["string", "null"]}
+        },
+        "required": ["offset", "next_offset", "data", "truncated", "read_error"],
+        "additionalProperties": false
+    })
+}

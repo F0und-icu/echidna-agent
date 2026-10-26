@@ -6,15 +6,18 @@ use std::sync::{Arc, Mutex, Weak, mpsc};
 
 use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
 use crossterm::{cursor, execute, terminal};
-use tokio::sync::Notify;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 static ACTIVE: Mutex<Weak<Mutex<Console>>> = Mutex::new(Weak::new());
+const PREVIEW_CAPACITY: usize = 8;
 
 pub(crate) struct Terminal {
     console: Arc<Mutex<Console>>,
-    pub(crate) wake: Arc<Notify>,
+}
+
+pub(crate) struct TerminalEditor {
+    console: Arc<Mutex<Console>>,
     previews: mpsc::Receiver<String>,
 }
 
@@ -39,7 +42,6 @@ impl InputMode {
 pub(crate) struct PreviewSender {
     sender: mpsc::SyncSender<String>,
     dropped: Arc<AtomicU64>,
-    wake: Arc<Notify>,
 }
 
 impl PreviewSender {
@@ -47,7 +49,6 @@ impl PreviewSender {
         if self.sender.try_send(frame).is_err() {
             self.dropped.fetch_add(1, Ordering::Relaxed);
         }
-        self.wake.notify_one();
     }
 }
 
@@ -65,7 +66,7 @@ struct Console {
 }
 
 impl Terminal {
-    pub(crate) fn start() -> io::Result<Option<Self>> {
+    pub(crate) fn start() -> io::Result<Option<(Self, TerminalEditor)>> {
         if !io::stdin().is_terminal()
             || !io::stdout().is_terminal()
             || std::env::var_os("TERM").is_some_and(|term| term == "dumb")
@@ -73,8 +74,7 @@ impl Terminal {
             return Ok(None);
         }
         let (columns, _) = terminal::size()?;
-        let (sender, previews) = mpsc::sync_channel(8);
-        let wake = Arc::new(Notify::new());
+        let (sender, previews) = mpsc::sync_channel(PREVIEW_CAPACITY);
         let console = Arc::new(Mutex::new(Console {
             draft: String::new(),
             cursor: 0,
@@ -86,19 +86,16 @@ impl Terminal {
             preview: PreviewSender {
                 sender,
                 dropped: Arc::new(AtomicU64::new(0)),
-                wake: Arc::clone(&wake),
             },
         }));
         terminal::enable_raw_mode()?;
         let terminal = Self {
-            console,
-            wake,
-            previews,
+            console: Arc::clone(&console),
         };
         execute!(io::stdout(), EnableBracketedPaste)?;
         *ACTIVE.lock().map_err(poisoned)? = Arc::downgrade(&terminal.console);
         terminal.console.lock().map_err(poisoned)?.redraw()?;
-        Ok(Some(terminal))
+        Ok(Some((terminal, TerminalEditor { console, previews })))
     }
 
     pub(crate) fn mode(&self, mode: InputMode) -> io::Result<()> {
@@ -107,6 +104,12 @@ impl Terminal {
         state.redraw()
     }
 
+    pub(crate) fn input_mode(&self) -> io::Result<InputMode> {
+        Ok(self.console.lock().map_err(poisoned)?.mode)
+    }
+}
+
+impl TerminalEditor {
     pub(crate) fn edit(&self, edit: Edit) -> io::Result<Option<String>> {
         let mut state = self.console.lock().map_err(poisoned)?;
         match edit {
@@ -139,7 +142,10 @@ impl Terminal {
                 state.start = 0;
                 if state.mode != InputMode::Paste && line.trim().is_empty() {
                     state.redraw()?;
-                    return Ok(None);
+                    // The consumer may already be entering Paste mode while
+                    // this reader is ahead of it. Only the consumer may ignore
+                    // an ordinary blank line; preserve its original bytes.
+                    return Ok(Some(line));
                 }
                 // Echo accepted text; only the returned original String owns
                 // submission. Paste whitespace is visible, never executed.
@@ -177,11 +183,12 @@ impl Terminal {
         let dropped = state.preview.dropped.swap(0, Ordering::Relaxed);
         if dropped > 0 {
             state.output(
-                format!("[工具展示拥塞：跳过 {dropped} 条预览；执行事实以 Session 记录为准]\n")
+                format!("[tool preview congested: skipped {dropped} previews; Session records remain authoritative]\n")
                     .as_bytes(),
             )?;
         }
-        for frame in self.previews.try_iter() {
+        // A continuously producing Tool must yield back to input polling.
+        for frame in self.previews.try_iter().take(PREVIEW_CAPACITY) {
             state.output(frame.as_bytes())?;
         }
         Ok(())

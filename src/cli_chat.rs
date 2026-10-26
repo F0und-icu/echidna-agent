@@ -29,6 +29,7 @@ mod memory;
 mod persistence;
 mod recovery;
 mod theme;
+mod timing;
 mod tool_output;
 mod usage;
 mod vision;
@@ -327,7 +328,12 @@ pub(crate) async fn run(
             if line == "/memory" {
                 console_println!(
                     "{}",
-                    memory::status(&session.project, &session.binding, &tools)?
+                    memory::status(
+                        &session.project,
+                        &session.binding,
+                        &tools,
+                        agent.last_context_plan()
+                    )?
                 );
                 continue;
             }
@@ -608,22 +614,31 @@ pub(crate) async fn run(
                 continue;
             }
 
+            // Show local preparation immediately; a follow-up is only accepted
+            // after its current sources and durable Session have been checked.
+            lines.prompt(crate::terminal_console::InputMode::Processing)?;
+            let timing = timing::TurnTiming::new(composition.diagnostic_output_enabled());
             if research_enabled {
-                let domain = session.prepare_domain_for_turn(disposition, pending_domain.take())?;
+                let (domain, phase) = session.prepare_research_for_turn(
+                    disposition,
+                    pending_domain.take(),
+                    pending_phase.take(),
+                )?;
                 agent.queue_domain_profile(domain);
-                let phase = session.prepare_phase_for_turn(disposition, pending_phase.take())?;
                 agent.queue_research_phase(phase);
             }
+            timing.checkpoint("research_selection");
 
             // Prompt/core filesystem failures occur before a possible scoped
             // Vision request as well as before the Primary Provider request.
             let current = context_cache.refresh(&session.project, &tools, &session.binding)?;
             agent.refresh_current_context(current)?;
+            timing.checkpoint("context_refresh");
+            lines.processing(follow_up)?;
             let cancellation = AgentCancellation::new();
             let request_budget = Arc::new(ModelRequestBudget::new(
                 composition.runtime().model_request_limit_per_turn,
             ));
-            lines.processing(follow_up)?;
             let initial_images = if pending_images.is_empty() {
                 Vec::new()
             } else {
@@ -677,6 +692,7 @@ pub(crate) async fn run(
                     }
                 }
             };
+            timing.checkpoint("initial_sources_ready");
             let signal_cancellation = cancellation.clone();
             let answer_started = Cell::new(false);
             let end_answer = || {
@@ -685,6 +701,7 @@ pub(crate) async fn run(
                 }
             };
             let mut text_delta = |text: &str| {
+                timing.observe_text(text);
                 if !answer_started.get() && !text.is_empty() {
                     console_print!("{}", theme.answer_prefix());
                     answer_started.set(true);
@@ -703,6 +720,7 @@ pub(crate) async fn run(
                     .record_request_audit_manifest(attempt, None)
                     .map(|manifest| {
                         accepted_attempt.replace(Some(manifest.audit_event_id().clone()));
+                        timing.checkpoint("primary_request_ready");
                     })
                     .map_err(ChatError::into_request_audit_agent_loop_error)
             };
@@ -888,6 +906,7 @@ pub(crate) async fn run(
                 .await?
             };
 
+            timing.checkpoint("primary_turn_settled");
             tool_output.borrow_mut().finish_turn();
             let mut auto_compacted = false;
             match outcome {
@@ -1047,7 +1066,7 @@ impl DurableChatSession {
         explicit_resume: bool,
         composition: &ProviderComposition,
         replace_definition: bool,
-        discovered_mcp: &[crate::adapters::mcp_http::McpCatalogTool],
+        discovered_mcp: &[crate::adapters::mcp::McpCatalogTool],
     ) -> Result<
         (
             SessionState,
@@ -1187,113 +1206,43 @@ impl DurableChatSession {
         ))        })
     }
 
-    /// Makes the selected Phase durable before AgentLoop can apply it or send
-    /// a Provider request. A failed append leaves caller configuration alone.
-    fn prepare_phase_for_turn(
+    /// App owns research selection policy; this boundary supplies durable I/O.
+    fn prepare_research_for_turn(
         &self,
         disposition: SessionDisposition,
-        requested: Option<ResearchPhaseSelection>,
-    ) -> Result<ResearchPhase, ChatError> {
+        domain: Option<DomainProfileSelection>,
+        phase: Option<ResearchPhaseSelection>,
+    ) -> Result<(DomainProfile, ResearchPhase), ChatError> {
+        let research = self
+            .binding
+            .definition()
+            .research()
+            .expect("research command admission");
         self.with_projection(|projection, store, stream_id| {
-            let selection = match requested {
-                Some(selection) => selection,
-                None => match projection.state().research_phase_selection() {
-                    Some(selection) => return Ok(selection.phase()),
-                    None if disposition == SessionDisposition::Started => {
-                        ResearchPhaseSelection::definition_default(
-                            self.binding
-                                .definition()
-                                .research()
-                                .expect("research command admission")
-                                .phase(),
-                        )
-                    }
-                    None => {
-                        let phase = self
-                            .binding
-                            .definition()
-                            .research()
-                            .expect("research command admission")
-                            .phase();
-                        if phase == ResearchPhase::Mapping {
-                            ResearchPhaseSelection::legacy_default()
-                        } else {
-                            ResearchPhaseSelection::definition_default(phase)
-                        }
-                    }
-                },
-            };
-            let sequence = store.next_sequence()?;
-            let event = SessionEvent::ResearchPhaseSelected { selection }.into_envelope(
-                event_id(
-                    self.project.project_id(),
-                    &self.session_id,
-                    sequence.get(),
-                    "research-phase",
-                ),
-                stream_id,
-                sequence,
-                occurred_at(),
-            )?;
             projection
-                .append(store, event)
-                .map_err(ChatError::from_session_append)?;
-            Ok(selection.phase())
-        })
-    }
-
-    /// Makes the selected Domain durable before AgentLoop can apply it or
-    /// send a Provider request. Legacy replay remains read-only until here.
-    fn prepare_domain_for_turn(
-        &self,
-        disposition: SessionDisposition,
-        requested: Option<DomainProfileSelection>,
-    ) -> Result<DomainProfile, ChatError> {
-        self.with_projection(|projection, store, stream_id| {
-            let selection = match requested {
-                Some(selection) => selection,
-                None => match projection.state().domain_profile_selection() {
-                    Some(selection) => return Ok(selection.profile()),
-                    None if disposition == SessionDisposition::Started => {
-                        DomainProfileSelection::definition_default(
-                            self.binding
-                                .definition()
-                                .research()
-                                .expect("research command admission")
-                                .domain(),
+                .prepare_research_turn(
+                    store,
+                    stream_id,
+                    crate::app::session::ResearchTurnRequest {
+                        started: disposition == SessionDisposition::Started,
+                        default_domain: research.domain(),
+                        default_phase: research.phase(),
+                        domain,
+                        phase,
+                    },
+                    |sequence, kind| {
+                        (
+                            event_id(
+                                self.project.project_id(),
+                                &self.session_id,
+                                sequence.get(),
+                                kind,
+                            ),
+                            occurred_at(),
                         )
-                    }
-                    None => {
-                        let domain = self
-                            .binding
-                            .definition()
-                            .research()
-                            .expect("research command admission")
-                            .domain();
-                        if domain == DomainProfile::Source {
-                            DomainProfileSelection::legacy_default()
-                        } else {
-                            DomainProfileSelection::definition_default(domain)
-                        }
-                    }
-                },
-            };
-            let sequence = store.next_sequence()?;
-            let event = SessionEvent::DomainProfileSelected { selection }.into_envelope(
-                event_id(
-                    self.project.project_id(),
-                    &self.session_id,
-                    sequence.get(),
-                    "domain-profile",
-                ),
-                stream_id,
-                sequence,
-                occurred_at(),
-            )?;
-            projection
-                .append(store, event)
-                .map_err(ChatError::from_session_append)?;
-            Ok(selection.profile())
+                    },
+                )
+                .map_err(ChatError::from_session_append)
         })
     }
 
@@ -1603,7 +1552,7 @@ pub(crate) enum ChatError {
     #[error(transparent)]
     ToolExecution(#[from] crate::ports::tool::ToolExecutionError),
     #[error(transparent)]
-    Mcp(#[from] crate::adapters::mcp_http::McpError),
+    Mcp(#[from] crate::adapters::mcp::McpError),
     #[error(transparent)]
     RequestAudit(#[from] crate::domain::request_audit::RequestAuditError),
     #[error("rebuild Project Snapshot for Chat: {0}")]

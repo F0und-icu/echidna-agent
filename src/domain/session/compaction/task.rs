@@ -11,7 +11,7 @@ use crate::domain::context::ContextReferences;
 use crate::domain::events::{EventEnvelope, EventId, EventSequence, StreamId};
 use crate::domain::project::ProjectId;
 use crate::domain::research::ExecutionReceiptId;
-use crate::domain::session::{SessionError, SessionReducer};
+use crate::domain::session::{SessionError, SessionReducer, SessionState};
 
 use super::{fingerprint_value, require_text, validate_unique_ids};
 
@@ -31,7 +31,7 @@ impl SessionSourceIdentity {
         project_id: ProjectId,
         events: &[EventEnvelope<Value>],
         project_events: &[EventEnvelope<Value>],
-    ) -> Result<Self, SessionError> {
+    ) -> Result<(Self, SessionState), SessionError> {
         let state = SessionReducer.reduce(events.iter().cloned())?;
         let last = events
             .last()
@@ -39,7 +39,7 @@ impl SessionSourceIdentity {
         let stream_id = state
             .stream_id()
             .ok_or(SessionError::CompactionSourceSequenceMissing)?;
-        Ok(Self {
+        let source = Self {
             project_id,
             stream_id: stream_id.clone(),
             watermark: last.sequence,
@@ -48,7 +48,8 @@ impl SessionSourceIdentity {
                 .last()
                 .map_or(0, |event| event.sequence.get()),
             project_stream_hash: fingerprint_value(&project_events)?,
-        })
+        };
+        Ok((source, state))
     }
 
     pub fn project_id(&self) -> &ProjectId {

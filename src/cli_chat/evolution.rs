@@ -1,7 +1,7 @@
 //! The fixed normal-completion RSI boundary; never runs during recovery.
 
 use crate::adapters::agent_evolution::{EvolutionError, EvolutionStore};
-use crate::adapters::mcp_http::McpCatalogTool;
+use crate::adapters::mcp::McpCatalogTool;
 use crate::adapters::tools::ToolRegistry;
 use crate::app::agent_loop::AgentLoop;
 use crate::provider_composition::ProviderComposition;

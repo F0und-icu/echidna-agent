@@ -1,6 +1,4 @@
 //! Explicit failed-attempt capture through the real Adapter, in every build.
-include!("../src/lib.rs");
-mod support;
 
 mod captures {
     use std::fs;

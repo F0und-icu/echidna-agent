@@ -11,10 +11,10 @@ use std::sync::Arc;
 use crate::adapters::credentials::{
     AccountBoundCredential, CredentialResolution, CredentialSource, CredentialSourceError,
 };
-use crate::adapters::mcp_http::{McpCatalogTool, McpError, McpRuntime};
+use crate::adapters::mcp::{McpCatalogTool, McpError, McpRuntime};
 use crate::adapters::project_event_store::Project;
 use crate::adapters::responses::{ResponsesHttpAdapter, ResponsesHttpConfig, ResponsesWireProfile};
-use crate::adapters::subscription_auth::SubscriptionAuthService;
+use crate::adapters::subscription_auth::{SubscriptionAuthService, catalog::SubscriptionCatalog};
 use crate::domain::model::{ModelCapabilities, ReasoningEffort};
 use crate::domain::profile::AgentModelProfile;
 use crate::domain::request_audit::RequestAdapterVersion;
@@ -37,6 +37,8 @@ pub struct ProviderComposition {
     agent_definition_path: Option<std::path::PathBuf>,
     runtime: RuntimeSettings,
     mcp: McpRuntime,
+    #[cfg(debug_assertions)]
+    diagnostic_output: bool,
 }
 
 /// One strictly decoded and validated Config v1 value awaiting runtime-only
@@ -49,7 +51,7 @@ pub(crate) struct ValidatedProviderConfig(ProviderConfigV1);
 /// credentials, never a Provider ID, URL or model name, select this route.
 pub(crate) enum ConfiguredModelCatalog {
     ApiKey(ResponsesHttpAdapter),
-    Subscription(SubscriptionAuthService),
+    Subscription(SubscriptionCatalog),
 }
 
 impl ProviderComposition {
@@ -152,10 +154,12 @@ impl ProviderComposition {
                 Ok(ConfiguredModelCatalog::ApiKey(adapter))
             }
             ProviderCredential::ChatGptSubscription(subscription) => {
-                subscription_service(subscription).map(ConfiguredModelCatalog::Subscription)
+                subscription_service(subscription)
+                    .map(|auth| ConfiguredModelCatalog::Subscription(auth.catalog()))
             }
             ProviderCredential::CodexSubscription(subscription) => {
-                codex_subscription_service(subscription).map(ConfiguredModelCatalog::Subscription)
+                codex_subscription_service(subscription)
+                    .map(|auth| ConfiguredModelCatalog::Subscription(auth.catalog()))
             }
         }
     }
@@ -217,6 +221,17 @@ impl ProviderComposition {
         self.agent_definition_path.as_deref()
     }
 
+    pub(crate) fn diagnostic_output_enabled(&self) -> bool {
+        #[cfg(debug_assertions)]
+        {
+            self.diagnostic_output
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            false
+        }
+    }
+
     pub(crate) fn runtime(&self) -> RuntimeSettings {
         self.runtime
     }
@@ -237,7 +252,8 @@ impl ProviderComposition {
         let config = config.0;
         let prompt_sources = config.prompts.clone();
         let agent_definition_path = config.agent_definition_path().map(Path::to_path_buf);
-        let mcp = McpRuntime::new(config.mcp_servers.clone(), Arc::clone(&credential_source));
+        let mcp = McpRuntime::new(config.mcp_servers.clone(), Arc::clone(&credential_source))
+            .with_observer(project.as_ref().map(|_| crate::cli_mcp_output::observer()));
 
         let agent = config.active_agent_definition();
         let primary_definition = config.provider(&agent.primary);
@@ -294,6 +310,8 @@ impl ProviderComposition {
             agent_definition_path,
             runtime: config.runtime,
             mcp,
+            #[cfg(debug_assertions)]
+            diagnostic_output: debug,
         })
     }
 }
@@ -365,11 +383,13 @@ fn compose_provider(
                 Some(project) => adapter.with_project_image_resolver(project.clone()),
                 None => adapter,
             };
-            let adapter = adapter.with_cli_output(
-                cli_role,
-                #[cfg(debug_assertions)]
-                debug,
-            );
+            let adapter = adapter.with_observer(cli_role.map(|role| {
+                crate::cli_model_output::observer(
+                    role,
+                    #[cfg(debug_assertions)]
+                    debug,
+                )
+            }));
             Ok((adapter, request_adapter_version))
         }
     }

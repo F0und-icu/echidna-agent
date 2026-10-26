@@ -289,6 +289,19 @@ impl StreamingStages<'_> {
     }
 }
 
+/// One accepted Provider delivery; its required provenance travels atomically.
+struct CommittedPrimaryDelivery {
+    continuation: Option<CommittedContinuation>,
+    context_manifest: FullLogicalManifest,
+    input: ModelInputIR,
+    map: ContextDeliveryMap,
+    unactivated_tool_plan: ResolvedToolPlan,
+    history_len: usize,
+    world_state: Option<ResearchWorldState>,
+    project_snapshot: Option<ProjectSnapshotContext>,
+    project_memory_core: Option<crate::domain::context::ContextFragment>,
+}
+
 pub struct AgentLoop<'provider, 'tools, Provider: ?Sized, Tools: ?Sized> {
     provider: &'provider Provider,
     tools: &'tools Tools,
@@ -304,11 +317,9 @@ pub struct AgentLoop<'provider, 'tools, Provider: ?Sized, Tools: ?Sized> {
     model: ModelIdentity,
     profile: ModelProfile,
     provider_session: ProviderSession,
-    continuation: Option<CommittedContinuation>,
     completed_idempotency: BTreeMap<IdempotencyKey, ToolExecutionOutcome>,
     context_planner: ContextPlanner,
     fragment_cache: Option<Arc<dyn ContextFragmentCache>>,
-    committed_context_manifest: Option<FullLogicalManifest>,
     last_context_plan: Option<ContextPlan>,
     last_successful_context: Option<ContextInspection>,
     last_sampling_step_plan: Option<SamplingStepPlan>,
@@ -317,15 +328,7 @@ pub struct AgentLoop<'provider, 'tools, Provider: ?Sized, Tools: ?Sized> {
     active_agent_model_profile: Option<AgentModelProfile>,
     pending_agent_model_profile: Option<AgentModelProfile>,
     active_tool_exposure_plan: ToolExposurePlan,
-    committed_delivery_input: Option<ModelInputIR>,
-    committed_delivery_map: Option<ContextDeliveryMap>,
-    // Immutable pre-activation plan from the Turn of the committed sample.
-    // Used only to prove normal expiry; never advertises or dispatches Tools.
-    committed_unactivated_tool_plan: Option<ResolvedToolPlan>,
-    committed_history_len: usize,
-    committed_world_state: Option<ResearchWorldState>,
-    committed_project_snapshot: Option<ProjectSnapshotContext>,
-    committed_project_memory_core: Option<crate::domain::context::ContextFragment>,
+    committed_delivery: Option<CommittedPrimaryDelivery>,
     history_provenance: BTreeMap<usize, ContextProvenance>,
     bound_session_stream: Option<StreamId>,
     applied_compaction: Option<AppliedCompaction>,
@@ -404,11 +407,9 @@ where
             model,
             profile,
             provider_session,
-            continuation: None,
             completed_idempotency: BTreeMap::new(),
             context_planner: ContextPlanner::current(),
             fragment_cache: None,
-            committed_context_manifest: None,
             last_context_plan: None,
             last_successful_context: None,
             last_sampling_step_plan: None,
@@ -417,13 +418,7 @@ where
             active_agent_model_profile: None,
             pending_agent_model_profile: None,
             active_tool_exposure_plan,
-            committed_delivery_input: None,
-            committed_delivery_map: None,
-            committed_unactivated_tool_plan: None,
-            committed_history_len: 0,
-            committed_world_state: None,
-            committed_project_snapshot: None,
-            committed_project_memory_core: None,
+            committed_delivery: None,
             history_provenance: BTreeMap::new(),
             bound_session_stream: None,
             applied_compaction: None,
@@ -883,7 +878,11 @@ where
             };
             let expired_plan = (!turn_has_committed_sample)
                 .then_some(())
-                .and(self.committed_unactivated_tool_plan.as_ref())
+                .and_then(|_| {
+                    self.committed_delivery
+                        .as_ref()
+                        .map(|state| &state.unactivated_tool_plan)
+                })
                 .filter(|prior| *prior == &resolved_tool_plan);
             let tool_specs = resolved_tool_plan.advertised_specs();
             let turn = TurnContext::new(
@@ -911,7 +910,10 @@ where
                     budget: context_budget,
                     capabilities: &capabilities,
                     tool_specs,
-                    prior_manifest: self.committed_context_manifest.as_ref(),
+                    prior_manifest: self
+                        .committed_delivery
+                        .as_ref()
+                        .map(|state| &state.context_manifest),
                     correction_feedback: &correction_feedback,
                 })?;
             let sampling_step = SamplingStepPlan::new(
@@ -944,14 +946,18 @@ where
             let full_assessment = self
                 .provider_session
                 .assess_delivery(&full_snapshot, capabilities.incremental_input);
-            let retains_reasoning = self.committed_delivery_input.as_ref().is_some_and(|input| {
-                input.content_items.iter().any(|item| {
-                    matches!(
-                        item,
-                        ContentItem::Reasoning { .. } | ContentItem::OpaqueContinuation { .. }
-                    )
-                })
-            });
+            let retains_reasoning = self
+                .committed_delivery
+                .as_ref()
+                .map(|state| &state.input)
+                .is_some_and(|input| {
+                    input.content_items.iter().any(|item| {
+                        matches!(
+                            item,
+                            ContentItem::Reasoning { .. } | ContentItem::OpaqueContinuation { .. }
+                        )
+                    })
+                });
             let (mut delivery_input, mut delivery_map, mut snapshot, assessment) =
                 if retains_reasoning
                     || matches!(
@@ -970,17 +976,9 @@ where
                             current_plan: plan,
                             planner: &self.context_planner,
                             budget: context_budget,
-                            committed_input: self.committed_delivery_input.as_ref(),
-                            committed_delivery_map: self.committed_delivery_map.as_ref(),
-                            committed_history_len: self.committed_history_len,
-                            committed_manifest: self.committed_context_manifest.as_ref(),
-                            committed_world_state: self.committed_world_state.as_ref(),
+                            committed_delivery: self.committed_delivery.as_ref(),
                             world_state: self.world_state.as_ref(),
-                            committed_project_snapshot: self.committed_project_snapshot.as_ref(),
                             project_snapshot: self.project_snapshot.as_ref(),
-                            committed_project_memory_core: self
-                                .committed_project_memory_core
-                                .as_ref(),
                             project_memory_core: self.project_memory_core.as_ref(),
                             history: self.history.items(),
                             history_provenance: &self.history_provenance,
@@ -1017,8 +1015,9 @@ where
                                         || ((!deferred_activations.names().is_empty()
                                             || expired_plan.is_some())
                                             && self
-                                                .committed_delivery_input
+                                                .committed_delivery
                                                 .as_ref()
+                                                .map(|state| &state.input)
                                                 .is_some_and(|previous| {
                                                     self.provider_session
                                                         .tool_change_preserves_delivery(
@@ -1226,7 +1225,6 @@ where
             }
             self.provider_session
                 .record_completed_sample(&snapshot, server_output_items.clone())?;
-            self.commit_continuation(&completion);
             turn_has_committed_sample = true;
             delivery_input
                 .content_items
@@ -1234,14 +1232,22 @@ where
             delivery_map
                 .append_model_output_items(sampling_step.step_id(), &server_output_items)?;
             delivery_map.validate_against(&delivery_input)?;
-            self.committed_delivery_input = Some(delivery_input);
-            self.committed_delivery_map = Some(delivery_map);
-            self.committed_unactivated_tool_plan = Some(unactivated_tool_plan.clone());
-            self.committed_history_len = self.history.items().len();
-            self.committed_world_state = self.world_state.clone();
-            self.committed_project_snapshot = self.project_snapshot.clone();
-            self.committed_project_memory_core = self.project_memory_core.clone();
-            self.committed_context_manifest = Some(plan.full_logical_manifest().clone());
+            self.committed_delivery = Some(CommittedPrimaryDelivery {
+                continuation: completion.response_id().cloned().map(|response_id| {
+                    CommittedContinuation {
+                        session: self.provider_session.reference().clone(),
+                        response_id,
+                    }
+                }),
+                input: delivery_input,
+                map: delivery_map,
+                unactivated_tool_plan: unactivated_tool_plan.clone(),
+                history_len: self.history.items().len(),
+                world_state: self.world_state.clone(),
+                project_snapshot: self.project_snapshot.clone(),
+                project_memory_core: self.project_memory_core.clone(),
+                context_manifest: plan.full_logical_manifest().clone(),
+            });
             self.last_successful_context = Some(ContextInspection {
                 plan: plan.clone(),
                 baseline_assessment: self
@@ -1484,15 +1490,7 @@ where
     }
 
     fn clear_committed_primary_delivery_state(&mut self) {
-        self.continuation = None;
-        self.committed_context_manifest = None;
-        self.committed_delivery_input = None;
-        self.committed_delivery_map = None;
-        self.committed_unactivated_tool_plan = None;
-        self.committed_history_len = self.history.items().len();
-        self.committed_world_state = None;
-        self.committed_project_snapshot = None;
-        self.committed_project_memory_core = None;
+        self.committed_delivery = None;
         self.last_baseline_assessment = None;
     }
 
@@ -1514,8 +1512,9 @@ where
             ),
             BaselineAssessment::AppendOnlyCandidate { delta_items } => {
                 let continuation = self
-                    .continuation
+                    .committed_delivery
                     .as_ref()
+                    .and_then(|state| state.continuation.as_ref())
                     .filter(|stored| stored.session == *self.provider_session.reference())
                     .map(|stored| stored.response_id.clone())
                     .ok_or(AgentLoopError::ContinuationIdentityMissing)?;
@@ -1543,17 +1542,6 @@ where
             return Err(AgentLoopError::ContinuationIdentityMissing);
         }
         Ok(())
-    }
-
-    fn commit_continuation(&mut self, completion: &ModelResponseCompletion) {
-        self.continuation =
-            completion
-                .response_id()
-                .cloned()
-                .map(|response_id| CommittedContinuation {
-                    session: self.provider_session.reference().clone(),
-                    response_id,
-                });
     }
 
     async fn execute_tool_calls(

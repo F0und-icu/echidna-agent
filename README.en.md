@@ -231,7 +231,12 @@ Keep real keys and configuration outside the repository and out of Git.
 Use the [MCP template](examples/provider-mcp.toml) to declare one or more remote
 Streamable HTTP tool servers under `mcp_servers`. Each server needs an absolute
 HTTP(S) `url` and either `protocol_version = "2025-11-25"` or
-`protocol_version = "2026-07-28"`. An optional `timeout_ms` defaults to 60000.
+`protocol_version = "2026-07-28"`. An optional `timeout_ms` defaults to 60000
+and bounds each tool call. Both HTTP and stdio accept `startup_timeout_ms` for
+the complete server startup, initialization and catalog discovery; when omitted,
+it inherits `timeout_ms`. For a slow startup with short calls, use for example
+`timeout_ms = 1000` and `startup_timeout_ms = 10000`. Startup failures identify
+the server and phase without skipping or retrying it.
 
 If a server requires Bearer authentication, use only a dedicated reference such
 as `CYBER_AGENT_MCP_EXAMPLE_API_KEY`; provider keys and subscription accounts are

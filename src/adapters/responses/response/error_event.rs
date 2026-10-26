@@ -2,35 +2,31 @@
 
 use serde_json::{Number, Value};
 
+use super::super::redaction::WireRedaction;
+use crate::diagnostic_text::escaped_text;
 use crate::ports::model::ModelProviderError;
-use crate::terminal_content::escaped_text;
 
 use super::{PREVIOUS_RESPONSE_NOT_FOUND_CODE, ResponsesWireProfile, protocol_error};
 
 pub(super) struct ErrorRedaction {
-    secrets: Vec<String>,
+    redaction: WireRedaction,
 }
 
 impl ErrorRedaction {
     pub(super) fn new(bearer: &str, account_id: Option<&[u8]>) -> Self {
-        let mut secrets = vec![bearer.to_owned()];
-        if let Some(account_id) = account_id {
-            secrets.push(
-                std::str::from_utf8(account_id)
-                    .expect("account header was constructed from a UTF-8 credential")
-                    .to_owned(),
-            );
+        let account = account_id.map(|account_id| {
+            std::str::from_utf8(account_id)
+                .expect("account header was constructed from a UTF-8 credential")
+        });
+        Self {
+            redaction: WireRedaction::new(&[bearer, account.unwrap_or("")]),
         }
-        secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
-        Self { secrets }
     }
 
     fn project(&self, text: &str, limit: usize) -> String {
         // Replace whole request values before selecting a bounded prefix, so a
         // value straddling that prefix cannot leak its credential fragment.
-        let redacted = self.secrets.iter().fold(text.to_owned(), |text, secret| {
-            text.replace(secret, "[redacted]")
-        });
+        let redacted = self.redaction.text(text);
         let mut characters = redacted.chars();
         let mut bounded: String = characters.by_ref().take(limit).collect();
         if characters.next().is_some() {

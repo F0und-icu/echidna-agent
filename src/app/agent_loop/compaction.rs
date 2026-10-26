@@ -51,12 +51,13 @@ where
     Tools: ToolExecutor + ?Sized,
 {
     fn delivery_input_estimate(&self) -> Result<Option<u32>, AgentLoopError> {
-        let Some(mut input) = self.committed_delivery_input.clone() else {
+        let Some(committed) = &self.committed_delivery else {
             return Ok(None);
         };
+        let mut input = committed.input.clone();
         input
             .content_items
-            .extend_from_slice(&self.history.items()[self.committed_history_len..]);
+            .extend_from_slice(&self.history.items()[committed.history_len..]);
         Ok(Some(
             self.context_planner.estimate_rendered_model_input(&input)?,
         ))

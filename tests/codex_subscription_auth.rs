@@ -184,7 +184,7 @@ async fn codex_login_uses_fixed_oauth_requests_and_account_bound_model_discovery
     assert_eq!(status["account_header_ready"], true);
     assert!(status["access_token_expires_at_unix"].as_u64() > Some(now_unix()));
     assert!(status.get("direct_access_granted").is_none());
-    let models = auth.models().await.unwrap();
+    let models = auth.catalog().models().await.unwrap();
     assert_eq!(
         models
             .iter()
@@ -330,6 +330,7 @@ async fn codex_models_reject_ambiguous_or_malformed_catalog_metadata() {
 
         assert_eq!(
             service(&store, &base)
+                .catalog()
                 .models()
                 .await
                 .unwrap_err()
@@ -363,6 +364,7 @@ async fn codex_catalog_client_version_controls_both_catalog_request_locations() 
     });
 
     let models = service_with_catalog_client_version(&store, &base, Some("1.2.3"))
+        .catalog()
         .models()
         .await
         .unwrap();
@@ -435,7 +437,7 @@ async fn codex_model_catalog_http_failures_keep_credentials_and_redact_remote_da
             );
         });
 
-        let error = service(&store, &base).models().await.unwrap_err();
+        let error = service(&store, &base).catalog().models().await.unwrap_err();
         assert_eq!(
             error.to_string(),
             format!("subscription authentication model catalog request failed with HTTP {status}")

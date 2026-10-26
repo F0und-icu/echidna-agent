@@ -1,5 +1,10 @@
 //! Fixed local-image Tool backed by the existing Artifact publication owner.
 
+use super::ToolRegistry;
+use crate::domain::tools::{
+    ToolDeterminism, ToolEffect, ToolExposure, ToolParallelism, ToolRetryPolicy, ToolSpec,
+};
+
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -281,7 +286,7 @@ fn partial_derivative_failure(
     outcome
 }
 
-pub(super) fn input_schema_for_scope(binding: &ArtifactScopeBinding) -> Value {
+fn input_schema_for_scope(binding: &ArtifactScopeBinding) -> Value {
     let mut schema = json!({
         "type": "object",
         "properties": {
@@ -341,7 +346,7 @@ fn scope_from_input(
     }
 }
 
-pub(super) fn output_schema() -> Value {
+fn output_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
@@ -379,4 +384,29 @@ fn publication_schema() -> Value {
             "research_event_count": {"type": "integer", "minimum": 0}
         }, "required": ["event_id", "artifact", "blob", "research_event_count"], "additionalProperties": false
     })
+}
+
+pub(super) const NAME: &str = "view_image";
+
+pub(super) fn spec(registry: &ToolRegistry) -> ToolSpec {
+    super::spec(
+        NAME,
+        "2",
+        super::description(
+            "one supported local image",
+            "format validation or proof is needed.",
+            "a local supported image.",
+            "source and selected Artifacts.",
+            true,
+        ),
+        ToolExposure::Direct,
+        input_schema_for_scope(&registry.artifact_scope),
+        output_schema(),
+        ToolParallelism::ResourceLocked,
+        Some("file:{source_path},file:.echidna/research.jsonl"),
+        ToolEffect::LocalMutation,
+        ToolRetryPolicy::NeverAutoRetry,
+        ToolDeterminism::EnvironmentDependent,
+        120_000,
+    )
 }

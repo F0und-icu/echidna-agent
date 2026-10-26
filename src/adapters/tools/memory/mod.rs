@@ -1,5 +1,10 @@
 //! Fixed project-Memory Tools with audited Markdown revisions.
 
+use super::ToolRegistry;
+use crate::domain::tools::{
+    ToolDeterminism, ToolEffect, ToolExposure, ToolParallelism, ToolRetryPolicy, ToolSpec,
+};
+
 mod schema;
 
 use std::path::Path;
@@ -45,7 +50,7 @@ struct MemoryWriteArgs {
     event_id: String,
 }
 
-pub(super) fn normalize_read(
+fn normalize_read(
     project_root: &Path,
     control_directory: &str,
     scope: &MemoryScope,
@@ -60,7 +65,7 @@ pub(super) fn normalize_read(
     ))
 }
 
-pub(super) fn normalize_write(
+fn normalize_write(
     project_root: &Path,
     control_directory: &str,
     scope: &MemoryScope,
@@ -76,7 +81,7 @@ pub(super) fn normalize_write(
     ))
 }
 
-pub(super) async fn execute_read(
+async fn execute_read(
     project_root: &Path,
     scope: &MemoryScope,
     plan: ToolExecutionPlan,
@@ -163,7 +168,7 @@ pub(super) async fn execute_read(
     )
 }
 
-pub(super) async fn execute_write(
+async fn execute_write(
     project_root: &Path,
     scope: &MemoryScope,
     plan: ToolExecutionPlan,
@@ -557,14 +562,133 @@ fn validate_core_tool_limit(path: &MemoryPath, content: &str, limit: usize) -> R
     }
 }
 
-pub(super) fn read_input_schema() -> Value {
+fn read_input_schema() -> Value {
     schema::read_input_schema()
 }
 
-pub(super) fn write_input_schema(core_byte_limit: usize) -> Value {
+fn write_input_schema(core_byte_limit: usize) -> Value {
     schema::write_input_schema(core_byte_limit)
 }
 
-pub(super) fn output_schema() -> Value {
+fn output_schema() -> Value {
     schema::output_schema()
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) enum Tool {
+    MemoryRead,
+    MemoryWrite,
+}
+
+impl Tool {
+    pub(super) const ALL: [Self; 2] = [Self::MemoryRead, Self::MemoryWrite];
+
+    pub(super) const fn name(self) -> &'static str {
+        match self {
+            Self::MemoryRead => "memory_read",
+            Self::MemoryWrite => "memory_write",
+        }
+    }
+
+    pub(super) fn spec(self, registry: &ToolRegistry) -> ToolSpec {
+        match self {
+            Self::MemoryRead => super::spec(
+                self.name(),
+                "2",
+                super::description(
+                    "bounded Memory in the Agent's configured scope",
+                    "a mutation or verified Research fact is needed.",
+                    "the smallest missing document; reuse current delivered Core Memory instead of rereading it routinely.",
+                    "path, content and hash; content:null and hash:null mean the document is absent in the bound Memory namespace.",
+                    false,
+                ),
+                ToolExposure::Deferred,
+                read_input_schema(),
+                output_schema(),
+                ToolParallelism::ResourceLocked,
+                Some("file:.echidna/memory/{path},file:.echidna/research.jsonl"),
+                ToolEffect::LocalMutation,
+                ToolRetryPolicy::NeverAutoRetry,
+                ToolDeterminism::EnvironmentDependent,
+                10_000,
+            ),
+            Self::MemoryWrite => super::spec(
+                self.name(),
+                "2",
+                super::description(
+                    "a focused Memory update in the Agent's configured scope",
+                    "content is transient, or an existing document lacks its current hash.",
+                    "a focused update; use expected_hash:null only to create a missing document, otherwise read the current hash first.",
+                    "hashes, Blob and status.",
+                    false,
+                ),
+                ToolExposure::Deferred,
+                write_input_schema(registry.window_policy.core_memory_bytes()),
+                output_schema(),
+                ToolParallelism::ResourceLocked,
+                Some("file:.echidna/memory/{path},file:.echidna/research.jsonl"),
+                ToolEffect::LocalMutation,
+                ToolRetryPolicy::NeverAutoRetry,
+                ToolDeterminism::EnvironmentDependent,
+                30_000,
+            ),
+        }
+    }
+
+    pub(super) fn normalize(
+        self,
+        registry: &ToolRegistry,
+        arguments: Value,
+    ) -> Result<(Value, Vec<ResourceKey>), ToolExecutorError> {
+        let project_root = &registry.project_root;
+        let control = registry.control_directory_name;
+        let memory_scope = registry.memory_scope.as_ref();
+        match self {
+            Self::MemoryRead => normalize_read(
+                project_root,
+                control,
+                memory_scope.expect("Memory Tool is registered only with a scope"),
+                arguments,
+            ),
+            Self::MemoryWrite => normalize_write(
+                project_root,
+                control,
+                memory_scope.expect("Memory Tool is registered only with a scope"),
+                arguments,
+            ),
+        }
+    }
+
+    pub(super) async fn execute(
+        self,
+        registry: &ToolRegistry,
+        plan: ToolExecutionPlan,
+    ) -> ToolExecutionOutcome {
+        match self {
+            Self::MemoryRead => {
+                execute_read(
+                    &registry.project_root,
+                    registry
+                        .memory_scope
+                        .as_ref()
+                        .expect("Memory Tool is registered only with a scope"),
+                    plan,
+                    registry.window_policy.core_memory_bytes(),
+                )
+                .await
+            }
+            Self::MemoryWrite => {
+                execute_write(
+                    &registry.project_root,
+                    registry
+                        .memory_scope
+                        .as_ref()
+                        .expect("Memory Tool is registered only with a scope"),
+                    plan,
+                    registry.window_policy.core_memory_bytes(),
+                )
+                .await
+            }
+        }
+    }
 }

@@ -1,4 +1,3 @@
-use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -11,7 +10,11 @@ use serde_json::{Value, json};
 use super::headers::{HeaderBinding, encode_header_value, request_headers};
 use super::{McpError, McpProtocolVersion};
 
-pub(super) const MAX_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
+use super::observation::{McpObservation, McpObserver};
+use super::rpc::{
+    CompletedCall, MAX_MESSAGE_BYTES, decode_message, into_result, is_notification,
+    is_server_request, safe_error,
+};
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const MCP_PROTOCOL_VERSION: HeaderName = HeaderName::from_static("mcp-protocol-version");
 const MCP_METHOD: HeaderName = HeaderName::from_static("mcp-method");
@@ -26,19 +29,21 @@ pub(super) struct McpClient {
     bearer: Option<String>,
     session_id: Arc<Mutex<Option<String>>>,
     next_id: Arc<AtomicU64>,
-}
-
-pub(crate) enum CompletedCall {
-    Result(Value),
-    Error(Value),
+    server_id: String,
+    observer: Option<McpObserver>,
+    startup_timeout: Duration,
+    call_timeout: Duration,
 }
 
 impl McpClient {
     pub(super) fn new(
+        server_id: String,
         endpoint: String,
         protocol: McpProtocolVersion,
         timeout_ms: u64,
         bearer: Option<String>,
+        startup_timeout_ms: u64,
+        observer: Option<McpObserver>,
     ) -> Result<Self, McpError> {
         let client = reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
@@ -55,6 +60,10 @@ impl McpClient {
             bearer,
             session_id: Arc::new(Mutex::new(None)),
             next_id: Arc::new(AtomicU64::new(1)),
+            server_id,
+            observer,
+            startup_timeout: Duration::from_millis(startup_timeout_ms),
+            call_timeout: Duration::from_millis(timeout_ms),
         })
     }
 
@@ -141,6 +150,7 @@ impl McpClient {
                 json!({"jsonrpc": "2.0", "method": method, "params": params}),
                 method,
                 None,
+                self.startup_timeout,
             )
             .await?;
         if response.status() != reqwest::StatusCode::ACCEPTED {
@@ -159,8 +169,13 @@ impl McpClient {
     ) -> Result<CompletedCall, McpError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed).to_string();
         let body = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
-        let response = self.post(body, method, call_headers).await?;
-        self.decode_response(response, &id).await
+        let timeout = if matches!(method, "initialize" | "tools/list") {
+            self.startup_timeout
+        } else {
+            self.call_timeout
+        };
+        let response = self.post(body, method, call_headers, timeout).await?;
+        self.decode_response(response, &id, timeout).await
     }
 
     async fn post(
@@ -168,13 +183,15 @@ impl McpClient {
         body: Value,
         method: &str,
         call_headers: Option<(&str, Vec<(String, String)>)>,
+        timeout: Duration,
     ) -> Result<reqwest::Response, McpError> {
         let mut request = self
             .client
             .post(&self.endpoint)
             .header(ACCEPT, "application/json, text/event-stream")
             .header(CONTENT_TYPE, "application/json")
-            .json(&body);
+            .json(&body)
+            .timeout(timeout);
         if let Some(bearer) = &self.bearer {
             request = request.header(AUTHORIZATION, format!("Bearer {bearer}"));
         }
@@ -218,6 +235,7 @@ impl McpClient {
         &self,
         response: reqwest::Response,
         id: &str,
+        timeout: Duration,
     ) -> Result<CompletedCall, McpError> {
         let session = response
             .headers()
@@ -255,7 +273,7 @@ impl McpClient {
             return decode_message(value, id);
         }
         if content_type.starts_with("text/event-stream") {
-            return self.decode_sse(response, id).await;
+            return self.decode_sse(response, id, timeout).await;
         }
         Err(McpError::Protocol {
             message: "MCP response used an unsupported content type".to_owned(),
@@ -266,6 +284,7 @@ impl McpClient {
         &self,
         response: reqwest::Response,
         id: &str,
+        timeout: Duration,
     ) -> Result<CompletedCall, McpError> {
         let size = Arc::new(AtomicU64::new(0));
         let counted = response.bytes_stream().map({
@@ -293,7 +312,7 @@ impl McpClient {
                     message: "MCP SSE event was not JSON-RPC JSON".to_owned(),
                 })?;
             if is_server_request(&value) {
-                self.respond_to_server_request(&value).await?;
+                self.respond_to_server_request(&value, timeout).await?;
                 continue;
             }
             if is_notification(&value) {
@@ -302,11 +321,12 @@ impl McpClient {
                     .and_then(Value::as_str)
                     .unwrap_or_default();
                 if method == "notifications/message" || method == "notifications/progress" {
-                    writeln!(
-                        crate::terminal_console::stderr(),
-                        "[MCP transport notification: {method}]"
-                    )
-                    .expect("MCP stderr failed");
+                    if let Some(observer) = &self.observer {
+                        observer(McpObservation::Notification {
+                            server_id: self.server_id.clone(),
+                            method: method.to_owned(),
+                        });
+                    }
                     continue;
                 }
                 return Err(McpError::Protocol {
@@ -320,7 +340,11 @@ impl McpClient {
         })
     }
 
-    async fn respond_to_server_request(&self, request: &Value) -> Result<(), McpError> {
+    async fn respond_to_server_request(
+        &self,
+        request: &Value,
+        timeout: Duration,
+    ) -> Result<(), McpError> {
         let id = request
             .get("id")
             .cloned()
@@ -336,14 +360,15 @@ impl McpClient {
         let body = if method == "ping" {
             json!({"jsonrpc": "2.0", "id": id, "result": {}})
         } else {
-            writeln!(
-                crate::terminal_console::stderr(),
-                "[MCP transport unsupported server request: {method}]"
-            )
-            .expect("MCP stderr failed");
+            if let Some(observer) = &self.observer {
+                observer(McpObservation::UnsupportedRequest {
+                    server_id: self.server_id.clone(),
+                    method: method.to_owned(),
+                });
+            }
             json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": "Method not found"}})
         };
-        let response = self.post(body, "response", None).await?;
+        let response = self.post(body, "response", None, timeout).await?;
         if response.status() != reqwest::StatusCode::ACCEPTED {
             return Err(McpError::Protocol {
                 message: "MCP server-request response was not accepted".to_owned(),
@@ -351,40 +376,6 @@ impl McpClient {
         }
         Ok(())
     }
-}
-
-pub(super) fn decode_message(value: Value, expected_id: &str) -> Result<CompletedCall, McpError> {
-    if value.get("jsonrpc").and_then(Value::as_str) != Some("2.0")
-        || value.get("id").and_then(Value::as_str) != Some(expected_id)
-    {
-        return Err(McpError::Protocol {
-            message: "MCP response did not match its JSON-RPC request".to_owned(),
-        });
-    }
-    match (value.get("result"), value.get("error")) {
-        (Some(result), None) if result.is_object() => Ok(CompletedCall::Result(result.clone())),
-        (None, Some(error)) if error.is_object() => Ok(CompletedCall::Error(error.clone())),
-        _ => Err(McpError::Protocol {
-            message: "MCP response did not contain one valid JSON-RPC result or error".to_owned(),
-        }),
-    }
-}
-
-fn into_result(completed: CompletedCall) -> Result<Value, McpError> {
-    match completed {
-        CompletedCall::Result(result) => Ok(result),
-        CompletedCall::Error(error) => Err(McpError::Catalog {
-            message: format!("initialize returned JSON-RPC error: {}", safe_error(&error)),
-        }),
-    }
-}
-
-fn is_server_request(value: &Value) -> bool {
-    value.get("method").is_some() && value.get("id").is_some()
-}
-
-fn is_notification(value: &Value) -> bool {
-    value.get("method").is_some() && value.get("id").is_none()
 }
 
 async fn bounded_json(response: reqwest::Response) -> Result<Value, McpError> {
@@ -412,12 +403,4 @@ async fn bounded_json(response: reqwest::Response) -> Result<Value, McpError> {
     serde_json::from_slice(&bytes).map_err(|_| McpError::Protocol {
         message: "MCP response was not valid JSON".to_owned(),
     })
-}
-
-fn safe_error(error: &Value) -> String {
-    error
-        .get("message")
-        .and_then(Value::as_str)
-        .map(|message| message.chars().take(160).collect())
-        .unwrap_or_else(|| "invalid JSON-RPC error".to_owned())
 }

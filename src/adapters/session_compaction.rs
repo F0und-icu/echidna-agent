@@ -5,8 +5,9 @@ use crate::adapters::project_event_store::{
 };
 use crate::adapters::research_projection::{
     CompactionValidationFacts, CompactionValidationFactsError, ProjectArtifactCatalog,
-    continuation_text, load_compaction_validation_facts, load_historical_compaction_facts,
-    load_reference_catalog,
+    continuation_text, load_compaction_validation_facts,
+    load_compaction_validation_facts_with_references, load_historical_compaction_facts,
+    load_reference_catalog, load_reference_catalog_with_session,
 };
 use crate::domain::context::ContextWindowPolicy;
 use crate::domain::events::StreamId;
@@ -14,9 +15,8 @@ use crate::domain::model::ContentItem;
 use crate::domain::project::ProjectId;
 use crate::domain::research::ExecutionReceiptId;
 use crate::domain::session::{
-    CompactionValidationContext, NarrativeSummary, SessionError, SessionReducer,
-    SessionSourceIdentity, SessionState, SessionSummary, SessionSummaryDraft,
-    TaskCompactionValidationFacts,
+    CompactionValidationContext, NarrativeSummary, SessionError, SessionSourceIdentity,
+    SessionState, SessionSummary, SessionSummaryDraft, TaskCompactionValidationFacts,
 };
 
 pub(crate) struct SessionCompactionFacts {
@@ -86,30 +86,30 @@ pub(crate) fn load_session_compaction_facts(
     let session_id = session_id(source_stream)?;
     let events =
         read_existing_session_events(project, &session_id).map_err(|error| error.to_string())?;
-    let reduced = SessionReducer
-        .reduce(events.iter().cloned())
-        .map_err(|error| error.to_string())?;
+    let project_events =
+        read_existing_research_events(project).map_err(|error| error.to_string())?;
+    // The source identity owns strict replay. Reuse its validated state rather
+    // than decoding/validating every durable RequestAudit a second time.
+    let (source, reduced) =
+        SessionSourceIdentity::from_events(project.project_id().clone(), &events, &project_events)
+            .map_err(|error| error.to_string())?;
     if &reduced != state {
         return Err("Compaction Session source changed before validation"
             .to_owned()
             .into());
     }
-    let project_events =
-        read_existing_research_events(project).map_err(|error| error.to_string())?;
+    let references = load_reference_catalog_with_session(project, &session_id, &reduced)?;
     let catalog = ProjectArtifactCatalog::from_events_with_references(
         project_events.iter().cloned(),
-        &load_reference_catalog(project)?,
+        &references,
     )?;
-    let source =
-        SessionSourceIdentity::from_events(project.project_id().clone(), &events, &project_events)
-            .map_err(|error| error.to_string())?;
     let task = task_facts(source, &reduced, &catalog, &session_id)?;
     Ok(SessionCompactionFacts {
         project_id: project.project_id().clone(),
         research: binding
             .definition()
             .research()
-            .map(|_| load_compaction_validation_facts(project))
+            .map(|_| load_compaction_validation_facts_with_references(project, references))
             .transpose()?,
         task: Some(task),
     })
@@ -165,7 +165,7 @@ fn load_summary_facts(
                 project_events.iter().cloned(),
                 &load_reference_catalog(project)?,
             )?;
-            let actual = SessionSourceIdentity::from_events(
+            let (actual, state) = SessionSourceIdentity::from_events(
                 project.project_id().clone(),
                 &events,
                 &project_events,
@@ -173,7 +173,6 @@ fn load_summary_facts(
             if &actual != source {
                 return Err("Compaction task historical Session/project prefix identity/hash does not match".to_owned());
             }
-            let state = SessionReducer.reduce(events).map_err(|error| error.to_string())?;
             task_facts(actual, &state, &catalog, &session_id)
         })
         .transpose()?;

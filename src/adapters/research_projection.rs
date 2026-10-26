@@ -19,7 +19,7 @@ use crate::domain::research::{
 };
 use crate::domain::session::{
     CompactionValidationContext, EvidenceSpine, NarrativeSummary, ResearchStreamIdentity,
-    SessionError, SessionReducer, SessionSummaryDraft,
+    SessionError, SessionReducer, SessionState, SessionSummaryDraft,
 };
 
 /// Strict, discardable projection of shared project Artifact facts.
@@ -523,32 +523,48 @@ fn bounded_text(value: &str, maximum_bytes: usize) -> String {
 pub(crate) fn load_reference_catalog(
     project: &Project,
 ) -> Result<ResearchReferenceCatalog, String> {
-    load_reference_catalog_and_receipt_ids(project).map(|(catalog, _)| catalog)
+    load_reference_catalog_from_sessions(project, None)
 }
 
-fn load_reference_catalog_and_receipt_ids(
+/// Reuses the current Session already strictly replayed under the caller's
+/// Project writer lease. Other Sessions retain the same full validation.
+pub(crate) fn load_reference_catalog_with_session(
     project: &Project,
-) -> Result<(ResearchReferenceCatalog, BTreeSet<ExecutionReceiptId>), String> {
+    session_id: &StreamId,
+    state: &SessionState,
+) -> Result<ResearchReferenceCatalog, String> {
+    load_reference_catalog_from_sessions(project, Some((session_id, state)))
+}
+
+fn load_reference_catalog_from_sessions(
+    project: &Project,
+    current: Option<(&StreamId, &SessionState)>,
+) -> Result<ResearchReferenceCatalog, String> {
     let mut references = ResearchReferenceCatalog::default();
-    let mut receipt_ids = BTreeSet::new();
     for session_id in project
         .existing_session_ids()
         .map_err(|error| error.to_string())?
     {
-        let events = read_existing_session_events(project, &session_id)
-            .map_err(|error| format!("Session `{session_id}` cannot be read: {error}"))?;
-        let session = SessionReducer
-            .reduce(events)
-            .map_err(|error| format!("Session `{session_id}` cannot be reduced: {error}"))?;
+        let replayed;
+        let session = match current {
+            Some((id, state)) if id == &session_id => state,
+            _ => {
+                let events = read_existing_session_events(project, &session_id)
+                    .map_err(|error| format!("Session `{session_id}` cannot be read: {error}"))?;
+                replayed = SessionReducer.reduce(events).map_err(|error| {
+                    format!("Session `{session_id}` cannot be reduced: {error}")
+                })?;
+                &replayed
+            }
+        };
         for record in session.execution_receipts() {
             let receipt_id = ExecutionReceiptId::new(record.event_id.as_str());
             references
-                .insert_execution_receipt(receipt_id.clone(), record.receipt.clone())
+                .insert_execution_receipt(receipt_id, record.receipt.clone())
                 .map_err(|error| error.to_string())?;
-            receipt_ids.insert(receipt_id);
         }
     }
-    Ok((references, receipt_ids))
+    Ok(references)
 }
 
 pub(crate) fn load_research_state(project: &Project) -> Result<ResearchState, String> {
@@ -618,6 +634,15 @@ pub(crate) fn load_compaction_validation_facts(
     load_compaction_facts_at(project, None)
 }
 
+/// One compaction operation shares its already validated receipt catalogue
+/// between generic Artifact and Research facts; no cache survives this call.
+pub(crate) fn load_compaction_validation_facts_with_references(
+    project: &Project,
+    references: ResearchReferenceCatalog,
+) -> Result<CompactionValidationFacts, CompactionValidationFactsError> {
+    load_compaction_facts_with_references(project, None, references)
+}
+
 /// Replays the original exact Research prefix, never treating an advanced
 /// current stream as if it were the old Summary's source. The caller must
 /// still validate the old Summary against this historical context.
@@ -639,7 +664,19 @@ fn load_compaction_facts_at(
     project: &Project,
     watermark: Option<u64>,
 ) -> Result<CompactionValidationFacts, CompactionValidationFactsError> {
-    let (references, execution_receipt_ids) = load_reference_catalog_and_receipt_ids(project)?;
+    let references = load_reference_catalog(project)?;
+    load_compaction_facts_with_references(project, watermark, references)
+}
+
+fn load_compaction_facts_with_references(
+    project: &Project,
+    watermark: Option<u64>,
+    references: ResearchReferenceCatalog,
+) -> Result<CompactionValidationFacts, CompactionValidationFactsError> {
+    let execution_receipt_ids = references
+        .execution_receipts()
+        .map(|(id, _)| id.clone())
+        .collect();
     let mut events = read_existing_research_events(project).map_err(|error| error.to_string())?;
     if let Some(watermark) = watermark {
         // Identity validation below checks contiguous sequences and exact hash.

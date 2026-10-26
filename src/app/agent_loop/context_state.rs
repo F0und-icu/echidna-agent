@@ -91,15 +91,9 @@ pub(super) struct StateDiffDeliveryInput<'a> {
     pub(super) current_plan: &'a ContextPlan,
     pub(super) planner: &'a ContextPlanner,
     pub(super) budget: ContextBudget,
-    pub(super) committed_input: Option<&'a ModelInputIR>,
-    pub(super) committed_delivery_map: Option<&'a ContextDeliveryMap>,
-    pub(super) committed_history_len: usize,
-    pub(super) committed_manifest: Option<&'a FullLogicalManifest>,
-    pub(super) committed_world_state: Option<&'a ResearchWorldState>,
+    pub(super) committed_delivery: Option<&'a super::CommittedPrimaryDelivery>,
     pub(super) world_state: Option<&'a ResearchWorldState>,
-    pub(super) committed_project_snapshot: Option<&'a ProjectSnapshotContext>,
     pub(super) project_snapshot: Option<&'a ProjectSnapshotContext>,
-    pub(super) committed_project_memory_core: Option<&'a ContextFragment>,
     pub(super) project_memory_core: Option<&'a ContextFragment>,
     pub(super) history: &'a [ContentItem],
     pub(super) history_provenance: &'a BTreeMap<usize, ContextProvenance>,
@@ -264,42 +258,31 @@ pub(super) fn state_diff_delivery_input(
         current_plan,
         planner,
         budget,
-        committed_input,
-        committed_delivery_map,
-        committed_history_len,
-        committed_manifest,
-        committed_world_state,
+        committed_delivery,
         world_state,
-        committed_project_snapshot,
         project_snapshot,
-        committed_project_memory_core,
         project_memory_core,
         history,
         history_provenance,
         turn_history_start,
     } = input;
-    let Some(committed_input) = committed_input else {
+    let Some(committed) = committed_delivery else {
         return Ok(None);
     };
+    let committed_input = &committed.input;
+    let committed_delivery_map = &committed.map;
+    let committed_manifest = &committed.context_manifest;
+    let committed_history_len = committed.history_len;
+    let committed_world_state = committed.world_state.as_ref();
+    let committed_project_snapshot = committed.project_snapshot.as_ref();
+    let committed_project_memory_core = committed.project_memory_core.as_ref();
     let retains_reasoning = committed_input.content_items.iter().any(|item| {
         matches!(
             item,
             ContentItem::Reasoning { .. } | ContentItem::OpaqueContinuation { .. }
         )
     });
-    let Some(committed_delivery_map) = committed_delivery_map else {
-        return continuation_unavailable_or_none(
-            retains_reasoning,
-            ContinuationRejection::MissingBaseline,
-        );
-    };
     committed_delivery_map.validate_against(committed_input)?;
-    let Some(committed_manifest) = committed_manifest else {
-        return continuation_unavailable_or_none(
-            retains_reasoning,
-            ContinuationRejection::MissingBaseline,
-        );
-    };
     if committed_history_len > history.len() || !plan_allows_history_append(current_plan) {
         return continuation_unavailable_or_none(
             retains_reasoning,

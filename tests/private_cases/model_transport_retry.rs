@@ -1,8 +1,5 @@
 //! Focused contracts for the one bounded prepared-request retry owner.
 
-include!("../src/lib.rs");
-mod support;
-
 #[path = "model_transport_retry_cases/runtime.rs"]
 mod chat_runtime_contracts;
 
@@ -782,7 +779,7 @@ mod retry_contracts {
         use crate::domain::tools::{ToolCall, ToolCallId, ToolName};
         use crate::ports::model::ContinuationRetention;
 
-        let root = super::support::TemporaryDirectory::new("rsi-prepared-retry");
+        let root = crate::support::TemporaryDirectory::new("rsi-prepared-retry");
         let project = Project::initialize(root.path()).unwrap();
         let script = root.path().join("once.sh");
         std::fs::write(&script, "printf x >> \"$0.count\"\n").unwrap();

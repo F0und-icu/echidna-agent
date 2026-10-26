@@ -1,5 +1,4 @@
 //! Admission counts and optional capacity through the existing private owner.
-include!("../src/lib.rs");
 
 use crate::app::model_request_budget::{DEFAULT_MODEL_REQUEST_LIMIT, ModelRequestBudget};
 use crate::domain::context::ProviderSessionRole;

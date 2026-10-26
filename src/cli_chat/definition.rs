@@ -5,7 +5,7 @@ use std::path::Path;
 use crate::adapters::agent_definition::{
     bind_definition, builtin_definition, builtin_research_binding, load_definition_binding,
 };
-use crate::adapters::mcp_http::McpCatalogTool;
+use crate::adapters::mcp::McpCatalogTool;
 use crate::adapters::project_event_store::Project;
 use crate::adapters::tools::ToolRegistry;
 use crate::app::agent_loop::AgentLoop;

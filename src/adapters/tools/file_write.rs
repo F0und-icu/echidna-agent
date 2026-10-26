@@ -6,6 +6,14 @@
 //! complete before its one atomic rename. Multi-file patch transactions are
 //! deferred rather than claiming an unimplemented cross-file atomicity.
 
+use super::ToolRegistry;
+use crate::domain::tools::{
+    ResourceKey, ToolDeterminism, ToolEffect, ToolExposure, ToolParallelism, ToolRetryPolicy,
+    ToolSpec,
+};
+use crate::ports::tool::ToolExecutorError;
+use serde_json::Value;
+
 mod filesystem;
 mod patch;
 mod schema;
@@ -23,7 +31,7 @@ use filesystem::{
 use patch::{apply_hunks, parse_patch};
 use schema::{ApplyPatchArgs, WriteFileArgs, expected_hash, validate_preimages};
 
-pub(super) use schema::{
+use schema::{
     apply_patch_input_schema, normalize_apply_patch, normalize_write_file, output_schema,
     write_file_input_schema,
 };
@@ -209,4 +217,89 @@ fn preimage_mismatch(
             "message": "file changed after the caller captured its preimage; no write was made"
         }),
     )
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) enum Tool {
+    WriteFile,
+    ApplyPatch,
+}
+
+impl Tool {
+    pub(super) const ALL: [Self; 2] = [Self::WriteFile, Self::ApplyPatch];
+
+    pub(super) const fn name(self) -> &'static str {
+        match self {
+            Self::WriteFile => "write_file",
+            Self::ApplyPatch => "apply_patch",
+        }
+    }
+
+    pub(super) fn spec(self) -> ToolSpec {
+        match self {
+            Self::WriteFile => super::spec(
+                self.name(),
+                "1",
+                super::description(
+                    "one atomic expected-hash file replacement",
+                    "a small patch or multi-file edit is needed.",
+                    "apply_patch for small edits; write_file for new files or complete replacements. Prefer file tools over shell heredocs. Keep long edits bounded; reuse the returned after_hash for the next edit only if no intervening mutation occurred. See input schema for null/hash semantics.",
+                    "a hashed file mutation.",
+                    false,
+                ),
+                ToolExposure::Deferred,
+                write_file_input_schema(),
+                output_schema(),
+                ToolParallelism::ResourceLocked,
+                Some("file:{path}"),
+                ToolEffect::LocalMutation,
+                ToolRetryPolicy::NeverAutoRetry,
+                ToolDeterminism::EnvironmentDependent,
+                30_000,
+            ),
+            Self::ApplyPatch => super::spec(
+                self.name(),
+                "1",
+                super::description(
+                    "one validated file patch",
+                    "the patch is invalid or spans files.",
+                    "a small exact unified diff and verified preimage; see input schema for the supported format. Use write_file to create files or replace non-LF text, not shell heredocs to bypass JSON escaping.",
+                    "a file mutation.",
+                    false,
+                ),
+                ToolExposure::Direct,
+                apply_patch_input_schema(),
+                output_schema(),
+                ToolParallelism::ResourceLocked,
+                Some("file:{preimages[*].path}"),
+                ToolEffect::LocalMutation,
+                ToolRetryPolicy::NeverAutoRetry,
+                ToolDeterminism::EnvironmentDependent,
+                30_000,
+            ),
+        }
+    }
+
+    pub(super) fn normalize(
+        self,
+        registry: &ToolRegistry,
+        arguments: Value,
+    ) -> Result<(Value, Vec<ResourceKey>), ToolExecutorError> {
+        let project_root = &registry.project_root;
+        match self {
+            Self::WriteFile => normalize_write_file(project_root, arguments),
+            Self::ApplyPatch => normalize_apply_patch(project_root, arguments),
+        }
+    }
+
+    pub(super) async fn execute(
+        self,
+        registry: &ToolRegistry,
+        plan: ToolExecutionPlan,
+    ) -> ToolExecutionOutcome {
+        match self {
+            Self::WriteFile => execute_write_file(&registry.project_root, plan).await,
+            Self::ApplyPatch => execute_apply_patch(&registry.project_root, plan).await,
+        }
+    }
 }

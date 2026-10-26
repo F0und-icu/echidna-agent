@@ -1,5 +1,10 @@
 //! Fixed adapters for reading and appending versioned Research facts.
 
+use super::ToolRegistry;
+use crate::domain::tools::{
+    ToolDeterminism, ToolEffect, ToolExposure, ToolParallelism, ToolRetryPolicy, ToolSpec,
+};
+
 mod schema;
 
 use std::path::Path;
@@ -117,7 +122,7 @@ enum ResearchUpdateOperation {
     },
 }
 
-pub(super) fn normalize_get(
+fn normalize_get(
     project_root: &Path,
     control_directory: &str,
     value: Value,
@@ -129,7 +134,7 @@ pub(super) fn normalize_get(
     ))
 }
 
-pub(super) fn normalize_update(
+fn normalize_update(
     project_root: &Path,
     control_directory: &str,
     value: Value,
@@ -147,10 +152,7 @@ pub(super) fn normalize_update(
     ))
 }
 
-pub(super) async fn execute_get(
-    project_root: &Path,
-    plan: ToolExecutionPlan,
-) -> ToolExecutionOutcome {
+async fn execute_get(project_root: &Path, plan: ToolExecutionPlan) -> ToolExecutionOutcome {
     let arguments = match decode_get_arguments(plan.call.arguments.clone()) {
         Ok(arguments) => arguments,
         Err(error) => return invalid_plan(plan, error),
@@ -238,10 +240,7 @@ fn receipt_page(references: &ResearchReferenceCatalog, query: &ResearchReceiptQu
     })
 }
 
-pub(super) async fn execute_update(
-    project_root: &Path,
-    plan: ToolExecutionPlan,
-) -> ToolExecutionOutcome {
+async fn execute_update(project_root: &Path, plan: ToolExecutionPlan) -> ToolExecutionOutcome {
     let arguments: ResearchUpdateArgs =
         match decode_arguments("research_update", plan.call.arguments.clone()) {
             Ok(arguments) => arguments,
@@ -501,18 +500,104 @@ fn research_failure(
     ToolExecutionOutcome::failed(plan, code, json!({"error_code": code, "error": error}))
 }
 
-pub(super) fn get_input_schema() -> Value {
+fn get_input_schema() -> Value {
     schema::get_input_schema()
 }
 
-pub(super) fn update_input_schema() -> Value {
+fn update_input_schema() -> Value {
     schema::update_input_schema()
 }
 
-pub(super) fn get_output_schema() -> Value {
+fn get_output_schema() -> Value {
     schema::get_output_schema()
 }
 
-pub(super) fn update_output_schema() -> Value {
+fn update_output_schema() -> Value {
     schema::update_output_schema()
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) enum Tool {
+    ResearchGet,
+    ResearchUpdate,
+}
+
+impl Tool {
+    pub(super) const ALL: [Self; 2] = [Self::ResearchGet, Self::ResearchUpdate];
+
+    pub(super) const fn name(self) -> &'static str {
+        match self {
+            Self::ResearchGet => "research_get",
+            Self::ResearchUpdate => "research_update",
+        }
+    }
+
+    pub(super) fn spec(self) -> ToolSpec {
+        match self {
+            Self::ResearchGet => super::spec(
+                self.name(),
+                "2",
+                super::description(
+                    "existing typed Research state",
+                    "a mutation or transition is needed.",
+                    "reuse current delivered Research facts; fetch only to fill a concrete state/reference gap. Request receipts only to discover bounded, real Receipt Event IDs; filter by an exact execution_id when known. Paths and execution IDs are not receipt IDs.",
+                    "typed Research state and, when explicitly requested, a bounded receipt page sorted by receipt_id.",
+                    false,
+                ),
+                ToolExposure::Direct,
+                get_input_schema(),
+                get_output_schema(),
+                ToolParallelism::Parallel,
+                Some("file:.echidna/research.jsonl"),
+                ToolEffect::ReadOnly,
+                ToolRetryPolicy::ReplaySafe,
+                ToolDeterminism::Deterministic,
+                10_000,
+            ),
+            Self::ResearchUpdate => super::spec(
+                self.name(),
+                "2",
+                super::description(
+                    "supported typed Research facts",
+                    "the source is unbacked.",
+                    "typed facts with real references. Reuse the exact target_id/version from research_get, create a missing record before updating it, and discover real Receipt Event IDs through research_get.receipts. A Receipt becomes target-scoped evidence only after an explicit Experiment and ExperimentCapsule bind its receipt_id and matching execution_id to that TargetSnapshot. Keep tentative analysis out of verified facts and do not manufacture records for routine progress narration.",
+                    "record status.",
+                    true,
+                ),
+                ToolExposure::Direct,
+                update_input_schema(),
+                update_output_schema(),
+                ToolParallelism::ResourceLocked,
+                Some("file:.echidna/research.jsonl"),
+                ToolEffect::LocalMutation,
+                ToolRetryPolicy::NeverAutoRetry,
+                ToolDeterminism::EnvironmentDependent,
+                10_000,
+            ),
+        }
+    }
+
+    pub(super) fn normalize(
+        self,
+        registry: &ToolRegistry,
+        arguments: Value,
+    ) -> Result<(Value, Vec<ResourceKey>), ToolExecutorError> {
+        let project_root = &registry.project_root;
+        let control = registry.control_directory_name;
+        match self {
+            Self::ResearchGet => normalize_get(project_root, control, arguments),
+            Self::ResearchUpdate => normalize_update(project_root, control, arguments),
+        }
+    }
+
+    pub(super) async fn execute(
+        self,
+        registry: &ToolRegistry,
+        plan: ToolExecutionPlan,
+    ) -> ToolExecutionOutcome {
+        match self {
+            Self::ResearchGet => execute_get(&registry.project_root, plan).await,
+            Self::ResearchUpdate => execute_update(&registry.project_root, plan).await,
+        }
+    }
 }

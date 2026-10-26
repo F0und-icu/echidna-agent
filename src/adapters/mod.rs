@@ -7,7 +7,7 @@ pub mod credentials;
 pub(crate) mod file_diff;
 pub mod fragment_cache;
 pub mod image;
-pub(crate) mod mcp_http;
+pub(crate) mod mcp;
 pub mod mock_model;
 pub mod project_event_store;
 pub(crate) mod project_memory;

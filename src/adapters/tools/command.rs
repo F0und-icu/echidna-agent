@@ -1,5 +1,8 @@
 //! Argv-only single and batched command execution.
 
+use super::ToolRegistry;
+use crate::domain::tools::{ToolDeterminism, ToolExposure, ToolRetryPolicy, ToolSpec};
+
 use std::collections::VecDeque;
 use std::fs;
 use std::io::Read;
@@ -27,7 +30,7 @@ use super::resources::ResourceKeyResolver;
 use super::{decode_arguments, invalid_arguments, invalid_plan};
 use crate::domain::agent_evolution::{ScriptFile, validate_input_files};
 
-pub(super) fn verified_inputs_schema() -> Value {
+fn verified_inputs_schema() -> Value {
     json!({"type":"array","maxItems":8,"items":{"type":"object","properties":{"path":{"type":"string","minLength":1},"blake3":{"type":"string","pattern":"^[0-9a-f]{64}$"}},"required":["path","blake3"],"additionalProperties":false}})
 }
 
@@ -131,7 +134,7 @@ struct RunCommandsArgs {
     commands: Vec<RunCommandArgs>,
 }
 
-pub(super) fn normalize_one(
+fn normalize_one(
     project_root: &Path,
     value: Value,
     input_verification_enabled: bool,
@@ -158,7 +161,7 @@ pub(super) fn normalize_one(
     ))
 }
 
-pub(super) fn normalize_batch(
+fn normalize_batch(
     project_root: &Path,
     value: Value,
     input_verification_enabled: bool,
@@ -205,10 +208,7 @@ pub(super) fn normalize_batch(
     ))
 }
 
-pub(super) async fn execute_one(
-    project_root: &Path,
-    plan: ToolExecutionPlan,
-) -> ToolExecutionOutcome {
+async fn execute_one(project_root: &Path, plan: ToolExecutionPlan) -> ToolExecutionOutcome {
     let arguments: RunCommandArgs =
         match decode_arguments("run_command", plan.call.arguments.clone()) {
             Ok(arguments) => arguments,
@@ -232,14 +232,7 @@ pub(super) async fn execute_one(
     outcome
 }
 
-pub(super) async fn execute_batch(
-    project_root: &Path,
-    plan: ToolExecutionPlan,
-) -> ToolExecutionOutcome {
-    execute_batch_observed(project_root, plan, None).await
-}
-
-pub(super) async fn execute_batch_observed(
+async fn execute_batch_observed(
     project_root: &Path,
     plan: ToolExecutionPlan,
     observer: Option<ToolObservationSender>,
@@ -815,4 +808,183 @@ fn output_value(project_root: &Path, cwd: &Path, output: &FixedProbeOutput) -> V
 
 fn per_item_limit(total: usize, count: usize) -> usize {
     total / count.max(1)
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) enum Tool {
+    RunCommand,
+    RunCommands,
+}
+
+impl Tool {
+    pub(super) const ALL: [Self; 2] = [Self::RunCommand, Self::RunCommands];
+
+    pub(super) const fn name(self) -> &'static str {
+        match self {
+            Self::RunCommand => "run_command",
+            Self::RunCommands => "run_commands",
+        }
+    }
+
+    pub(super) fn spec(self, registry: &ToolRegistry) -> ToolSpec {
+        let mut spec = match self {
+            Self::RunCommand => super::spec(
+                self.name(),
+                "3",
+                super::description(
+                    "one bounded local command",
+                    "a batch or interactive terminal is needed.",
+                    "argv, not a shell string. Omitted/null cwd uses the project root; '.' is project-relative. For a path discrepancy, compare pwd -P and the requested path before assuming a missing directory: symlink aliases such as /tmp and /private/tmp may refer to one location, but must be observed. Check the actual program path/implementation/version in the intended host or container before choosing platform-specific flags; ENOENT alone cannot distinguish program, cwd, interpreter or loader absence.",
+                    "bounded lossy retained-prefix head/tail preview; output_captures contains durable raw Blob refs for read_output after publication.",
+                    false,
+                ),
+                ToolExposure::Direct,
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                        "cwd": {"type": "string"},
+                        "resources": {"type": "array", "items": resource_schema()}
+                    },
+                    "required": ["argv"],
+                    "additionalProperties": false
+                }),
+                self.output_schema(),
+                ToolParallelism::ResourceLocked,
+                Some("resource:{resources}"),
+                ToolEffect::Interactive,
+                ToolRetryPolicy::NeverAutoRetry,
+                ToolDeterminism::Nondeterministic,
+                120_000,
+            ),
+            Self::RunCommands => super::spec(
+                self.name(),
+                "4",
+                super::description(
+                    "independent bounded commands",
+                    "one command or a long/interactive process is needed; use run_command, start_job or start_pty instead.",
+                    "short independent checks in parallel, or explicit serial order for dependent steps. cwd has the same project-relative semantics as run_command; a child failure is not proof of broken parallel execution. Serial ordering does not stop later commands after an earlier command fails; only submit later steps whose prerequisites are already established.",
+                    "ordered results and failures.",
+                    false,
+                ),
+                ToolExposure::Direct,
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "mode": {"type": "string", "enum": ["serial", "parallel"]},
+                        "commands": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 32,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                                    "cwd": {"type": "string"},
+                                    "resources": {"type": "array", "items": resource_schema()}
+                                },
+                                "required": ["argv"],
+                                "additionalProperties": false
+                            }
+                        }
+                    },
+                    "required": ["mode", "commands"],
+                    "additionalProperties": false
+                }),
+                self.output_schema(),
+                ToolParallelism::ResourceLocked,
+                Some("resource:{commands[*].resources}"),
+                ToolEffect::Interactive,
+                ToolRetryPolicy::NeverAutoRetry,
+                ToolDeterminism::Nondeterministic,
+                120_000,
+            ),
+        };
+        if registry.input_verification_enabled {
+            let (input_properties, output_properties) = if self == Self::RunCommand {
+                (
+                    &mut spec.input_schema["properties"],
+                    &mut spec.output_schema["properties"],
+                )
+            } else {
+                (
+                    &mut spec.input_schema["properties"]["commands"]["items"]["properties"],
+                    &mut spec.output_schema["properties"]["commands"]["items"]["properties"]["result"]
+                        ["properties"],
+                )
+            };
+            input_properties["verified_inputs"] = verified_inputs_schema();
+            if registry.automatic_verification_enabled {
+                input_properties["code_inputs"] = json!({"type":"array","maxItems":8,"items":{"type":"string","minLength":1},"uniqueItems":true});
+            }
+            output_properties["verified_inputs"] = verified_inputs_schema();
+            spec.version = if self == Self::RunCommand { "4" } else { "5" }.to_owned();
+        }
+        spec
+    }
+
+    pub(super) fn normalize(
+        self,
+        registry: &ToolRegistry,
+        arguments: Value,
+    ) -> Result<(Value, Vec<ResourceKey>), ToolExecutorError> {
+        let project_root = &registry.project_root;
+        let input_verification_enabled = registry.input_verification_enabled;
+        match self {
+            Self::RunCommand => normalize_one(
+                project_root,
+                arguments,
+                input_verification_enabled,
+                registry.automatic_verification_enabled,
+            ),
+            Self::RunCommands => normalize_batch(
+                project_root,
+                arguments,
+                input_verification_enabled,
+                registry.automatic_verification_enabled,
+            ),
+        }
+    }
+
+    pub(super) async fn execute(
+        self,
+        registry: &ToolRegistry,
+        plan: ToolExecutionPlan,
+        observer: Option<crate::ports::tool::ToolObservationSender>,
+    ) -> ToolExecutionOutcome {
+        match self {
+            Self::RunCommand => execute_one(&registry.project_root, plan).await,
+            Self::RunCommands => {
+                execute_batch_observed(&registry.project_root, plan, observer).await
+            }
+        }
+    }
+
+    fn output_schema(self) -> Value {
+        let mut schema = match self {
+            Self::RunCommand => command_output_schema(),
+            Self::RunCommands => json!({
+                "type": "object", "properties": {
+                    "commands": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"type": "object", "properties": {
+                        "index": {"type": "integer", "minimum": 0}, "status": {"type": "string", "enum": ["succeeded", "failed"]}, "result": command_output_schema()
+                    }, "required": ["index", "status", "result"], "additionalProperties": false}},
+                    "partial_failure": json!({"type": "boolean"})
+                }, "required": ["commands", "partial_failure"], "additionalProperties": false
+            }),
+        };
+        schema["properties"]["output_captures"] = crate::domain::tools::capture_schema();
+        schema
+    }
+}
+
+fn command_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "cwd": {"type": "string", "minLength": 1}, "exit_code": {"type": ["integer", "null"]},
+            "stdout": {"type": "string"}, "stderr": {"type": "string"}, "truncated": {"type": "boolean"}
+        },
+        "required": ["cwd", "exit_code", "stdout", "stderr", "truncated"],
+        "additionalProperties": false
+    })
 }

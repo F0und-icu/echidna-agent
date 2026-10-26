@@ -1,5 +1,9 @@
 //! Fixed, bounded environment inspection for vulnerability research.
 
+use crate::domain::tools::{
+    ToolDeterminism, ToolEffect, ToolExposure, ToolParallelism, ToolRetryPolicy, ToolSpec,
+};
+
 mod probe;
 mod schema;
 
@@ -16,7 +20,7 @@ use self::probe::{DeviceObservation, NamedProbeObservation, ProbeObservation, Pr
 use super::{decode_arguments, invalid_plan};
 
 pub(super) const SCHEMA_VERSION: u16 = 1;
-const TOOL_NAME: &str = "inspect_environment";
+pub(super) const NAME: &str = "inspect_environment";
 const MAX_PROBE_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -68,7 +72,7 @@ pub(super) fn normalize(
     _project_root: &Path,
     value: Value,
 ) -> Result<(Value, Vec<crate::domain::tools::ResourceKey>), ToolExecutorError> {
-    let arguments: InspectEnvironmentArgs = decode_arguments(TOOL_NAME, value)?;
+    let arguments: InspectEnvironmentArgs = decode_arguments(NAME, value)?;
     Ok((
         serde_json::to_value(arguments).expect("InspectEnvironmentArgs serialization cannot fail"),
         Vec::new(),
@@ -76,7 +80,7 @@ pub(super) fn normalize(
 }
 
 pub(super) async fn execute(project_root: &Path, plan: ToolExecutionPlan) -> ToolExecutionOutcome {
-    let _: InspectEnvironmentArgs = match decode_arguments(TOOL_NAME, plan.call.arguments.clone()) {
+    let _: InspectEnvironmentArgs = match decode_arguments(NAME, plan.call.arguments.clone()) {
         Ok(arguments) => arguments,
         Err(error) => return invalid_plan(plan, error),
     };
@@ -150,10 +154,33 @@ fn environment_fingerprint(report: &EnvironmentReport) -> String {
     blake3::hash(&bytes).to_hex().to_string()
 }
 
-pub(super) fn input_schema() -> Value {
+fn input_schema() -> Value {
     schema::input_schema()
 }
 
-pub(super) fn output_schema() -> Value {
+fn output_schema() -> Value {
     schema::output_schema()
+}
+
+pub(super) fn spec() -> ToolSpec {
+    super::spec(
+        NAME,
+        "2",
+        super::description(
+            "the current execution environment",
+            "arbitrary probing, container inspection, command execution, or a persistent environment database is needed.",
+            "the fixed bounded agent-host OS, runtime, Git, proxy, toolchain and connected-device observation when absent or stale. Reuse applicable results, not a full probe every Turn. For task-specific program paths, GNU/BSD/LLVM identity, flags and container prerequisites use bounded run_command(s) at the intended execution location; host OS and a version token alone do not establish these capabilities.",
+            "structured fixed-probe status and parsed version tokens plus an observation fingerprint, not an executable identity or container fingerprint. available means this probe and version parse succeeded; false does not prove absence. probe_failed includes ambiguous spawn failures; missing is legacy-only. Device count is meaningful only with available status. No raw probe output is disclosed.",
+            false,
+        ),
+        ToolExposure::Direct,
+        input_schema(),
+        output_schema(),
+        ToolParallelism::Parallel,
+        None,
+        ToolEffect::ReadOnly,
+        ToolRetryPolicy::ReplaySafe,
+        ToolDeterminism::EnvironmentDependent,
+        30_000,
+    )
 }

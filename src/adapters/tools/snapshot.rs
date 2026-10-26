@@ -1,5 +1,10 @@
 //! Fixed project inspection Tool backed by the local rebuildable cache.
 
+use super::ToolRegistry;
+use crate::domain::tools::{
+    ToolDeterminism, ToolEffect, ToolExposure, ToolParallelism, ToolRetryPolicy,
+};
+
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -8,7 +13,7 @@ use serde_json::{Value, json};
 use crate::adapters::project_event_store::Project;
 use crate::adapters::project_snapshot::{CacheDisposition, LocalProjectSnapshot};
 use crate::domain::tools::{ResourceKey, ToolExecutionOutcome, ToolExecutionPlan, ToolSpec};
-use crate::ports::tool::ToolExecutorError;
+use crate::ports::tool::{ToolExecutor, ToolExecutorError};
 
 use super::resources::ResourceKeyResolver;
 use super::{decode_arguments, invalid_plan};
@@ -32,7 +37,7 @@ pub(super) fn normalize(
     ))
 }
 
-pub(super) async fn execute(
+async fn execute(
     project_root: &Path,
     specs: &[ToolSpec],
     plan: ToolExecutionPlan,
@@ -94,7 +99,7 @@ fn snapshot_failure(
     )
 }
 
-pub(super) fn input_schema() -> Value {
+fn input_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
@@ -105,7 +110,44 @@ pub(super) fn input_schema() -> Value {
     })
 }
 
-pub(super) fn output_schema() -> Value {
+pub(super) const NAME: &str = "inspect_project";
+
+pub(super) fn spec() -> ToolSpec {
+    super::spec(
+        NAME,
+        "2",
+        super::description(
+            "current project metadata",
+            "file content or evidence is needed.",
+            "reuse delivered Project facts; inspect only missing or stale metadata. tool_capabilities lists this Step's advertised tools, not all discoverable tools. Use tool_search for a missing capability before declaring it unavailable.",
+            "Snapshot metadata, current advertised Tool capabilities and explicitly verified hash_paths.",
+            false,
+        ),
+        ToolExposure::Direct,
+        input_schema(),
+        output_schema(),
+        ToolParallelism::ResourceLocked,
+        Some("file:.echidna/cache"),
+        ToolEffect::LocalMutation,
+        ToolRetryPolicy::NeverAutoRetry,
+        ToolDeterminism::EnvironmentDependent,
+        30_000,
+    )
+}
+
+pub(super) async fn execute_registered(
+    registry: &ToolRegistry,
+    plan: ToolExecutionPlan,
+) -> ToolExecutionOutcome {
+    let specs = if plan.resolved_tool_plan_fingerprint().is_some() {
+        plan.resolved_tool_specs().to_vec()
+    } else {
+        registry.specs()
+    };
+    execute(&registry.project_root, &specs, plan).await
+}
+
+fn output_schema() -> Value {
     json!({
         "type": "object", "properties": {
             "status": {"type": "string", "enum": ["hit", "incremental_refresh", "full_rebuild"]},

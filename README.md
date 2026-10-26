@@ -307,7 +307,10 @@ export CYBER_AGENT_VISION_API_KEY='replace-with-your-vision-key'
 使用 [MCP 模板](examples/provider-mcp.toml)，在 `mcp_servers` 下声明一个或多个远程
 Streamable HTTP 工具服务器。每个服务器需要绝对 HTTP(S) `url`，以及
 `protocol_version = "2025-11-25"` 或 `protocol_version = "2026-07-28"` 之一。
-可选 `timeout_ms` 默认为 60000。
+可选 `timeout_ms` 默认为 60000，限定每次工具调用。HTTP 和 stdio 均可单独配置
+`startup_timeout_ms`，限定该服务器启动、初始化和目录发现的总时间；省略时沿用
+`timeout_ms`。需要短调用超时但启动较慢时，可设置例如 `timeout_ms = 1000`、
+`startup_timeout_ms = 10000`。启动失败会显示服务器名和具体阶段，不跳过或重试。
 
 如果服务器需要 Bearer 认证，只能使用专用引用，例如
 `CYBER_AGENT_MCP_EXAMPLE_API_KEY`；不得复用模型 Provider 密钥或订阅账户。在启动

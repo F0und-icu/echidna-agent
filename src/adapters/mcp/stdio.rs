@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::io::{self, Write};
+use std::io;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -15,7 +15,8 @@ use tokio::process::{ChildStdin, ChildStdout};
 use tokio::sync::{Mutex as AsyncMutex, MutexGuard};
 use tokio::task::JoinHandle;
 
-use super::protocol::{MAX_MESSAGE_BYTES, decode_message};
+use super::observation::{McpObservation, McpObserver};
+use super::rpc::{MAX_MESSAGE_BYTES, decode_message};
 use super::{CompletedCall, McpError, McpServerConfig};
 use crate::domain::canonical_json::canonical_blake3_hash;
 
@@ -29,6 +30,7 @@ pub(super) struct StdioClient {
     connection: AsyncMutex<Option<Connection>>,
     process: Mutex<Option<OwnedProcess>>,
     timeout: Duration,
+    startup_timeout: Duration,
     next_id: AtomicU64,
 }
 
@@ -45,6 +47,8 @@ struct StderrMetadata {
 }
 
 struct OwnedProcess {
+    server_id: String,
+    observer: Option<McpObserver>,
     child: Child,
     stderr: Option<JoinHandle<()>>,
     metadata: Arc<StderrMetadata>,
@@ -67,22 +71,31 @@ impl Drop for OwnedProcess {
         };
         let kill_error = self.child.kill().err().map(|error| error.kind());
         let wait_error = self.child.wait().err().map(|error| error.kind());
-        if group_error.is_some() || wait_error.is_some() {
-            writeln!(crate::terminal_console::stderr(),
-                "[MCP stdio cleanup: group_io={group_error:?} child_io={kill_error:?} wait_io={wait_error:?} stderr_bytes={} stderr_io={:?}]",
-                self.metadata.bytes.load(Ordering::Relaxed),
-                *self
+        if (group_error.is_some() || wait_error.is_some())
+            && let Some(observer) = &self.observer
+        {
+            observer(McpObservation::Cleanup {
+                server_id: self.server_id.clone(),
+                group_error,
+                kill_error,
+                wait_error,
+                stderr_bytes: self.metadata.bytes.load(Ordering::Relaxed),
+                stderr_error: *self
                     .metadata
                     .error
                     .lock()
-                    .expect("MCP stderr mutex poisoned")
-            ).expect("MCP stderr failed");
+                    .expect("MCP stderr mutex poisoned"),
+            });
         }
     }
 }
 
 impl StdioClient {
-    pub(super) fn start(config: &McpServerConfig) -> Result<Self, McpError> {
+    pub(super) fn start(
+        server_id: &str,
+        config: &McpServerConfig,
+        observer: Option<McpObserver>,
+    ) -> Result<Self, McpError> {
         let command = config.command.as_ref().expect("validated stdio command");
         let cwd = config.cwd.as_ref().expect("resolved stdio cwd");
         let args = config.args.as_deref().unwrap_or_default();
@@ -118,6 +131,8 @@ impl StdioClient {
             .map_err(|error| transport("stdio spawn", error.kind()))?;
         let metadata = Arc::new(StderrMetadata::default());
         let mut owned = OwnedProcess {
+            server_id: server_id.to_owned(),
+            observer,
             child,
             stderr: None,
             metadata: Arc::clone(&metadata),
@@ -158,6 +173,7 @@ impl StdioClient {
             })),
             process: Mutex::new(Some(owned)),
             timeout: Duration::from_millis(config.timeout_ms),
+            startup_timeout: Duration::from_millis(config.startup_timeout_ms()),
             next_id: AtomicU64::new(1),
         })
     }
@@ -314,7 +330,16 @@ impl StdioClient {
                 }
             }
         };
-        match tokio::time::timeout(self.timeout, operation).await {
+        match tokio::time::timeout(
+            if method == "tools/call" {
+                self.timeout
+            } else {
+                self.startup_timeout
+            },
+            operation,
+        )
+        .await
+        {
             Ok(result) => result,
             Err(_) if attempted => Err(protocol("stdio request timed out after dispatch")),
             Err(_) => Err(McpError::PreExecution {

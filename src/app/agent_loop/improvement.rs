@@ -57,9 +57,13 @@ impl<Provider: ModelProvider + ?Sized, Tools: ToolExecutor + ?Sized>
             .last_sampling_step_plan
             .as_ref()
             .ok_or(AgentLoopError::ContextStateMismatch)?;
+        let committed = self
+            .committed_delivery
+            .as_ref()
+            .ok_or(AgentLoopError::ContextStateMismatch)?;
         if completed.turn_configuration().turn().turn_id
             != TurnId::new(format!("turn:{}", self.next_turn_sequence))
-            || self.committed_history_len != self.history.items().len()
+            || committed.history_len != self.history.items().len()
         {
             return Err(AgentLoopError::ContextStateMismatch);
         }

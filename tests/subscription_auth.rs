@@ -155,7 +155,7 @@ async fn signed_loopback_login_uses_pkce_and_models_preserve_server_order() {
     assert_eq!(serde_json::to_value(&status).unwrap()["state"], "connected");
     assert!(status.verified_identity);
     assert!(status.direct_access_granted);
-    let models = auth.models().await.unwrap();
+    let models = auth.catalog().models().await.unwrap();
     assert_eq!(
         serde_json::to_value(&models).unwrap(),
         serde_json::json!([
@@ -212,6 +212,7 @@ async fn siwc_models_reject_missing_visibility_instead_of_silently_filtering_it(
 
     assert_eq!(
         service(&store, &base)
+            .catalog()
             .models()
             .await
             .unwrap_err()

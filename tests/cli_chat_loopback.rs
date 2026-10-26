@@ -5130,3 +5130,6 @@ mod f3_context {
 mod agent_definition_admission;
 #[path = "cli_chat_cases/agent_definition_compaction.rs"]
 mod agent_definition_compaction;
+
+#[path = "cli_chat_cases/memory_visibility.rs"]
+mod memory_visibility;

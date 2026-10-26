@@ -4,7 +4,7 @@ mod recovery;
 mod scan;
 
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{BufReader, Read, Write};
 use std::marker::PhantomData;
 use std::path::PathBuf;
 
@@ -107,35 +107,60 @@ impl ProjectWriter {
         }
         let stream_id = stream.stream_id();
         let registry = EventUpcasterRegistry::current();
-        let bytes = super::project::read_bytes(&path, "read Session Event suffix")?;
+        let mut reader =
+            BufReader::new(
+                File::open(&path).map_err(|source| ProjectEventStoreError::Io {
+                    operation: "read Session Event suffix",
+                    path: path.clone(),
+                    source,
+                })?,
+            );
         let offset = cursor.map_or(0, |cursor| cursor.bytes);
-        if let Some(cursor) = cursor
-            && (cursor.path != path
-                || cursor.stream_id != stream_id
-                || bytes.len() < offset
-                || blake3::hash(&bytes[..offset]) != cursor.hash.finalize())
-        {
-            return Err(ProjectEventStoreError::ValidatedPrefixChanged { path });
+        let mut hash = blake3::Hasher::new();
+        if let Some(cursor) = cursor {
+            if cursor.path != path || cursor.stream_id != stream_id {
+                return Err(ProjectEventStoreError::ValidatedPrefixChanged { path });
+            }
+            let mut remaining = offset;
+            let mut chunk = [0; 65_536];
+            while remaining > 0 {
+                let capacity = remaining.min(chunk.len());
+                let count = reader.read(&mut chunk[..capacity]).map_err(|source| {
+                    ProjectEventStoreError::Io {
+                        operation: "verify Session Event prefix",
+                        path: path.clone(),
+                        source,
+                    }
+                })?;
+                if count == 0 {
+                    return Err(ProjectEventStoreError::ValidatedPrefixChanged { path });
+                }
+                hash.update(&chunk[..count]);
+                remaining -= count;
+            }
+            if hash.finalize() != cursor.hash.finalize() {
+                return Err(ProjectEventStoreError::ValidatedPrefixChanged { path });
+            }
         }
-        let scan = scan::scan_stream_suffix_bytes(
-            &bytes[offset..],
+        let scan = scan::scan_stream_reader(
+            &mut reader,
             &path,
             &stream_id,
             &registry,
             offset,
             cursor.and_then(|cursor| cursor.last_sequence),
+            &mut hash,
         )?;
-        let (events, last_sequence) = match scan {
+        let (events, last_sequence, validated_bytes) = match scan {
             StreamScan::Complete {
                 events,
                 last_sequence,
-            } => (events, last_sequence),
+                validated_bytes,
+            } => (events, last_sequence, validated_bytes),
             StreamScan::Trailing { offset, .. } => {
                 return Err(ProjectEventStoreError::RecoveryMetadataRequired { path, offset });
             }
         };
-        let mut hash = cursor.map_or_else(blake3::Hasher::new, |cursor| cursor.hash.clone());
-        hash.update(&bytes[offset..]);
         let mut store = JsonlEventStore::open(
             path.clone(),
             stream_id.clone(),
@@ -146,7 +171,7 @@ impl ProjectWriter {
         store.projection_cursor = Some(SessionStreamCursor {
             path,
             stream_id,
-            bytes: bytes.len(),
+            bytes: validated_bytes,
             hash,
             last_sequence,
         });

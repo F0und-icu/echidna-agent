@@ -7,6 +7,7 @@ use super::*;
 use crate::adapters::agent_evolution::EvolutionStore;
 use crate::adapters::tools::ToolRegistry;
 use crate::app::agent_loop::{ImprovementSampleInput, ImprovementSampleOutput};
+use crate::app::improvement::{self as improvement_policy, ImprovementReadiness};
 use crate::domain::agent_evolution::{EvolutionCandidate, EvolutionExperience, ScriptFile};
 use crate::domain::model::ContentItem;
 use crate::domain::session::SessionError;
@@ -43,12 +44,7 @@ mod reference_match;
 use reference_match::{ScratchPair, freeze_inputs};
 
 pub(super) fn history_start(session: &DurableChatSession) -> Result<usize, ChatError> {
-    if !session
-        .binding
-        .definition()
-        .rsi()
-        .is_some_and(|rsi| rsi.improvement)
-    {
+    if improvement_policy::policy(session.binding.definition()).is_none() {
         return Ok(0);
     }
     Ok(session.improvement_state()?.history().items().len())
@@ -66,17 +62,16 @@ pub(super) async fn after_completed<Provider: ModelProvider + ?Sized>(
     cancellation: AgentCancellation,
     audit_context: &RequestAuditRunContext,
     composition: &ProviderComposition,
-    discovered_mcp: &[crate::adapters::mcp_http::McpCatalogTool],
+    discovered_mcp: &[crate::adapters::mcp::McpCatalogTool],
 ) -> Result<(), ChatError> {
-    let Some(policy) = session
-        .binding
-        .definition()
-        .rsi()
-        .filter(|rsi| rsi.improvement)
-    else {
+    let Some(policy) = improvement_policy::policy(session.binding.definition()) else {
         return Ok(());
     };
-    if tools.has_active_processes() || !no_pending_images || cancellation.is_cancelled() {
+    if !improvement_policy::completed_boundary_is_eligible(
+        tools.has_active_processes(),
+        no_pending_images,
+        cancellation.is_cancelled(),
+    ) {
         return Ok(());
     }
     agent
@@ -86,60 +81,15 @@ pub(super) async fn after_completed<Provider: ModelProvider + ?Sized>(
     session.validate_stopped_runtime(agent)?;
     let state = session.improvement_state()?;
     state.ensure_no_unknown_improvement()?;
-    let current = state
-        .history_items_with_event_ids()
-        .skip(history_start)
-        .collect::<Vec<_>>();
-    let mut friction = Vec::new();
-    if task.starts_with("[rsi-feedback]")
-        && let Some((id, _)) = current.first()
-    {
-        friction.push((*id).clone());
-    }
-    let mut commands = std::collections::BTreeMap::new();
-    for (id, item) in &current {
-        if let ContentItem::ToolResult { result } = item {
-            let receipt = state.execution_receipts().iter().find(|record| {
-                record.receipt.execution_id == ExecutionId::for_model_call(&result.call_id)
-            });
-            if result.status == ToolResultStatus::Failed
-                && let Some(receipt) = receipt
-            {
-                friction.push(receipt.event_id.clone());
+    let (current, friction) =
+        match improvement_policy::readiness(&state, task, history_start, budget) {
+            ImprovementReadiness::NoFriction => return Ok(()),
+            ImprovementReadiness::InsufficientBudget => {
+                console_eprintln!("[RSI2 deferred] Fewer than 3 shared admissions remain.");
+                return Ok(());
             }
-            if let Some(call) = current.iter().find_map(|(_, item)| match item {
-                ContentItem::ToolCall { call }
-                    if call.call_id == result.call_id
-                        && call.name == ToolName::new("run_command") =>
-                {
-                    Some(call)
-                }
-                _ => None,
-            }) && result
-                .output
-                .get("verified_inputs")
-                .and_then(serde_json::Value::as_array)
-                .is_some_and(|inputs| !inputs.is_empty())
-            {
-                let key = serde_json::to_string(&json!([
-                    call.arguments,
-                    result.output["verified_inputs"]
-                ]))
-                .expect("validated command serializes");
-                if commands.insert(key, (*id).clone()).is_some() {
-                    friction.push((*id).clone());
-                }
-            }
-        }
-    }
-    friction.truncate(8);
-    if friction.is_empty() {
-        return Ok(());
-    }
-    if budget.remaining().is_some_and(|remaining| remaining < 3) {
-        console_eprintln!("[RSI2 deferred] Fewer than 3 shared admissions remain.");
-        return Ok(());
-    }
+            ImprovementReadiness::Ready { current, friction } => (current, friction),
+        };
     let pending =
         session
             .project

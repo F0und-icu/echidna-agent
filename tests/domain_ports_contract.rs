@@ -81,6 +81,11 @@ fn ports_support_an_in_memory_event_store_without_an_adapter() {
 #[test]
 fn domain_and_ports_keep_the_required_dependency_direction() {
     let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root_ui_references = [
+        "crate::terminal_console",
+        "crate::terminal_content",
+        "crate::cli_",
+    ];
     let domain_io_references = [
         "std::fs",
         "std::net",
@@ -112,43 +117,55 @@ fn domain_and_ports_keep_the_required_dependency_direction() {
     ];
     assert_sources_do_not_contain(
         &repository_root.join("src/domain"),
-        &[&["wire"], &domain_io_references, &provider_wire_references],
+        &[
+            &["wire"],
+            &domain_io_references,
+            &provider_wire_references,
+            &root_ui_references,
+        ],
     );
     assert_sources_do_not_contain(
         &repository_root.join("src/app"),
         &[
             &["crate::adapters", "super::adapters", "wire"],
             &provider_wire_references,
+            &root_ui_references,
         ],
     );
     assert_sources_do_not_contain(
         &repository_root.join("src/adapters"),
-        &[&[
-            "crate::app",
-            "super::app",
-            "crate::provider_composition",
-            "super::provider_composition",
-        ]],
+        &[
+            &[
+                "crate::app",
+                "super::app",
+                "crate::provider_composition",
+                "super::provider_composition",
+            ],
+            &root_ui_references,
+        ],
     );
     assert_sources_do_not_contain(
         &repository_root.join("src/ports"),
-        &[&[
-            "std::fs",
-            "std::net",
-            "std::process",
-            "std::time",
-            "std::io",
-            "tokio::",
-            "reqwest",
-            "openai",
-            "deepseek",
-            "responses",
-            "previous_response_id",
-            "text/event-stream",
-            "crate::app",
-            "crate::adapters",
-            "crate::ui",
-        ]],
+        &[
+            &[
+                "std::fs",
+                "std::net",
+                "std::process",
+                "std::time",
+                "std::io",
+                "tokio::",
+                "reqwest",
+                "openai",
+                "deepseek",
+                "responses",
+                "previous_response_id",
+                "text/event-stream",
+                "crate::app",
+                "crate::adapters",
+                "crate::ui",
+            ],
+            &root_ui_references,
+        ],
     );
 }
 

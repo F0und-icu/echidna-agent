@@ -1,5 +1,4 @@
-// Keep the App's fixed one-sample service and retention sidecar crate-private.
-include!("../src/lib.rs");
+//! The App's fixed one-sample service and retention sidecar stay crate-private.
 
 mod continuation_regression {
     use std::sync::Mutex;
@@ -10,7 +9,6 @@ mod continuation_regression {
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::mpsc;
 
-    use super::*;
     use crate::adapters::artifact_store::LocalArtifactStore;
     use crate::adapters::credentials::{
         AccountBoundCredential, CredentialResolution, CredentialSource, CredentialSourceError,
@@ -36,6 +34,7 @@ mod continuation_regression {
         ContinuationRetention, ModelEventStream, ModelProvider, ModelProviderError, ModelRequest,
         ModelStreamEvent, PreparedModelRequest, ProviderResponseId,
     };
+    use crate::*;
 
     struct FixtureCredential;
 

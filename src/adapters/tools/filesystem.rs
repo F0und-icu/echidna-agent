@@ -1,5 +1,10 @@
 //! FullAccess file reading and deterministic directory listing.
 
+use super::ToolRegistry;
+use crate::domain::tools::{
+    ToolDeterminism, ToolEffect, ToolExposure, ToolParallelism, ToolRetryPolicy, ToolSpec,
+};
+
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
@@ -56,7 +61,7 @@ const fn default_max_depth() -> u16 {
     4
 }
 
-pub(super) fn normalize_read_file(
+fn normalize_read_file(
     project_root: &Path,
     value: Value,
 ) -> Result<(Value, Vec<ResourceKey>), ToolExecutorError> {
@@ -68,7 +73,7 @@ pub(super) fn normalize_read_file(
     ))
 }
 
-pub(super) fn normalize_read_files(
+fn normalize_read_files(
     project_root: &Path,
     value: Value,
 ) -> Result<(Value, Vec<ResourceKey>), ToolExecutorError> {
@@ -94,7 +99,7 @@ pub(super) fn normalize_read_files(
     ))
 }
 
-pub(super) fn normalize_list_files(
+fn normalize_list_files(
     project_root: &Path,
     value: Value,
 ) -> Result<(Value, Vec<ResourceKey>), ToolExecutorError> {
@@ -112,10 +117,7 @@ pub(super) fn normalize_list_files(
     ))
 }
 
-pub(super) async fn execute_read_file(
-    project_root: &Path,
-    plan: ToolExecutionPlan,
-) -> ToolExecutionOutcome {
+async fn execute_read_file(project_root: &Path, plan: ToolExecutionPlan) -> ToolExecutionOutcome {
     let arguments: ReadFileArgs = match decode_arguments("read_file", plan.call.arguments.clone()) {
         Ok(arguments) => arguments,
         Err(error) => return invalid_plan(plan, error),
@@ -131,10 +133,7 @@ pub(super) async fn execute_read_file(
     }
 }
 
-pub(super) async fn execute_read_files(
-    project_root: &Path,
-    plan: ToolExecutionPlan,
-) -> ToolExecutionOutcome {
+async fn execute_read_files(project_root: &Path, plan: ToolExecutionPlan) -> ToolExecutionOutcome {
     let arguments: ReadFilesArgs = match decode_arguments("read_files", plan.call.arguments.clone())
     {
         Ok(arguments) => arguments,
@@ -166,10 +165,7 @@ pub(super) async fn execute_read_files(
     )
 }
 
-pub(super) async fn execute_list_files(
-    project_root: &Path,
-    plan: ToolExecutionPlan,
-) -> ToolExecutionOutcome {
+async fn execute_list_files(project_root: &Path, plan: ToolExecutionPlan) -> ToolExecutionOutcome {
     let arguments: ListFilesArgs = match decode_arguments("list_files", plan.call.arguments.clone())
     {
         Ok(arguments) => arguments,
@@ -343,4 +339,203 @@ fn select_lines(bytes: &[u8], start_line: Option<u64>, end_line: Option<u64>) ->
 
 fn per_item_limit(total: usize, count: usize) -> usize {
     total / count.max(1)
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) enum Tool {
+    ReadFile,
+    ReadFiles,
+    ListFiles,
+}
+
+impl Tool {
+    pub(super) const ALL: [Self; 3] = [Self::ReadFile, Self::ReadFiles, Self::ListFiles];
+
+    pub(super) const fn name(self) -> &'static str {
+        match self {
+            Self::ReadFile => "read_file",
+            Self::ReadFiles => "read_files",
+            Self::ListFiles => "list_files",
+        }
+    }
+
+    pub(super) fn spec(self) -> ToolSpec {
+        match self {
+            Self::ReadFile => super::spec(
+                self.name(),
+                "1",
+                super::description(
+                    "one local file",
+                    "a batch or search is needed.",
+                    "line ranges.",
+                    "content, bytes and truncation.",
+                    false,
+                ),
+                ToolExposure::Direct,
+                json!({
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                    "additionalProperties": false
+                }),
+                self.output_schema(),
+                ToolParallelism::Parallel,
+                Some("file:{path}"),
+                ToolEffect::ReadOnly,
+                ToolRetryPolicy::ReplaySafe,
+                ToolDeterminism::EnvironmentDependent,
+                10_000,
+            ),
+            Self::ReadFiles => super::spec(
+                self.name(),
+                "1",
+                super::description(
+                    "several independent local files",
+                    "one file or a text search is enough.",
+                    "a bounded independent batch.",
+                    "per-file content and failures.",
+                    false,
+                ),
+                ToolExposure::Direct,
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "files": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 32,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "path": {"type": "string"},
+                                    "start_line": {"type": "integer", "minimum": 1},
+                                    "end_line": {"type": "integer", "minimum": 1}
+                                },
+                                "required": ["path"],
+                                "additionalProperties": false
+                            }
+                        }
+                    },
+                    "required": ["files"],
+                    "additionalProperties": false
+                }),
+                self.output_schema(),
+                ToolParallelism::Parallel,
+                Some("file:{files[*].path}"),
+                ToolEffect::ReadOnly,
+                ToolRetryPolicy::ReplaySafe,
+                ToolDeterminism::EnvironmentDependent,
+                15_000,
+            ),
+            Self::ListFiles => super::spec(
+                self.name(),
+                "1",
+                super::description(
+                    "paths or a bounded tree",
+                    "content or text matches are needed.",
+                    "an explicit depth.",
+                    "paths and truncation.",
+                    false,
+                ),
+                ToolExposure::Direct,
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "max_depth": {"type": "integer", "minimum": 0, "maximum": 64}
+                    },
+                    "additionalProperties": false
+                }),
+                self.output_schema(),
+                ToolParallelism::Parallel,
+                Some("file:{path}"),
+                ToolEffect::ReadOnly,
+                ToolRetryPolicy::ReplaySafe,
+                ToolDeterminism::EnvironmentDependent,
+                15_000,
+            ),
+        }
+    }
+
+    pub(super) fn normalize(
+        self,
+        registry: &ToolRegistry,
+        arguments: Value,
+    ) -> Result<(Value, Vec<ResourceKey>), ToolExecutorError> {
+        let project_root = &registry.project_root;
+        match self {
+            Self::ReadFile => normalize_read_file(project_root, arguments),
+            Self::ReadFiles => normalize_read_files(project_root, arguments),
+            Self::ListFiles => normalize_list_files(project_root, arguments),
+        }
+    }
+
+    pub(super) async fn execute(
+        self,
+        registry: &ToolRegistry,
+        plan: ToolExecutionPlan,
+    ) -> ToolExecutionOutcome {
+        match self {
+            Self::ReadFile => execute_read_file(&registry.project_root, plan).await,
+            Self::ReadFiles => execute_read_files(&registry.project_root, plan).await,
+            Self::ListFiles => execute_list_files(&registry.project_root, plan).await,
+        }
+    }
+
+    fn output_schema(self) -> Value {
+        match self {
+            Self::ReadFile => read_file_output_schema(),
+            Self::ReadFiles => json!({
+                "type": "object",
+                "properties": {
+                    "files": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"oneOf": [
+                        {"type": "object", "properties": {
+                            "status": {"type": "string", "const": "succeeded"},
+                            "result": read_file_output_schema()
+                        }, "required": ["status", "result"], "additionalProperties": false},
+                        {"type": "object", "properties": {
+                            "status": {"type": "string", "const": "failed"},
+                            "result": file_read_failure_schema()
+                        }, "required": ["status", "result"], "additionalProperties": false}
+                    ]}},
+                    "partial_failure": json!({"type": "boolean"})
+                }, "required": ["files", "partial_failure"], "additionalProperties": false
+            }),
+            Self::ListFiles => json!({
+                "type": "object", "properties": {
+                    "path": json!({"type": "string", "minLength": 1}), "paths": {"type": "string"},
+                    "path_count": json!({"type": "integer", "minimum": 0}), "truncated": json!({"type": "boolean"})
+                }, "required": ["path", "paths", "path_count", "truncated"], "additionalProperties": false
+            }),
+        }
+    }
+}
+
+fn read_file_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "minLength": 1},
+            "content": {"type": "string"},
+            "original_bytes": {"type": "integer", "minimum": 0},
+            "selected_bytes": {"type": "integer", "minimum": 0},
+            "truncated": {"type": "boolean"},
+            "start_line": {"type": ["integer", "null"], "minimum": 1},
+            "end_line": {"type": ["integer", "null"], "minimum": 1}
+        },
+        "required": ["path", "content", "original_bytes", "selected_bytes", "truncated", "start_line", "end_line"],
+        "additionalProperties": false
+    })
+}
+
+fn file_read_failure_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "error": {"type": "string", "minLength": 1},
+            "path": {"type": "string", "minLength": 1}
+        },
+        "required": ["error", "path"],
+        "additionalProperties": false
+    })
 }

@@ -1,12 +1,6 @@
 //! An opaque subscription response must retain a real Core Memory replacement.
 //!
-//! This compiles the crate privately so the test exercises the production App
-//! entry point and existing Context refresh/Audit owners without a test API.
-
-include!("../src/lib.rs");
-
-#[path = "support/mod.rs"]
-mod support;
+//! Exercises the production App entry point and existing Context refresh/Audit owners.
 
 mod opaque_core_memory_continuation {
     use std::convert::Infallible;

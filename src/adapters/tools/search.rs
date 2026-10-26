@@ -1,5 +1,9 @@
 //! Bounded ripgrep-backed single and multi-pattern file search.
 
+use crate::domain::tools::{
+    ToolDeterminism, ToolEffect, ToolExposure, ToolParallelism, ToolRetryPolicy, ToolSpec,
+};
+
 use std::path::Path;
 
 use futures_util::future::join_all;
@@ -200,4 +204,104 @@ fn failure_value(
 
 fn per_item_limit(total: usize, count: usize) -> usize {
     total / count.max(1)
+}
+
+pub(super) const NAME: &str = "search_files";
+
+pub(super) fn spec() -> ToolSpec {
+    super::spec(
+        NAME,
+        "1",
+        super::description(
+            "bounded text matches in local files",
+            "file content or a command result is needed.",
+            "narrow patterns.",
+            "matches, bytes and truncation.",
+            false,
+        ),
+        ToolExposure::Direct,
+        json!({
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string"},
+                "patterns": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 32,
+                    "items": {"type": "string"}
+                },
+                "paths": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"type": "string"}}
+            },
+            "oneOf": [
+                {"required": ["pattern"], "not": {"required": ["patterns"]}},
+                {"required": ["patterns"], "not": {"required": ["pattern"]}}
+            ],
+            "additionalProperties": false
+        }),
+        output_schema(),
+        ToolParallelism::Parallel,
+        Some("file:{paths}"),
+        ToolEffect::ReadOnly,
+        ToolRetryPolicy::ReplaySafe,
+        ToolDeterminism::EnvironmentDependent,
+        30_000,
+    )
+}
+
+fn output_schema() -> Value {
+    json!({
+        "oneOf": [
+            search_result_schema(),
+            {"type": "object", "properties": {
+                "results": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"oneOf": [
+                    {"type": "object", "properties": {
+                        "pattern": json!({"type": "string", "minLength": 1}), "status": {"type": "string", "const": "succeeded"},
+                        "result": search_result_schema()
+                    }, "required": ["pattern", "status", "result"], "additionalProperties": false},
+                    {"type": "object", "properties": {
+                        "pattern": json!({"type": "string", "minLength": 1}), "status": {"type": "string", "const": "failed"},
+                        "result": search_failure_schema()
+                    }, "required": ["pattern", "status", "result"], "additionalProperties": false}
+                ]}},
+                "partial_failure": json!({"type": "boolean"})
+            }, "required": ["results", "partial_failure"], "additionalProperties": false}
+        ]
+    })
+}
+
+fn search_result_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "matches": {"type": "string"},
+            "original_bytes": {"type": "integer", "minimum": 0},
+            "truncated": {"type": "boolean"}
+        },
+        "required": ["matches", "original_bytes", "truncated"],
+        "additionalProperties": false
+    })
+}
+
+fn search_failure_schema() -> Value {
+    json!({
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {"error": {"type": "string", "minLength": 1}},
+                "required": ["error"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "exit_code": {"type": ["integer", "null"]},
+                    "stdout": {"type": "string"},
+                    "stderr": {"type": "string"},
+                    "truncated": {"type": "boolean"}
+                },
+                "required": ["exit_code", "stdout", "stderr", "truncated"],
+                "additionalProperties": false
+            }
+        ]
+    })
 }

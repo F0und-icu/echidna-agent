@@ -1,5 +1,10 @@
 //! Fixed Tool adapter that records one durable Artifact fact.
 
+use super::ToolRegistry;
+use crate::domain::tools::{
+    ToolDeterminism, ToolEffect, ToolExposure, ToolParallelism, ToolRetryPolicy, ToolSpec,
+};
+
 mod schema;
 
 use std::path::Path;
@@ -379,14 +384,14 @@ fn artifact_failure(
     )
 }
 
-pub(super) fn input_schema_for_scope(scope_binding: &ArtifactScopeBinding) -> Value {
+fn input_schema_for_scope(scope_binding: &ArtifactScopeBinding) -> Value {
     schema::input_schema(matches!(
         scope_binding,
         ArtifactScopeBinding::TargetFromArguments
     ))
 }
 
-pub(super) fn output_schema() -> Value {
+fn output_schema() -> Value {
     schema::output_schema()
 }
 
@@ -424,4 +429,48 @@ fn scope_from_input(
             })
         }
     }
+}
+
+pub(super) const NAME: &str = "artifact_store";
+
+pub(super) fn spec(registry: &ToolRegistry) -> ToolSpec {
+    super::spec(
+        NAME,
+        "2",
+        {
+            let target_scoped = matches!(
+                registry.artifact_scope,
+                ArtifactScopeBinding::TargetFromArguments
+            );
+            let (do_not_use, prefer, produces) = (
+                "text is transient or lacks source provenance.",
+                if target_scoped {
+                    "an existing real TargetSnapshot and root source or complete derived lineage. Read retained command bytes with read_output first; raw capture Blob refs are not Research Artifact provenance. Do not create placeholder evidence just to retain output."
+                } else {
+                    "an original local source or complete derived lineage. The runtime binds the Artifact to this Session; no TargetSnapshot is required. Read retained command bytes with read_output first; raw capture is not verified evidence."
+                },
+                if target_scoped {
+                    "Blob and Artifact."
+                } else {
+                    "Blob and Session Artifact."
+                },
+            );
+            super::description(
+                "durable raw-output provenance",
+                do_not_use,
+                prefer,
+                produces,
+                true,
+            )
+        },
+        ToolExposure::Deferred,
+        input_schema_for_scope(&registry.artifact_scope),
+        output_schema(),
+        ToolParallelism::ResourceLocked,
+        Some("file:{source_path},file:.echidna/research.jsonl"),
+        ToolEffect::LocalMutation,
+        ToolRetryPolicy::NeverAutoRetry,
+        ToolDeterminism::EnvironmentDependent,
+        120_000,
+    )
 }

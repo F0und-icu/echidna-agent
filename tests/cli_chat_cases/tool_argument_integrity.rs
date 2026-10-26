@@ -59,8 +59,8 @@ fn malformed_arguments_reject_the_whole_sample_without_writes_or_payload_disclos
             );
         }
         if cfg!(debug_assertions) {
-            assert!(stderr.contains("协议解码失败：响应未提交（不代表网络中断）"));
-            assert!(!stderr.contains("响应中断：未观察到完成"));
+            assert!(stderr.contains("protocol decoding failed: response not committed (does not imply network interruption)"));
+            assert!(!stderr.contains("response interrupted: completion not observed"));
         }
         let project = Project::discover(root.path()).unwrap();
         let state = reduced_session(&project, &session_id(root.path()));

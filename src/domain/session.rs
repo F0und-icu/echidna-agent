@@ -1335,7 +1335,9 @@ fn apply_session_event(
                 "session.request_audit_recorded",
                 SessionLifecycle::Active,
             )?;
-            manifest.validate()?;
+            // SessionEvent::decode already validates this manifest at the
+            // untrusted payload boundary. Internal receipt expansion cannot
+            // produce RequestAuditRecorded events.
             if manifest.audit_event_id() != event_id {
                 return Err(SessionError::RequestAuditEventIdentityMismatch {
                     expected: event_id.clone(),

@@ -1,10 +1,4 @@
 //! Model-free Unix process integration tests for native configured stdio MCP.
-include!("../src/lib.rs");
-
-#[path = "support/provider_config.rs"]
-mod provider_config;
-#[path = "support/mod.rs"]
-mod support;
 
 #[cfg(unix)]
 mod mcp_stdio_regression {
@@ -19,7 +13,7 @@ mod mcp_stdio_regression {
     use serde_json::{Value, json};
 
     use crate::adapters::credentials::{CredentialSource, CredentialSourceError};
-    use crate::adapters::mcp_http::{CompletedCall, McpError, McpRuntime, McpServerConfig};
+    use crate::adapters::mcp::{CompletedCall, McpError, McpRuntime, McpServerConfig};
     use crate::adapters::tools::ToolRegistry;
     use crate::domain::tools::{
         ExecutionId, ToolCall, ToolCallId, ToolEffect, ToolExposure, ToolResultStatus,
@@ -41,10 +35,15 @@ mod mcp_stdio_regression {
 
     fn server(directory: &TemporaryDirectory, mode: &str, timeout: u64) -> String {
         format!(
-            "command = \"python3\"\nargs = [{}, {}, {}]\nprotocol_version = \"2025-11-25\"\ntimeout_ms = {timeout}\n",
+            "command = \"python3\"\nargs = [{}, {}, {}]\nprotocol_version = \"2025-11-25\"\ntimeout_ms = {timeout}\nstartup_timeout_ms = {}\n",
             json!(fixture_path().to_str().unwrap()),
             json!(mode),
-            json!(directory.path().to_str().unwrap())
+            json!(directory.path().to_str().unwrap()),
+            if mode == "startup_timeout" {
+                timeout
+            } else {
+                3000
+            }
         )
     }
 
@@ -95,6 +94,59 @@ mod mcp_stdio_regression {
         serde_json::from_slice(&fs::read(directory.path().join("launch.json")).unwrap()).unwrap()
     }
 
+    // Failure diagnostics only: never print fixture environment, arguments or
+    // RPC contents. Read process status only for IDs actually recorded by it.
+    fn startup_diagnostics(directory: &TemporaryDirectory) -> Value {
+        let (launch_status, launch) = match fs::read(directory.path().join("launch.json")) {
+            Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
+                Ok(launch) => ("present".to_owned(), Some(launch)),
+                Err(_) => ("invalid JSON".to_owned(), None),
+            },
+            Err(error) => (format!("read {:?}", error.kind()), None),
+        };
+        let methods = match fs::read_to_string(directory.path().join("requests.jsonl")) {
+            Ok(text) => text
+                .lines()
+                .map(|line| match serde_json::from_str::<Value>(line) {
+                    Ok(value) => value
+                        .get("method")
+                        .and_then(Value::as_str)
+                        .unwrap_or("<missing method>")
+                        .to_owned(),
+                    Err(_) => "<invalid JSON>".to_owned(),
+                })
+                .collect::<Vec<_>>(),
+            Err(error) => vec![format!("<read {:?}>", error.kind())],
+        };
+        let mut processes = Vec::new();
+        if let Some(launch) = &launch {
+            for field in ["pid", "descendant"] {
+                if let Some(pid) = launch
+                    .get(field)
+                    .and_then(Value::as_u64)
+                    .filter(|pid| *pid > 0 && *pid <= i32::MAX as u64)
+                {
+                    let observed = match Command::new("ps")
+                        .args([
+                            "-o",
+                            "pid=,ppid=,pgid=,stat=,wchan=",
+                            "-p",
+                            &pid.to_string(),
+                        ])
+                        .output()
+                    {
+                        Ok(output) => {
+                            json!({"status": output.status.code(), "process": String::from_utf8_lossy(&output.stdout)})
+                        }
+                        Err(error) => json!({"read_error_kind":format!("{:?}", error.kind())}),
+                    };
+                    processes.push(json!({"role":field,"recorded_pid":pid,"observed":observed}));
+                }
+            }
+        }
+        json!({"launch_record":launch_status,"descendant_ready":launch.as_ref().and_then(|value| value.get("descendant_ready")).and_then(Value::as_bool),"request_methods":methods,"recorded_processes":processes})
+    }
+
     fn requests(directory: &TemporaryDirectory) -> Vec<Value> {
         fs::read_to_string(directory.path().join("requests.jsonl"))
             .unwrap()
@@ -139,10 +191,18 @@ mod mcp_stdio_regression {
             if status.trim().is_empty() || status.trim().starts_with('Z') {
                 break;
             }
-            assert!(
-                std::time::Instant::now() < until,
-                "same-group descendant still running: {status}"
-            );
+            if std::time::Instant::now() >= until {
+                let detail = Command::new("ps")
+                    .args(["-o", "pid=,ppid=,pgid=,stat=,wchan=", "-p", &descendant])
+                    .output()
+                    .unwrap();
+                panic!(
+                    "same-group descendant not stopped within 2s: fixture={} leader={pid} descendant={descendant} state={status:?} ps_status={} process={}",
+                    directory.path().display(),
+                    detail.status,
+                    String::from_utf8_lossy(&detail.stdout),
+                );
+            }
             std::thread::sleep(Duration::from_millis(5));
         }
     }
@@ -267,7 +327,12 @@ mod mcp_stdio_regression {
             let composition = composition(&directory, mode, 350);
             let tools = discover_chat_tools(&composition, directory.path())
                 .await
-                .unwrap();
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "{mode} startup failed: {error}; {}",
+                        startup_diagnostics(&directory)
+                    )
+                });
             let name = tools
                 .catalog()
                 .into_iter()
@@ -790,6 +855,103 @@ mod mcp_stdio_regression {
             assert!(!terminal.contains(secret), "{terminal}");
             assert!(terminal.contains("<redacted>"), "{terminal}");
             assert!(terminal.contains("bytes"), "{terminal}");
+        }
+    }
+    #[tokio::test]
+    async fn stdio_startup_observer_identifies_failed_stage_and_preserves_cause() {
+        use crate::adapters::mcp::observation::{McpObservation, McpStartupStage};
+        for (mode, expected) in [
+            ("normal", None),
+            ("bad_initialize", Some(McpStartupStage::Initializing)),
+            ("bad_catalog", Some(McpStartupStage::Listing)),
+            ("startup_timeout", Some(McpStartupStage::Initializing)),
+        ] {
+            let directory = TemporaryDirectory::new(&format!("stdio-stages-{mode}"));
+            let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let recorded = Arc::clone(&events);
+            let runtime =
+                runtime(&directory, mode, 350).with_observer(Some(Arc::new(move |event| {
+                    recorded.lock().unwrap().push(event)
+                })));
+            let result = runtime.discover().await;
+            if let Some(expected) = expected {
+                let error = result.err().expect("startup must fail visibly");
+                assert!(
+                    matches!(&error, McpError::Startup { server_id, stage, source } if server_id == "local" && *stage == expected && !source.to_string().is_empty()),
+                    "{error}"
+                );
+                let events = events.lock().unwrap();
+                assert!(
+                    matches!(events.first(), Some(McpObservation::Startup { server_id, stage: McpStartupStage::Starting }) if server_id == "local")
+                );
+                assert!(
+                    matches!(events.last(), Some(McpObservation::StartupFailed { server_id, stage }) if server_id == "local" && *stage == expected),
+                    "{events:?}"
+                );
+                assert!(!events.iter().any(|event| matches!(
+                    event,
+                    McpObservation::Startup {
+                        stage: McpStartupStage::Ready,
+                        ..
+                    }
+                )));
+            } else {
+                assert!(!result.unwrap().is_empty());
+                assert!(matches!(
+                    events.lock().unwrap().last(),
+                    Some(McpObservation::Startup {
+                        stage: McpStartupStage::Ready,
+                        ..
+                    })
+                ));
+            }
+            drop(runtime);
+            assert_reaped_and_group_stopped(&directory);
+        }
+    }
+
+    #[tokio::test]
+    async fn stdio_separate_startup_deadline_does_not_relax_short_tool_call() {
+        let directory = TemporaryDirectory::new("stdio-separate-deadlines");
+        let runtime = runtime(&directory, "slow_startup_short_call", 40);
+        let tools = runtime
+            .discover()
+            .await
+            .expect("150ms initialize uses explicit startup deadline, not the 40ms call deadline");
+        assert!(
+            matches!(tools[0].call(json!({})).await, Err(McpError::Protocol { message }) if message == "stdio request timed out after dispatch")
+        );
+        assert_eq!(
+            requests(&directory)
+                .iter()
+                .filter(|request| request["method"] == "tools/call")
+                .count(),
+            1
+        );
+        drop(runtime);
+        assert_reaped_and_group_stopped(&directory);
+    }
+
+    #[test]
+    fn startup_timeout_validation_uses_the_config_boundary_for_both_transports() {
+        for transport in ["url = \"http://127.0.0.1:1/mcp\"", "command = \"python3\""] {
+            for timeout in [0, 86_400_001] {
+                let directory = TemporaryDirectory::new("mcp-invalid-startup-deadline");
+                let path = config_file(
+                    &directory,
+                    &format!(
+                        "{transport}\nprotocol_version = \"2025-11-25\"\nstartup_timeout_ms = {timeout}\n"
+                    ),
+                );
+                let error = ProviderComposition::load(path, Arc::new(NoCredentials))
+                    .err()
+                    .expect("invalid deadline rejected without credentials or startup");
+                assert!(
+                    error.to_string().contains("mcp_servers.startup_timeout_ms"),
+                    "{error}"
+                );
+                assert!(!directory.path().join("launch.json").exists());
+            }
         }
     }
 }

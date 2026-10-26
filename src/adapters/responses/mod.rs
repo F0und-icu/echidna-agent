@@ -2,8 +2,8 @@
 //! by explicit configuration.
 
 mod catalog;
-mod cli_output;
 mod failure_capture;
+pub(crate) mod presentation;
 mod redaction;
 mod request;
 mod response;
@@ -171,7 +171,7 @@ pub struct ResponsesHttpAdapter {
     config: ResponsesHttpConfig,
     credential_source: Arc<dyn CredentialSource>,
     image_resolver: Option<Arc<ImageArtifactResolver>>,
-    cli_role: Option<&'static str>,
+    observer: Option<Arc<dyn presentation::ResponsesObserver>>,
     failure_capture: Option<PathBuf>,
     opaque_continuations: Arc<OpaqueContinuationStore>,
     #[cfg(debug_assertions)]
@@ -202,7 +202,7 @@ impl ResponsesHttpAdapter {
             config,
             credential_source,
             image_resolver: None,
-            cli_role: None,
+            observer: None,
             failure_capture: None,
             opaque_continuations: Arc::new(OpaqueContinuationStore::default()),
             #[cfg(debug_assertions)]
@@ -220,16 +220,17 @@ impl ResponsesHttpAdapter {
         self
     }
 
-    pub(crate) fn with_cli_output(
+    pub(crate) fn with_observer(
         mut self,
-        role: Option<&'static str>,
-        #[cfg(debug_assertions)] debug: bool,
+        observer: Option<Arc<dyn presentation::ResponsesObserver>>,
     ) -> Self {
-        self.cli_role = role;
         #[cfg(debug_assertions)]
         {
-            self.debug = debug;
+            self.debug = observer
+                .as_ref()
+                .is_some_and(|observer| observer.full_debug());
         }
+        self.observer = observer;
         self
     }
 
@@ -416,7 +417,7 @@ impl ModelProvider for ResponsesHttpAdapter {
             retained_opaque,
             opaque_continuations,
             profile,
-            cli_role: self.cli_role,
+            observer: self.observer.clone(),
             failure_capture: self.failure_capture.clone(),
             partial_text: Arc::new(AtomicBool::new(false)),
             #[cfg(debug_assertions)]
@@ -440,7 +441,7 @@ struct PreparedResponsesRequest {
     retained_opaque: BTreeSet<OpaqueContinuationReference>,
     opaque_continuations: Arc<OpaqueContinuationStore>,
     profile: ResponsesWireProfile,
-    cli_role: Option<&'static str>,
+    observer: Option<Arc<dyn presentation::ResponsesObserver>>,
     failure_capture: Option<PathBuf>,
     partial_text: Arc<AtomicBool>,
     #[cfg(debug_assertions)]
@@ -463,7 +464,7 @@ impl PreparedModelRequest for PreparedResponsesRequest {
         let retained_opaque = self.retained_opaque.clone();
         let opaque_continuations = Arc::clone(&self.opaque_continuations);
         let profile = self.profile;
-        let cli_role = self.cli_role;
+        let observer = self.observer.clone();
         let failure_capture = self.failure_capture.clone();
         let partial_text = Arc::clone(&self.partial_text);
         #[cfg(debug_assertions)]
@@ -478,12 +479,13 @@ impl PreparedModelRequest for PreparedResponsesRequest {
             } = credential;
             let capture = failure_capture.map(|directory| failure_capture::FailedRequestCapture::new(
                 directory,
-                cli_role,
+                observer.as_ref().map(|observer| observer.role()),
                 endpoint.clone(),
                 request_body.clone(),
                 bearer.clone(),
                 account_id.as_ref().map(|value| std::str::from_utf8(value.as_bytes()).expect("account header originated from UTF-8").to_owned()),
             ));
+            let request_observer = observer.clone();
             let attempt = try_stream! {
             let mut decoder = response::ResponseDecoder::new(
                 profile,
@@ -491,14 +493,11 @@ impl PreparedModelRequest for PreparedResponsesRequest {
                 &bearer,
                 account_id.as_ref().map(HeaderValue::as_bytes),
             );
-            let mut diagnostics = cli_role.map(|role| cli_output::RequestOutput::new(role, bearer,
-                #[cfg(debug_assertions)]
-                account_id.as_ref().map(|value| std::str::from_utf8(value.as_bytes()).expect("account header originated from UTF-8").to_owned()),
-                #[cfg(debug_assertions)]
-                full_debug,
+            let mut diagnostics = request_observer.as_ref().map(|observer| presentation::RequestOutput::new(observer, &bearer,
+                account_id.as_ref().map(|value| std::str::from_utf8(value.as_bytes()).expect("account header originated from UTF-8")),
             ));
             #[cfg(debug_assertions)]
-            if let Some(diagnostics) = &diagnostics {
+            if let Some(diagnostics) = &mut diagnostics {
                 diagnostics.request(&request);
             }
             let request_started = Instant::now();
@@ -520,7 +519,7 @@ impl PreparedModelRequest for PreparedResponsesRequest {
 
             let status = response.status();
             #[cfg(debug_assertions)]
-            if let Some(diagnostics) = &diagnostics {
+            if let Some(diagnostics) = &mut diagnostics {
                 diagnostics.status(status.as_u16());
             }
             let mut response_events = match (status.is_success(), profile, continuation_requested) {
@@ -533,7 +532,7 @@ impl PreparedModelRequest for PreparedResponsesRequest {
                 (false, _, true) => {
                     let body = response.text().await.unwrap_or_default();
                     #[cfg(debug_assertions)]
-                    if let Some(diagnostics) = &diagnostics {
+                    if let Some(diagnostics) = &mut diagnostics {
                         diagnostics.http_error_body(&body);
                     }
                     if response::continuation_rejected_http_body(&body) {
@@ -550,7 +549,7 @@ impl PreparedModelRequest for PreparedResponsesRequest {
                     #[cfg(debug_assertions)]
                     if full_debug {
                         let body = read_bounded_http_error_body(response).await;
-                        if let Some(diagnostics) = &diagnostics {
+                        if let Some(diagnostics) = &mut diagnostics {
                             match body {
                                 response::BoundedHttpErrorBody::Complete(body) => {
                                     diagnostics.http_error_body(&body)
@@ -598,7 +597,7 @@ impl PreparedModelRequest for PreparedResponsesRequest {
 
                 #[cfg(debug_assertions)]
                 if !profile.is_subscription()
-                    && let Some(diagnostics) = &diagnostics
+                    && let Some(diagnostics) = &mut diagnostics
                 {
                     diagnostics.response(&event.data);
                 }
@@ -657,7 +656,7 @@ impl PreparedModelRequest for PreparedResponsesRequest {
                     Ok(event) => yield event,
                     Err(error) => {
                         if let Some(capture) = &capture {
-                            capture.record(&error);
+                            capture.record(&error, observer.as_deref());
                         }
                         Err(error)?;
                     }
@@ -670,9 +669,9 @@ impl PreparedModelRequest for PreparedResponsesRequest {
 
     fn retrying(&self, retry: usize) {
         if self.partial_text.swap(false, Ordering::Relaxed)
-            && let Some(role) = self.cli_role
+            && let Some(observer) = &self.observer
         {
-            cli_output::discarded_partial_response(role, retry);
+            observer.notify(presentation::ResponseNotice::RetryDiscarded { retry });
         }
     }
 }

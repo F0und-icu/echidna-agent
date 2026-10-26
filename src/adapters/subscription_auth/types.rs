@@ -1,5 +1,6 @@
 use std::path::{Component, Path, PathBuf};
 
+use reqwest::StatusCode;
 use serde::Serialize;
 use thiserror::Error;
 
@@ -53,10 +54,6 @@ pub(crate) enum SubscriptionAuthProtocol {
     SiwcDirect,
     Codex,
 }
-
-pub(crate) use crate::model_catalog::{
-    CatalogModel as SubscriptionModel, CatalogReasoningLevel as SubscriptionReasoningLevel,
-};
 
 #[derive(Clone, Debug, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -219,4 +216,31 @@ pub(super) fn validate_constructor_input(
 
 pub(super) fn account_path(root: &Path, account: &str, name: &str) -> PathBuf {
     root.join(format!("{account}.{name}"))
+}
+
+pub(super) fn classify_http_status(status: StatusCode) -> SubscriptionAuthError {
+    if temporary_status(status) {
+        SubscriptionAuthError::TemporarilyUnavailable
+    } else if matches!(
+        status,
+        StatusCode::BAD_REQUEST | StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+    ) {
+        SubscriptionAuthError::LoginRequired
+    } else {
+        SubscriptionAuthError::InvalidResponse
+    }
+}
+
+pub(super) fn auth_http_failure(
+    operation: SubscriptionAuthHttpOperation,
+    status: StatusCode,
+) -> SubscriptionAuthError {
+    SubscriptionAuthError::AuthHttpFailure {
+        operation,
+        status: status.as_u16(),
+    }
+}
+
+pub(super) fn temporary_status(status: StatusCode) -> bool {
+    status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
 }

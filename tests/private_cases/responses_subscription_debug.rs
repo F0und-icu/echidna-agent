@@ -1,6 +1,14 @@
-// This test is compiled as a private copy of the library so it can exercise
-// the crate-private CLI diagnostic owner through ResponsesHttpAdapter.
-include!("../src/lib.rs");
+//! The crate-private CLI diagnostic owner through ResponsesHttpAdapter.
+
+fn assert_single_probe(output: &std::process::Output) {
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(|line| line == "running 1 test"),
+        "child probe must execute exactly one test: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
 
 #[cfg(debug_assertions)]
 mod debug_regression {
@@ -45,7 +53,7 @@ mod debug_regression {
                 let provider = ResponsesHttpAdapter::new(
                     ResponsesHttpConfig::new(base_url,"fixture-model","chatgpt_subscription:fixture",subscription_capabilities()),
                     Arc::new(FixtureCredentialSource),
-                ).with_cli_output(Some("primary"),true);
+                ).with_observer(Some(crate::cli_model_output::observer("primary", true)));
                 for malformed in [false,true] {
                     let input = ModelInputIR::current("Fixture instruction.",vec![ContentItem::user_text("Fixture input.")],ModelRequestRequirements::default());
                     let mut stream = provider.stream(ModelRequest::full(input)).unwrap();
@@ -64,12 +72,13 @@ mod debug_regression {
         let output = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "debug_regression::error_event_debug_never_bypasses_selected_bounded_projection",
+                "responses_subscription_debug::debug_regression::error_event_debug_never_bypasses_selected_bounded_projection",
                 "--nocapture",
             ])
             .env(ERROR_CHILD_ENV, "1")
             .output()
             .unwrap();
+        super::assert_single_probe(&output);
         assert!(
             output.status.success(),
             "{}",
@@ -113,12 +122,13 @@ mod debug_regression {
         let output = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "debug_regression::subscription_failures_redact_actual_debug_stderr",
+                "responses_subscription_debug::debug_regression::subscription_failures_redact_actual_debug_stderr",
                 "--nocapture",
             ])
             .env(CHILD_ENV, "1")
             .output()
             .unwrap();
+        super::assert_single_probe(&output);
         assert!(
             output.status.success(),
             "debug child failed:\n{}",
@@ -126,9 +136,9 @@ mod debug_regression {
         );
 
         let stderr = String::from_utf8(output.stderr).unwrap();
-        assert!(stderr.contains("[debug 发送 primary"));
-        assert!(stderr.contains("HTTP 错误"));
-        assert!(stderr.contains("Provider 返回停止状态：响应未提交"));
+        assert!(stderr.contains("[debug sending primary"));
+        assert!(stderr.contains("HTTP error"));
+        assert!(stderr.contains("Provider returned a stop status: response not committed"));
         assert!(
             stderr.contains(STANDARD_SECRET),
             "standard-profile debug output unexpectedly stopped showing its error body:\n{stderr}"
@@ -154,7 +164,7 @@ mod debug_regression {
                 .with_chatgpt_subscription_profile(),
                 Arc::new(FixtureCredentialSource),
             )
-            .with_cli_output(Some("primary"), true);
+            .with_observer(Some(crate::cli_model_output::observer("primary", true)));
 
             assert_subscription_failure(&provider).await;
             assert_subscription_failure(&provider).await;
@@ -167,7 +177,7 @@ mod debug_regression {
                 ),
                 Arc::new(FixtureCredentialSource),
             )
-            .with_cli_output(Some("primary"), true);
+            .with_observer(Some(crate::cli_model_output::observer("primary", true)));
             assert_standard_http_failure(&standard_provider).await;
             server.join().unwrap();
         });
@@ -271,6 +281,91 @@ mod debug_regression {
         }
         String::from_utf8(bytes).unwrap()
     }
+    #[tokio::test]
+    async fn finite_observer_gets_only_redacted_projection_and_keeps_wire_request() {
+        use crate::adapters::responses::presentation::{
+            RequestObserver, ResponseNotice, ResponsePresentation, ResponsesObserver,
+        };
+        use std::sync::Mutex;
+        struct Recorder(Arc<Mutex<Vec<String>>>);
+        impl ResponsesObserver for Recorder {
+            fn role(&self) -> &'static str {
+                "primary"
+            }
+            fn begin(&self) -> Box<dyn RequestObserver> {
+                Box::new(Recorder(Arc::clone(&self.0)))
+            }
+            fn notify(&self, notice: ResponseNotice) {
+                self.0.lock().unwrap().push(format!("{notice:?}"));
+            }
+            fn full_debug(&self) -> bool {
+                true
+            }
+        }
+        impl RequestObserver for Recorder {
+            fn observe(&mut self, event: ResponsePresentation) {
+                self.0.lock().unwrap().push(format!("{event:?}"));
+            }
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let (sent, received) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            sent.send(super::release_regression::read_request(&mut stream))
+                .unwrap();
+            let body = format!(
+                "data: {{\"type\":\"response.reasoning_text.delta\",\"delta\":\"{BEARER_SECRET} selected reasoning\"}}\n\ndata: {{\"type\":\"error\",\"message\":\"{BEARER_SECRET} failed\"}}\n\n"
+            );
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        });
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let provider = ResponsesHttpAdapter::new(
+            ResponsesHttpConfig::new(
+                base_url,
+                "fixture-model",
+                "chatgpt_subscription:fixture",
+                subscription_capabilities(),
+            ),
+            Arc::new(FixtureCredentialSource),
+        )
+        .with_observer(Some(Arc::new(Recorder(Arc::clone(&observed)))));
+        let input = ModelInputIR::current(
+            format!("{BEARER_SECRET} actual instruction"),
+            vec![ContentItem::user_text("fixture task")],
+            ModelRequestRequirements::default(),
+        );
+        let mut stream = provider.stream(ModelRequest::full(input)).unwrap();
+        assert!(stream.next().await.unwrap().is_ok());
+        assert!(matches!(
+            stream.next().await,
+            Some(Err(ModelProviderError::ProviderFailure { .. }))
+        ));
+        drop(stream);
+        assert!(
+            received
+                .recv()
+                .unwrap()
+                .contains(&format!("{BEARER_SECRET} actual instruction")),
+            "presentation must not rewrite sent input"
+        );
+        server.join().unwrap();
+        let observations = observed.lock().unwrap().join("\n");
+        assert!(
+            observations.contains("[redacted] actual instruction"),
+            "{observations}"
+        );
+        assert!(
+            observations.contains("[redacted] selected reasoning"),
+            "{observations}"
+        );
+        assert!(observations.contains("Rejected"), "{observations}");
+        assert!(!observations.contains(BEARER_SECRET), "{observations}");
+        assert!(
+            !observations.contains("credential_reference"),
+            "{observations}"
+        );
+    }
 }
 
 mod release_regression {
@@ -322,30 +417,39 @@ mod release_regression {
         }
 
         for (case, summary, marker) in [
-            ("completed", "first", "[推理摘要已完成]"),
-            ("done", "done-only", "[推理摘要已完成]"),
+            ("completed", "first", "[reasoning summary completed]"),
+            ("done", "done-only", "[reasoning summary completed]"),
             (
                 "failed",
                 "terminal-summary",
-                "[推理摘要未提交：Provider 返回停止状态]",
+                "[reasoning summary not committed: Provider returned a stop status]",
             ),
             (
                 "incomplete",
                 "terminal-summary",
-                "[推理摘要未提交：Provider 返回停止状态]",
+                "[reasoning summary not committed: Provider returned a stop status]",
             ),
-            ("eof", "terminal-summary", "[推理摘要中断：响应未完成]"),
-            ("drop", "terminal-summary", "[推理摘要中断：响应未完成]"),
+            (
+                "eof",
+                "terminal-summary",
+                "[reasoning summary interrupted: response not completed]",
+            ),
+            (
+                "drop",
+                "terminal-summary",
+                "[reasoning summary interrupted: response not completed]",
+            ),
         ] {
             let output = Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
-                    "release_regression::codex_summary_is_redacted_escaped_and_separated_in_release_stderr",
+                    "responses_subscription_debug::release_regression::codex_summary_is_redacted_escaped_and_separated_in_release_stderr",
                     "--nocapture",
                 ])
                 .env(CHILD_ENV, case)
                 .output()
                 .unwrap();
+            super::assert_single_probe(&output);
             assert!(
                 output.status.success(),
                 "{case} child failed:\n{}",
@@ -354,11 +458,14 @@ mod release_regression {
 
             let stdout = String::from_utf8(output.stdout).unwrap();
             let stderr = String::from_utf8(output.stderr).unwrap();
-            assert!(stderr.contains("[推理摘要 primary #"), "{case}: {stderr}");
+            assert!(
+                stderr.contains("[reasoning summary primary #"),
+                "{case}: {stderr}"
+            );
             assert!(stderr.contains(summary), "{case}: {stderr}");
             assert!(stderr.contains(marker), "{case}: {stderr}");
             assert!(!stderr.contains(BEARER_SECRET), "{case}: {stderr}");
-            assert!(!stdout.contains("推理摘要"), "{case}: {stdout}");
+            assert!(!stdout.contains("reasoning summary"), "{case}: {stdout}");
             assert!(!stdout.contains(summary), "{case}: {stdout}");
             if case == "completed" {
                 assert!(stderr.contains("first\nsecond"), "{stderr}");
@@ -383,11 +490,11 @@ mod release_regression {
                 .with_codex_subscription_profile(),
                 Arc::new(FixtureCredentialSource),
             )
-            .with_cli_output(
-                Some("primary"),
+            .with_observer(Some(crate::cli_model_output::observer(
+                "primary",
                 #[cfg(debug_assertions)]
                 false,
-            );
+            )));
             let input = ModelInputIR::current(
                 "Fixture instruction.",
                 vec![ContentItem::user_text("Fixture input.")],
@@ -467,12 +574,13 @@ mod release_regression {
             let output = Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
-                    "release_regression::codex_body_failure_diagnostics_are_typed_and_private",
+                    "responses_subscription_debug::release_regression::codex_body_failure_diagnostics_are_typed_and_private",
                     "--nocapture",
                 ])
                 .env(CHILD_ENV, case)
                 .output()
                 .unwrap();
+            super::assert_single_probe(&output);
             let stderr = String::from_utf8(output.stderr).unwrap();
             assert!(output.status.success(), "{case}: {stderr}");
             for field in [
@@ -529,11 +637,11 @@ mod release_regression {
                 .with_timeouts(2_000, 2_000),
                 Arc::new(FixtureCredentialSource),
             )
-            .with_cli_output(
-                Some("primary"),
+            .with_observer(Some(crate::cli_model_output::observer(
+                "primary",
                 #[cfg(debug_assertions)]
                 true,
-            );
+            )));
             let input = ModelInputIR::current(
                 "Fixture instruction.",
                 vec![ContentItem::user_text("Fixture input.")],
@@ -736,7 +844,7 @@ mod release_regression {
         String::from_utf8(bytes).unwrap()
     }
 
-    fn read_request(stream: &mut TcpStream) -> String {
+    pub(super) fn read_request(stream: &mut TcpStream) -> String {
         stream
             .set_read_timeout(Some(std::time::Duration::from_secs(5)))
             .unwrap();

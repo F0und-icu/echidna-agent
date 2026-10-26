@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -24,8 +23,8 @@ use super::store::{
 use super::types::{
     CODEX_CLIENT_ID, CodexSubscriptionAuthStatus, DIRECT_USE_SCOPE, SubscriptionAuthError,
     SubscriptionAuthHttpOperation, SubscriptionAuthProtocol, SubscriptionAuthStatus,
-    SubscriptionConnectionState, SubscriptionLogoutOutcome, SubscriptionModel,
-    SubscriptionReasoningLevel, resolve_catalog_client_version, validate_constructor_input,
+    SubscriptionConnectionState, SubscriptionLogoutOutcome, auth_http_failure,
+    resolve_catalog_client_version, temporary_status, validate_constructor_input,
 };
 use super::{API_BASE_URL, AuthEndpoints, CODEX_API_BASE_URL, CODEX_CATALOG_COMPATIBILITY_VERSION};
 
@@ -48,7 +47,6 @@ const CODEX_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 const CODEX_REVOKE_URL: &str = "https://auth.openai.com/oauth/revoke";
 const CODEX_DISCOVERY_URL: &str = "https://auth.openai.com/.well-known/openid-configuration";
 const CODEX_ISSUER: &str = "https://auth.openai.com";
-const ECHIDNA_USER_AGENT: &str = concat!("echidna/", env!("CARGO_PKG_VERSION"));
 
 /// App-owned OAuth lifecycle for one explicit local subscription account.
 /// Construction is deliberately free of filesystem, credential, and network I/O.
@@ -435,36 +433,13 @@ impl SubscriptionAuthService {
         }
     }
 
-    /// Performs the explicit, account-scoped model discovery path after
-    /// obtaining a usable subscription bearer.
-    pub(crate) async fn models(&self) -> Result<Vec<SubscriptionModel>, SubscriptionAuthError> {
-        if self.protocol == SubscriptionAuthProtocol::Codex {
-            return self.codex_models().await;
-        }
-        let token = self.access_token().await?;
-        let response = self
-            .http
-            .get(format!(
-                "{}/models",
-                self.endpoints.api_base_url().trim_end_matches('/')
-            ))
-            .bearer_auth(token)
-            .send()
-            .await
-            .map_err(|_| SubscriptionAuthError::TemporarilyUnavailable)?;
-        if !response.status().is_success() {
-            return Err(classify_http_status(response.status()));
-        }
-        let models: SiwcModelsResponse = response
-            .json()
-            .await
-            .map_err(|_| SubscriptionAuthError::InvalidResponse)?;
-        siwc_subscription_models(
-            models
-                .models
-                .into_iter()
-                .filter(|model| model.visibility == "list")
-                .collect(),
+    pub(crate) fn catalog(&self) -> super::catalog::SubscriptionCatalog {
+        super::catalog::SubscriptionCatalog::new(
+            self.clone(),
+            self.http.clone(),
+            self.endpoints.api_base_url().to_owned(),
+            self.protocol,
+            self.catalog_client_version.clone(),
         )
     }
 
@@ -675,36 +650,6 @@ impl SubscriptionAuthService {
             Err(RefreshFailure::InvalidClient) => Err(SubscriptionAuthError::InvalidRegistration),
             Err(RefreshFailure::Authentication(error)) => Err(error),
         }
-    }
-
-    async fn codex_models(&self) -> Result<Vec<SubscriptionModel>, SubscriptionAuthError> {
-        let credential = self.access_codex_credential().await?;
-        let (bearer, account_id) = credential.into_parts();
-        let response = self
-            .http
-            .get(format!(
-                "{}/models",
-                self.endpoints.api_base_url().trim_end_matches('/')
-            ))
-            .query(&[("client_version", self.catalog_client_version.as_str())])
-            .bearer_auth(bearer)
-            .header("ChatGPT-Account-ID", account_id)
-            .header("version", self.catalog_client_version.as_str())
-            .header("User-Agent", ECHIDNA_USER_AGENT)
-            .send()
-            .await
-            .map_err(|_| SubscriptionAuthError::TemporarilyUnavailable)?;
-        if !response.status().is_success() {
-            return Err(auth_http_failure(
-                SubscriptionAuthHttpOperation::ModelCatalog,
-                response.status(),
-            ));
-        }
-        let models: CodexModelsResponse = response
-            .json()
-            .await
-            .map_err(|_| SubscriptionAuthError::InvalidResponse)?;
-        codex_subscription_models(models.models)
     }
 
     async fn logout_codex(&self) -> Result<SubscriptionLogoutOutcome, SubscriptionAuthError> {
@@ -1192,170 +1137,6 @@ impl TokenResponse {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct SiwcModelsResponse {
-    models: Vec<SiwcModelResponse>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SiwcModelResponse {
-    slug: String,
-    display_name: String,
-    visibility: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct CodexModelsResponse {
-    models: Vec<ModelResponse>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ModelResponse {
-    slug: String,
-    display_name: String,
-    #[serde(default)]
-    default_reasoning_level: Option<String>,
-    #[serde(default)]
-    supported_reasoning_levels: Vec<ReasoningLevelResponse>,
-    #[serde(default, deserialize_with = "optional_positive_u32")]
-    context_window: Option<u32>,
-    #[serde(default, deserialize_with = "optional_positive_u32")]
-    max_context_window: Option<u32>,
-    #[serde(default, deserialize_with = "optional_modalities")]
-    input_modalities: Option<Vec<String>>,
-    #[serde(default, deserialize_with = "optional_bool")]
-    supports_reasoning_summary_parameter: Option<bool>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ReasoningLevelResponse {
-    effort: String,
-    description: String,
-}
-
-fn siwc_subscription_models(
-    models: Vec<SiwcModelResponse>,
-) -> Result<Vec<SubscriptionModel>, SubscriptionAuthError> {
-    if models.iter().any(|model| {
-        model.slug.is_empty()
-            || model.slug.len() > 256
-            || model.display_name.is_empty()
-            || model.display_name.len() > 256
-    }) {
-        return Err(SubscriptionAuthError::InvalidResponse);
-    }
-    Ok(models
-        .into_iter()
-        .map(|model| SubscriptionModel {
-            slug: model.slug,
-            display_name: model.display_name,
-            default_reasoning_level: None,
-            supported_reasoning_levels: Vec::new(),
-            context_window: None,
-            max_context_window: None,
-            input_modalities: None,
-            supports_reasoning_summary_parameter: None,
-            reasoning_levels_advertised: true,
-        })
-        .collect())
-}
-
-fn codex_subscription_models(
-    models: Vec<ModelResponse>,
-) -> Result<Vec<SubscriptionModel>, SubscriptionAuthError> {
-    let mut slugs = BTreeSet::new();
-    for model in &models {
-        if model.slug.is_empty()
-            || model.slug.len() > 256
-            || model.display_name.is_empty()
-            || model.display_name.len() > 256
-            || !slugs.insert(&model.slug)
-        {
-            return Err(SubscriptionAuthError::InvalidResponse);
-        }
-        if let Some(default) = &model.default_reasoning_level
-            && !valid_reasoning_metadata(default, 64)
-        {
-            return Err(SubscriptionAuthError::InvalidResponse);
-        }
-        let mut efforts = BTreeSet::new();
-        for level in &model.supported_reasoning_levels {
-            if !valid_reasoning_metadata(&level.effort, 64)
-                || level.description.is_empty()
-                || level.description.len() > 512
-                || !efforts.insert(&level.effort)
-            {
-                return Err(SubscriptionAuthError::InvalidResponse);
-            }
-        }
-        if model.input_modalities.as_ref().is_some_and(|modalities| {
-            modalities.len() > 32
-                || modalities
-                    .iter()
-                    .any(|value| !valid_reasoning_metadata(value, 64))
-        }) {
-            return Err(SubscriptionAuthError::InvalidResponse);
-        }
-    }
-    Ok(models
-        .into_iter()
-        .map(|model| SubscriptionModel {
-            slug: model.slug,
-            display_name: model.display_name,
-            default_reasoning_level: model.default_reasoning_level,
-            supported_reasoning_levels: model
-                .supported_reasoning_levels
-                .into_iter()
-                .map(|level| SubscriptionReasoningLevel {
-                    effort: level.effort,
-                    description: level.description,
-                })
-                .collect(),
-            context_window: model.context_window,
-            max_context_window: model.max_context_window,
-            input_modalities: model.input_modalities,
-            supports_reasoning_summary_parameter: model.supports_reasoning_summary_parameter,
-            reasoning_levels_advertised: true,
-        })
-        .collect())
-}
-
-fn optional_positive_u32<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    match Option::<u32>::deserialize(deserializer)? {
-        Some(value) if value > 0 => Ok(Some(value)),
-        Some(_) => Err(serde::de::Error::custom(
-            "expected a positive unsigned integer",
-        )),
-        None => Ok(None),
-    }
-}
-
-fn optional_modalities<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let values = Vec::<String>::deserialize(deserializer)?;
-    Ok(Some(values))
-}
-
-fn optional_bool<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    bool::deserialize(deserializer).map(Some)
-}
-
-fn valid_reasoning_metadata(value: &str, maximum_length: usize) -> bool {
-    !value.is_empty()
-        && value.len() <= maximum_length
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-}
-
 enum RefreshFailure {
     Temporary,
     Terminal,
@@ -1789,31 +1570,4 @@ fn now_unix() -> Result<u64, SubscriptionAuthError> {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .map_err(|_| SubscriptionAuthError::StorageUnavailable)
-}
-
-fn classify_http_status(status: StatusCode) -> SubscriptionAuthError {
-    if temporary_status(status) {
-        SubscriptionAuthError::TemporarilyUnavailable
-    } else if matches!(
-        status,
-        StatusCode::BAD_REQUEST | StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
-    ) {
-        SubscriptionAuthError::LoginRequired
-    } else {
-        SubscriptionAuthError::InvalidResponse
-    }
-}
-
-fn auth_http_failure(
-    operation: SubscriptionAuthHttpOperation,
-    status: StatusCode,
-) -> SubscriptionAuthError {
-    SubscriptionAuthError::AuthHttpFailure {
-        operation,
-        status: status.as_u16(),
-    }
-}
-
-fn temporary_status(status: StatusCode) -> bool {
-    status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
 }

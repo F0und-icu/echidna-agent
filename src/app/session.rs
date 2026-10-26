@@ -4,6 +4,15 @@ use crate::domain::events::{ApplyOutcome, EventEnvelope};
 use crate::domain::session::{SessionError, SessionReducer, SessionState};
 use crate::ports::EventSink;
 
+/// Explicit turn-boundary requests; defaults come from the validated binding.
+pub(crate) struct ResearchTurnRequest {
+    pub(crate) started: bool,
+    pub(crate) default_domain: crate::domain::domain_profile::DomainProfile,
+    pub(crate) default_phase: crate::domain::research_control::ResearchPhase,
+    pub(crate) domain: Option<crate::domain::domain_profile::DomainProfileSelection>,
+    pub(crate) phase: Option<crate::domain::research_control::ResearchPhaseSelection>,
+}
+
 /// Validates one prospective state, appends its Event durably, then promotes
 /// that state. A failed append never mutates the caller's `SessionState`.
 fn append_after_durable<S>(
@@ -37,6 +46,89 @@ pub struct SessionProjection {
 }
 
 impl SessionProjection {
+    /// Resolve and durably apply the original domain-then-phase boundary from
+    /// one synchronized projection. UI supplies identity/time, never policy.
+    pub(crate) fn prepare_research_turn<S: EventSink<serde_json::Value>>(
+        &mut self,
+        sink: &mut S,
+        stream: crate::domain::events::StreamId,
+        request: ResearchTurnRequest,
+        mut stamp: impl FnMut(
+            crate::domain::events::EventSequence,
+            &'static str,
+        ) -> (
+            crate::domain::events::EventId,
+            crate::domain::events::OccurredAt,
+        ),
+    ) -> Result<
+        (
+            crate::domain::domain_profile::DomainProfile,
+            crate::domain::research_control::ResearchPhase,
+        ),
+        AppendAfterDurableError<S::Error>,
+    > {
+        use crate::domain::domain_profile::{DomainProfile, DomainProfileSelection};
+        use crate::domain::research_control::{ResearchPhase, ResearchPhaseSelection};
+        use crate::domain::session::SessionEvent;
+        let (domain, domain_change) = match request.domain {
+            Some(selection) => (selection.profile(), Some(selection)),
+            None => match self.state.domain_profile_selection() {
+                Some(selection) => (selection.profile(), None),
+                None => {
+                    let selection =
+                        if request.started || request.default_domain != DomainProfile::Source {
+                            DomainProfileSelection::definition_default(request.default_domain)
+                        } else {
+                            DomainProfileSelection::legacy_default()
+                        };
+                    (selection.profile(), Some(selection))
+                }
+            },
+        };
+        let (phase, phase_change) = match request.phase {
+            Some(selection) => (selection.phase(), Some(selection)),
+            None => match self.state.research_phase_selection() {
+                Some(selection) => (selection.phase(), None),
+                None => {
+                    let selection =
+                        if request.started || request.default_phase != ResearchPhase::Mapping {
+                            ResearchPhaseSelection::definition_default(request.default_phase)
+                        } else {
+                            ResearchPhaseSelection::legacy_default()
+                        };
+                    (selection.phase(), Some(selection))
+                }
+            },
+        };
+        for (event, kind) in [
+            domain_change.map(|selection| {
+                (
+                    SessionEvent::DomainProfileSelected { selection },
+                    "domain-profile",
+                )
+            }),
+            phase_change.map(|selection| {
+                (
+                    SessionEvent::ResearchPhaseSelected { selection },
+                    "research-phase",
+                )
+            }),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let sequence = self
+                .next_event_sequence()
+                .map_err(AppendAfterDurableError::Session)?;
+            let (id, at) = stamp(sequence, kind);
+            let event = event
+                .into_envelope(id, stream.clone(), sequence, at)
+                .map_err(AppendAfterDurableError::Session)?;
+            self.append(sink, event)?;
+        }
+        Ok((domain, phase))
+    }
+
     /// Strictly reconstructs Session State from durable Events supplied by an
     /// EventSource at the composition boundary.
     pub fn replay<Events>(events: Events) -> Result<Self, SessionError>

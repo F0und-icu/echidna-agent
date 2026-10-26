@@ -1,10 +1,4 @@
-//! Offline standard-model discovery and the real CLI selection path. Including
-//! the library keeps the credential-injection boundary private in production.
-
-include!("../src/lib.rs");
-
-#[path = "support/mod.rs"]
-mod support;
+//! Offline standard-model discovery and the real CLI selection path.
 
 mod catalog_regression {
     use std::fs;

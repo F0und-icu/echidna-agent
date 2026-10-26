@@ -1,3 +1,5 @@
+use std::fs::File;
+use std::io::{BufRead, BufReader, Cursor, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use serde_json::Value;
@@ -7,12 +9,12 @@ use crate::domain::events::{
 };
 
 use super::super::ProjectEventStoreError;
-use super::super::project::read_bytes;
 
 pub(crate) enum StreamScan {
     Complete {
         events: Vec<EventEnvelope<Value>>,
         last_sequence: Option<EventSequence>,
+        validated_bytes: usize,
     },
     Trailing {
         last_sequence: Option<EventSequence>,
@@ -37,15 +39,21 @@ impl StreamScan {
     }
 }
 
-/// The sole byte-level JSONL scanner. Only a lexical failure at the final
-/// record boundary is recoverable; every semantic failure is read-only.
 pub(crate) fn scan_stream(
     path: &Path,
     expected_stream_id: &StreamId,
     registry: &EventUpcasterRegistry<Value>,
 ) -> Result<StreamScan, ProjectEventStoreError> {
-    let bytes = read_bytes(path, "read Event stream")?;
-    scan_stream_bytes(&bytes, path, expected_stream_id, registry)
+    let file = File::open(path).map_err(|source| read_error(path, source))?;
+    scan_stream_reader(
+        &mut BufReader::new(file),
+        path,
+        expected_stream_id,
+        registry,
+        0,
+        None,
+        &mut blake3::Hasher::new(),
+    )
 }
 
 pub(crate) fn scan_stream_bytes(
@@ -54,81 +62,117 @@ pub(crate) fn scan_stream_bytes(
     expected_stream_id: &StreamId,
     registry: &EventUpcasterRegistry<Value>,
 ) -> Result<StreamScan, ProjectEventStoreError> {
-    scan_stream_suffix_bytes(bytes, path, expected_stream_id, registry, 0, None)
+    scan_stream_reader(
+        &mut Cursor::new(bytes),
+        path,
+        expected_stream_id,
+        registry,
+        0,
+        None,
+        &mut blake3::Hasher::new(),
+    )
 }
 
-/// A verified prefix supplies the preceding sequence; every suffix record
-/// follows the ordinary scanner's exact envelope/upcast/corruption rules.
-pub(super) fn scan_stream_suffix_bytes(
-    bytes: &[u8],
+/// One record scanner serves full files, byte fixtures and verified suffixes.
+/// The reader starts after the exact prefix represented by offset/hash/sequence.
+pub(super) fn scan_stream_reader<Reader: BufRead + Seek>(
+    reader: &mut Reader,
     path: &Path,
     expected_stream_id: &StreamId,
     registry: &EventUpcasterRegistry<Value>,
-    byte_offset: usize,
+    mut record_start: usize,
     mut last_sequence: Option<EventSequence>,
+    validated_hash: &mut blake3::Hasher,
 ) -> Result<StreamScan, ProjectEventStoreError> {
     let mut events = Vec::new();
-    let mut record_start = 0_usize;
-
-    for (index, byte) in bytes.iter().enumerate() {
-        if *byte != b'\n' {
-            continue;
+    let mut record = Vec::new();
+    loop {
+        record.clear();
+        let count = reader
+            .read_until(b'\n', &mut record)
+            .map_err(|source| read_error(path, source))?;
+        if count == 0 {
+            return Ok(StreamScan::Complete {
+                events,
+                last_sequence,
+                validated_bytes: record_start,
+            });
         }
-
-        let record = &bytes[record_start..index];
-        let final_record = index + 1 == bytes.len();
-        match decode_record(record, expected_stream_id, last_sequence, registry) {
-            Ok(event) => {
+        let terminated = record.last() == Some(&b'\n');
+        let body = if terminated {
+            &record[..record.len() - 1]
+        } else {
+            &record
+        };
+        match decode_record(body, expected_stream_id, last_sequence, registry) {
+            Ok(event) if terminated => {
                 last_sequence = Some(event.sequence);
                 events.push(event);
+                validated_hash.update(&record);
+                record_start += record.len();
             }
-            Err(RecordProblem::Lexical(_reason)) if final_record => {
-                return Ok(StreamScan::Trailing {
-                    last_sequence,
-                    offset: (byte_offset + record_start) as u64,
-                    valid_prefix: bytes[..record_start].to_vec(),
-                    raw_tail: bytes[record_start..].to_vec(),
-                });
-            }
-            Err(RecordProblem::Lexical(reason)) => {
-                return Err(ProjectEventStoreError::NonTailCorruption {
-                    path: path.to_path_buf(),
-                    offset: (byte_offset + record_start) as u64,
-                    reason,
-                });
-            }
-            Err(RecordProblem::Semantic(reason)) => {
-                return Err(ProjectEventStoreError::InvalidEventRecord {
-                    path: path.to_path_buf(),
-                    offset: (byte_offset + record_start) as u64,
-                    reason,
+            result => {
+                let problem = match result {
+                    Ok(_) => None,
+                    Err(RecordProblem::Lexical(reason)) => Some((true, reason)),
+                    Err(RecordProblem::Semantic(reason)) => Some((false, reason)),
+                };
+                let final_record = !terminated
+                    || reader
+                        .fill_buf()
+                        .map_err(|source| read_error(path, source))?
+                        .is_empty();
+                if final_record && problem.as_ref().is_none_or(|(lexical, _)| *lexical) {
+                    // Recovery needs the original prefix, only on a real tail.
+                    // A reread must match the bytes just validated, including
+                    // when the underlying file changed outside the writer lease.
+                    reader
+                        .seek(SeekFrom::Start(0))
+                        .map_err(|source| read_error(path, source))?;
+                    let mut valid_prefix = Vec::new();
+                    reader
+                        .take(record_start as u64)
+                        .read_to_end(&mut valid_prefix)
+                        .map_err(|source| read_error(path, source))?;
+                    if valid_prefix.len() != record_start
+                        || blake3::hash(&valid_prefix) != validated_hash.finalize()
+                    {
+                        return Err(ProjectEventStoreError::ValidatedPrefixChanged {
+                            path: path.to_path_buf(),
+                        });
+                    }
+                    return Ok(StreamScan::Trailing {
+                        last_sequence,
+                        offset: record_start as u64,
+                        valid_prefix,
+                        raw_tail: record,
+                    });
+                }
+                let (lexical, reason) = problem.expect("a complete record failed decoding");
+                return Err(if lexical {
+                    ProjectEventStoreError::NonTailCorruption {
+                        path: path.to_path_buf(),
+                        offset: record_start as u64,
+                        reason,
+                    }
+                } else {
+                    ProjectEventStoreError::InvalidEventRecord {
+                        path: path.to_path_buf(),
+                        offset: record_start as u64,
+                        reason,
+                    }
                 });
             }
         }
-        record_start = index + 1;
     }
+}
 
-    if record_start < bytes.len() {
-        let record = &bytes[record_start..];
-        return match decode_record(record, expected_stream_id, last_sequence, registry) {
-            Ok(_) | Err(RecordProblem::Lexical(_)) => Ok(StreamScan::Trailing {
-                last_sequence,
-                offset: (byte_offset + record_start) as u64,
-                valid_prefix: bytes[..record_start].to_vec(),
-                raw_tail: record.to_vec(),
-            }),
-            Err(problem) => Err(ProjectEventStoreError::InvalidEventRecord {
-                path: path.to_path_buf(),
-                offset: (byte_offset + record_start) as u64,
-                reason: problem.into_reason(),
-            }),
-        };
+fn read_error(path: &Path, source: std::io::Error) -> ProjectEventStoreError {
+    ProjectEventStoreError::Io {
+        operation: "read Event stream",
+        path: path.to_path_buf(),
+        source,
     }
-
-    Ok(StreamScan::Complete {
-        events,
-        last_sequence,
-    })
 }
 
 fn decode_record(
@@ -164,14 +208,6 @@ fn decode_record(
 enum RecordProblem {
     Lexical(String),
     Semantic(String),
-}
-
-impl RecordProblem {
-    fn into_reason(self) -> String {
-        match self {
-            Self::Lexical(reason) | Self::Semantic(reason) => reason,
-        }
-    }
 }
 
 pub(crate) fn next_sequence(

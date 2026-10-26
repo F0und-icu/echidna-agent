@@ -172,6 +172,49 @@ impl TerminalChat {
 }
 
 #[test]
+fn accepted_task_shows_working_before_context_preparation_failure() {
+    let root = TemporaryDirectory::new("working-before-context-error");
+    initialize_project(root.path());
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let config = write_config(
+        root.path(),
+        &format!("http://{}/v1", listener.local_addr().unwrap()),
+    );
+    let mut chat = TerminalChat::new(root.path(), &config);
+    // Change an explicit source only after startup, so the next Turn's real
+    // context refresh fails before any Provider request can be admitted.
+    fs::create_dir_all(root.path().join(".echidna/memory/core.md")).unwrap();
+    chat.send("Read the current task sources.\n");
+    chat.wait_for("chat failed:");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(status) = chat.child.try_wait().unwrap() {
+            assert!(!status.success());
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "preparation failure did not settle"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    chat.assert_restored();
+    let output = String::from_utf8_lossy(&chat.captured);
+    let working = output
+        .find("working> ")
+        .expect("accepted task status missing");
+    assert!(working < output.find("chat failed:").unwrap(), "{output}");
+    let project = Project::discover(root.path()).unwrap();
+    let state = reduced_session(&project, &session_id(root.path()));
+    assert!(state.history().items().is_empty());
+    assert!(state.request_audits().is_empty());
+    assert!(
+        matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+    );
+}
+
+#[test]
 fn rsi2_terminal_stop_cancels_diagnosis_without_recovery_or_probe_requests() {
     let root = TemporaryDirectory::new("rsi2-terminal-stop");
     initialize_project(root.path());

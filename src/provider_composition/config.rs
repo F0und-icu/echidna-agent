@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::adapters::mcp_http::McpServerConfig;
+use crate::adapters::mcp::McpServerConfig;
 use crate::domain::context::{ModelIdentity, ModelProfile};
 use crate::domain::model::{CapabilityMappingVersion, ModelCapabilities, ReasoningEffort};
 use crate::domain::profile::{AgentModelProfile, ProviderProfile, VisionMode};

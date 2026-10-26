@@ -1,33 +1,28 @@
 //! No-network regression coverage for the private auth selection picker.
-//!
-//! Compile the library as this test crate so it can exercise the crate-private
-//! picker helpers without widening the product API.
-
-include!("../src/lib.rs");
 
 mod picker_regression {
     use std::io::Cursor;
 
-    use crate::adapters::subscription_auth::{SubscriptionModel, SubscriptionReasoningLevel};
     use crate::cli_auth::{read_selection_choice, select_effort_choice, select_model_choice};
     use crate::domain::model::ReasoningEffort;
+    use crate::model_catalog::{CatalogModel, CatalogReasoningLevel};
 
-    fn catalog() -> Vec<SubscriptionModel> {
+    fn catalog() -> Vec<CatalogModel> {
         vec![
-            SubscriptionModel {
+            CatalogModel {
                 slug: "first".to_owned(),
                 display_name: "First".to_owned(),
                 default_reasoning_level: None,
                 supported_reasoning_levels: vec![
-                    SubscriptionReasoningLevel {
+                    CatalogReasoningLevel {
                         effort: "medium".to_owned(),
                         description: "Balanced".to_owned(),
                     },
-                    SubscriptionReasoningLevel {
+                    CatalogReasoningLevel {
                         effort: "high".to_owned(),
                         description: "Thorough".to_owned(),
                     },
-                    SubscriptionReasoningLevel {
+                    CatalogReasoningLevel {
                         effort: "future".to_owned(),
                         description: "Server-defined".to_owned(),
                     },
@@ -38,7 +33,7 @@ mod picker_regression {
                 supports_reasoning_summary_parameter: Some(true),
                 reasoning_levels_advertised: true,
             },
-            SubscriptionModel {
+            CatalogModel {
                 slug: "second".to_owned(),
                 display_name: "Second".to_owned(),
                 default_reasoning_level: None,

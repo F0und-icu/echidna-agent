@@ -1,5 +1,4 @@
 //! Completed-boundary validation distinguishes explicit recovery from a new gap.
-include!("../src/lib.rs");
 
 #[test]
 fn model_usage_subsets_validate_without_inventing_missing_counts() {

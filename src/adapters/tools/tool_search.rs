@@ -1,5 +1,7 @@
 //! Fixed discovery Tool for bounded Deferred Tool schemas.
 
+use crate::domain::tools::{ToolDeterminism, ToolEffect, ToolParallelism, ToolRetryPolicy};
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -83,7 +85,7 @@ pub(super) fn execute(plan: ToolExecutionPlan, specs: &[ToolSpec]) -> ToolExecut
     )
 }
 
-pub(super) fn input_schema() -> Value {
+fn input_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
@@ -122,4 +124,36 @@ fn normalize_query(query: &str) -> String {
         .map(str::to_ascii_lowercase)
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+pub(super) const NAME: &str = "tool_search";
+
+pub(super) fn spec() -> ToolSpec {
+    super::spec(
+        NAME,
+        "2",
+        super::description(
+            "find Deferred tools",
+            "a Tool is Hidden or already Direct.",
+            "an exact tool-name token when known, otherwise a few precise keywords. A tool absent from inspect_project.tool_capabilities may still be Deferred and discoverable.",
+            "eligible matching schemas; activation lasts only for the rest of the current Turn.",
+            false,
+        ),
+        ToolExposure::Direct,
+        input_schema(),
+        output_schema(),
+        ToolParallelism::Parallel,
+        None,
+        ToolEffect::ReadOnly,
+        ToolRetryPolicy::ReplaySafe,
+        ToolDeterminism::Deterministic,
+        5_000,
+    )
+}
+
+fn output_schema() -> Value {
+    json!({
+        "type": "object", "properties": {"query": json!({"type": "string", "minLength": 1}), "matches": {"type": "array", "maxItems": 16, "items": {"type": "object", "properties": {"name": json!({"type": "string", "minLength": 1}), "description": json!({"type": "string", "minLength": 1}), "exposure": {"type": "string", "enum": ["direct", "deferred", "hidden"]}, "input_schema": {"type": "object"}, "output_schema": {"type": "object"}}, "required": ["name", "description", "exposure", "input_schema", "output_schema"], "additionalProperties": false}}, "truncated": json!({"type": "boolean"})},
+        "required": ["query", "matches", "truncated"], "additionalProperties": false
+    })
 }

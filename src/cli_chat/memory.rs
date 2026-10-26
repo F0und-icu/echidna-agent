@@ -1,4 +1,4 @@
-//! Read-only visibility into the bound Markdown memory namespace.
+//! Read-only visibility into Markdown memory and separate RSI experience.
 
 use serde_json::{Value, json};
 
@@ -6,6 +6,7 @@ use crate::adapters::project_event_store::Project;
 use crate::adapters::project_memory::LocalProjectMemory;
 use crate::adapters::tools::ToolRegistry;
 use crate::domain::agent_definition::AgentDefinitionBinding;
+use crate::domain::context::ContextPlan;
 use crate::domain::memory::MemoryPath;
 use crate::domain::tools::{ToolExposure, ToolName};
 use crate::ports::tool::ToolExecutor;
@@ -16,9 +17,15 @@ pub(super) fn status(
     project: &Project,
     binding: &AgentDefinitionBinding,
     tools: &ToolRegistry,
+    last_plan: Option<&ContextPlan>,
 ) -> Result<Value, ChatError> {
+    let rsi = crate::app::improvement::experience_status(binding, last_plan);
     let Some(scope) = crate::cli_agent::memory_scope(binding) else {
-        return Ok(json!({"memory": "disabled", "automatic_extraction": false}));
+        return Ok(json!({
+            "memory": "disabled",
+            "automatic_extraction": false,
+            "rsi": rsi,
+        }));
     };
     let memory = LocalProjectMemory::with_scope(project, scope.clone());
     let core = memory
@@ -41,6 +48,7 @@ pub(super) fn status(
         "generation": "model_tool_writes",
         "automatic_extraction": false,
         "automatic_context": "core.md; read detail documents explicitly with memory_read",
-        "creation": "The first successful memory_write creates its Markdown document."
+        "creation": "The first successful memory_write creates its Markdown document.",
+        "rsi": rsi,
     }))
 }

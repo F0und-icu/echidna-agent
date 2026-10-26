@@ -4,6 +4,11 @@
 //! scanning. Request/response bytes are bounded, while durable response-body
 //! provenance stays with the existing Artifact publisher.
 
+use super::ToolRegistry;
+use crate::domain::tools::{
+    ToolDeterminism, ToolEffect, ToolExposure, ToolParallelism, ToolRetryPolicy, ToolSpec,
+};
+
 mod body;
 mod request;
 mod response;
@@ -34,7 +39,7 @@ use request::{
 };
 use response::{capture_response, preview_json, response_media_type};
 
-pub(super) fn output_schema() -> Value {
+fn output_schema() -> Value {
     schema::output_schema()
 }
 
@@ -217,7 +222,7 @@ fn artifact_arguments(
     }
 }
 
-pub(super) fn input_schema_for_scope(binding: &ArtifactScopeBinding) -> Value {
+fn input_schema_for_scope(binding: &ArtifactScopeBinding) -> Value {
     schema::input_schema(matches!(binding, ArtifactScopeBinding::TargetFromArguments))
 }
 
@@ -287,4 +292,32 @@ fn http_failure(
         code,
         json!({"error_code": code, "error": message.into()}),
     )
+}
+
+pub(super) const NAME: &str = "http_request";
+
+pub(super) fn spec(registry: &ToolRegistry) -> ToolSpec {
+    let mut spec = super::spec(
+        NAME,
+        "3",
+        super::description(
+            "one bounded HTTP request",
+            "a crawl, scanner, Provider request, or vendor client is needed.",
+            "a known URL addressing a concrete knowledge gap: version-matched documentation, exact source or original advisory; retain source and target applicability. Use structured method, bounded body and explicit Artifact provenance. This is not a search engine; respect project exclusions on solution material.",
+            "status, final URL, safe metadata, timing, preview, and response Artifact.",
+            true,
+        ),
+        ToolExposure::Deferred,
+        input_schema_for_scope(&registry.artifact_scope),
+        output_schema(),
+        ToolParallelism::ResourceLocked,
+        Some("file:.echidna/research.jsonl"),
+        ToolEffect::ExternalMutation,
+        ToolRetryPolicy::NeverAutoRetry,
+        ToolDeterminism::Nondeterministic,
+        35_000,
+    );
+    spec.input_schema["properties"]["preview_bytes"]["maximum"] =
+        json!(registry.window_policy.readback_max_bytes());
+    spec
 }

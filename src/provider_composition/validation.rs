@@ -9,7 +9,7 @@ use super::config::{
     AgentProfileDefinition, CapabilityMappingDefinition, PROVIDER_CONFIG_SCHEMA_VERSION,
     ProviderConfigV1, ProviderDefinition,
 };
-use crate::adapters::mcp_http::McpServerConfig;
+use crate::adapters::mcp::McpServerConfig;
 
 impl ProviderConfigV1 {
     pub(super) fn validate(&self) -> Result<(), ProviderCompositionError> {
@@ -122,9 +122,7 @@ fn validate_mcp_server(id: &str, server: &McpServerConfig) -> Result<(), Provide
             if !cfg!(unix) {
                 return Err(invalid("stdio MCP requires Unix"));
             }
-            if server.protocol_version
-                != crate::adapters::mcp_http::McpProtocolVersion::Legacy20251125
-            {
+            if server.protocol_version != crate::adapters::mcp::McpProtocolVersion::Legacy20251125 {
                 return Err(invalid("stdio MCP supports only protocol 2025-11-25"));
             }
             if server.credential_ref.is_some() {
@@ -152,6 +150,14 @@ fn validate_mcp_server(id: &str, server: &McpServerConfig) -> Result<(), Provide
     if server.timeout_ms == 0 || server.timeout_ms > 86_400_000 {
         return Err(ProviderCompositionError::InvalidTimeout {
             field: "mcp_servers.timeout_ms",
+        });
+    }
+    if server
+        .startup_timeout_ms
+        .is_some_and(|timeout| timeout == 0 || timeout > 86_400_000)
+    {
+        return Err(ProviderCompositionError::InvalidTimeout {
+            field: "mcp_servers.startup_timeout_ms",
         });
     }
     if let Some(reference) = &server.credential_ref {

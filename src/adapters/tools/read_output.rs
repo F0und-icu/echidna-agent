@@ -1,5 +1,10 @@
 //! Bounded exact-byte readback through the existing local Blob owner.
 
+use super::ToolRegistry;
+use crate::domain::tools::{
+    ToolDeterminism, ToolEffect, ToolExposure, ToolParallelism, ToolRetryPolicy, ToolSpec,
+};
+
 use super::{decode_arguments, invalid_arguments, invalid_plan};
 use crate::adapters::{artifact_store::LocalArtifactStore, project_event_store::Project};
 use crate::domain::context::ContextWindowPolicy;
@@ -83,7 +88,7 @@ pub(super) async fn execute(
     }
 }
 
-pub(super) fn input_schema() -> Value {
+fn input_schema() -> Value {
     let max_read_bytes = ContextWindowPolicy::for_window(32768).readback_max_bytes();
     json!({"type":"object","properties":{
         "blob_id":{"type":"string","pattern":"^[0-9a-f]{64}$"},
@@ -92,7 +97,7 @@ pub(super) fn input_schema() -> Value {
     },"required":["blob_id"],"additionalProperties":false})
 }
 
-pub(super) fn output_schema() -> Value {
+fn output_schema() -> Value {
     json!({"type":"object","properties":{
         "blob_id":{"type":"string","pattern":"^[0-9a-f]{64}$"},
         "offset":{"type":"integer","minimum":0},"next_offset":{"type":"integer","minimum":0},
@@ -100,4 +105,32 @@ pub(super) fn output_schema() -> Value {
         "data_base64":{"type":"string"},"text":{"type":"string"},
         "text_lossy":{"type":"boolean"},"has_more":{"type":"boolean"}
     },"required":["blob_id","offset","next_offset","stored_bytes","data_base64","text","text_lossy","has_more"],"additionalProperties":false})
+}
+
+pub(super) const NAME: &str = "read_output";
+
+pub(super) fn spec(registry: &ToolRegistry) -> ToolSpec {
+    let mut spec = super::spec(
+        NAME,
+        "1",
+        super::description(
+            "reading a retained process-output Blob beyond its preview",
+            "a current file or running Job/PTY output is needed.",
+            "the exact output_captures Blob ID and byte offset; do not rerun a completed command for truncated output.",
+            "a bounded text view and exact base64 bytes; raw capture is not verified evidence.",
+            false,
+        ),
+        ToolExposure::Deferred,
+        input_schema(),
+        output_schema(),
+        ToolParallelism::Parallel,
+        None,
+        ToolEffect::ReadOnly,
+        ToolRetryPolicy::ReplaySafe,
+        ToolDeterminism::EnvironmentDependent,
+        5_000,
+    );
+    spec.input_schema["properties"]["max_bytes"]["maximum"] =
+        json!(registry.window_policy.readback_max_bytes());
+    spec
 }

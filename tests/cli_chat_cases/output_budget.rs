@@ -45,7 +45,7 @@ fn output_limit_incomplete_stops_atomically_and_requires_explicit_resume() {
     assert!(output.status.success(), "{stderr}");
     assert!(stderr.contains("response_incomplete"));
     assert!(stderr.contains("max_output_tokens"));
-    assert!(!stderr.contains("协议解码失败"));
+    assert!(!stderr.contains("protocol decoding failed"));
     assert!(String::from_utf8_lossy(&output.stdout).contains("Task input not accepted or saved"));
     let first = f2a_request_body(&server.requests, "budget first request");
     let second = f2a_request_body(&server.requests, "budget explicit resumed request");

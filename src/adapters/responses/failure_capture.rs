@@ -8,10 +8,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
+use super::presentation::{ResponseNotice, ResponsesObserver};
 use super::redaction::WireRedaction;
 use crate::ports::model::ModelProviderError;
-use crate::terminal_console as console;
-use crate::terminal_content::escaped_text;
 
 static NEXT_CAPTURE: AtomicU64 = AtomicU64::new(1);
 
@@ -43,24 +42,20 @@ impl FailedRequestCapture {
         }
     }
 
-    pub(super) fn record(&self, error: &ModelProviderError) {
+    pub(super) fn record(
+        &self,
+        error: &ModelProviderError,
+        observer: Option<&dyn ResponsesObserver>,
+    ) {
         let redaction = WireRedaction::new(&[&self.bearer, self.account.as_deref().unwrap_or("")]);
-        match self.save(error, &redaction) {
-            Ok(path) => {
-                let _ = writeln!(
-                    console::stderr(),
-                    "[debug-failures] saved redacted, non-replayable request snapshot: {}",
-                    escaped_text(&redaction.text(&path.to_string_lossy()))
-                );
-            }
-            Err(error) => {
-                // Never expose filesystem/source error text or replace the Provider error.
-                let _ = writeln!(
-                    console::stderr(),
-                    "[debug-failures] capture failed ({:?}); original Provider error preserved",
-                    error.kind()
-                );
-            }
+        let outcome = self.save(error, &redaction);
+        if let Some(observer) = observer {
+            observer.notify(match outcome {
+                Ok(path) => ResponseNotice::CaptureSaved {
+                    path: redaction.text(&path.to_string_lossy()),
+                },
+                Err(error) => ResponseNotice::CaptureFailed { kind: error.kind() },
+            });
         }
     }
 

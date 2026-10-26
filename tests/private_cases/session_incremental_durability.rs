@@ -1,6 +1,4 @@
 //! Exact-prefix incremental projection and complete execution-outcome contracts.
-include!("../src/lib.rs");
-mod support;
 
 mod durability {
     use std::fs;
