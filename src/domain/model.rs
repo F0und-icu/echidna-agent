@@ -14,6 +14,7 @@ pub const MODEL_INPUT_IR_SCHEMA_VERSION: u16 = 4;
 pub(crate) const MODEL_INPUT_IR_V2_SCHEMA_VERSION: u16 = 2;
 pub(crate) const MODEL_INPUT_IR_V3_SCHEMA_VERSION: u16 = 3;
 pub(crate) const MAX_TOOL_ARGUMENT_CORRECTIONS_PER_TURN: u8 = 2;
+pub(crate) const MAX_TOOL_ARGUMENT_CORRECTIONS_PER_CHAIN: u8 = 2;
 
 /// A version for the provider-neutral input representation.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]

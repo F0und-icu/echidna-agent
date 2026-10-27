@@ -47,6 +47,19 @@ fn valid_config() -> String {
 }
 
 #[test]
+fn invalid_compaction_effort_fails_offline_without_credentials() {
+    for effort in ["", "not valid", "invalid!"] {
+        let credentials = Arc::new(RecordingCredentialSource::default());
+        let config = format!(
+            "{}\n[runtime]\ncompaction_reasoning_effort = \"{effort}\"\n",
+            valid_config()
+        );
+        assert!(load("invalid-compaction-effort", &config, credentials.clone()).is_err());
+        assert!(credentials.references().is_empty());
+    }
+}
+
+#[test]
 fn output_limit_config_is_explicit_role_scoped_and_offline_validated() {
     for value in [0, 32_768, 32_769, 30_000, 28_672] {
         let credentials = Arc::new(RecordingCredentialSource::default());

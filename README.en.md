@@ -142,6 +142,8 @@ receive built-in guidance to preserve reusable lessons and explicit remember
 requests through the memory tools. `core.md` is refreshed into later context;
 detail notes require explicit reads. There is no background model extraction
 task or guarantee of a memory write on every turn.
+Current fixed guidance requests English narrative in new memory writes, preserving
+literal quotations, code, paths and identifiers. Existing documents are not translated.
 
 Inside chat, `/agent` displays identity and digest. `/agent reload [directory or agent.toml]`
 reloads instructions for the same identity, keeps History, and rebuilds the Provider session.
@@ -457,9 +459,26 @@ Domain guidance does not install analysis tools automatically.
 | `/stop` or Ctrl+C | Request that the current turn stop. Completed operations are not undone; background jobs need separate handling. |
 | `/paste` | Follow the prompt to enter a multiline task or additional material. |
 | `/image PATH` | Append one local image to the next Turn's queue; repeated commands preserve order. |
-| `/compact` | Compact context when prerequisites such as a target and research records are present; unavailable while images are queued. |
+| `/compact` | Ask the configured primary model for a tool-free handoff, then validate and compact context using a command-scoped request budget; unavailable while images are queued. |
 | `/resume` | Explicitly rebuild the model session after a recoverable stop, then enter a task. |
 | `/exit` | Leave the interactive interface. |
+
+Automatic compaction remains opt-in with `[runtime] auto_compact = true`. A settled
+tool batch or completed turn can request one model handoff, sharing that task's
+request budget, including transport retries. The newest complete tool batch and
+recent receipt/history references survive compaction. Invalid, oversized,
+cancelled or failed handoffs visibly defer replacement and retain the original
+context and provider continuation. Summaries remain lossy, derived material;
+offline fixtures do not establish real-task quality gains.
+Modern summaries omit machine reference lists from model delivery while retaining
+the complete durable facts, provenance, narrative and Research spine.
+On Resume after append-only Research updates, references refresh offline while
+the previous derived handoff is retained; this refresh sends no model request.
+
+Optionally set `[runtime].compaction_reasoning_effort = "high"` for the isolated
+compaction request. Omit it to inherit the primary setting. Compaction uses the
+same model, endpoint and credentials; primary and vision requests are unchanged.
+The server must support the selected effort; a refusal is shown without downgrade.
 
 Connection failures and transport interruptions before a complete model response receive
 at most two retries, after 500ms and 1000ms. `/stop` and Ctrl+C can cancel the wait.
@@ -472,11 +491,20 @@ and credential errors are not retried. After exhaustion, the checkpoint is retai
 follow the stop message to use `/resume` and enter a new task. RSI diagnosis and contrast
 samples share that same budget; retry does not reopen an arm, replay a completed probe
 command, or adopt a failed candidate.
-One improvement attempt has at most three logical samples: diagnosis, old, and new.
-Each may make up to three physical attempts, for at most nine actual requests;
+Opted-in improvement also checks fresh friction at most once per16 settled durable
+tool batches, with no active jobs, pending images, cancellation or unknown execution.
+Its bounded source package prioritizes the latest eight signals. Accepted local
+gains can apply in the same Turn after a successful tool-free handoff, complete-batch
+preflight and durable definition checkpoint; task, budget and tool activations remain.
+One improvement attempt has diagnosis, old, and new samples; same-Turn application
+also needs a handoff sample. Each may make up to three physical attempts, for at most12 actual requests;
 the original shared Turn budget can stop the attempt earlier.
 New RSI sessions with multiple request audits for one scope must be resumed with
 this version; older persona binaries reject those sessions.
+Malformed Tool JSON is rejected before the whole sample dispatches. At most two
+regenerations are allowed per consecutive rejection chain; only a fully accepted,
+durably committed sample resets it. Cancellation/transport failure does not reset
+the chain and completed tools are never replayed.
 
 Export a session while preserving references to its process and materials:
 

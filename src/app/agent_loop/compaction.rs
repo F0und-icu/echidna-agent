@@ -17,12 +17,20 @@ use super::{AgentLoop, AgentLoopConfigurationError, AgentLoopError, context_stat
 /// Context after its durable History prefix is compacted. It is never appended
 /// as a second History event.
 pub(crate) struct ToolBatchContext<'a> {
+    pub(super) turn_id: &'a crate::domain::context::TurnId,
+    pub(super) history_end: usize,
     pub(super) history_start: usize,
     pub(super) original_input: &'a [ContentItem],
     pub(super) input_provenance:
         &'a std::collections::BTreeMap<usize, crate::domain::context::ContextProvenance>,
     pub(super) detached: bool,
     pub(super) tool_specs: &'a [crate::domain::tools::ToolSpec],
+}
+
+impl ToolBatchContext<'_> {
+    pub(crate) fn original_input(&self) -> &[ContentItem] {
+        self.original_input
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -78,8 +86,32 @@ where
         candidate: &SessionCompaction,
         active: &ToolBatchContext<'_>,
     ) -> Result<bool, AgentLoopError> {
+        self.preflight_batch_context(candidate, active, &self.prompt_composition, true)
+    }
+
+    pub(crate) fn preflight_checkpoint_definition(
+        &self,
+        candidate: &SessionCompaction,
+        active: &ToolBatchContext<'_>,
+        prompt: &crate::domain::research_control::PromptComposition,
+    ) -> Result<bool, AgentLoopError> {
+        self.preflight_batch_context(candidate, active, prompt, false)
+    }
+
+    fn preflight_batch_context(
+        &self,
+        candidate: &SessionCompaction,
+        active: &ToolBatchContext<'_>,
+        prompt: &crate::domain::research_control::PromptComposition,
+        require_reduction: bool,
+    ) -> Result<bool, AgentLoopError> {
         use crate::domain::context::{ContextDecision, ContextPlannerError};
         let retained = candidate.retained_history();
+        // A historical compaction may have omitted the latest complete batch.
+        // Its durable suffix cannot be reintroduced inside an active Turn.
+        if retained.len() > self.history.items().len() {
+            return Ok(false);
+        }
         // The Session owner selects a suffix. Keep the active input whole, or
         // detach it whole; never duplicate only its remaining image suffix.
         if !self.history.items().ends_with(retained) {
@@ -100,7 +132,7 @@ where
         let empty = std::collections::BTreeMap::new();
         let candidate =
             match context_state::compile_context(context_state::ContextCompilationInput {
-                prompt_composition: &self.prompt_composition,
+                prompt_composition: prompt,
                 world_state: self.world_state.as_ref(),
                 project_snapshot: self.project_snapshot.as_ref(),
                 project_memory_core: self.project_memory_core.as_ref(),
@@ -132,6 +164,9 @@ where
             .all(|item| matches!(item.decision(), ContextDecision::Include))
         {
             return Ok(false);
+        }
+        if !require_reduction {
+            return Ok(true);
         }
         let target = budget.working_set_input_tokens() / 2;
         Ok(self

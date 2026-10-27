@@ -331,6 +331,20 @@ async fn candidate_summary_does_not_touch_an_active_baseline_but_durable_compact
         &requests[2].input().content_items,
         session.latest_compaction().unwrap().summary()
     ));
+    let summary = session.latest_compaction().unwrap().summary();
+    let durable = serde_json::to_value(summary).unwrap();
+    let projected = requests[2]
+        .input()
+        .content_items
+        .iter()
+        .find_map(|item| match item {
+            ContentItem::Text { text, .. } => text.strip_prefix("derived_session_summary_v2:"),
+            _ => None,
+        })
+        .unwrap();
+    let projected: serde_json::Value = serde_json::from_str(projected).unwrap();
+    assert_eq!(projected["narrative"], durable["narrative"]);
+    assert_eq!(projected["evidence_spine"], durable["evidence_spine"]);
     assert!(requests[3].is_incremental());
 }
 

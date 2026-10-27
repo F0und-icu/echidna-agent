@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
+use std::io::Read;
 
 use crate::adapters::project_event_store::{
     Project, read_existing_research_events, read_existing_session_events,
@@ -80,9 +81,12 @@ impl SessionReceiptCatalogCache {
     /// Reuses only unchanged individual Session receipt projections. A normal
     /// History checkpoint changes the active Session file, but never causes
     /// every other project Session to be replayed.
-    pub(crate) fn refresh(
+    /// The caller holds the synchronized current Session under its Project
+    /// writer lease. Peers still require exact byte identity and strict replay.
+    pub(crate) fn refresh_with_session(
         &mut self,
         project: &Project,
+        current: Option<(&StreamId, &SessionState)>,
     ) -> Result<(ResearchReferenceCatalog, String), String> {
         let session_ids = project
             .existing_session_ids()
@@ -90,19 +94,22 @@ impl SessionReceiptCatalogCache {
         let live = session_ids.iter().cloned().collect::<BTreeSet<_>>();
         self.sessions.retain(|id, _| live.contains(id));
 
-        for session_id in session_ids {
+        for session_id in &session_ids {
+            if current.is_some_and(|(id, _)| id == session_id) {
+                continue;
+            }
             let path = project
-                .session_stream_path_existing(&session_id)
+                .session_stream_path_existing(session_id)
                 .map_err(|error| error.to_string())?;
             let before = session_source_digest(&path)?;
             let reuse = self
                 .sessions
-                .get(&session_id)
+                .get(session_id)
                 .is_some_and(|cached| cached.source_digest == before);
             if reuse {
                 continue;
             }
-            let receipts = load_session_receipts(project, &session_id)?;
+            let receipts = load_session_receipts(project, session_id)?;
             let after = session_source_digest(&path)?;
             if before != after {
                 return Err(format!(
@@ -110,7 +117,7 @@ impl SessionReceiptCatalogCache {
                 ));
             }
             self.sessions.insert(
-                session_id,
+                session_id.clone(),
                 CachedSessionReceipts {
                     source_digest: after,
                     receipts,
@@ -120,12 +127,29 @@ impl SessionReceiptCatalogCache {
 
         let mut catalog = ResearchReferenceCatalog::default();
         let mut identity = Vec::new();
-        for (session_id, cached) in &self.sessions {
-            for (receipt_id, receipt) in &cached.receipts {
+        for session_id in &session_ids {
+            let receipts = match current {
+                Some((id, state)) if id == session_id => state
+                    .execution_receipts()
+                    .iter()
+                    .map(|record| {
+                        (
+                            ExecutionReceiptId::new(record.event_id.as_str()),
+                            &record.receipt,
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+                _ => self.sessions[session_id]
+                    .receipts
+                    .iter()
+                    .map(|(id, receipt)| (id.clone(), receipt))
+                    .collect(),
+            };
+            for (receipt_id, receipt) in receipts {
                 catalog
                     .insert_execution_receipt(receipt_id.clone(), receipt.clone())
                     .map_err(|error| error.to_string())?;
-                identity.push((session_id.as_str(), receipt_id.as_str(), receipt));
+                identity.push((session_id.as_str(), receipt_id, receipt));
             }
         }
         let bytes = serde_json::to_vec(&identity).map_err(|error| error.to_string())?;
@@ -134,9 +158,90 @@ impl SessionReceiptCatalogCache {
 }
 
 fn session_source_digest(path: &std::path::Path) -> Result<String, String> {
-    fs::read(path)
-        .map(|bytes| blake3::hash(&bytes).to_hex().to_string())
-        .map_err(|error| format!("read Session stream `{}`: {error}", path.display()))
+    let mut file = fs::File::open(path)
+        .map_err(|error| format!("read Event stream `{}`: {error}", path.display()))?;
+    let mut digest = blake3::Hasher::new();
+    let mut chunk = [0; 65_536];
+    loop {
+        let count = file
+            .read(&mut chunk)
+            .map_err(|error| format!("read Event stream `{}`: {error}", path.display()))?;
+        if count == 0 {
+            return Ok(digest.finalize().to_hex().to_string());
+        }
+        digest.update(&chunk[..count]);
+    }
+}
+
+/// One short-lived strictly scanned project view shared by Context and Summary
+/// validation in the same synchronized transaction.
+pub(crate) struct ProjectReadContext {
+    pub(crate) events: Vec<EventEnvelope<serde_json::Value>>,
+    pub(crate) references: ResearchReferenceCatalog,
+    pub(crate) research_digest: String,
+    pub(crate) receipt_digest: String,
+}
+
+impl ProjectReadContext {
+    pub(crate) fn load(
+        project: &Project,
+        cache: &mut SessionReceiptCatalogCache,
+        current: Option<(&StreamId, &SessionState)>,
+    ) -> Result<Self, String> {
+        let path = project
+            .research_stream_path_existing()
+            .map_err(|error| error.to_string())?;
+        let before = session_source_digest(&path)?;
+        let (references, receipt_digest) = cache.refresh_with_session(project, current)?;
+        let events = read_existing_research_events(project).map_err(|error| error.to_string())?;
+        let after = session_source_digest(&path)?;
+        if before != after {
+            return Err("Project stream changed during projection read".to_owned());
+        }
+        Ok(Self {
+            events,
+            references,
+            research_digest: after,
+            receipt_digest,
+        })
+    }
+
+    pub(crate) fn research_state(&self) -> Result<ResearchState, String> {
+        ProjectStreamReducer
+            .reduce(self.events.iter().cloned(), &self.references)
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn event_prefix(&self, watermark: u64) -> &[EventEnvelope<serde_json::Value>] {
+        &self.events[..self
+            .events
+            .partition_point(|event| event.sequence.get() <= watermark)]
+    }
+
+    pub(crate) fn compaction_facts(
+        &self,
+        project_id: &crate::domain::project::ProjectId,
+        watermark: Option<u64>,
+    ) -> Result<CompactionValidationFacts, CompactionValidationFactsError> {
+        let events = watermark.map_or(self.events.as_slice(), |value| self.event_prefix(value));
+        compaction_facts_from_events(project_id, events, self.references.clone())
+    }
+
+    pub(crate) fn historical_compaction_facts(
+        &self,
+        project_id: &crate::domain::project::ProjectId,
+        source: &ResearchStreamIdentity,
+    ) -> Result<CompactionValidationFacts, String> {
+        let facts = self
+            .compaction_facts(project_id, Some(source.watermark().get()))
+            .map_err(|error| error.to_string())?;
+        if &facts.research_stream != source {
+            return Err(
+                "Compaction historical Research prefix identity/hash does not match".to_owned(),
+            );
+        }
+        Ok(facts)
+    }
 }
 
 fn load_session_receipts(
@@ -454,7 +559,7 @@ fn research_reference_is_retained(
     }
 }
 
-pub(super) fn continuation_text(
+pub(crate) fn continuation_text(
     history: &[ContentItem],
     previous: Option<&crate::domain::session::SessionSummary>,
     policy: ContextWindowPolicy,
@@ -571,17 +676,6 @@ pub(crate) fn load_research_state(project: &Project) -> Result<ResearchState, St
     load_research_projection(project).map(|(state, _)| state)
 }
 
-/// Validates the shared Project stream and returns only its durable event
-/// count. Generic runtime paths use this before selecting non-Research facts.
-pub(crate) fn load_project_stream_integrity(project: &Project) -> Result<usize, String> {
-    let references = load_reference_catalog(project)?;
-    let events = read_existing_research_events(project).map_err(|error| error.to_string())?;
-    ProjectStreamReducer
-        .reduce(events, &references)
-        .map(|state| state.applied_event_count())
-        .map_err(|error| error.to_string())
-}
-
 /// Reduces Research against a caller-refreshed ephemeral receipt catalog.
 /// The caller owns the cache lifetime; this helper owns no additional state.
 pub(crate) fn load_research_state_with_references(
@@ -631,7 +725,8 @@ impl From<String> for CompactionValidationFactsError {
 pub(crate) fn load_compaction_validation_facts(
     project: &Project,
 ) -> Result<CompactionValidationFacts, CompactionValidationFactsError> {
-    load_compaction_facts_at(project, None)
+    let references = load_reference_catalog(project)?;
+    load_compaction_validation_facts_with_references(project, references)
 }
 
 /// One compaction operation shares its already validated receipt catalogue
@@ -640,62 +735,32 @@ pub(crate) fn load_compaction_validation_facts_with_references(
     project: &Project,
     references: ResearchReferenceCatalog,
 ) -> Result<CompactionValidationFacts, CompactionValidationFactsError> {
-    load_compaction_facts_with_references(project, None, references)
+    let events = read_existing_research_events(project).map_err(|error| error.to_string())?;
+    compaction_facts_from_events(project.project_id(), &events, references)
 }
 
-/// Replays the original exact Research prefix, never treating an advanced
-/// current stream as if it were the old Summary's source. The caller must
-/// still validate the old Summary against this historical context.
-pub(crate) fn load_historical_compaction_facts(
-    project: &Project,
-    source: &ResearchStreamIdentity,
-) -> Result<CompactionValidationFacts, String> {
-    let facts = load_compaction_facts_at(project, Some(source.watermark().get()))
-        .map_err(|error| error.to_string())?;
-    if &facts.research_stream != source {
-        return Err(
-            "Compaction historical Research prefix identity/hash does not match".to_owned(),
-        );
-    }
-    Ok(facts)
-}
-
-fn load_compaction_facts_at(
-    project: &Project,
-    watermark: Option<u64>,
-) -> Result<CompactionValidationFacts, CompactionValidationFactsError> {
-    let references = load_reference_catalog(project)?;
-    load_compaction_facts_with_references(project, watermark, references)
-}
-
-fn load_compaction_facts_with_references(
-    project: &Project,
-    watermark: Option<u64>,
+fn compaction_facts_from_events(
+    project_id: &crate::domain::project::ProjectId,
+    events: &[EventEnvelope<serde_json::Value>],
     references: ResearchReferenceCatalog,
 ) -> Result<CompactionValidationFacts, CompactionValidationFactsError> {
     let execution_receipt_ids = references
         .execution_receipts()
         .map(|(id, _)| id.clone())
         .collect();
-    let mut events = read_existing_research_events(project).map_err(|error| error.to_string())?;
-    if let Some(watermark) = watermark {
-        // Identity validation below checks contiguous sequences and exact hash.
-        events.retain(|event| event.sequence.get() <= watermark);
-    }
-    let research_stream =
-        ResearchStreamIdentity::from_events(project.project_id().clone(), &events).map_err(
-            |error| match error {
-                SessionError::CompactionResearchStreamEmpty => {
-                    CompactionValidationFactsError::ResearchStreamEmpty
-                }
-                error => CompactionValidationFactsError::Projection(error.to_string()),
-            },
-        )?;
+    let research_stream = ResearchStreamIdentity::from_events(project_id.clone(), events).map_err(
+        |error| match error {
+            SessionError::CompactionResearchStreamEmpty => {
+                CompactionValidationFactsError::ResearchStreamEmpty
+            }
+            error => CompactionValidationFactsError::Projection(error.to_string()),
+        },
+    )?;
     let research_state = ResearchReducer
-        .reduce_with_references(events, &references)
+        .reduce_with_references(events.iter().cloned(), &references)
         .map_err(|error| error.to_string())?;
     Ok(CompactionValidationFacts {
-        project_id: project.project_id().clone(),
+        project_id: project_id.clone(),
         research_stream,
         research_state,
         research_references: references,

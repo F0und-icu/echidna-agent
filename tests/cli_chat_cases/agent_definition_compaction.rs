@@ -2,6 +2,159 @@
 
 use super::*;
 
+#[test]
+fn compaction_effort_is_scoped_and_audited_in_real_loopback() {
+    for (primary_effort, override_effort, expected) in [
+        (Some("high"), Some("low"), Some("low")),
+        (Some("high"), None, Some("high")),
+        (None, None, None),
+    ] {
+        let root = TemporaryDirectory::new("compaction-effort");
+        initialize_project(root.path());
+        let definition = definition(root.path());
+        let server = spawn_responses_server(vec![
+            (
+                200,
+                text_response(&"Observed writing progress. ".repeat(1000), "before"),
+            ),
+            (
+                200,
+                compaction_summary_response("Recorded writing progress.", "summary"),
+            ),
+            (200, text_response("Continued.", "after")),
+        ]);
+        let config = write_config(root.path(), &server.base_url);
+        let mut config_text = fs::read_to_string(&config).unwrap();
+        if let Some(effort) = primary_effort {
+            config_text = config_text.replacen(
+                "context_window = 32768",
+                &format!("context_window = 32768\nreasoning_effort = \"{effort}\""),
+                1,
+            );
+        }
+        if let Some(effort) = override_effort {
+            config_text.push_str(&format!(
+                "\n[runtime]\ncompaction_reasoning_effort = \"{effort}\"\n"
+            ));
+        }
+        fs::write(&config, config_text).unwrap();
+        let output = run_chat(
+            root.path(),
+            &config,
+            "Write a document.\n/compact\nContinue.\n/exit\n",
+            &["--agent", definition.to_str().unwrap()],
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Compaction revision 1 applied"));
+        let wires = (0..3)
+            .map(|_| {
+                request_body(
+                    &server
+                        .requests
+                        .recv_timeout(Duration::from_secs(10))
+                        .unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        server.join();
+        assert_eq!(wires[0]["reasoning"]["effort"].as_str(), primary_effort);
+        assert_eq!(wires[1]["reasoning"]["effort"].as_str(), expected);
+        assert_eq!(wires[2]["reasoning"]["effort"].as_str(), primary_effort);
+        assert_eq!(wires[0]["tools"], wires[2]["tools"]);
+        assert!(wires[1].get("tools").is_none());
+        let project = Project::discover(root.path()).unwrap();
+        let state = reduced_session(&project, &session_id(root.path()));
+        let audits = state.request_audits();
+        assert_eq!(audits.len(), 3);
+        assert_eq!(
+            audits[0].capability_mapping().semantic_hash(),
+            audits[2].capability_mapping().semantic_hash()
+        );
+        assert_eq!(
+            audits[0].capability_mapping().semantic_hash()
+                == audits[1].capability_mapping().semantic_hash(),
+            primary_effort == expected
+        );
+        assert_audits_reconstruct(root.path(), &state);
+        for (audit, expected_effort) in
+            audits
+                .iter()
+                .zip([primary_effort, expected, primary_effort])
+        {
+            let input = audit
+                .reconstruct(|blob| {
+                    fs::read(
+                        root.path()
+                            .join(".echidna/artifacts/blobs/sha256")
+                            .join(blob.as_str()),
+                    )
+                })
+                .unwrap();
+            assert_eq!(
+                serde_json::to_value(input.requirements.reasoning_effort)
+                    .unwrap()
+                    .as_str(),
+                expected_effort
+            );
+        }
+    }
+}
+
+#[test]
+fn rejected_compaction_effort_is_visible_without_downgrade() {
+    let root = TemporaryDirectory::new("compaction-effort-rejected");
+    initialize_project(root.path());
+    let definition = definition(root.path());
+    let server = spawn_responses_server(vec![
+        (200, text_response(&"Prior work. ".repeat(1000), "before")),
+        (
+            400,
+            "{\"error\":{\"message\":\"unsupported effort\"}}".to_owned(),
+        ),
+        (200, text_response("Continued.", "after")),
+    ]);
+    let config = write_config(root.path(), &server.base_url);
+    let text = fs::read_to_string(&config).unwrap().replacen(
+        "context_window = 32768",
+        "context_window = 32768\nreasoning_effort = \"high\"",
+        1,
+    );
+    fs::write(
+        &config,
+        format!("{text}\n[runtime]\ncompaction_reasoning_effort = \"low\"\n"),
+    )
+    .unwrap();
+    let output = run_chat(
+        root.path(),
+        &config,
+        "Write a document.\n/compact\nContinue.\n/exit\n",
+        &["--agent", definition.to_str().unwrap()],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let wires = (0..3)
+        .map(|_| request_body(&server.requests.recv_timeout(F2A_WAIT).unwrap()))
+        .collect::<Vec<_>>();
+    server.join();
+    assert_eq!(wires[1]["reasoning"]["effort"], "low");
+    assert_eq!(wires[2]["reasoning"]["effort"], "high");
+    assert_eq!(wires[2]["previous_response_id"], "before");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Compaction deferred"));
+    let project = Project::discover(root.path()).unwrap();
+    assert!(
+        reduced_session(&project, &session_id(root.path()))
+            .latest_compaction()
+            .is_none()
+    );
+}
+
 fn definition(root: &std::path::Path) -> std::path::PathBuf {
     let directory = root.join("writing-agent");
     fs::create_dir(&directory).unwrap();
@@ -42,10 +195,19 @@ fn generic_image_compacts_without_target_and_resumes_deleted_definition() {
     initialize_project(root.path());
     let definition = definition(root.path());
     fs::write(root.path().join("screen.png"), png_bytes(32, 16)).unwrap();
-    let primary = spawn_responses_server(vec![(
-        200,
-        text_response(&"Detailed writing notes. ".repeat(1000), "generic-first"),
-    )]);
+    let primary = spawn_responses_server(vec![
+        (
+            200,
+            text_response(&"Detailed writing notes. ".repeat(1000), "generic-first"),
+        ),
+        (
+            200,
+            compaction_summary_response(
+                "Detailed writing notes for the supplied diagram.",
+                "generic-summary",
+            ),
+        ),
+    ]);
     let vision = spawn_responses_server(vec![(
         200,
         vision_response("A synthetic diagram.", "generic-vision"),
@@ -75,6 +237,17 @@ fn generic_image_compacts_without_target_and_resumes_deleted_definition() {
             .recv_timeout(Duration::from_secs(10))
             .unwrap(),
     );
+    let summary_wire = request_body(
+        &primary
+            .requests
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap(),
+    );
+    assert!(
+        summary_wire["tools"]
+            .as_array()
+            .is_none_or(|tools| tools.is_empty())
+    );
     primary.join();
     vision.join();
     assert!(
@@ -99,7 +272,7 @@ fn generic_image_compacts_without_target_and_resumes_deleted_definition() {
     let session = session_id(root.path());
     let state = reduced_session(&project, &session);
     let summary = serde_json::to_value(state.latest_compaction().unwrap().summary()).unwrap();
-    assert_eq!(summary["schema_version"], 3);
+    assert_eq!(summary["schema_version"], 5);
     assert!(summary["evidence_spine"].is_null());
     assert_eq!(
         summary["task_references"]["definition"]["agent_id"],
@@ -178,7 +351,7 @@ fn generic_image_compacts_without_target_and_resumes_deleted_definition() {
     assert!(
         serde_json::to_string(&wire)
             .unwrap()
-            .contains("derived_session_summary_v3")
+            .contains("derived_session_summary_v5")
     );
     let resumed_state = reduced_session(&project, &session);
     assert_eq!(
@@ -197,13 +370,19 @@ fn generic_summary_rejects_cross_session_wrong_prefix_and_forged_references() {
     let root = TemporaryDirectory::new("generic-summary-negative");
     initialize_project(root.path());
     let definition = definition(root.path());
-    let server = spawn_responses_server(vec![(
-        200,
-        text_response(
-            &"Durable writing progress. ".repeat(1000),
-            "generic-negative",
+    let server = spawn_responses_server(vec![
+        (
+            200,
+            text_response(
+                &"Durable writing progress. ".repeat(1000),
+                "generic-negative",
+            ),
         ),
-    )]);
+        (
+            200,
+            compaction_summary_response("Durable writing progress.", "generic-negative-summary"),
+        ),
+    ]);
     let config = write_config(root.path(), &server.base_url);
     let output = run_chat(
         root.path(),
@@ -216,6 +395,10 @@ fn generic_summary_rejects_cross_session_wrong_prefix_and_forged_references() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    server
+        .requests
+        .recv_timeout(Duration::from_secs(10))
+        .unwrap();
     server
         .requests
         .recv_timeout(Duration::from_secs(10))
@@ -313,6 +496,72 @@ fn generic_summary_rejects_cross_session_wrong_prefix_and_forged_references() {
 }
 
 #[test]
+fn rejected_compaction_samples_keep_parent_delivery_and_never_execute_tools() {
+    for rejected in [
+        text_response("not valid summary JSON", "bad-summary"),
+        text_response(&"x".repeat(5000), "oversized-summary"),
+        m4_long_flow_tool_response(
+            "summary-must-not-run",
+            "run_command",
+            json!({"argv":["/bin/sh","-c","touch summary-must-not-run"]}),
+            "tool-summary",
+        ),
+    ] {
+        let root = TemporaryDirectory::new("rejected-model-compaction");
+        initialize_project(root.path());
+        let definition = definition(root.path());
+        let server = spawn_responses_server(vec![
+            (
+                200,
+                text_response(
+                    &"ACTUAL-PARENT-PROGRESS ".repeat(500),
+                    "parent-before-summary",
+                ),
+            ),
+            (200, rejected),
+            (
+                200,
+                text_response("PARENT-CONTINUED", "parent-after-summary"),
+            ),
+        ]);
+        let config = write_config(root.path(), &server.base_url);
+        let output = run_chat(
+            root.path(),
+            &config,
+            "Write the report.\n/compact\nContinue the report.\n/exit\n",
+            &["--agent", definition.to_str().unwrap()],
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let wires = (0..3)
+            .map(|_| request_body(&server.requests.recv_timeout(F2A_WAIT).unwrap()))
+            .collect::<Vec<_>>();
+        server.join();
+        assert!(wires[1]["tools"].as_array().is_none_or(Vec::is_empty));
+        assert!(wires[1].get("previous_response_id").is_none());
+        assert_eq!(wires[2]["previous_response_id"], "parent-before-summary");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("Compaction deferred"), "{stdout}");
+        assert!(stdout.contains("PARENT-CONTINUED"));
+        assert!(!root.path().join("summary-must-not-run").exists());
+        let project = Project::discover(root.path()).unwrap();
+        let state = reduced_session(&project, &session_id(root.path()));
+        assert!(state.latest_compaction().is_none());
+        assert_eq!(state.execution_receipt_count(), 0);
+        assert_eq!(state.request_audits().len(), 3);
+        assert!(
+            serde_json::to_string(state.history().items())
+                .unwrap()
+                .contains("ACTUAL-PARENT-PROGRESS")
+        );
+        assert_audits_reconstruct(root.path(), &state);
+    }
+}
+
+#[test]
 fn immediate_reload_compaction_budgets_the_new_instruction_binding() {
     let root = TemporaryDirectory::new("generic-reload-compaction");
     initialize_project(root.path());
@@ -329,6 +578,13 @@ fn immediate_reload_compaction_budgets_the_new_instruction_binding() {
     let server = spawn_responses_server(vec![
         (200, text_response(&"A".repeat(8_000), "before-reload-one")),
         (200, text_response(&"B".repeat(4_000), "before-reload-two")),
+        (
+            200,
+            compaction_summary_response(
+                "Completed the first two document sections.",
+                "reload-summary",
+            ),
+        ),
         (
             200,
             text_response("Continue with the new definition.", "after-reload"),
@@ -355,7 +611,7 @@ fn immediate_reload_compaction_budgets_the_new_instruction_binding() {
     assert!(stdout.contains("reloaded at definition"), "{stdout}");
     assert!(stdout.contains("Compaction revision 1 applied"), "{stdout}");
     let mut wires = Vec::new();
-    for _ in 0..3 {
+    for _ in 0..4 {
         wires.push(request_body(
             &server
                 .requests
@@ -378,23 +634,23 @@ fn immediate_reload_compaction_budgets_the_new_instruction_binding() {
             .as_str()
     );
     assert!(
-        serde_json::to_string(&wires[2])
+        serde_json::to_string(&wires[3])
             .unwrap()
             .contains(&"B".repeat(4_000)),
         "candidate retention must fit the new instruction budget without truncation"
     );
     assert!(
-        wires[2]["instructions"]
+        wires[3]["instructions"]
             .as_str()
             .unwrap()
             .contains("RELOADED WRITER.")
     );
     assert!(
-        !wires[2]["instructions"]
+        !wires[3]["instructions"]
             .as_str()
             .unwrap()
             .contains("PINNED-WRITER-IDENTITY")
     );
-    assert!(wires[2]["previous_response_id"].is_null());
+    assert!(wires[3]["previous_response_id"].is_null());
     assert_audits_reconstruct(root.path(), &state);
 }

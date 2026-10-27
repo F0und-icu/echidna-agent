@@ -12,16 +12,18 @@ use crate::domain::model::ContentItem;
 use super::{COMPACTION_CREATED_EVENT_TYPE, SessionError};
 
 mod evidence;
+mod model_sample;
 mod summary;
 mod task;
 
 pub use evidence::{CompactionValidationContext, EvidenceSpine, ResearchStreamIdentity};
+pub use model_sample::CompactionModelSample;
 pub use summary::{NarrativeSummary, SessionSummary, SessionSummaryDraft};
 pub(crate) use task::{
     SessionSourceIdentity, SessionTaskReferences, TaskCompactionValidationFacts,
 };
 
-pub(super) const CURRENT_SESSION_SUMMARY_SCHEMA_VERSION: u16 = 4;
+pub(super) const CURRENT_SESSION_SUMMARY_SCHEMA_VERSION: u16 = 5;
 
 /// One append-only Compaction fact. Original Session History remains durable.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -79,7 +81,7 @@ impl SessionCompaction {
         if self.schema_version != self.summary.schema_version()
             || !matches!(
                 self.schema_version,
-                1 | 2 | 3 | CURRENT_SESSION_SUMMARY_SCHEMA_VERSION
+                1 | 2 | 3 | 4 | CURRENT_SESSION_SUMMARY_SCHEMA_VERSION
             )
         {
             return Err(SessionError::UnsupportedPayloadSchema {

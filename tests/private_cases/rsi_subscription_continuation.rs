@@ -16,7 +16,8 @@ mod continuation_regression {
     use crate::adapters::responses::{ResponsesHttpAdapter, ResponsesHttpConfig};
     use crate::adapters::tools::ToolRegistry;
     use crate::app::agent_loop::{
-        AgentLoop, AgentLoopError, ChatDurabilityCheckpoint, ImprovementSampleInput,
+        AgentLoop, AgentLoopError, ChatDurabilityCheckpoint, CompactionSampleInput,
+        ImprovementSampleInput,
     };
     use crate::app::cancellation::AgentCancellation;
     use crate::app::model_request_budget::ModelRequestBudget;
@@ -224,6 +225,9 @@ mod continuation_regression {
         Commands,
         Failure,
         Cancelled,
+        CompactionSuccess,
+        CompactionInvalid,
+        CompactionCancelled,
     }
 
     async fn isolation(case: Case) {
@@ -245,6 +249,17 @@ mod continuation_regression {
                 json!({"type":"response.failed","response":{"error":{"code":"fixture_failure","message":"fixture"}}})
             ),
             Case::Cancelled => completed("cancelled", vec![encrypted("cancelled")], None),
+            Case::CompactionSuccess => completed(
+                "compacted",
+                vec![encrypted("compacted")],
+                Some(
+                    r#"{"concise_progress":"main-call completed; recorded actual-rsi-command output","unresolved_questions":[],"next_step_notes":["Continue from retained results without rerunning main-call"]}"#,
+                ),
+            ),
+            Case::CompactionInvalid => {
+                completed("invalid", vec![encrypted("invalid")], Some("not JSON"))
+            }
+            Case::CompactionCancelled => completed("cancelled", vec![encrypted("cancelled")], None),
         };
         let mut bodies = vec![
             completed(
@@ -276,7 +291,8 @@ mod continuation_regression {
                 Arc::new(FixtureCredential),
             ),
             scoped_references: Arc::new(Mutex::new(Vec::new())),
-            cancel: matches!(case, Case::Cancelled).then(|| cancellation.clone()),
+            cancel: matches!(case, Case::Cancelled | Case::CompactionCancelled)
+                .then(|| cancellation.clone()),
         };
         let root = std::env::temp_dir().join(format!(
             "echidna-rsi-opaque-{}-{case:?}",
@@ -323,9 +339,82 @@ mod continuation_regression {
             vec![ImprovementStage::Diagnosis]
         };
         for stage in &stages {
+            if matches!(
+                case,
+                Case::CompactionSuccess | Case::CompactionInvalid | Case::CompactionCancelled
+            ) {
+                use crate::domain::events::{EventSequence, OccurredAt};
+                use crate::domain::session::{SessionEvent, SessionSourceIdentity};
+                let mut source_events = Vec::new();
+                let mut source_items = vec![SessionEvent::Started {
+                    primary_provider_session: ProviderSession::new(
+                        ProviderSessionId::new("parent-fixture"),
+                        ProviderSessionRole::Primary,
+                        0,
+                    )
+                    .reference()
+                    .clone(),
+                }];
+                source_items.push(SessionEvent::HistoryItemRecorded {
+                    item: ContentItem::user_text("execute command"),
+                });
+                for (index, event) in source_items.into_iter().enumerate() {
+                    source_events.push(
+                        event
+                            .into_envelope(
+                                EventId::new(format!("source-{index}")),
+                                StreamId::new("session:isolation"),
+                                EventSequence::new(index as u64 + 1),
+                                OccurredAt::new("2026-10-26T00:00:00Z"),
+                            )
+                            .unwrap(),
+                    );
+                }
+                let (source, _) = SessionSourceIdentity::from_events(
+                    ProjectId::new("project-isolation"),
+                    &source_events,
+                    &[],
+                )
+                .unwrap();
+                let result = agent
+                    .sample_compaction(
+                        CompactionSampleInput {
+                            provider: &provider,
+                            agent_model_profile: None,
+                            source: &source,
+                            source_data: serde_json::to_string(&parent_history).unwrap(),
+                            current_goal: "execute command".to_owned(),
+                            references: vec![EventId::new("source-1")],
+                            byte_limit: 8192,
+                            request_budget: &budget,
+                            cancellation: cancellation.clone(),
+                            audit_context: &audit_context,
+                        },
+                        &mut |_| Ok(EventId::new("compaction-audit")),
+                    )
+                    .await;
+                match case {
+                    Case::CompactionSuccess => {
+                        let output = result.unwrap();
+                        assert_eq!(output.sample.narrative().current_goal(), "execute command");
+                        assert!(output.usage.is_some());
+                    }
+                    Case::CompactionInvalid => assert!(matches!(
+                        result,
+                        Err(AgentLoopError::CompactionSummaryRejected { .. })
+                    )),
+                    Case::CompactionCancelled => {
+                        assert!(matches!(result, Err(AgentLoopError::CompactionCancelled)))
+                    }
+                    _ => unreachable!(),
+                }
+                assert_eq!(agent.history().items(), parent_history);
+                continue;
+            }
             let result = agent
                 .sample_improvement(
                     ImprovementSampleInput {
+                        boundary: crate::app::agent_loop::ImprovementBoundary::CompletedTurn,
                         attempt_id: "opaque-attempt",
                         stage: *stage,
                         prompt: &prompt,
@@ -373,6 +462,9 @@ mod continuation_regression {
                     serde_json::from_str::<Value>(&result.unwrap().text).unwrap()["decision"],
                     "no_change"
                 ),
+                Case::CompactionSuccess | Case::CompactionInvalid | Case::CompactionCancelled => {
+                    unreachable!()
+                }
             }
             assert_eq!(agent.history().items(), parent_history);
         }
@@ -443,6 +535,193 @@ mod continuation_regression {
     async fn encrypted_parent_continues_after_actual_no_change_diagnosis() {
         isolation(Case::NoChange).await;
     }
+
+    struct BorrowedDiagnosis<'a> {
+        audit: &'a RequestAuditRunContext,
+        tools: &'a ToolRegistry,
+        budget: &'a ModelRequestBudget,
+        calls: usize,
+    }
+
+    impl crate::app::agent_loop::ToolBatchStage<ObservedProvider, ToolRegistry>
+        for BorrowedDiagnosis<'_>
+    {
+        fn apply<'call, 'provider: 'call, 'tools: 'call>(
+            &'call mut self,
+            agent: &'call mut AgentLoop<'provider, 'tools, ObservedProvider, ToolRegistry>,
+            active: &'call crate::app::agent_loop::ToolBatchContext<'_>,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), AgentLoopError>> + 'call>>
+        {
+            Box::pin(async move {
+                use crate::app::agent_loop::ImprovementBoundary;
+                let prompt = PromptComposition::current();
+                let before = agent.history().items().to_vec();
+                for boundary in [
+                    ImprovementBoundary::CompletedTurn,
+                    ImprovementBoundary::ToolBatch(active),
+                ] {
+                    let result = agent
+                        .sample_improvement(
+                            ImprovementSampleInput {
+                                boundary,
+                                attempt_id: "active-opaque-diagnosis",
+                                stage: ImprovementStage::Diagnosis,
+                                prompt: &prompt,
+                                task: "Diagnose a neutral completed command batch.".to_owned(),
+                                references: vec![],
+                                tools: self.tools,
+                                request_budget: self.budget,
+                                cancellation: AgentCancellation::new(),
+                                audit_context: self.audit,
+                            },
+                            &mut |_| Ok(EventId::new("active-diagnosis-audit")),
+                            &mut |_, _, items, _, _| {
+                                assert!(items.iter().all(|item| !matches!(
+                                    item,
+                                    ContentItem::Reasoning { .. }
+                                        | ContentItem::OpaqueContinuation { .. }
+                                )));
+                                Ok(())
+                            },
+                            &mut |_| Ok(()),
+                        )
+                        .await;
+                    if matches!(boundary, ImprovementBoundary::CompletedTurn) {
+                        assert!(matches!(result, Err(AgentLoopError::ContextStateMismatch)));
+                    } else {
+                        assert_eq!(
+                            serde_json::from_str::<Value>(&result?.text).unwrap()["decision"],
+                            "no_change"
+                        );
+                        self.calls += 1;
+                    }
+                    assert_eq!(agent.history().items(), before);
+                }
+                Ok(())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn borrowed_tool_checkpoint_preserves_encrypted_parent_without_adding_history() {
+        use crate::adapters::project_snapshot::LocalProjectSnapshot;
+        use crate::app::agent_loop::{
+            CliRuntimeStages, CurrentContextState, ViewImageFollowUpFuture,
+        };
+        use crate::domain::world_state::ProjectSnapshotContext;
+        use crate::ports::tool::ToolExecutor;
+        let (url, mut requests, server) = server(vec![
+            completed(
+                "active-parent",
+                vec![encrypted("active-parent"), command("active-main-call")],
+                None,
+            ),
+            completed(
+                "active-diagnosis",
+                vec![encrypted("active-diagnosis")],
+                Some(r#"{"decision":"no_change","reason":"Keep the supported method."}"#),
+            ),
+            completed("active-final", vec![], Some("Parent task complete.")),
+        ])
+        .await;
+        let provider = ObservedProvider {
+            adapter: ResponsesHttpAdapter::new(
+                ResponsesHttpConfig::new(
+                    url,
+                    "fixture-subscription",
+                    "codex_subscription:rsi-isolation",
+                    capabilities(),
+                )
+                .with_codex_subscription_profile(),
+                Arc::new(FixtureCredential),
+            ),
+            scoped_references: Arc::new(Mutex::new(Vec::new())),
+            cancel: None,
+        };
+        let root = crate::support::TemporaryDirectory::new("borrowed-opaque-checkpoint");
+        let project = Project::initialize(root.path()).unwrap();
+        let tools = ToolRegistry::for_project(root.path());
+        let mut agent = AgentLoop::new(&provider, &tools)
+            .with_output_store(LocalArtifactStore::for_project(&project));
+        let audit = RequestAuditRunContext::new(
+            RequestAuditBinding::new(
+                project.project_id().clone(),
+                StreamId::new("session:active-isolation"),
+            )
+            .unwrap(),
+            ResponsesHttpAdapter::request_adapter_version(),
+        );
+        let budget = Arc::new(ModelRequestBudget::new(3));
+        let mut stage = BorrowedDiagnosis {
+            audit: &audit,
+            tools: &tools,
+            budget: &budget,
+            calls: 0,
+        };
+        let mut follow_up =
+            |_| -> ViewImageFollowUpFuture<'_> { Box::pin(async { unreachable!("no images") }) };
+        let mut text = |_: &str| Ok(());
+        let mut started = |_: &crate::domain::tools::ToolExecutionPlan| {};
+        let mut durable = |_: ChatDurabilityCheckpoint<'_>| Ok(());
+        let mut refresh = || {
+            let snapshot = LocalProjectSnapshot::new(&project)
+                .inspect(&tools.specs(), &[], "active-opaque")
+                .unwrap();
+            Ok(CurrentContextState::new(
+                None,
+                ProjectSnapshotContext::new(snapshot.snapshot).unwrap(),
+                None,
+            ))
+        };
+        let result = agent
+            .run_turn_audited_with_context_refresh_and_vision_stages(
+                "Execute the neutral command.",
+                vec![],
+                AgentCancellation::new(),
+                &audit,
+                &mut |_| Ok(()),
+                CliRuntimeStages::new(
+                    &mut follow_up,
+                    &mut text,
+                    &mut started,
+                    &mut durable,
+                    &mut refresh,
+                    budget.clone(),
+                ),
+                Some(&mut stage),
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(result,crate::app::agent_loop::AgentTurnOutcome::Completed {model_requests:3,executions,..} if executions.len()==1)
+        );
+        assert_eq!(stage.calls, 1);
+        assert_eq!(budget.counts().total(), 3);
+        assert_eq!(agent.history().items().len(), 4);
+        let mut wires = Vec::new();
+        while let Some(request) = requests.recv().await {
+            wires.push(request);
+        }
+        server.await.unwrap();
+        assert_eq!(wires.len(), 3);
+        assert!(
+            !wires[1]["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["type"] == "reasoning")
+        );
+        let reasoning = wires[2]["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["type"] == "reasoning")
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(reasoning, vec![encrypted("active-parent")]);
+        assert!(!wires[2].to_string().contains("active-diagnosis"));
+        assert_eq!(provider.scoped_references.lock().unwrap().len(), 1);
+    }
     #[tokio::test]
     async fn encrypted_parent_continues_after_actual_old_new_command_scopes() {
         isolation(Case::Commands).await;
@@ -454,6 +733,17 @@ mod continuation_regression {
     #[tokio::test]
     async fn encrypted_parent_continues_after_a_staged_scope_is_cancelled() {
         isolation(Case::Cancelled).await;
+    }
+
+    #[tokio::test]
+    async fn encrypted_parent_continues_after_compaction_success_rejection_and_cancellation() {
+        for case in [
+            Case::CompactionSuccess,
+            Case::CompactionInvalid,
+            Case::CompactionCancelled,
+        ] {
+            isolation(case).await;
+        }
     }
 
     #[test]

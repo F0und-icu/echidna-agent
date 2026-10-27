@@ -5,15 +5,14 @@ use crate::adapters::project_event_store::{
 };
 use crate::adapters::research_projection::{
     CompactionValidationFacts, CompactionValidationFactsError, ProjectArtifactCatalog,
-    continuation_text, load_compaction_validation_facts,
-    load_compaction_validation_facts_with_references, load_historical_compaction_facts,
-    load_reference_catalog, load_reference_catalog_with_session,
+    ProjectReadContext, continuation_text, load_compaction_validation_facts,
+    load_compaction_validation_facts_with_references, load_reference_catalog_with_session,
 };
 use crate::domain::context::ContextWindowPolicy;
+use crate::domain::events::EventId;
 use crate::domain::events::StreamId;
 use crate::domain::model::ContentItem;
 use crate::domain::project::ProjectId;
-use crate::domain::research::ExecutionReceiptId;
 use crate::domain::session::{
     CompactionValidationContext, NarrativeSummary, SessionError, SessionSourceIdentity,
     SessionState, SessionSummary, SessionSummaryDraft, TaskCompactionValidationFacts,
@@ -23,9 +22,29 @@ pub(crate) struct SessionCompactionFacts {
     project_id: ProjectId,
     research: Option<CompactionValidationFacts>,
     task: Option<TaskCompactionValidationFacts>,
+    model_sample: Option<(crate::domain::events::EventId, NarrativeSummary)>,
 }
 
 impl SessionCompactionFacts {
+    pub(crate) fn with_model_sample(
+        mut self,
+        id: crate::domain::events::EventId,
+        narrative: NarrativeSummary,
+    ) -> Self {
+        self.model_sample = Some((id, narrative));
+        self
+    }
+    pub(crate) fn task_source(&self) -> Result<&SessionSourceIdentity, SessionError> {
+        self.task
+            .as_ref()
+            .map(TaskCompactionValidationFacts::source)
+            .ok_or_else(|| SessionError::CompactionContextProvenance {
+                message: "model compaction requires a durable Agent binding".to_owned(),
+            })
+    }
+    pub(crate) fn task_projection(&self) -> Option<&TaskCompactionValidationFacts> {
+        self.task.as_ref()
+    }
     pub(crate) fn context(&self) -> CompactionValidationContext<'_> {
         match (&self.research, &self.task) {
             (Some(research), Some(task)) => research.context().with_task(task),
@@ -65,7 +84,17 @@ impl SessionCompactionFacts {
         // Task summaries use FactReference provenance. Even the smallest
         // candidate must retain a source event; an empty reference list would
         // violate that contract before preflight can report no useful reduction.
-        SessionSummaryDraft::for_task(task.references(reference_limit.max(1)), spine, narrative)
+        let draft = SessionSummaryDraft::for_task(
+            task.references(reference_limit.max(1)),
+            spine,
+            narrative,
+        )?;
+        Ok(match self.model_sample.as_ref() {
+            Some((event_id, narrative)) => {
+                draft.with_model_sample(event_id.clone(), narrative.clone())
+            }
+            None => draft,
+        })
     }
 }
 
@@ -78,6 +107,7 @@ pub(crate) fn load_session_compaction_facts(
             project_id: project.project_id().clone(),
             research: Some(load_compaction_validation_facts(project)?),
             task: None,
+            model_sample: None,
         });
     };
     let source_stream = state
@@ -103,7 +133,7 @@ pub(crate) fn load_session_compaction_facts(
         project_events.iter().cloned(),
         &references,
     )?;
-    let task = task_facts(source, &reduced, &catalog, &session_id)?;
+    let task = task_facts(source, &reduced, &catalog, &session_id, &events)?;
     Ok(SessionCompactionFacts {
         project_id: project.project_id().clone(),
         research: binding
@@ -112,6 +142,68 @@ pub(crate) fn load_session_compaction_facts(
             .map(|_| load_compaction_validation_facts_with_references(project, references))
             .transpose()?,
         task: Some(task),
+        model_sample: None,
+    })
+}
+
+/// Current source captured by the synchronized startup projection. A missing
+/// source is a real cache miss after later appends and uses the strict loader.
+pub(crate) fn load_session_compaction_facts_from_read(
+    project: &Project,
+    state: &SessionState,
+    source: Option<&SessionSourceIdentity>,
+    read: &ProjectReadContext,
+) -> Result<SessionCompactionFacts, CompactionValidationFactsError> {
+    let Some(source) = source else {
+        return load_session_compaction_facts(project, state);
+    };
+    let Some(binding) = state.agent_definition_binding() else {
+        return Ok(SessionCompactionFacts {
+            project_id: project.project_id().clone(),
+            research: Some(read.compaction_facts(project.project_id(), None)?),
+            task: None,
+            model_sample: None,
+        });
+    };
+    if source.project_id() != project.project_id()
+        || Some(source.stream_id()) != state.stream_id()
+        || source.watermark().get()
+            != state
+                .next_event_sequence()
+                .map_err(|error| error.to_string())?
+                .get()
+                - 1
+    {
+        return Err(
+            "Current Compaction source does not belong to its synchronized projection"
+                .to_owned()
+                .into(),
+        );
+    }
+    let source = source
+        .clone()
+        .with_current_project(&read.events)
+        .map_err(|error| error.to_string())?;
+    let session_id = session_id(source.stream_id())?;
+    let catalog = ProjectArtifactCatalog::from_events_with_references(
+        read.events.iter().cloned(),
+        &read.references,
+    )?;
+    let task = TaskCompactionValidationFacts::current_projection(
+        source,
+        state,
+        catalog.session_artifact_ids(&session_id).cloned().collect(),
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(SessionCompactionFacts {
+        project_id: project.project_id().clone(),
+        research: binding
+            .definition()
+            .research()
+            .map(|_| read.compaction_facts(project.project_id(), None))
+            .transpose()?,
+        task: Some(task),
+        model_sample: None,
     })
 }
 
@@ -121,29 +213,36 @@ pub(crate) fn load_session_compaction_facts(
 pub(crate) fn load_resume_compaction_facts(
     project: &Project,
     summary: &SessionSummary,
+    read: &ProjectReadContext,
+    cached: Option<&TaskCompactionValidationFacts>,
 ) -> Result<SessionCompactionFacts, String> {
-    load_summary_facts(project, summary, false)
+    load_summary_facts(project, summary, false, read, cached)
 }
 
 pub(crate) fn load_historical_session_compaction_facts(
     project: &Project,
     summary: &SessionSummary,
+    read: &ProjectReadContext,
+    cached: Option<&TaskCompactionValidationFacts>,
 ) -> Result<SessionCompactionFacts, String> {
-    load_summary_facts(project, summary, true)
+    load_summary_facts(project, summary, true, read, cached)
 }
 
 fn load_summary_facts(
     project: &Project,
     summary: &SessionSummary,
     historical_research: bool,
+    read: &ProjectReadContext,
+    cached: Option<&TaskCompactionValidationFacts>,
 ) -> Result<SessionCompactionFacts, String> {
     let research = summary
         .evidence_spine()
         .map(|spine| {
             if historical_research {
-                load_historical_compaction_facts(project, spine.source())
+                read.historical_compaction_facts(project.project_id(), spine.source())
             } else {
-                load_compaction_validation_facts(project).map_err(|error| error.to_string())
+                read.compaction_facts(project.project_id(), None)
+                    .map_err(|error| error.to_string())
             }
         })
         .transpose()?;
@@ -155,25 +254,26 @@ fn load_summary_facts(
                 return Err("Compaction task belongs to a different project".to_owned());
             }
             let session_id = session_id(source.stream_id())?;
+            let project_events = read.event_prefix(source.project_stream_watermark());
+            source.validate_project_prefix(project_events).map_err(|error| error.to_string())?;
+            let catalog = ProjectArtifactCatalog::from_events_with_references(
+                project_events.iter().cloned(), &read.references,
+            )?;
+            if let Some(cached) = cached.filter(|value| value.source() == source) {
+                return Ok(cached.clone().with_artifacts(catalog.session_artifact_ids(&session_id).cloned().collect()));
+            }
             let mut events = read_existing_session_events(project, &session_id)
                 .map_err(|error| error.to_string())?;
             events.retain(|event| event.sequence.get() <= source.watermark().get());
-            let mut project_events = read_existing_research_events(project)
-                .map_err(|error| error.to_string())?;
-            project_events.retain(|event| event.sequence.get() <= source.project_stream_watermark());
-            let catalog = ProjectArtifactCatalog::from_events_with_references(
-                project_events.iter().cloned(),
-                &load_reference_catalog(project)?,
-            )?;
             let (actual, state) = SessionSourceIdentity::from_events(
                 project.project_id().clone(),
                 &events,
-                &project_events,
+                project_events,
             ).map_err(|error| error.to_string())?;
             if &actual != source {
                 return Err("Compaction task historical Session/project prefix identity/hash does not match".to_owned());
             }
-            task_facts(actual, &state, &catalog, &session_id)
+            task_facts(actual, &state, &catalog, &session_id, &events)
         })
         .transpose()?;
     if research.is_none() && task.is_none() {
@@ -183,6 +283,7 @@ fn load_summary_facts(
         project_id: project.project_id().clone(),
         research,
         task,
+        model_sample: None,
     })
 }
 
@@ -191,23 +292,13 @@ fn task_facts(
     state: &SessionState,
     catalog: &ProjectArtifactCatalog,
     session_id: &StreamId,
+    events: &[crate::domain::events::EventEnvelope<serde_json::Value>],
 ) -> Result<TaskCompactionValidationFacts, String> {
-    let binding = state
-        .agent_definition_binding()
-        .ok_or_else(|| "Summary v3 source has no durable Agent definition".to_owned())?;
-    TaskCompactionValidationFacts::new(
+    TaskCompactionValidationFacts::from_session_source(
         source,
-        binding,
+        state,
         catalog.session_artifact_ids(session_id).cloned().collect(),
-        state
-            .execution_receipts()
-            .iter()
-            .map(|record| ExecutionReceiptId::new(record.event_id.as_str()))
-            .collect(),
-        state
-            .history_items_with_event_ids()
-            .map(|(id, _)| id.clone())
-            .collect(),
+        events,
     )
     .map_err(|error| error.to_string())
 }
@@ -219,4 +310,25 @@ fn session_id(stream: &StreamId) -> Result<StreamId, String> {
         .filter(|id| !id.is_empty())
         .map(StreamId::new)
         .ok_or_else(|| format!("invalid Session source stream `{stream}`"))
+}
+
+/// A network sample runs without a writer lease. Before publishing its
+/// replacement, prove that only its own audited attempts/sample/usage followed
+/// the exact frozen Session and project prefixes.
+pub(crate) fn validate_compaction_source_suffix(
+    project: &Project,
+    source: &SessionSourceIdentity,
+    attempts: &[EventId],
+    sample_event: Option<&EventId>,
+) -> Result<(), String> {
+    let events = read_existing_session_events(project, &session_id(source.stream_id())?)
+        .map_err(|error| error.to_string())?;
+    let project_events =
+        read_existing_research_events(project).map_err(|error| error.to_string())?;
+    if source.project_id() != project.project_id() {
+        return Err("Compaction source belongs to a different Project".to_owned());
+    }
+    source
+        .validate_sampling_suffix(&events, &project_events, attempts, sample_event)
+        .map_err(|error| error.to_string())
 }

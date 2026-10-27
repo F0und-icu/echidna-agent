@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "agent_evolution/long_task.rs"]
+mod long_task;
+
 pub(super) fn improvement_definition(root: &std::path::Path) -> std::path::PathBuf {
     let path = definition(root, true);
     let manifest = path.join("agent.toml");
@@ -272,15 +275,21 @@ fn rsi2_reference_match_uses_actual_scoped_commands_and_only_adopts_a_local_gain
         improvement_fixture(root.path());
         let count = if matches!(case, "no-change" | "bad-json" | "empty-reason") {
             4
+        } else if case == "gain" {
+            7
         } else {
             6
         };
         let server = server(
             move |step, request| match step {
-                0 => tool(
-                    "main-failed",
-                    "run_command",
-                    json!({"argv":["/bin/sh","probe.sh","fail"]}),
+                0 => format!(
+                    "data: {}\n\n{}",
+                    json!({"type":"response.output_text.delta","delta":"Superseded neutral aggregation preparation. ".repeat(500)}),
+                    tool(
+                        "main-failed",
+                        "run_command",
+                        json!({"argv":["/bin/sh","probe.sh","fail"]}),
+                    )
                 ),
                 1 => tool(
                     "main-reference",
@@ -321,6 +330,13 @@ fn rsi2_reference_match_uses_actual_scoped_commands_and_only_adopts_a_local_gain
                     };
                     tool("same-provider-call-id", "run_command", args)
                 }
+                6 if case == "gain" => {
+                    assert!(request.get("tools").is_none());
+                    compaction_summary_response(
+                        "main-failed failed; main-reference completed with the actual expected output. RSI accepted only the measured local gain.",
+                        "rsi-after-summary",
+                    )
+                }
                 _ => unreachable!(),
             },
             count,
@@ -355,7 +371,7 @@ fn rsi2_reference_match_uses_actual_scoped_commands_and_only_adopts_a_local_gain
         assert_eq!(
             facts
                 .iter()
-                .filter(|fact| fact["kind"] == "started")
+                .filter(|fact| fact["kind"] == "started" || fact["kind"] == "checkpoint_started")
                 .count(),
             1
         );
@@ -388,9 +404,9 @@ fn rsi2_reference_match_uses_actual_scoped_commands_and_only_adopts_a_local_gain
         assert_eq!(state.request_audits().len(), count);
         assert_eq!(
             state.execution_receipt_count(),
-            if count == 6 { 4 } else { 2 }
+            if count >= 6 { 4 } else { 2 }
         );
-        if count == 6 {
+        if count >= 6 {
             let scoped = facts
                 .iter()
                 .filter(|fact| fact["kind"] == "sample" && fact["stage"] != "diagnosis")
@@ -522,7 +538,8 @@ fn rsi2_reference_match_uses_actual_scoped_commands_and_only_adopts_a_local_gain
                     .iter()
                     .filter(
                         |event| event["event_type"] == "session.rsi_activity_recorded"
-                            && event["payload"]["fact"]["kind"] == "started"
+                            && (event["payload"]["fact"]["kind"] == "started"
+                                || event["payload"]["fact"]["kind"] == "checkpoint_started")
                     )
                     .count(),
                 1,

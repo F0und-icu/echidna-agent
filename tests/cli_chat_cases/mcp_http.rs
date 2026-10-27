@@ -354,7 +354,12 @@ fn one_startup_mcp_catalog_covers_reload_use_and_compaction_preflight() {
         (200, catalog_response()),
         (200, completed_response("2", "lifecycle observed")),
     ]);
-    let provider = spawn_responses_server(scripted_turn("lifecycle"));
+    let mut lifecycle = scripted_turn("lifecycle");
+    lifecycle.push((
+        200,
+        compaction_summary_response("lifecycle observed", "lifecycle-summary"),
+    ));
+    let provider = spawn_responses_server(lifecycle);
     let config = mcp_config(harness.path(), &provider.base_url, &remote.base_url);
     let output = run_chat(
         root.path(),
@@ -377,7 +382,7 @@ fn one_startup_mcp_catalog_covers_reload_use_and_compaction_preflight() {
     let requests = take_requests(remote, 2, "one MCP catalog across bindings");
     assert_eq!(requests[0]["method"], "tools/list");
     assert_eq!(requests[1]["method"], "tools/call");
-    let sent = take_requests(provider, 3, "MCP binding lifecycle Provider");
+    let sent = take_requests(provider, 4, "MCP binding lifecycle Provider");
     assert!(!advertises_remote(&sent[0]));
     assert!(advertises_remote(&sent[1]));
     assert!(json_contains_text(&sent[2]["input"], "lifecycle observed"));

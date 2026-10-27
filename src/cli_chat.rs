@@ -49,9 +49,7 @@ use crate::adapters::project_event_store::{Project, ProjectEventStream};
 use crate::adapters::research_projection::CompactionValidationFactsError;
 use crate::adapters::session_compaction::{
     SessionCompactionFacts, load_historical_session_compaction_facts, load_resume_compaction_facts,
-    load_session_compaction_facts,
 };
-use crate::adapters::tools::ToolRegistry;
 use crate::app::agent_loop::{
     AgentLoop, AgentLoopError, AgentTurnOutcome, AssistantTextDeltaStage, ChatDurabilityCheckpoint,
     ChatDurabilityStage, CliRuntimeStages, ToolExecutionStartStage, ViewImageFollowUpFuture,
@@ -548,21 +546,41 @@ pub(crate) async fn run(
                     );
                     continue;
                 }
-                let current = context_cache.refresh(&session.project, &tools, &session.binding)?;
+                let current = session.refresh_context(&mut context_cache, &tools)?;
                 agent.refresh_current_context(current)?;
-                console_println!(
-                    "{}",
-                    session
-                        .compact(
-                            &mut agent,
-                            composition
-                                .agent_profile()
-                                .primary()
-                                .capabilities()
-                                .context_window
-                        )?
-                        .message()
-                );
+                let cancellation = AgentCancellation::new();
+                let budget =
+                    ModelRequestBudget::new(composition.runtime().model_request_limit_per_turn);
+                lines.processing(false)?;
+                let result = input::interruptible(
+                    session.compact(
+                        &mut agent,
+                        composition
+                            .agent_profile()
+                            .primary()
+                            .capabilities()
+                            .context_window,
+                        compaction::CompactionRequestContext {
+                            composition,
+                            budget: &budget,
+                            cancellation: cancellation.clone(),
+                            audit: &audit_context,
+                        },
+                    ),
+                    &cancellation,
+                    lines,
+                    terminal_input,
+                    &mut input_closed,
+                    &mut pending_input,
+                )
+                .await?;
+                match result {
+                    Ok(summary) => console_println!("{}", summary.message()),
+                    Err(error) if compaction::explicitly_deferred(&error) => console_println!(
+                        "Compaction deferred: {error}; original Context and Provider delivery retained."
+                    ),
+                    Err(error) => return Err(error),
+                }
                 continue;
             }
             if line == "/image" {
@@ -631,7 +649,7 @@ pub(crate) async fn run(
 
             // Prompt/core filesystem failures occur before a possible scoped
             // Vision request as well as before the Primary Provider request.
-            let current = context_cache.refresh(&session.project, &tools, &session.binding)?;
+            let current = session.refresh_context(&mut context_cache, &tools)?;
             agent.refresh_current_context(current)?;
             timing.checkpoint("context_refresh");
             lines.processing(follow_up)?;
@@ -754,7 +772,7 @@ pub(crate) async fn run(
                         .map_err(|error| AgentLoopError::ModelRejectionCommit {
                             message: error.to_string(),
                         })?;
-                    let limit = crate::domain::model::MAX_TOOL_ARGUMENT_CORRECTIONS_PER_TURN;
+                    let limit = crate::domain::model::MAX_TOOL_ARGUMENT_CORRECTIONS_PER_CHAIN;
                     console_eprintln!(
                         "\n[model sample rejected] {diagnostic}; streamed prose was not committed and no Tool from this sample ran."
                     );
@@ -770,6 +788,11 @@ pub(crate) async fn run(
                     }
                     Ok(())
                 }
+                ChatDurabilityCheckpoint::ArgumentCorrectionReset => session
+                    .record_correction_reset()
+                    .map_err(|error| AgentLoopError::ModelRejectionCommit {
+                        message: error.to_string(),
+                    }),
                 ChatDurabilityCheckpoint::Subcommand(checkpoint) => {
                     session
                         .record_subcommand(checkpoint)
@@ -814,67 +837,38 @@ pub(crate) async fn run(
                 })
             };
             let mut refresh_context = || {
-                context_cache
-                    .refresh(&session.project, &tools, &session.binding)
+                session
+                    .refresh_context(&mut context_cache, &tools)
                     .map_err(|error| AgentLoopError::ContextRefresh {
                         message: error.to_string(),
                     })
             };
             let improvement_task = line.clone();
             let improvement_history_start = improvement::history_start(&session)?;
-            let mut batch_compaction_deferred = false;
-            let mut tool_batch =
-                |agent: &mut AgentLoop<'_, '_, _, ToolRegistry>,
-                 active: &crate::app::agent_loop::ToolBatchContext<'_>| {
-                    if !composition.runtime().auto_compact
-                        || batch_compaction_deferred
-                        || signal_cancellation.is_cancelled()
-                        || !agent.delivery_needs_compaction()?
-                    {
-                        return Ok(());
-                    }
-                    end_answer();
-                    match session.compact_tool_batch(
-                        agent,
-                        composition
-                            .agent_profile()
-                            .primary()
-                            .capabilities()
-                            .context_window,
-                        active,
-                    ) {
-                        Ok(summary) => console_println!(
-                            "Automatic tool-batch compaction applied. {} Current task and Turn budget retained.",
-                            summary.message()
-                        ),
-                        Err(ChatError::CompactionFacts(
-                            CompactionValidationFactsError::ResearchStreamEmpty,
-                        )) => {
-                            console_println!(
-                                "Automatic tool-batch compaction deferred: the Project Research stream is empty; Provider delivery retained."
-                            );
-                            batch_compaction_deferred = true;
-                        }
-                        Err(ChatError::Session(SessionError::CompactionCurrentTargetRequired)) => {
-                            console_println!(
-                                "Automatic tool-batch compaction deferred: no current TargetSnapshot; Provider delivery retained."
-                            );
-                            batch_compaction_deferred = true;
-                        }
-                        Err(ChatError::CompactionNotUseful) => {
-                            console_println!(
-                                "Automatic tool-batch compaction deferred: no smaller usable Context working set; Provider delivery retained."
-                            );
-                            batch_compaction_deferred = true;
-                        }
-                        Err(error) => {
-                            return Err(AgentLoopError::ToolBatchCompaction {
-                                message: error.to_string(),
-                            });
-                        }
-                    }
-                    Ok(())
-                };
+            let mut tool_batch = compaction::AutomaticToolBatchCompaction {
+                session: &session,
+                window_tokens: composition
+                    .agent_profile()
+                    .primary()
+                    .capabilities()
+                    .context_window,
+                request: compaction::CompactionRequestContext {
+                    composition,
+                    budget: &request_budget,
+                    cancellation: signal_cancellation.clone(),
+                    audit: &audit_context,
+                },
+                deferred: !composition.runtime().auto_compact,
+                end_answer: &end_answer,
+                composition,
+                tools: &tools,
+                discovered_mcp: &discovered_mcp,
+                task: &improvement_task,
+                history_start: improvement_history_start,
+                no_pending_images: pending_images.is_empty(),
+                binding: session.binding.clone(),
+                batches: 0,
+            };
             let outcome = {
                 let turn = agent.run_turn_audited_with_context_refresh_and_vision_stages(
                     line,
@@ -890,10 +884,9 @@ pub(crate) async fn run(
                         &mut refresh_context,
                         Arc::clone(&request_budget),
                     ),
-                    composition
-                        .runtime()
-                        .auto_compact
-                        .then_some(&mut tool_batch),
+                    (composition.runtime().auto_compact
+                        || crate::app::improvement::policy(session.binding.definition()).is_some())
+                    .then_some(&mut tool_batch),
                 );
                 input::interruptible(
                     turn,
@@ -906,6 +899,10 @@ pub(crate) async fn run(
                 .await?
             };
 
+            let tool_batch_compaction_deferred = tool_batch.deferred;
+            let effective_binding = tool_batch.binding.clone();
+            drop(tool_batch);
+            session.binding = effective_binding;
             timing.checkpoint("primary_turn_settled");
             tool_output.borrow_mut().finish_turn();
             let mut auto_compacted = false;
@@ -944,9 +941,11 @@ pub(crate) async fn run(
                         disposition = SessionDisposition::Resumed;
                         context_cache = context::ChatContextCache::default();
                     }
-                    if composition.runtime().auto_compact && !signal_cancellation.is_cancelled() {
-                        let current =
-                            context_cache.refresh(&session.project, &tools, &session.binding)?;
+                    if composition.runtime().auto_compact
+                        && !tool_batch_compaction_deferred
+                        && !signal_cancellation.is_cancelled()
+                    {
+                        let current = session.refresh_context(&mut context_cache, &tools)?;
                         agent.refresh_current_context(current)?;
                         let should_compact = agent.delivery_needs_compaction()?
                             || match agent.fresh_compaction_context_probe()? {
@@ -956,14 +955,30 @@ pub(crate) async fn run(
                                 None => true,
                             };
                         if should_compact {
-                            match session.compact(
+                            let compact = session.compact(
                                 &mut agent,
                                 composition
                                     .agent_profile()
                                     .primary()
                                     .capabilities()
                                     .context_window,
-                            ) {
+                                compaction::CompactionRequestContext {
+                                    composition,
+                                    budget: &request_budget,
+                                    cancellation: signal_cancellation.clone(),
+                                    audit: &audit_context,
+                                },
+                            );
+                            match input::interruptible(
+                                compact,
+                                &signal_cancellation,
+                                lines,
+                                terminal_input,
+                                &mut input_closed,
+                                &mut pending_input,
+                            )
+                            .await?
+                            {
                                 Ok(summary) => {
                                     console_println!("{}", summary.automatic_message());
                                     auto_compacted = true;
@@ -985,6 +1000,11 @@ pub(crate) async fn run(
                                 Err(ChatError::CompactionNotUseful) => {
                                     console_println!(
                                         "Automatic completed-Turn compaction deferred: no smaller usable next-Turn Context was found; no Compaction was appended and Provider delivery state was retained."
+                                    );
+                                }
+                                Err(error) if compaction::automatically_deferred(&error) => {
+                                    console_println!(
+                                        "Automatic completed-Turn compaction deferred: {error}; original Context and Provider delivery retained."
                                     );
                                 }
                                 Err(error) => return Err(error),
@@ -1043,6 +1063,8 @@ struct DurableChatSession {
     artifacts: LocalArtifactStore,
     binding: AgentDefinitionBinding,
     projection: std::sync::Mutex<Option<persistence::CachedSessionProjection>>,
+    receipt_cache:
+        std::sync::Mutex<crate::adapters::research_projection::SessionReceiptCatalogCache>,
 }
 
 impl DurableChatSession {
@@ -1058,6 +1080,9 @@ impl DurableChatSession {
             artifacts,
             binding,
             projection: std::sync::Mutex::new(None),
+            receipt_cache: std::sync::Mutex::new(
+                crate::adapters::research_projection::SessionReceiptCatalogCache::default(),
+            ),
         })
     }
 
@@ -1093,9 +1118,10 @@ impl DurableChatSession {
         }
 
         self.with_projection(|projection, store, stream_id| {
+        let read = if explicit_resume { Some(self.project_read(projection.state())?) } else { None };
         if explicit_resume {
             projection.state().ensure_no_unknown_improvement()?;
-            self.preflight_binding(projection.state(), composition, discovered_mcp)?;
+            self.preflight_binding_from_read(projection.state(), composition, discovered_mcp, read.as_ref().expect("Resume captured its read context"))?;
         }
         let sequence = store.next_sequence()?;
         let provider_session = ProviderSession::new(
@@ -1128,15 +1154,16 @@ impl DurableChatSession {
                 .latest_compaction()
                 .filter(|compaction| compaction.summary().requires_reference_validation())
             {
-                let mut facts = load_resume_compaction_facts(&self.project, compaction.summary())
+                let read = read.as_ref().expect("Resume captured its read context");
+                let mut facts = load_resume_compaction_facts(&self.project, compaction.summary(), read, projection.compaction_source_for(compaction.summary()))
                     .map_err(ChatError::ResearchProjection)?;
                 match compaction.validate_references(&facts.context()) {
                     Ok(()) => {},
                     Err(crate::domain::session::SessionError::CompactionEvidenceStaleResearchRevision { .. }) => {
-                        let historical = load_historical_session_compaction_facts(&self.project, compaction.summary())
+                        let historical = load_historical_session_compaction_facts(&self.project, compaction.summary(), read, projection.compaction_source_for(compaction.summary()))
                             .map_err(ChatError::ResearchProjection)?;
                         compaction.validate_references(&historical.context())?;
-                        facts = load_session_compaction_facts(&self.project, projection.state())
+                        facts = crate::adapters::session_compaction::load_session_compaction_facts_from_read(&self.project, projection.state(), projection.current_source(), read)
                             .map_err(ChatError::CompactionFacts)?;
                         let rebuilt = self.rebuild_compaction(
                             projection.state(),
@@ -1144,6 +1171,7 @@ impl DurableChatSession {
                             composition,
                             provider_session.clone(),
                             discovered_mcp,
+                            read,
                         )?;
                         let recovery_sequence = store.next_sequence()?;
                         let recovery = SessionEvent::CompactionCreated { compaction: rebuilt }.into_envelope(
@@ -1151,6 +1179,7 @@ impl DurableChatSession {
                             stream_id.clone(), recovery_sequence, occurred_at(),
                         )?;
                         projection.append(store, recovery).map_err(ChatError::from_session_append)?;
+                        if let Some(source) = facts.task_projection() { projection.retain_compaction_source(source.clone())?; }
                     },
                     Err(error) => return Err(error.into()),
                 }
@@ -1407,10 +1436,11 @@ impl DurableChatSession {
                 .audit_event_id()
                 .clone();
             let sequence = store.next_sequence()?;
-            let event = SessionEvent::ModelSampleRejected {
+            let event = SessionEvent::ConsecutiveModelSampleRejected {
                 request_audit_event_id,
                 diagnostic,
                 corrections_used,
+                reset_anchor: projection.state().correction_reset_anchor().cloned(),
             }
             .into_envelope(
                 event_id(
@@ -1418,6 +1448,41 @@ impl DurableChatSession {
                     &self.session_id,
                     sequence.get(),
                     "model-rejected",
+                ),
+                stream_id,
+                sequence,
+                occurred_at(),
+            )?;
+            projection
+                .append(store, event)
+                .map_err(ChatError::from_session_append)?;
+            Ok(())
+        })
+    }
+
+    fn record_correction_reset(&self) -> Result<(), ChatError> {
+        self.with_projection(|projection, store, stream_id| {
+            let state = projection.state();
+            let (prior_rejection_audit_event_id, accepted_history_event_refs) =
+                state.correction_reset_source()?;
+            let accepted_request_audit_event_id = state
+                .request_audits()
+                .last()
+                .ok_or(SessionError::InvalidModelSampleRejection)?
+                .audit_event_id()
+                .clone();
+            let sequence = store.next_sequence()?;
+            let event = SessionEvent::ModelArgumentCorrectionReset {
+                accepted_request_audit_event_id,
+                prior_rejection_audit_event_id,
+                accepted_history_event_refs,
+            }
+            .into_envelope(
+                event_id(
+                    self.project.project_id(),
+                    &self.session_id,
+                    sequence.get(),
+                    "argument-correction-reset",
                 ),
                 stream_id,
                 sequence,
@@ -1595,6 +1660,8 @@ pub(crate) enum ChatError {
         "Compaction did not yield a smaller usable next-Turn Context within the configured budget; no Compaction appended"
     )]
     CompactionNotUseful,
+    #[error("Compaction source integrity failed: {message}")]
+    CompactionSummarySource { message: String },
     #[error(
         "Tool Call `{call_id}` has a durable ExecutionReceipt but no paired durable ToolResult; recovery refuses to invent an aborted result or replay the Tool"
     )]

@@ -369,6 +369,13 @@ fn capacity_compaction_keeps_more_real_references_and_v4_resumes_under_a_smaller
                         ),
                     )
                 })
+                .chain(std::iter::once((
+                    200,
+                    compaction_summary_response(
+                        &"p".repeat(if window == 272000 { 3072 } else { 1536 }),
+                        "capacity-summary",
+                    ),
+                )))
                 .collect(),
         );
         let config = write_context_window_config(root.path(), &server.base_url, window);
@@ -385,13 +392,13 @@ fn capacity_compaction_keeps_more_real_references_and_v4_resumes_under_a_smaller
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert_eq!(server.requests.try_iter().count(), 20);
+        assert_eq!(server.requests.try_iter().count(), 21);
         server.join();
         let session = session_id(root.path());
         let state = reduced_session(&Project::discover(root.path()).unwrap(), &session);
         let summary = serde_json::to_value(state.latest_compaction().unwrap().summary()).unwrap();
         let large = window == 272000;
-        assert_eq!(summary["schema_version"], if large { 4 } else { 3 });
+        assert_eq!(summary["schema_version"], 5);
         assert_eq!(
             summary["task_references"]["history_event_refs"]
                 .as_array()

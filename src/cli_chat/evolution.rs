@@ -8,6 +8,116 @@ use crate::provider_composition::ProviderComposition;
 
 use super::{ChatError, DurableChatSession, definition};
 
+/// Applies only the exact candidate returned by this checkpoint's accepted
+/// contrast. A pre-existing passive pending file never enters this path.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn apply_checkpoint<Provider: crate::ports::model::ModelProvider + ?Sized>(
+    session: &DurableChatSession,
+    current: &crate::domain::agent_definition::AgentDefinitionBinding,
+    accepted: super::improvement::AcceptedImprovement,
+    agent: &mut AgentLoop<'_, '_, Provider, ToolRegistry>,
+    active: &crate::app::agent_loop::ToolBatchContext<'_>,
+    window_tokens: u32,
+    request: super::compaction::CompactionRequestContext<'_>,
+) -> Result<Option<crate::domain::agent_definition::AgentDefinitionBinding>, ChatError> {
+    let store = EvolutionStore::new(&session.project, current);
+    let state = session.durable_state()?;
+    state.improvement_evidence(&accepted.attempt_id, current.definition().digest().as_str())?;
+    if store
+        .pending(current, &session.session_id, &state)?
+        .as_ref()
+        != Some(&accepted.binding)
+    {
+        return Err(super::definition::error(
+            "Accepted RSI candidate changed before checkpoint application",
+        ));
+    }
+    let prompt = definition::prompt_for_state(
+        &session.project,
+        &accepted.binding,
+        &state,
+        session.session_id.as_str(),
+    )?;
+    let cancellation = request.cancellation.clone();
+    if let Err(error) = session
+        .compact_for_definition(agent, window_tokens, active, &prompt, request)
+        .await
+    {
+        if super::compaction::automatically_deferred(&error) {
+            console_eprintln!(
+                "[RSI checkpoint deferred] {error}; candidate remains pending and old instructions remain active."
+            );
+            return Ok(None);
+        }
+        return Err(error);
+    }
+    if cancellation.is_cancelled() {
+        return Ok(None);
+    }
+    let state = session.durable_state()?;
+    if store
+        .pending(current, &session.session_id, &state)?
+        .as_ref()
+        != Some(&accepted.binding)
+    {
+        return Err(super::definition::error(
+            "Accepted RSI pending candidate changed during handoff",
+        ));
+    }
+    {
+        let _writer = session.project.open_writer()?;
+        store.save_revision(&accepted.binding)?;
+    }
+    session.with_projection(|projection, sink, stream| {
+        let state = projection.state();
+        let compaction = state
+            .latest_compaction()
+            .ok_or(crate::domain::session::SessionError::CompactionSourceSequenceMissing)?;
+        let revision = compaction.summary().revision();
+        let fingerprint = compaction.fingerprint()?;
+        let sequence = sink.next_sequence()?;
+        let provider = crate::domain::context::ProviderSession::new(
+            crate::domain::context::ProviderSessionId::new(format!(
+                "primary:{}:checkpoint:{}",
+                session.session_id,
+                sequence.get()
+            )),
+            crate::domain::context::ProviderSessionRole::Primary,
+            sequence.get(),
+        );
+        let event = crate::domain::session::SessionEvent::AgentDefinitionAppliedAtCheckpoint {
+            primary_provider_session: provider.reference().clone(),
+            binding: accepted.binding.clone(),
+            attempt_id: accepted.attempt_id.clone(),
+            parent_digest: current.definition().digest().as_str().to_owned(),
+            compaction_revision: revision,
+            compaction_fingerprint: fingerprint,
+        }
+        .into_envelope(
+            super::event_id(
+                session.project.project_id(),
+                &session.session_id,
+                sequence.get(),
+                "agent-checkpoint-applied",
+            ),
+            stream,
+            sequence,
+            super::occurred_at(),
+        )?;
+        projection
+            .append(sink, event)
+            .map_err(ChatError::from_session_append)?;
+        agent.install_checkpoint_definition(projection.state(), prompt, provider)?;
+        Ok(())
+    })?;
+    store.finish(&accepted.binding, &session.session_id)?;
+    console_eprintln!(
+        "[RSI checkpoint applied] revision {}; next request in this Turn uses the new instructions; task and budget retained.",
+        accepted.binding.definition().digest().as_str()
+    );
+    Ok(Some(accepted.binding))
+}
+
 pub(super) fn apply_completed<Provider: crate::ports::model::ModelProvider + ?Sized>(
     session: &mut DurableChatSession,
     agent: &mut AgentLoop<'_, '_, Provider, ToolRegistry>,

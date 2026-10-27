@@ -97,10 +97,19 @@ fn memory_status_is_read_only_and_reports_scope_absence_and_disabled_memory() {
 
 #[test]
 fn memory_tool_write_becomes_visible_and_refreshes_later_requests_and_resume() {
+    use sha2::{Digest, Sha256};
+    assert_eq!(
+        format!(
+            "{:x}",
+            Sha256::digest(include_bytes!("../../assets/prompts/memory-v1.md"))
+        ),
+        "94d801e8dd9560ff7efce7dd73b9b44021afd7dc660963145d78bdfb7522ada5",
+        "historical memory guidance remains byte-identical"
+    );
     let root = TemporaryDirectory::new("memory-write-refresh-resume");
     initialize_project(root.path());
     let definition = export_agent(root.path(), "writer", "technical-writing");
-    let content = "# Durable preference\nUse compact release notes. SOURCE: operator preference.\n";
+    let content = "# Durable preference\nUse compact release notes. SOURCE: operator preference.\nExact source label: `发布说明`.\n";
     let server = spawn_responses_server(vec![
         (
             200,
@@ -170,6 +179,17 @@ fn memory_tool_write_becomes_visible_and_refreshes_later_requests_and_resume() {
             .contains("Use memory_read before memory_write")
     );
     assert!(
+        requests[0]["instructions"].as_str().unwrap().contains(
+            "Write newly authored summaries, explanations and operational notes in English"
+        )
+    );
+    assert!(
+        requests[0]["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("Preserve exact quotations, code, paths")
+    );
+    assert!(
         requests[3]["input"]
             .to_string()
             .contains("Use compact release notes.")
@@ -195,7 +215,20 @@ fn memory_tool_write_becomes_visible_and_refreshes_later_requests_and_resume() {
     let state = reduced_session(&project, &id);
     assert_eq!(state.execution_receipt_count(), 2);
     state.history().ensure_all_tool_calls_paired().unwrap();
-    let resumed = run_chat(root.path(), &config, "/memory\n/exit\n", &["--resume", &id]);
+    let resumed_server = spawn_responses_server(vec![(
+        200,
+        text_response(
+            "Using the retained preference after Resume.",
+            "memory-resumed",
+        ),
+    )]);
+    let resumed_config = write_config(root.path(), &resumed_server.base_url);
+    let resumed = run_chat(
+        root.path(),
+        &resumed_config,
+        "/memory\nUse the saved release-note preference.\n/exit\n",
+        &["--resume", &id],
+    );
     assert!(
         resumed.status.success(),
         "{}",
@@ -204,6 +237,16 @@ fn memory_tool_write_becomes_visible_and_refreshes_later_requests_and_resume() {
     let restored = memory_status_values(&String::from_utf8_lossy(&resumed.stdout));
     assert_eq!(restored[0]["core_hash"], statuses[1]["core_hash"]);
     assert_eq!(restored[0]["core_path"], statuses[1]["core_path"]);
+    let resumed_request =
+        f2a_request_body(&resumed_server.requests, "memory guidance after Resume");
+    assert!(
+        resumed_request["instructions"].as_str().unwrap().contains(
+            "Write newly authored summaries, explanations and operational notes in English"
+        )
+    );
+    assert!(resumed_request["input"].to_string().contains("发布说明"));
+    assert!(resumed_server.requests.try_recv().is_err());
+    f2a_join_server(resumed_server, "memory guidance after Resume");
 }
 
 fn memory_status_values(stdout: &str) -> Vec<Value> {
@@ -431,6 +474,7 @@ fn memoryless_agent_reports_no_logical_memory_namespace() {
     );
     assert!(!advertises(&request, "memory_read"));
     assert!(!advertises(&request, "memory_write"));
+    assert!(!instructions.contains("Write newly authored summaries"));
 }
 
 #[test]

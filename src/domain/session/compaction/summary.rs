@@ -66,7 +66,7 @@ impl NarrativeSummary {
         &self.next_step_notes
     }
 
-    fn validate(&self) -> Result<(), SessionError> {
+    pub(super) fn validate(&self) -> Result<(), SessionError> {
         require_text("narrative.current_goal", &self.current_goal)?;
         require_text("narrative.concise_progress", &self.concise_progress)?;
         validate_text_entries("narrative.unresolved_questions", &self.unresolved_questions)?;
@@ -82,6 +82,7 @@ pub struct SessionSummaryDraft {
     task_references: Option<SessionTaskReferences>,
     narrative: NarrativeSummary,
     byte_limit: usize,
+    model_sample_event_ref: Option<crate::domain::events::EventId>,
 }
 
 impl SessionSummaryDraft {
@@ -94,6 +95,7 @@ impl SessionSummaryDraft {
             task_references: None,
             narrative,
             byte_limit: MAX_SESSION_SUMMARY_BYTES,
+            model_sample_event_ref: None,
         };
         draft.validate_intrinsic()?;
         Ok(draft)
@@ -113,6 +115,7 @@ impl SessionSummaryDraft {
             task_references: Some(task_references),
             narrative,
             byte_limit: MAX_SESSION_SUMMARY_BYTES,
+            model_sample_event_ref: None,
         };
         draft.validate_intrinsic()?;
         Ok(draft)
@@ -120,6 +123,21 @@ impl SessionSummaryDraft {
 
     pub fn narrative(&self) -> &NarrativeSummary {
         &self.narrative
+    }
+
+    pub(crate) fn with_model_sample(
+        mut self,
+        event_id: crate::domain::events::EventId,
+        narrative: NarrativeSummary,
+    ) -> Self {
+        self.model_sample_event_ref = Some(event_id);
+        self.narrative = narrative;
+        self
+    }
+
+    pub(crate) fn with_historical_narrative(mut self, narrative: NarrativeSummary) -> Self {
+        self.narrative = narrative;
+        self
     }
 
     pub(crate) fn with_byte_limit(mut self, byte_limit: usize) -> Result<Self, SessionError> {
@@ -155,6 +173,11 @@ impl SessionSummaryDraft {
                 super::task::invalid_task("task Summary requires exact Session validation facts")
             })?)?;
         }
+        validate_model_sample(
+            self.model_sample_event_ref.as_ref(),
+            &self.narrative,
+            context,
+        )?;
         Ok(())
     }
 }
@@ -194,6 +217,19 @@ struct SessionSummaryV4 {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
+struct SessionSummaryV5 {
+    schema_version: u16,
+    revision: u64,
+    fingerprint: String,
+    byte_limit: usize,
+    task_references: SessionTaskReferences,
+    evidence_spine: Option<EvidenceSpine>,
+    narrative: NarrativeSummary,
+    model_sample_event_ref: crate::domain::events::EventId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 struct LegacySessionSummaryV1 {
     schema_version: u16,
     revision: u64,
@@ -226,6 +262,7 @@ enum SessionSummaryVersion {
     CurrentV2(SessionSummaryV2),
     CurrentV3(Box<SessionSummaryV3>),
     CurrentV4(Box<SessionSummaryV4>),
+    CurrentV5(Box<SessionSummaryV5>),
 }
 
 /// Deletable derived Summary carried by one Compaction fact.
@@ -244,6 +281,7 @@ impl Serialize for SessionSummary {
             SessionSummaryVersion::CurrentV2(summary) => summary.serialize(serializer),
             SessionSummaryVersion::CurrentV3(summary) => summary.serialize(serializer),
             SessionSummaryVersion::CurrentV4(summary) => summary.serialize(serializer),
+            SessionSummaryVersion::CurrentV5(summary) => summary.serialize(serializer),
         }
     }
 }
@@ -275,6 +313,10 @@ impl<'de> Deserialize<'de> for SessionSummary {
                 .map(Box::new)
                 .map(SessionSummaryVersion::CurrentV4)
                 .map_err(serde::de::Error::custom)?,
+            5 => serde_json::from_value::<SessionSummaryV5>(value)
+                .map(Box::new)
+                .map(SessionSummaryVersion::CurrentV5)
+                .map_err(serde::de::Error::custom)?,
             _ => {
                 return Err(serde::de::Error::custom(format!(
                     "unsupported Session Summary schema version {schema_version}"
@@ -292,9 +334,24 @@ impl SessionSummary {
         context: &CompactionValidationContext<'_>,
     ) -> Result<Self, SessionError> {
         draft.validate_against(context)?;
-        let version = if draft.byte_limit > MAX_SESSION_SUMMARY_BYTES {
-            let mut summary = SessionSummaryV4 {
+        let version = if let Some(model_sample_event_ref) = draft.model_sample_event_ref {
+            let mut summary = SessionSummaryV5 {
                 schema_version: CURRENT_SESSION_SUMMARY_SCHEMA_VERSION,
+                revision,
+                fingerprint: String::new(),
+                byte_limit: draft.byte_limit,
+                task_references: draft.task_references.ok_or_else(|| {
+                    super::task::invalid_task("model Summary requires task provenance")
+                })?,
+                evidence_spine: draft.evidence_spine,
+                narrative: draft.narrative,
+                model_sample_event_ref,
+            };
+            summary.fingerprint = expected_v5_fingerprint(&summary)?;
+            SessionSummaryVersion::CurrentV5(Box::new(summary))
+        } else if draft.byte_limit > MAX_SESSION_SUMMARY_BYTES {
+            let mut summary = SessionSummaryV4 {
+                schema_version: 4,
                 revision,
                 fingerprint: String::new(),
                 byte_limit: draft.byte_limit,
@@ -366,7 +423,7 @@ impl SessionSummary {
                 }
             }
             SessionSummaryVersion::CurrentV4(summary) => {
-                if summary.schema_version != CURRENT_SESSION_SUMMARY_SCHEMA_VERSION {
+                if summary.schema_version != 4 {
                     return Err(unsupported_summary_schema(summary.schema_version));
                 }
                 validate_byte_limit(summary.byte_limit)?;
@@ -386,6 +443,24 @@ impl SessionSummary {
                     return Err(SessionError::CompactionFingerprintMismatch);
                 }
             }
+            SessionSummaryVersion::CurrentV5(summary) => {
+                if summary.schema_version != CURRENT_SESSION_SUMMARY_SCHEMA_VERSION {
+                    return Err(unsupported_summary_schema(summary.schema_version));
+                }
+                validate_byte_limit(summary.byte_limit)?;
+                summary.task_references.validate_intrinsic()?;
+                if let Some(spine) = &summary.evidence_spine {
+                    spine.validate_intrinsic()?;
+                }
+                summary.narrative.validate()?;
+                require_text(
+                    "summary.model_sample_event_ref",
+                    summary.model_sample_event_ref.as_str(),
+                )?;
+                if summary.fingerprint != expected_v5_fingerprint(summary)? {
+                    return Err(SessionError::CompactionFingerprintMismatch);
+                }
+            }
         }
         self.validate_encoded_size()
     }
@@ -396,6 +471,7 @@ impl SessionSummary {
             SessionSummaryVersion::CurrentV2(_) => 2,
             SessionSummaryVersion::CurrentV3(_) => 3,
             SessionSummaryVersion::CurrentV4(_) => 4,
+            SessionSummaryVersion::CurrentV5(_) => 5,
         }
     }
 
@@ -405,6 +481,7 @@ impl SessionSummary {
             SessionSummaryVersion::CurrentV2(summary) => summary.revision,
             SessionSummaryVersion::CurrentV3(summary) => summary.revision,
             SessionSummaryVersion::CurrentV4(summary) => summary.revision,
+            SessionSummaryVersion::CurrentV5(summary) => summary.revision,
         }
     }
 
@@ -414,6 +491,7 @@ impl SessionSummary {
             SessionSummaryVersion::CurrentV2(summary) => &summary.fingerprint,
             SessionSummaryVersion::CurrentV3(summary) => &summary.fingerprint,
             SessionSummaryVersion::CurrentV4(summary) => &summary.fingerprint,
+            SessionSummaryVersion::CurrentV5(summary) => &summary.fingerprint,
         }
     }
 
@@ -423,6 +501,7 @@ impl SessionSummary {
             SessionSummaryVersion::CurrentV2(summary) => Some(&summary.evidence_spine),
             SessionSummaryVersion::CurrentV3(summary) => summary.evidence_spine.as_ref(),
             SessionSummaryVersion::CurrentV4(summary) => summary.evidence_spine.as_ref(),
+            SessionSummaryVersion::CurrentV5(summary) => summary.evidence_spine.as_ref(),
         }
     }
 
@@ -432,6 +511,7 @@ impl SessionSummary {
             SessionSummaryVersion::CurrentV2(summary) => Some(&summary.narrative),
             SessionSummaryVersion::CurrentV3(summary) => Some(&summary.narrative),
             SessionSummaryVersion::CurrentV4(summary) => Some(&summary.narrative),
+            SessionSummaryVersion::CurrentV5(summary) => Some(&summary.narrative),
         }
     }
 
@@ -439,6 +519,7 @@ impl SessionSummary {
         match &self.version {
             SessionSummaryVersion::CurrentV3(summary) => Some(&summary.task_references),
             SessionSummaryVersion::CurrentV4(summary) => summary.task_references.as_ref(),
+            SessionSummaryVersion::CurrentV5(summary) => Some(&summary.task_references),
             _ => None,
         }
     }
@@ -455,6 +536,13 @@ impl SessionSummary {
         if let Some(spine) = self.evidence_spine() {
             spine.validate_against(context)?;
         }
+        if let SessionSummaryVersion::CurrentV5(summary) = &self.version {
+            validate_model_sample(
+                Some(&summary.model_sample_event_ref),
+                &summary.narrative,
+                context,
+            )?;
+        }
         Ok(())
     }
 
@@ -463,12 +551,46 @@ impl SessionSummary {
     }
 
     pub(crate) fn context_item(&self) -> Result<ContentItem, SessionError> {
-        let payload = serde_json::to_string(self).map_err(|error| SessionError::PayloadEncode {
+        let payload = if self.narrative().is_none() {
+            serde_json::to_string(self)
+        } else {
+            serde_json::to_string(&self.model_projection()?)
+        }
+        .map_err(|error| SessionError::PayloadEncode {
             event_type: EventType::new(COMPACTION_CREATED_EVENT_TYPE),
             message: error.to_string(),
         })?;
         let prefix = format!("derived_session_summary_v{}:", self.schema_version());
         Ok(ContentItem::user_text(format!("{prefix}{payload}")))
+    }
+
+    pub(crate) fn model_projection(&self) -> Result<Value, SessionError> {
+        #[derive(Serialize)]
+        struct Projection<'a> {
+            projection_version: u16,
+            schema_version: u16,
+            revision: u64,
+            fingerprint: &'a str,
+            source: Option<&'a super::task::SessionSourceIdentity>,
+            evidence_spine: Option<&'a EvidenceSpine>,
+            narrative: &'a NarrativeSummary,
+        }
+        let value = match self.narrative() {
+            Some(narrative) => serde_json::to_value(Projection {
+                projection_version: 1,
+                schema_version: self.schema_version(),
+                revision: self.revision(),
+                fingerprint: self.fingerprint(),
+                source: self.task_references().map(SessionTaskReferences::source),
+                evidence_spine: self.evidence_spine(),
+                narrative,
+            }),
+            None => serde_json::to_value(self),
+        };
+        value.map_err(|error| SessionError::PayloadEncode {
+            event_type: EventType::new(COMPACTION_CREATED_EVENT_TYPE),
+            message: error.to_string(),
+        })
     }
 
     pub(crate) fn context_provenance(&self) -> Result<Option<ContextProvenance>, SessionError> {
@@ -477,6 +599,12 @@ impl SessionSummary {
                 self.evidence_spine()
                     .map(EvidenceSpine::context_references)
                     .transpose()?,
+                match &self.version {
+                    SessionSummaryVersion::CurrentV5(summary) => {
+                        Some(&summary.model_sample_event_ref)
+                    }
+                    _ => None,
+                },
             )?;
             let freshness = FreshnessIdentity::new(task.source().stream_hash())
                 .map_err(context_provenance_error)?
@@ -530,6 +658,7 @@ impl SessionSummary {
             .len();
         let maximum = match &self.version {
             SessionSummaryVersion::CurrentV4(summary) => summary.byte_limit,
+            SessionSummaryVersion::CurrentV5(summary) => summary.byte_limit,
             _ => MAX_SESSION_SUMMARY_BYTES,
         };
         if actual > maximum {
@@ -598,13 +727,37 @@ fn expected_v4_fingerprint(value: &SessionSummaryV4) -> Result<String, SessionEr
     fingerprint_value(&value)
 }
 
-fn validate_byte_limit(byte_limit: usize) -> Result<(), SessionError> {
+pub(super) fn validate_byte_limit(byte_limit: usize) -> Result<(), SessionError> {
     if !(MAX_SESSION_SUMMARY_BYTES..=MAX_EXTENDED_SESSION_SUMMARY_BYTES).contains(&byte_limit) {
         return Err(SessionError::CompactionSummaryByteLimit {
             actual: byte_limit,
             minimum: MAX_SESSION_SUMMARY_BYTES,
             maximum: MAX_EXTENDED_SESSION_SUMMARY_BYTES,
         });
+    }
+    Ok(())
+}
+
+fn expected_v5_fingerprint(value: &SessionSummaryV5) -> Result<String, SessionError> {
+    let mut value = value.clone();
+    value.fingerprint.clear();
+    fingerprint_value(&value)
+}
+
+fn validate_model_sample(
+    event_id: Option<&crate::domain::events::EventId>,
+    narrative: &NarrativeSummary,
+    context: &CompactionValidationContext<'_>,
+) -> Result<(), SessionError> {
+    if let Some(event_id) = event_id
+        && context
+            .task
+            .and_then(|facts| facts.model_samples.get(event_id))
+            .is_none_or(|recorded| recorded != narrative)
+    {
+        return Err(super::task::invalid_task(
+            "Summary does not match its recorded model handoff",
+        ));
     }
     Ok(())
 }

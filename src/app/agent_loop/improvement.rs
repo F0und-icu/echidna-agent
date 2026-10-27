@@ -11,7 +11,16 @@ use crate::domain::session::{ImprovementStage, scoped_call_id};
 use crate::domain::tools::{ToolExposure, ToolName};
 use crate::ports::model::ContinuationRetention;
 
+/// The fixed stage lends the existing settled boundary for this one scope.
+/// It is never retained in AgentLoop or queued for later execution.
+#[derive(Clone, Copy)]
+pub(crate) enum ImprovementBoundary<'a> {
+    CompletedTurn,
+    ToolBatch(&'a ToolBatchContext<'a>),
+}
+
 pub(crate) struct ImprovementSampleInput<'a, Tools: ?Sized> {
+    pub(crate) boundary: ImprovementBoundary<'a>,
     pub(crate) attempt_id: &'a str,
     pub(crate) stage: ImprovementStage,
     pub(crate) prompt: &'a PromptComposition,
@@ -53,29 +62,43 @@ impl<Provider: ModelProvider + ?Sized, Tools: ToolExecutor + ?Sized>
             return Err(AgentLoopError::ImprovementCancelled);
         }
         let capabilities = self.provider.capabilities();
-        let completed = self
+        let step = self
             .last_sampling_step_plan
             .as_ref()
             .ok_or(AgentLoopError::ContextStateMismatch)?;
-        let committed = self
-            .committed_delivery
-            .as_ref()
-            .ok_or(AgentLoopError::ContextStateMismatch)?;
-        if completed.turn_configuration().turn().turn_id
-            != TurnId::new(format!("turn:{}", self.next_turn_sequence))
-            || committed.history_len != self.history.items().len()
-        {
+        let current_turn = TurnId::new(format!("turn:{}", self.next_turn_sequence));
+        if step.turn_configuration().turn().turn_id != current_turn {
             return Err(AgentLoopError::ContextStateMismatch);
         }
+        let available = match input.boundary {
+            ImprovementBoundary::CompletedTurn => {
+                let committed = self
+                    .committed_delivery
+                    .as_ref()
+                    .ok_or(AgentLoopError::ContextStateMismatch)?;
+                if committed.history_len != self.history.items().len() {
+                    return Err(AgentLoopError::ContextStateMismatch);
+                }
+                step.resolved_tool_plan().advertised_specs()
+            }
+            ImprovementBoundary::ToolBatch(active) => {
+                if active.turn_id != &current_turn
+                    || active.history_end != self.history.items().len()
+                {
+                    return Err(AgentLoopError::ContextStateMismatch);
+                }
+                self.history.ensure_all_tool_calls_paired()?;
+                active.tool_specs
+            }
+        };
         let exposure = ToolExposurePlan::new(input.tools.catalog().iter().map(|spec| {
             (
                 spec.name.clone(),
                 if input.stage != ImprovementStage::Diagnosis
                     && spec.name == ToolName::new("run_command")
-                    && completed
-                        .resolved_tool_plan()
-                        .advertised_spec(&spec.name)
-                        .is_some()
+                    && available
+                        .iter()
+                        .any(|available| available.name == spec.name)
                 {
                     // Retain only availability captured by the original
                     // resolver in this operator Turn, including real deferred
@@ -102,7 +125,7 @@ impl<Provider: ModelProvider + ?Sized, Tools: ToolExecutor + ?Sized>
             AuthorityLevel::DerivedNonEvidence,
             RetentionClass::Ephemeral,
             FreshnessIdentity::new(blake3::hash(input.task.as_bytes()).to_hex().to_string())?
-                .with_producer_version("rsi-improvement:2"),
+                .with_producer_version("rsi-improvement:3"),
             ContextReferences::new(Vec::new(), Vec::new(), Vec::new(), input.references)?,
         )?;
         let host_task = ContextFragment::new(

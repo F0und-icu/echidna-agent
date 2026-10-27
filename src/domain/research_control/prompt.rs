@@ -317,10 +317,10 @@ impl PromptComposition {
         if definition.context().memory() != crate::domain::agent_definition::AgentMemoryScope::None
         {
             fragments.push(content_identified_instruction_fragment(
-                "prompt:agent:00:memory-protocol:1",
+                "prompt:agent:00:memory-protocol:2",
                 ContextFragmentSource::BasePrompt,
                 ContextFragmentPriority::Required,
-                include_str!("../../../assets/prompts/memory-v1.md"),
+                include_str!("../../../assets/prompts/memory-v2.md"),
             )?);
         }
         if let Some(rsi) = definition.rsi() {
@@ -336,24 +336,24 @@ impl PromptComposition {
                 .unwrap_or(&[]);
             let protocol = format!(
                 "{}\nRuntime RSI binding: agent_id={id}; session_id={session}; parent_digest={}; pending_path={pending}; editable persona={}; methods={}.\nPublished ordinary script index: {}",
-                include_str!("../../../assets/prompts/rsi.md"),
+                include_str!("../../../assets/prompts/rsi-longtask-v2.md"),
                 definition.digest().as_str(),
                 rsi.persona,
                 rsi.methods,
                 serde_json::to_string(tools).expect("validated script index serializes")
             );
             fragments.push(content_identified_instruction_fragment(
-                "prompt:agent:00:rsi-protocol:1",
+                "prompt:agent:00:rsi-protocol:2",
                 ContextFragmentSource::BasePrompt,
                 ContextFragmentPriority::Required,
                 &protocol,
             )?);
             if rsi.improvement {
                 fragments.push(content_identified_instruction_fragment(
-                    "prompt:agent:00:rsi-improvement:2",
+                    "prompt:agent:00:rsi-improvement:3",
                     ContextFragmentSource::BasePrompt,
                     ContextFragmentPriority::Required,
-                    include_str!("../../../assets/prompts/rsi-improvement-v2.md"),
+                    include_str!("../../../assets/prompts/rsi-improvement-v3.md"),
                 )?);
             }
             if let Some(fixed) = &rsi.fixed_rules {

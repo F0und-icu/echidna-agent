@@ -690,6 +690,14 @@ fn text_response(text: &str, response_id: &str) -> String {
     )
 }
 
+fn compaction_summary_response(progress: &str, response_id: &str) -> String {
+    text_response(&json!({
+        "concise_progress": progress,
+        "unresolved_questions": ["Consult the retained original sources before treating a claim as verified."],
+        "next_step_notes": ["Original Tool outputs and task constraints may be omitted. The latest assistant continuation is not the original baseline; consult the original observation and explicit Project instructions. Do not rerun a completed mutation to recreate history."]
+    }).to_string(), response_id)
+}
+
 fn vision_response(summary: &str, response_id: &str) -> String {
     text_response(
         &serde_json::to_string(&json!({
@@ -924,6 +932,15 @@ fn append_research_event(project: &Project, label: &str, event: ResearchEvent) {
 }
 
 fn append_v2_compaction(project: &Project, session: &str, target: TargetSnapshotId) {
+    append_v2_compaction_with_progress(project, session, target, "reference-only summary");
+}
+
+fn append_v2_compaction_with_progress(
+    project: &Project,
+    session: &str,
+    target: TargetSnapshotId,
+    progress: &str,
+) {
     let research_events = {
         let mut writer = project.open_writer().unwrap();
         let store = writer.open_research(None).unwrap();
@@ -952,13 +969,7 @@ fn append_v2_compaction(project: &Project, session: &str, target: TargetSnapshot
             Vec::new(),
         )
         .unwrap(),
-        NarrativeSummary::new(
-            "resume fixture",
-            "reference-only summary",
-            Vec::new(),
-            Vec::new(),
-        )
-        .unwrap(),
+        NarrativeSummary::new("resume fixture", progress, Vec::new(), Vec::new()).unwrap(),
     )
     .unwrap();
     let state = {
@@ -1365,10 +1376,19 @@ fn ec_k4_two_primary_direct_images_keep_order_without_duplicate_history_and_surv
         2
     );
 
-    let resumed_server = spawn_responses_server(vec![(
-        200,
-        text_response("TWO_DIRECT_RESUMED", "two-direct-resumed"),
-    )]);
+    let resumed_server = spawn_responses_server(vec![
+        (
+            200,
+            compaction_summary_response(
+                "Retained the two observed image inputs.",
+                "two-image-summary",
+            ),
+        ),
+        (
+            200,
+            text_response("TWO_DIRECT_RESUMED", "two-direct-resumed"),
+        ),
+    ]);
     let resumed_config = write_direct_config(root.path(), &resumed_server.base_url);
     let resumed = run_chat(
         root.path(),
@@ -1382,6 +1402,12 @@ fn ec_k4_two_primary_direct_images_keep_order_without_duplicate_history_and_surv
         String::from_utf8_lossy(&resumed.stderr)
     );
     assert!(String::from_utf8_lossy(&resumed.stdout).contains("Compaction revision 1 applied"));
+    let summary_request = f2a_request_body(&resumed_server.requests, "two direct summary Primary");
+    assert!(
+        summary_request["tools"]
+            .as_array()
+            .is_none_or(|tools| tools.is_empty())
+    );
     let resumed_request = f2a_request_body(&resumed_server.requests, "two direct resumed Primary");
     f2a_join_server(resumed_server, "two direct resumed Primary");
     assert!(json_contains_text(
@@ -3017,19 +3043,23 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
     let first_server = spawn_responses_server(vec![
         (
             200,
-            m4_long_flow_tool_response(
-                "m5-compact-old-artifact",
-                "artifact_store",
-                json!({
-                    "event_id": "artifact-event-m5-compact-old",
-                    "occurred_at": "2026-08-31T00:00:00Z",
-                    "artifact_id": "artifact-m5-compact-old",
-                    "source_path": "candidate.txt",
-                    "media_type": "text/plain",
-                    "target_snapshot_id": old_target_snapshot.as_str(),
-                    "toolchain_fingerprint": "m5-compact-fixture-v1"
-                }),
-                "m5-compact-old-artifact-response",
+            format!(
+                "data: {}\n\n{}",
+                json!({"type":"response.output_text.delta","delta":"Superseded neutral mapping notes. ".repeat(500)}),
+                m4_long_flow_tool_response(
+                    "m5-compact-old-artifact",
+                    "artifact_store",
+                    json!({
+                        "event_id": "artifact-event-m5-compact-old",
+                        "occurred_at": "2026-08-31T00:00:00Z",
+                        "artifact_id": "artifact-m5-compact-old",
+                        "source_path": "candidate.txt",
+                        "media_type": "text/plain",
+                        "target_snapshot_id": old_target_snapshot.as_str(),
+                        "toolchain_fingerprint": "m5-compact-fixture-v1"
+                    }),
+                    "m5-compact-old-artifact-response",
+                )
             ),
         ),
         (
@@ -3306,13 +3336,22 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
         ),
     );
 
-    let compacted_server = spawn_responses_server(vec![(
-        200,
-        text_response(
-            "Continue from the exact compacted evidence boundary.",
-            "m5-compact-second-final",
+    let compacted_server = spawn_responses_server(vec![
+        (
+            200,
+            compaction_summary_response(
+                "Read bounded candidate; preserve the recorded experiment/finding source references.",
+                "m5-summary",
+            ),
         ),
-    )]);
+        (
+            200,
+            text_response(
+                "Continue from the exact compacted evidence boundary.",
+                "m5-compact-second-final",
+            ),
+        ),
+    ]);
     let compacted_config =
         write_context_window_config(root.path(), &compacted_server.base_url, 65_536);
     let compacted = run_chat(
@@ -3332,12 +3371,18 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
     );
     assert!(compacted_output.contains("Compaction revision 1 applied"));
     assert!(compacted_output.contains("next Primary request will be CompactionReset Full"));
+    let summary_request = request_body(&compacted_server.requests.recv().unwrap());
+    assert!(
+        summary_request["tools"]
+            .as_array()
+            .is_none_or(|tools| tools.is_empty())
+    );
     let compacted_request = request_body(&compacted_server.requests.recv().unwrap());
     compacted_server.join();
     assert!(compacted_request["previous_response_id"].is_null());
     let compacted_wire = serde_json::to_string(&compacted_request).unwrap();
     for expected in [
-        "derived_session_summary_v3",
+        "derived_session_summary_v5",
         "snapshot-m5-compact",
         "hypothesis-m5-compact",
         "experiment-m5-compact",
@@ -3370,7 +3415,7 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
     );
     let summary =
         serde_json::to_value(compacted_state.latest_compaction().unwrap().summary()).unwrap();
-    assert_eq!(summary["schema_version"], 3);
+    assert_eq!(summary["schema_version"], 5);
     assert_eq!(summary["revision"], 1);
     assert_eq!(
         summary["evidence_spine"]["target_snapshot_refs"],
@@ -3472,7 +3517,7 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
             .contains("execute the smallest decisive experiment")
     );
     let resumed_wire = serde_json::to_string(&resumed_request).unwrap();
-    assert!(resumed_wire.contains("derived_session_summary_v3"));
+    assert!(resumed_wire.contains("derived_session_summary_v5"));
     assert!(resumed_wire.contains("continue after explicit compaction"));
     assert!(resumed_wire.contains("resume the compacted boundary"));
 }
@@ -3705,10 +3750,16 @@ fn f3_large_compaction_bounds_reference_subset_and_drops_oversized_recent_histor
     initialize_project(root.path());
     let project = Project::discover(root.path()).unwrap();
     append_research_snapshot(&project, "large");
-    let server = spawn_responses_server(vec![(
-        200,
-        text_response(&"analysis ".repeat(3500), "large"),
-    )]);
+    let server = spawn_responses_server(vec![
+        (200, text_response(&"analysis ".repeat(3500), "large")),
+        (
+            200,
+            compaction_summary_response(
+                "Parser boundaries remain a candidate; source hypotheses require verification.",
+                "large-summary",
+            ),
+        ),
+    ]);
     let config = write_config(root.path(), &server.base_url);
     let initial = run_chat(
         root.path(),
@@ -3721,7 +3772,6 @@ fn f3_large_compaction_bounds_reference_subset_and_drops_oversized_recent_histor
         "{}",
         String::from_utf8_lossy(&initial.stderr)
     );
-    server.join();
     let session = session_id(root.path());
     for index in 0..100 {
         let record = HypothesisRecord::from_draft(HypothesisDraft {
@@ -3760,6 +3810,9 @@ fn f3_large_compaction_bounds_reference_subset_and_drops_oversized_recent_histor
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    server.requests.recv_timeout(F2A_WAIT).unwrap();
+    server.requests.recv_timeout(F2A_WAIT).unwrap();
+    server.join();
     let events = session_events(root.path(), &session);
     let compaction = &events
         .iter()

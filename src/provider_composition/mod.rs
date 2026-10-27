@@ -16,7 +16,7 @@ use crate::adapters::project_event_store::Project;
 use crate::adapters::responses::{ResponsesHttpAdapter, ResponsesHttpConfig, ResponsesWireProfile};
 use crate::adapters::subscription_auth::{SubscriptionAuthService, catalog::SubscriptionCatalog};
 use crate::domain::model::{ModelCapabilities, ReasoningEffort};
-use crate::domain::profile::AgentModelProfile;
+use crate::domain::profile::{AgentModelProfile, ProviderProfile};
 use crate::domain::request_audit::RequestAdapterVersion;
 use crate::ports::model::ModelProvider;
 
@@ -30,6 +30,7 @@ pub use validation::ProviderCompositionError;
 pub struct ProviderComposition {
     agent_profile: AgentModelProfile,
     primary: Arc<dyn ModelProvider>,
+    compaction: (Arc<dyn ModelProvider>, AgentModelProfile),
     vision: Option<Arc<dyn ModelProvider>>,
     primary_request_adapter_version: RequestAdapterVersion,
     vision_request_adapter_version: Option<RequestAdapterVersion>,
@@ -192,6 +193,10 @@ impl ProviderComposition {
         self.primary.as_ref()
     }
 
+    pub(crate) fn compaction_provider(&self) -> (&dyn ModelProvider, &AgentModelProfile) {
+        (self.compaction.0.as_ref(), &self.compaction.1)
+    }
+
     pub fn vision_provider(&self) -> Option<&dyn ModelProvider> {
         self.vision.as_deref()
     }
@@ -233,7 +238,7 @@ impl ProviderComposition {
     }
 
     pub(crate) fn runtime(&self) -> RuntimeSettings {
-        self.runtime
+        self.runtime.clone()
     }
 
     /// Discovers configured MCP tools only for live Chat setup. Default
@@ -299,10 +304,47 @@ impl ProviderComposition {
             None => (None, None),
         };
         let agent_profile = config.active_agent_model_profile()?;
+        let compaction = {
+            let mut capabilities = config.capabilities(primary_definition);
+            if let Some(effort) = &config.runtime.compaction_reasoning_effort {
+                capabilities.reasoning_effort = Some(effort.clone());
+            }
+            let (provider, _) = compose_provider(
+                &agent.primary,
+                primary_definition,
+                capabilities.clone(),
+                Arc::clone(&credential_source),
+                project.as_ref(),
+                project.as_ref().map(|_| "compaction"),
+                #[cfg(debug_assertions)]
+                debug,
+            )?;
+            let primary_profile = agent_profile.primary();
+            let scoped_profile = AgentModelProfile::new(
+                agent_profile.profile().clone(),
+                ProviderProfile::new(
+                    primary_profile.model().clone(),
+                    primary_profile.profile().clone(),
+                    capabilities,
+                ),
+                agent_profile.vision().cloned(),
+                agent_profile.vision_mode(),
+            )
+            .map_err(|source| ProviderCompositionError::InvalidAgentProfile {
+                profile: config.active_agent_profile.clone(),
+                source,
+            })?;
+            (
+                Arc::new(provider.with_failure_capture(debug_failures.as_deref()))
+                    as Arc<dyn ModelProvider>,
+                scoped_profile,
+            )
+        };
 
         Ok(Self {
             agent_profile,
             primary: Arc::new(primary),
+            compaction,
             vision,
             primary_request_adapter_version,
             vision_request_adapter_version,

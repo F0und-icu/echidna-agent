@@ -20,6 +20,15 @@ pub(crate) enum ImprovementFact {
         history_start: usize,
         friction: Vec<EventId>,
     },
+    CheckpointStarted {
+        parent_digest: String,
+        history_start: usize,
+        history_end: usize,
+        friction: Vec<EventId>,
+    },
+    CandidateBound {
+        definition_digest: String,
+    },
     Sample {
         stage: ImprovementStage,
         audit_event_id: EventId,
@@ -53,6 +62,24 @@ pub struct ImprovementActivity {
     pub(crate) fact: ImprovementFact,
 }
 
+impl ImprovementActivity {
+    pub(super) fn validate_schema(&self) -> Result<(), SessionError> {
+        let checkpoint_fact = matches!(
+            self.fact,
+            ImprovementFact::CheckpointStarted { .. } | ImprovementFact::CandidateBound { .. }
+        );
+        match self.schema_version {
+            1 if !checkpoint_fact => Ok(()),
+            2 if checkpoint_fact => Ok(()),
+            1 | 2 => Err(SessionError::InvalidImprovementActivity),
+            schema_version => Err(SessionError::UnsupportedPayloadSchema {
+                event_type: EventType::new("session.rsi_activity_recorded"),
+                schema_version,
+            }),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ImprovementRecord {
     pub(crate) event_id: EventId,
@@ -60,6 +87,21 @@ pub(crate) struct ImprovementRecord {
 }
 
 impl SessionState {
+    pub(crate) fn assessed_improvement_history_end(&self, history_start: usize) -> usize {
+        self.improvement_records
+            .iter()
+            .filter_map(|record| match &record.activity.fact {
+                ImprovementFact::CheckpointStarted {
+                    history_start: start,
+                    history_end,
+                    ..
+                } if *start == history_start => Some(*history_end),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(history_start)
+    }
+
     pub(super) fn ensure_no_scope_call_identity_collision(
         &self,
         call_id: &ToolCallId,
@@ -80,7 +122,7 @@ impl SessionState {
             .iter()
             .filter(|record| record.activity.attempt_id == attempt)
             .collect::<Vec<_>>();
-        let started=records.iter().find(|record|matches!(&record.activity.fact,ImprovementFact::Started {parent_digest:seen,..} if seen==parent_digest)).ok_or_else(invalid)?;
+        let started=records.iter().find(|record|matches!(&record.activity.fact,ImprovementFact::Started {parent_digest:seen,..} | ImprovementFact::CheckpointStarted {parent_digest:seen,..} if seen==parent_digest)).ok_or_else(invalid)?;
         let finished=records.iter().find(|record|matches!(&record.activity.fact,ImprovementFact::Finished {disposition,..} if disposition=="accepted")).ok_or_else(invalid)?;
         let mut references = vec![started.event_id.clone(), finished.event_id.clone()];
         for stage in [
@@ -138,8 +180,8 @@ pub(super) fn apply(
     event_id: &EventId,
 ) -> Result<(), SessionError> {
     let invalid = || SessionError::InvalidImprovementActivity;
-    if activity.schema_version != 1
-        || activity.attempt_id.is_empty()
+    activity.validate_schema()?;
+    if activity.attempt_id.is_empty()
         || activity.attempt_id.len() > 128
         || state.lifecycle != SessionLifecycle::Active
         || serde_json::to_vec(&activity).map_err(|_| invalid())?.len() > 1024 * 1024
@@ -152,10 +194,33 @@ pub(super) fn apply(
         .filter(|record| record.activity.attempt_id == activity.attempt_id)
         .collect::<Vec<_>>();
     match &activity.fact {
+        ImprovementFact::CandidateBound { definition_digest } => {
+            let parent = state
+                .agent_definition_binding
+                .as_ref()
+                .ok_or_else(invalid)?
+                .definition()
+                .digest()
+                .as_str();
+            state.improvement_evidence(&activity.attempt_id, parent)?;
+            if !crate::domain::agent_definition::is_blake3_digest(definition_digest)
+                || prior.iter().any(|record| {
+                    matches!(record.activity.fact, ImprovementFact::CandidateBound { .. })
+                })
+            {
+                return Err(invalid());
+            }
+        }
         ImprovementFact::Started {
             parent_digest,
             history_start,
             friction,
+        }
+        | ImprovementFact::CheckpointStarted {
+            parent_digest,
+            history_start,
+            friction,
+            ..
         } => {
             state.ensure_no_unknown_improvement()?;
             let binding = state
@@ -166,7 +231,12 @@ pub(super) fn apply(
                 || !binding.definition().rsi().is_some_and(|rsi| rsi.improvement)
                 || friction.is_empty() || friction.len() > 8
                 || !matches!(state.history.items().get(*history_start),Some(ContentItem::Text {role:super::super::model::MessageRole::User,..}))
-                || state.improvement_records.iter().any(|record|matches!(&record.activity.fact,ImprovementFact::Started {history_start:seen,..} if seen==history_start))
+                || match &activity.fact {
+                    ImprovementFact::Started { .. } => state.improvement_records.iter().any(|record|matches!(&record.activity.fact,ImprovementFact::Started {history_start:seen,..} if seen==history_start)),
+                    ImprovementFact::CheckpointStarted { history_end, .. } => *history_end != state.history.items().len()
+                        || *history_end <= state.assessed_improvement_history_end(*history_start),
+                    _ => unreachable!(),
+                }
                 || friction.iter().any(|id| !state.history_event_ids.iter().skip(*history_start).any(|seen| seen==id)
                     && !state.execution_receipts.iter().any(|record| &record.event_id == id && state.history.items().iter().skip(*history_start).any(|item|matches!(item,ContentItem::ToolResult {result} if ExecutionId::for_model_call(&result.call_id)==record.receipt.execution_id)))) {
                 return Err(invalid());
@@ -344,7 +414,9 @@ pub(super) fn apply(
                         return Err(invalid());
                     }
                 }
-                ImprovementFact::Started { .. } => unreachable!(),
+                ImprovementFact::Started { .. }
+                | ImprovementFact::CheckpointStarted { .. }
+                | ImprovementFact::CandidateBound { .. } => unreachable!(),
             }
         }
     }
@@ -375,7 +447,12 @@ pub(super) fn validate_audit_scope(
         .improvement_records
         .iter()
         .rev()
-        .find(|record| matches!(record.activity.fact, ImprovementFact::Started { .. }))
+        .find(|record| {
+            matches!(
+                record.activity.fact,
+                ImprovementFact::Started { .. } | ImprovementFact::CheckpointStarted { .. }
+            )
+        })
         .ok_or(SessionError::InvalidImprovementActivity)?;
     let attempt = &started.activity.attempt_id;
     let records = state

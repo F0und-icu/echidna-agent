@@ -192,6 +192,29 @@ impl DurableChatSession {
         composition: &ProviderComposition,
         discovered_mcp: &[McpCatalogTool],
     ) -> Result<(), ChatError> {
+        if state.stream_id().is_some() {
+            self.with_projection(|projection, _, _| {
+                let read = self.project_read(projection.state())?;
+                self.preflight_binding_from_read(
+                    projection.state(),
+                    composition,
+                    discovered_mcp,
+                    &read,
+                )
+            })
+        } else {
+            let read = self.project_read(state)?;
+            self.preflight_binding_from_read(state, composition, discovered_mcp, &read)
+        }
+    }
+
+    pub(super) fn preflight_binding_from_read(
+        &self,
+        state: &SessionState,
+        composition: &ProviderComposition,
+        discovered_mcp: &[McpCatalogTool],
+        read: &crate::adapters::research_projection::ProjectReadContext,
+    ) -> Result<(), ChatError> {
         let tools = self.bound_tools(
             discovered_mcp,
             composition
@@ -218,11 +241,14 @@ impl DurableChatSession {
             ),
         )?
         .with_prompt_composition(prompt.clone());
-        preview.refresh_current_context(context::ChatContextCache::default().refresh(
-            &self.project,
-            &tools,
-            &self.binding,
-        )?)?;
+        preview.refresh_current_context(
+            context::ChatContextCache::default().refresh_from_read_context(
+                &self.project,
+                &tools,
+                &self.binding,
+                read,
+            )?,
+        )?;
         let history = state
             .normalized_history_items()
             .map_err(crate::domain::session::SessionError::from)?;

@@ -15,6 +15,161 @@ use crate::ports::model::ModelProvider;
 
 use super::{ChatError, DurableChatSession, event_id, occurred_at};
 
+pub(super) struct CompactionRequestContext<'a> {
+    pub(super) composition: &'a crate::provider_composition::ProviderComposition,
+    pub(super) budget: &'a crate::app::model_request_budget::ModelRequestBudget,
+    pub(super) cancellation: crate::app::cancellation::AgentCancellation,
+    pub(super) audit: &'a crate::domain::request_audit::RequestAuditRunContext,
+}
+
+pub(super) struct AutomaticToolBatchCompaction<'a> {
+    pub(super) session: &'a DurableChatSession,
+    pub(super) window_tokens: u32,
+    pub(super) request: CompactionRequestContext<'a>,
+    pub(super) deferred: bool,
+    pub(super) end_answer: &'a dyn Fn(),
+    pub(super) composition: &'a crate::provider_composition::ProviderComposition,
+    pub(super) tools: &'a ToolRegistry,
+    pub(super) discovered_mcp: &'a [crate::adapters::mcp::McpCatalogTool],
+    pub(super) task: &'a str,
+    pub(super) history_start: usize,
+    pub(super) no_pending_images: bool,
+    pub(super) binding: crate::domain::agent_definition::AgentDefinitionBinding,
+    pub(super) batches: usize,
+}
+
+impl<Provider: ModelProvider + ?Sized>
+    crate::app::agent_loop::ToolBatchStage<Provider, ToolRegistry>
+    for AutomaticToolBatchCompaction<'_>
+{
+    fn apply<'call, 'provider: 'call, 'tools: 'call>(
+        &'call mut self,
+        agent: &'call mut AgentLoop<'provider, 'tools, Provider, ToolRegistry>,
+        active: &'call crate::app::agent_loop::ToolBatchContext<'_>,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<(), crate::app::agent_loop::AgentLoopError>>
+                + 'call,
+        >,
+    > {
+        Box::pin(async move {
+            self.batches += 1;
+            if self.batches.is_multiple_of(16)
+                && crate::app::improvement::policy(self.binding.definition()).is_some()
+            {
+                let mut accepted = None;
+                super::improvement::assess(
+                    self.session,
+                    &self.binding,
+                    agent,
+                    self.tools,
+                    self.task,
+                    self.history_start,
+                    self.no_pending_images,
+                    self.request.budget,
+                    self.request.cancellation.clone(),
+                    self.request.audit,
+                    self.composition,
+                    self.discovered_mcp,
+                    crate::app::agent_loop::ImprovementBoundary::ToolBatch(active),
+                    &mut accepted,
+                )
+                .await
+                .map_err(|error| {
+                    crate::app::agent_loop::AgentLoopError::ToolBatchCompaction {
+                        message: error.to_string(),
+                    }
+                })?;
+                if let Some(accepted) = accepted {
+                    let updated = super::evolution::apply_checkpoint(
+                        self.session,
+                        &self.binding,
+                        accepted,
+                        agent,
+                        active,
+                        self.window_tokens,
+                        CompactionRequestContext {
+                            composition: self.request.composition,
+                            budget: self.request.budget,
+                            cancellation: self.request.cancellation.clone(),
+                            audit: self.request.audit,
+                        },
+                    )
+                    .await
+                    .map_err(|error| {
+                        crate::app::agent_loop::AgentLoopError::ToolBatchCompaction {
+                            message: error.to_string(),
+                        }
+                    })?;
+                    if let Some(binding) = updated {
+                        self.binding = binding;
+                    }
+                    return Ok(());
+                }
+            }
+            if self.deferred
+                || self.request.cancellation.is_cancelled()
+                || !agent.delivery_needs_compaction()?
+            {
+                return Ok(());
+            }
+            (self.end_answer)();
+            match self
+                .session
+                .compact_tool_batch(
+                    agent,
+                    self.window_tokens,
+                    active,
+                    CompactionRequestContext {
+                        composition: self.request.composition,
+                        budget: self.request.budget,
+                        cancellation: self.request.cancellation.clone(),
+                        audit: self.request.audit,
+                    },
+                )
+                .await
+            {
+                Ok(summary) => console_println!(
+                    "Automatic tool-batch compaction applied. {} Current task and Turn budget retained.",
+                    summary.message()
+                ),
+                Err(error) if automatically_deferred(&error) => {
+                    console_println!(
+                        "Automatic tool-batch compaction deferred: {error}; Provider delivery retained."
+                    );
+                    self.deferred = true;
+                }
+                Err(error) => {
+                    return Err(
+                        crate::app::agent_loop::AgentLoopError::ToolBatchCompaction {
+                            message: error.to_string(),
+                        },
+                    );
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+pub(super) fn automatically_deferred(error: &ChatError) -> bool {
+    matches!(error,
+        ChatError::CompactionNotUseful
+        | ChatError::CompactionFacts(crate::adapters::research_projection::CompactionValidationFactsError::ResearchStreamEmpty)
+        | ChatError::Session(SessionError::CompactionCurrentTargetRequired)
+        | ChatError::Agent(crate::app::agent_loop::AgentLoopError::CompactionSummaryRejected { .. }
+            | crate::app::agent_loop::AgentLoopError::CompactionCancelled
+            | crate::app::agent_loop::AgentLoopError::Model(_)
+            | crate::app::agent_loop::AgentLoopError::ModelRequestLimit { .. }
+            | crate::app::agent_loop::AgentLoopError::ContextPlanner(crate::domain::context::ContextPlannerError::RequiredFragmentsExceedBudget { .. }
+                | crate::domain::context::ContextPlannerError::RenderedInputExceedsBudget { .. }))
+    )
+}
+
+pub(super) fn explicitly_deferred(error: &ChatError) -> bool {
+    matches!(error, ChatError::Agent(_)) && automatically_deferred(error)
+}
+
 pub(super) struct AppliedCompactionSummary {
     revision: u64,
     source_history_items: usize,
@@ -45,6 +200,7 @@ impl DurableChatSession {
         composition: &crate::provider_composition::ProviderComposition,
         provider_session: crate::domain::context::ProviderSession,
         discovered_mcp: &[crate::adapters::mcp::McpCatalogTool],
+        read: &crate::adapters::research_projection::ProjectReadContext,
     ) -> Result<SessionCompaction, ChatError> {
         // A context-only preflight uses the same configured Provider and Tool
         // catalog, never `stream` or a second executing AgentLoop.
@@ -68,15 +224,21 @@ impl DurableChatSession {
             self.session_id.as_str(),
         )?);
         preview.queue_agent_model_profile(composition.agent_profile().clone())?;
-        preview.refresh_current_context(super::context::ChatContextCache::default().refresh(
-            &self.project,
-            &tools,
-            self.agent_binding(),
-        )?)?;
+        preview.refresh_current_context(
+            super::context::ChatContextCache::default().refresh_from_read_context(
+                &self.project,
+                &tools,
+                self.agent_binding(),
+                read,
+            )?,
+        )?;
         let (_, candidate) = select_compaction(
             state,
             facts,
             ContextWindowPolicy::for_window(window_tokens),
+            state
+                .latest_compaction()
+                .and_then(|compaction| compaction.summary().narrative()),
             |candidate| {
                 preview
                     .preflight_compaction(candidate, false)
@@ -90,39 +252,186 @@ impl DurableChatSession {
     /// the AgentLoop, appends exactly one durable Event, then applies only the
     /// freshly replayed durable Compaction. Any failure exits Chat rather than
     /// continuing with divergent runtime and persisted state.
-    pub(super) fn compact<Provider>(
+    pub(super) async fn compact<Provider>(
         &self,
         agent: &mut AgentLoop<'_, '_, Provider, ToolRegistry>,
         window_tokens: u32,
+        request: CompactionRequestContext<'_>,
     ) -> Result<AppliedCompactionSummary, ChatError>
     where
         Provider: ModelProvider + ?Sized,
     {
-        self.compact_with_boundary(agent, window_tokens, None)
+        self.compact_with_boundary(agent, window_tokens, None, None, request)
+            .await
     }
 
-    pub(super) fn compact_tool_batch<Provider>(
+    pub(super) async fn compact_tool_batch<Provider>(
         &self,
         agent: &mut AgentLoop<'_, '_, Provider, ToolRegistry>,
         window_tokens: u32,
         active: &crate::app::agent_loop::ToolBatchContext<'_>,
+        request: CompactionRequestContext<'_>,
     ) -> Result<AppliedCompactionSummary, ChatError>
     where
         Provider: ModelProvider + ?Sized,
     {
-        self.compact_with_boundary(agent, window_tokens, Some(active))
+        self.compact_with_boundary(agent, window_tokens, Some(active), None, request)
+            .await
     }
 
-    fn compact_with_boundary<Provider>(
+    pub(super) async fn compact_for_definition<Provider: ModelProvider + ?Sized>(
+        &self,
+        agent: &mut AgentLoop<'_, '_, Provider, ToolRegistry>,
+        window_tokens: u32,
+        active: &crate::app::agent_loop::ToolBatchContext<'_>,
+        prompt: &crate::domain::research_control::PromptComposition,
+        request: CompactionRequestContext<'_>,
+    ) -> Result<AppliedCompactionSummary, ChatError> {
+        self.compact_with_boundary(agent, window_tokens, Some(active), Some(prompt), request)
+            .await
+    }
+
+    async fn compact_with_boundary<Provider>(
         &self,
         agent: &mut AgentLoop<'_, '_, Provider, ToolRegistry>,
         window_tokens: u32,
         active: Option<&crate::app::agent_loop::ToolBatchContext<'_>>,
+        replacement: Option<&crate::domain::research_control::PromptComposition>,
+        request: CompactionRequestContext<'_>,
     ) -> Result<AppliedCompactionSummary, ChatError>
     where
         Provider: ModelProvider + ?Sized,
     {
+        let policy = ContextWindowPolicy::for_window(window_tokens);
+        let (source, goal, source_data, references) =
+            self.with_projection(|projection, _, _| {
+                let state = projection.state();
+                agent.validate_compaction_session(state)?;
+                state
+                    .ensure_completed_history()
+                    .map_err(SessionError::from)?;
+                super::recovery::validate_runtime_history(state, agent)?;
+                let facts = load_session_compaction_facts(&self.project, state)
+                    .map_err(ChatError::CompactionFacts)?;
+                // Do not spend a model request when even the original local
+                // capacity/retention preflight proves no useful replacement fits.
+                select_compaction(state, &facts, policy, None, |candidate| {
+                    match (active, replacement) {
+                        (Some(active), Some(prompt)) => {
+                            agent.preflight_checkpoint_definition(candidate, active, prompt)
+                        }
+                        (Some(active), None) => {
+                            agent.preflight_tool_batch_compaction(candidate, active)
+                        }
+                        (None, _) => agent.preflight_compaction(candidate, true),
+                    }
+                    .map_err(ChatError::from)
+                })?;
+                let history = state
+                    .normalized_history_items()
+                    .map_err(SessionError::from)?;
+                let previous = state.latest_compaction().map(|value| value.summary());
+                let (goal, _) = crate::adapters::research_projection::continuation_text(
+                    &state
+                        .full_normalized_history()
+                        .map_err(SessionError::from)?,
+                    previous,
+                    policy,
+                )?;
+                let references = state
+                    .history_items_with_event_ids()
+                    .map(|(id, _)| id.clone())
+                    .rev()
+                    .take(policy.compaction_reference_items())
+                    .collect::<Vec<_>>();
+                let previous = previous
+                    .map(|summary| summary.model_projection())
+                    .transpose()?;
+                let data = serde_json::to_string(&serde_json::json!({
+                    "source": facts.task_source()?,
+                    "operator_goal": goal,
+                    "active_operator_input": active.map(|active| active.original_input()),
+                    "previous_derived_summary": previous,
+                    "active_normalized_history": history,
+                    "recent_history_event_refs": references,
+                }))
+                .map_err(|error| ChatError::CompactionSummarySource {
+                    message: error.to_string(),
+                })?;
+                Ok((facts.task_source()?.clone(), goal, data, references))
+            })?;
+        console_eprintln!(
+            "[compaction] Requesting a tool-free model handoff; original Context remains active until validation and durable append."
+        );
+        let mut attempts = Vec::new();
+        let mut record_attempt = |attempt| {
+            self.record_request_audit_manifest(attempt, None)
+                .map(|manifest| {
+                    let id = manifest.audit_event_id().clone();
+                    attempts.push(id.clone());
+                    id
+                })
+                .map_err(ChatError::into_request_audit_agent_loop_error)
+        };
+        let output = agent
+            .sample_compaction(
+                crate::app::agent_loop::CompactionSampleInput {
+                    provider: request.composition.compaction_provider().0,
+                    agent_model_profile: Some(request.composition.compaction_provider().1),
+                    source: &source,
+                    source_data,
+                    current_goal: goal,
+                    references,
+                    byte_limit: policy.summary_bytes(),
+                    request_budget: request.budget,
+                    cancellation: request.cancellation.clone(),
+                    audit_context: request.audit,
+                },
+                &mut record_attempt,
+            )
+            .await?;
+        if request.cancellation.is_cancelled() {
+            return Err(crate::app::agent_loop::AgentLoopError::CompactionCancelled.into());
+        }
+        let sample_id = self.with_projection(|projection, store, stream_id| {
+            crate::adapters::session_compaction::validate_compaction_source_suffix(
+                &self.project,
+                &source,
+                &attempts,
+                None,
+            )
+            .map_err(|message| ChatError::CompactionSummarySource { message })?;
+            let sequence = store.next_sequence()?;
+            let id = event_id(
+                self.project.project_id(),
+                &self.session_id,
+                sequence.get(),
+                "compaction-sample",
+            );
+            let event = SessionEvent::CompactionSampleRecorded {
+                sample: output.sample.clone(),
+            }
+            .into_envelope(id.clone(), stream_id, sequence, occurred_at())?;
+            projection
+                .append(store, event)
+                .map_err(ChatError::from_session_append)?;
+            Ok(id)
+        })?;
+        if let Some(usage) = output.usage {
+            self.record_model_usage(
+                output.sample.audit_event_id(),
+                output.sample.provider_session(),
+                usage,
+            )?;
+        }
         self.with_projection(|projection, store, stream_id| {
+            crate::adapters::session_compaction::validate_compaction_source_suffix(
+                &self.project,
+                &source,
+                &attempts,
+                Some(&sample_id),
+            )
+            .map_err(|message| ChatError::CompactionSummarySource { message })?;
             agent.validate_compaction_session(projection.state())?;
             projection
                 .state()
@@ -133,15 +442,22 @@ impl DurableChatSession {
             // The Writer lock freezes both Research and Session appenders while
             // these read-only facts and the new Compaction Event are composed.
             let facts = load_session_compaction_facts(&self.project, projection.state())
-                .map_err(ChatError::CompactionFacts)?;
+                .map_err(ChatError::CompactionFacts)?
+                .with_model_sample(sample_id, output.sample.narrative().clone());
             let (draft, compaction) = select_compaction(
                 projection.state(),
                 &facts,
                 ContextWindowPolicy::for_window(window_tokens),
+                None,
                 |candidate| {
-                    match active {
-                        Some(active) => agent.preflight_tool_batch_compaction(candidate, active),
-                        None => agent.preflight_compaction(candidate, true),
+                    match (active, replacement) {
+                        (Some(active), Some(prompt)) => {
+                            agent.preflight_checkpoint_definition(candidate, active, prompt)
+                        }
+                        (Some(active), None) => {
+                            agent.preflight_tool_batch_compaction(candidate, active)
+                        }
+                        (None, _) => agent.preflight_compaction(candidate, true),
                     }
                     .map_err(ChatError::from)
                 },
@@ -171,6 +487,9 @@ impl DurableChatSession {
             projection
                 .append(store, event)
                 .map_err(ChatError::from_session_append)?;
+            if let Some(source) = facts.task_projection() {
+                projection.retain_compaction_source(source.clone())?;
+            }
             agent.apply_compaction(projection.state(), Some(&validation))?;
             Ok(result)
         })
@@ -183,14 +502,17 @@ pub(super) fn select_compaction(
     state: &SessionState,
     facts: &SessionCompactionFacts,
     policy: ContextWindowPolicy,
+    historical_narrative: Option<&crate::domain::session::NarrativeSummary>,
     mut fits: impl FnMut(&SessionCompaction) -> Result<bool, ChatError>,
 ) -> Result<(SessionSummaryDraft, SessionCompaction), ChatError> {
     let history = state
         .full_normalized_history()
         .map_err(SessionError::from)?;
+    let minimum_recent = crate::domain::history::latest_complete_tool_batch_items(&history)
+        .map_err(SessionError::from)?;
     let mut references = policy.compaction_reference_items();
     loop {
-        let draft = facts
+        let mut draft = facts
             .compose_session_summary_draft(
                 &history,
                 state
@@ -200,10 +522,14 @@ pub(super) fn select_compaction(
                 policy,
             )?
             .with_byte_limit(policy.summary_bytes())?;
+        if let Some(narrative) = historical_narrative {
+            draft = draft.with_historical_narrative(narrative.clone());
+        }
         let mut retained = state
             .normalized_history_items()
             .map_err(SessionError::from)?
-            .len();
+            .len()
+            .max(minimum_recent);
         loop {
             match state.next_compaction(draft.clone(), retained, &facts.context()) {
                 Ok(candidate) if fits(&candidate)? => return Ok((draft, candidate)),
@@ -211,10 +537,10 @@ pub(super) fn select_compaction(
                 Err(SessionError::CompactionSummaryTooLarge { .. }) => break,
                 Err(error) => return Err(error.into()),
             }
-            if retained == 0 {
+            if retained <= minimum_recent {
                 break;
             }
-            retained /= 2;
+            retained = (retained / 2).max(minimum_recent);
         }
         if references == 0 {
             return Err(ChatError::CompactionNotUseful);

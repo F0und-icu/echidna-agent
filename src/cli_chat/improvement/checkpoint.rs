@@ -22,7 +22,15 @@ impl DurableChatSession {
             );
             let event = SessionEvent::ImprovementActivityRecorded {
                 activity: ImprovementActivity {
-                    schema_version: 1,
+                    schema_version: if matches!(
+                        fact,
+                        ImprovementFact::CheckpointStarted { .. }
+                            | ImprovementFact::CandidateBound { .. }
+                    ) {
+                        2
+                    } else {
+                        1
+                    },
                     attempt_id: attempt_id.to_owned(),
                     fact,
                 },
@@ -56,6 +64,7 @@ impl DurableChatSession {
     pub(super) async fn scoped_sample<Provider: ModelProvider + ?Sized>(
         &self,
         agent: &AgentLoop<'_, '_, Provider, ToolRegistry>,
+        boundary: ImprovementBoundary<'_>,
         tools: &ToolRegistry,
         attempt: &str,
         stage: ImprovementStage,
@@ -145,6 +154,7 @@ impl DurableChatSession {
         agent
             .sample_improvement(
                 ImprovementSampleInput {
+                    boundary,
                     attempt_id: attempt,
                     stage,
                     prompt,

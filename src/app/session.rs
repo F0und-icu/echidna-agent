@@ -43,6 +43,8 @@ where
 pub struct SessionProjection {
     reducer: SessionReducer,
     state: SessionState,
+    compaction_source: Option<crate::domain::session::TaskCompactionValidationFacts>,
+    current_source: Option<crate::domain::session::SessionSourceIdentity>,
 }
 
 impl SessionProjection {
@@ -137,7 +139,61 @@ impl SessionProjection {
     {
         let reducer = SessionReducer;
         let state = reducer.reduce(events)?;
-        Ok(Self { reducer, state })
+        Ok(Self {
+            reducer,
+            state,
+            compaction_source: None,
+            current_source: None,
+        })
+    }
+
+    pub(crate) fn replay_with_compaction_source(
+        project_id: crate::domain::project::ProjectId,
+        events: &[EventEnvelope<serde_json::Value>],
+        project_events: &[EventEnvelope<serde_json::Value>],
+    ) -> Result<Self, SessionError> {
+        let reducer = SessionReducer;
+        let (state, compaction_source, current_source) =
+            reducer.reduce_with_compaction_source(project_id, events, project_events)?;
+        Ok(Self {
+            reducer,
+            state,
+            compaction_source,
+            current_source,
+        })
+    }
+
+    pub(crate) fn current_source(&self) -> Option<&crate::domain::session::SessionSourceIdentity> {
+        self.current_source.as_ref()
+    }
+
+    pub(crate) fn compaction_source_for(
+        &self,
+        summary: &crate::domain::session::SessionSummary,
+    ) -> Option<&crate::domain::session::TaskCompactionValidationFacts> {
+        self.compaction_source.as_ref().filter(|facts| {
+            summary
+                .task_references()
+                .is_some_and(|refs| refs.source() == facts.source())
+        })
+    }
+
+    pub(crate) fn retain_compaction_source(
+        &mut self,
+        facts: crate::domain::session::TaskCompactionValidationFacts,
+    ) -> Result<(), SessionError> {
+        if self
+            .state
+            .latest_compaction()
+            .and_then(|value| value.summary().task_references())
+            .is_none_or(|refs| refs.source() != facts.source())
+        {
+            return Err(SessionError::CompactionContextProvenance {
+                message: "retained source does not match the durable Compaction".to_owned(),
+            });
+        }
+        self.compaction_source = Some(facts);
+        Ok(())
     }
 
     pub fn state(&self) -> &SessionState {
@@ -158,6 +214,7 @@ impl SessionProjection {
             self.reducer.apply_in_place(&mut next, event)?;
         }
         self.state = next;
+        self.current_source = None;
         Ok(())
     }
 
@@ -177,7 +234,11 @@ impl SessionProjection {
     where
         S: EventSink<serde_json::Value>,
     {
-        append_after_durable(&self.reducer, &mut self.state, sink, event)
+        let outcome = append_after_durable(&self.reducer, &mut self.state, sink, event)?;
+        if outcome != ApplyOutcome::DuplicateIgnored {
+            self.current_source = None;
+        }
+        Ok(outcome)
     }
 }
 

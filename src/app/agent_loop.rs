@@ -2,11 +2,15 @@
 
 mod argument_correction;
 mod compaction;
+mod compaction_sample;
+pub(crate) use compaction_sample::CompactionSampleInput;
 mod context_state;
 mod definition;
 mod execution;
 mod improvement;
-pub(crate) use improvement::{ImprovementSampleInput, ImprovementSampleOutput};
+pub(crate) use improvement::{
+    ImprovementBoundary, ImprovementSampleInput, ImprovementSampleOutput,
+};
 mod output_capture;
 mod recovery;
 mod request_audit;
@@ -14,11 +18,13 @@ mod request_audit;
 pub(crate) use compaction::ToolBatchContext;
 pub(crate) use context_state::CurrentContextState;
 
-type ToolBatchStage<'stage, 'provider, 'tools, Provider, Tools> = dyn FnMut(
-        &mut AgentLoop<'provider, 'tools, Provider, Tools>,
-        &ToolBatchContext<'_>,
-    ) -> Result<(), AgentLoopError>
-    + 'stage;
+pub(crate) trait ToolBatchStage<Provider: ModelProvider + ?Sized, Tools: ToolExecutor + ?Sized> {
+    fn apply<'call, 'provider: 'call, 'tools: 'call>(
+        &'call mut self,
+        agent: &'call mut AgentLoop<'provider, 'tools, Provider, Tools>,
+        active: &'call ToolBatchContext<'_>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), AgentLoopError>> + 'call>>;
+}
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -214,6 +220,7 @@ pub(crate) enum ChatDurabilityCheckpoint<'a> {
         diagnostic: &'a crate::domain::model::ToolArgumentDiagnostic,
         corrections_used: u8,
     },
+    ArgumentCorrectionReset,
     History(&'a [ContentItem]),
     ExecutionReceipt(&'a ToolExecutionOutcome),
     Subcommand(&'a crate::domain::tools::SubcommandCheckpoint),
@@ -324,6 +331,7 @@ pub struct AgentLoop<'provider, 'tools, Provider: ?Sized, Tools: ?Sized> {
     last_successful_context: Option<ContextInspection>,
     last_sampling_step_plan: Option<SamplingStepPlan>,
     next_turn_sequence: u64,
+    consecutive_argument_corrections: u8,
     last_baseline_assessment: Option<BaselineAssessment>,
     active_agent_model_profile: Option<AgentModelProfile>,
     pending_agent_model_profile: Option<AgentModelProfile>,
@@ -414,6 +422,7 @@ where
             last_successful_context: None,
             last_sampling_step_plan: None,
             next_turn_sequence: 0,
+            consecutive_argument_corrections: 0,
             last_baseline_assessment: None,
             active_agent_model_profile: None,
             pending_agent_model_profile: None,
@@ -475,6 +484,7 @@ where
         self.history = history;
         self.history_provenance.clear();
         self.provider_session = provider_session;
+        self.consecutive_argument_corrections = 0;
         self.bound_session_stream = Some(stream_id);
         self.session_summary = session
             .latest_compaction()
@@ -762,7 +772,7 @@ where
         audit_context: &RequestAuditRunContext,
         record_attempt: &mut dyn FnMut(RequestAuditAttempt) -> Result<(), AgentLoopError>,
         stages: CliRuntimeStages<'_>,
-        tool_batch: Option<&mut ToolBatchStage<'_, 'provider, 'tools, Provider, Tools>>,
+        tool_batch: Option<&mut dyn ToolBatchStage<Provider, Tools>>,
     ) -> Result<AgentTurnOutcome, AgentLoopError> {
         let primary_capability_hash = self.provider.capabilities().semantic_hash();
         let initial_images = initial_images
@@ -797,7 +807,7 @@ where
         initial_images: Vec<(ContentItem, ContextProvenance)>,
         mut view_image_follow_up: Option<&mut ViewImageFollowUp<'_>>,
         stages: StreamingStages<'_>,
-        mut tool_batch: Option<&mut ToolBatchStage<'_, 'provider, 'tools, Provider, Tools>>,
+        mut tool_batch: Option<&mut dyn ToolBatchStage<Provider, Tools>>,
     ) -> Result<AgentTurnOutcome, AgentLoopError> {
         let StreamingStages {
             request_budget,
@@ -848,7 +858,7 @@ where
             .tools
             .resolve_tool_plan(&self.active_tool_exposure_plan, &deferred_activations)?;
         let mut executions = Vec::new();
-        let mut corrections_used = 0;
+        let mut corrections_used = self.consecutive_argument_corrections;
         let mut correction_feedback = Vec::new();
         let mut turn_has_committed_sample = false;
         let mut next_request_index = 0;
@@ -1183,7 +1193,7 @@ where
                         })?;
                     }
                     if corrections_used
-                        >= crate::domain::model::MAX_TOOL_ARGUMENT_CORRECTIONS_PER_TURN
+                        >= crate::domain::model::MAX_TOOL_ARGUMENT_CORRECTIONS_PER_CHAIN
                     {
                         return Err(ModelStreamingError::Provider(
                             ModelProviderError::InvalidToolArguments { diagnostic },
@@ -1191,6 +1201,7 @@ where
                         .into());
                     }
                     corrections_used += 1;
+                    self.consecutive_argument_corrections = corrections_used;
                     correction_feedback.push(argument_correction::feedback(
                         sampling_step.step_id(),
                         &diagnostic,
@@ -1222,7 +1233,12 @@ where
                 stage(ChatDurabilityCheckpoint::History(
                     &self.history.items()[sample_history_start..],
                 ))?;
+                if corrections_used > 0 {
+                    stage(ChatDurabilityCheckpoint::ArgumentCorrectionReset)?;
+                }
             }
+            corrections_used = 0;
+            self.consecutive_argument_corrections = 0;
             self.provider_session
                 .record_completed_sample(&snapshot, server_output_items.clone())?;
             turn_has_committed_sample = true;
@@ -1334,14 +1350,17 @@ where
                     .tools
                     .resolve_tool_plan(&self.active_tool_exposure_plan, &deferred_activations)?;
                 let active = ToolBatchContext {
+                    turn_id: &turn_id,
+                    history_end: self.history.items().len(),
                     history_start: turn_history_start,
                     original_input: &original_input,
                     input_provenance: &input_provenance,
                     detached: detached_input,
                     tool_specs: tool_plan.advertised_specs(),
                 };
-                stage(self, &active)?;
+                stage.apply(self, &active).await?;
                 if self.applied_compaction != before {
+                    correction_feedback.clear();
                     let dropped = previous_len
                         .checked_sub(self.history.items().len())
                         .ok_or(AgentLoopError::ContextStateMismatch)?;
@@ -1740,6 +1759,10 @@ pub enum AgentLoopError {
     ContextRefresh { message: String },
     #[error("durable tool-batch compaction failed: {message}")]
     ToolBatchCompaction { message: String },
+    #[error("Compaction summary rejected: {reason}")]
+    CompactionSummaryRejected { reason: String },
+    #[error("Compaction summary cancelled; parent delivery retained")]
+    CompactionCancelled,
     #[error("Execution Receipt commit failed: {message}")]
     ExecutionReceiptCommit { message: String },
     #[error("assistant text presentation failed: {message}")]

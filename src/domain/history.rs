@@ -310,6 +310,32 @@ pub(crate) fn retain_recent_complete_history(
     Ok((retained_from, retained))
 }
 
+/// Minimum suffix that preserves the latest settled Tool batch, including
+/// parallel calls and narration interleaved before all results arrived.
+/// Selection is separate from legacy Compaction replay, which may retain zero.
+pub(crate) fn latest_complete_tool_batch_items(
+    items: &[ContentItem],
+) -> Result<usize, HistoryError> {
+    ConversationHistory::from_complete_content_items(items)?;
+    let mut pending = std::collections::BTreeSet::new();
+    let mut latest_start = None;
+    for (index, item) in items.iter().enumerate() {
+        match item {
+            ContentItem::ToolCall { call } => {
+                if pending.is_empty() {
+                    latest_start = Some(index);
+                }
+                pending.insert(&call.call_id);
+            }
+            ContentItem::ToolResult { result } => {
+                pending.remove(&result.call_id);
+            }
+            _ => {}
+        }
+    }
+    Ok(latest_start.map_or(0, |start| items.len() - start))
+}
+
 /// Validates externally assembled Context items by replaying Tool pairing
 /// through the same History owner used by the AgentLoop.
 pub(crate) fn validate_content_items(items: &[ContentItem]) -> Result<(), HistoryError> {

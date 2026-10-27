@@ -216,7 +216,7 @@ fn app_improvement_friction_retains_exact_receipt_and_duplicate_result_reference
     else {
         panic!("known retained friction was not eligible");
     };
-    assert_eq!(friction, [failure, repeated]);
+    assert_eq!(friction, [repeated, failure]);
     assert_eq!(current.len(), state.history().items().len());
     assert_eq!(budget.counts().total(), 0);
     assert!(matches!(
@@ -253,6 +253,7 @@ fn app_improvement_feedback_is_bounded_and_uses_actual_shared_remaining_budget()
             .unwrap(),
         );
     }
+    expected.reverse();
     expected.truncate(8);
     let state = SessionReducer.reduce(events).unwrap();
     let unlimited = ModelRequestBudget::new(0);
@@ -273,6 +274,330 @@ fn app_improvement_feedback_is_bounded_and_uses_actual_shared_remaining_budget()
         readiness(&empty, "ordinary task", 0, &budget),
         ImprovementReadiness::NoFriction
     ));
+}
+
+#[test]
+fn long_rsi_diagnostic_source_bounds_hundreds_of_steps_and_keeps_latest_signals() {
+    let mut events = started();
+    append(
+        &mut events,
+        SessionEvent::HistoryItemRecorded {
+            item: ContentItem::user_text("A neutral task".repeat(4000)),
+        },
+    );
+    let mut receipt_ids = Vec::new();
+    for index in 0..160 {
+        append(
+            &mut events,
+            SessionEvent::HistoryItemRecorded {
+                item: ContentItem::assistant_text(format!(
+                    "Historical observation{index}: {}",
+                    "old material ".repeat(400)
+                )),
+            },
+        );
+        receipt_ids.push(
+            recorded_tool(
+                &mut events,
+                "read_file",
+                ToolResultStatus::Failed,
+                json!([]),
+                true,
+            )
+            .0
+            .unwrap(),
+        );
+    }
+    let state = SessionReducer.reduce(events).unwrap();
+    let budget = ModelRequestBudget::new(0);
+    let ImprovementReadiness::Ready { current, friction } =
+        readiness(&state, "A neutral task", 0, &budget)
+    else {
+        panic!("retained failures must be available");
+    };
+    assert_eq!(
+        friction,
+        receipt_ids
+            .iter()
+            .rev()
+            .take(8)
+            .cloned()
+            .collect::<Vec<_>>()
+    );
+    let source = crate::app::improvement::diagnostic_source(
+        &state,
+        &"neutral goal ".repeat(5000),
+        &current,
+        &friction,
+        8192,
+    )
+    .unwrap();
+    let encoded = serde_json::to_vec(&source).unwrap();
+    assert!(encoded.len() <= 8192);
+    assert_eq!(source["friction"], json!(friction));
+    assert!(source["omitted_history_items"].as_u64().unwrap() > 100);
+    assert!(
+        source["observations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|pair| pair["source_pair"].as_array().unwrap().len() == 2)
+    );
+    assert!(
+        !String::from_utf8(encoded)
+            .unwrap()
+            .contains("Historical observation0:")
+    );
+}
+
+#[test]
+fn diagnostic_source_retains_command_semantics_before_clipping_large_values() {
+    let long_path = ["a".repeat(225), "b".repeat(225), "c".repeat(225)].join("/");
+    let oversized = (0..8)
+        .map(|index| {
+            json!({
+                "path":format!("input-{index}/{}",vec!["n".repeat(225);17].join("/")),
+                "blake3":"a".repeat(64),
+            })
+        })
+        .collect::<Vec<_>>();
+    for identities in [
+        json!([{"path":"neutral-input.csv","blake3":"a".repeat(64)}]),
+        json!([{"path":long_path,"blake3":"a".repeat(64)},{"path":"other-neutral-input.csv","blake3":"b".repeat(64)}]),
+        json!(oversized),
+    ] {
+        let files: Vec<crate::domain::agent_evolution::ScriptFile> =
+            serde_json::from_value(identities.clone()).unwrap();
+        crate::domain::agent_evolution::validate_input_files(&files).unwrap();
+        let mut events = started();
+        append(
+            &mut events,
+            SessionEvent::HistoryItemRecorded {
+                item: ContentItem::user_text("Review a neutral CSV formatting result."),
+            },
+        );
+        let large = "A neutral Unicode observation: αβγ \"quoted\"\n".repeat(50_000);
+        let mut friction = Vec::new();
+        for (index, status, exit_code) in [
+            (0, ToolResultStatus::Failed, 7),
+            (1, ToolResultStatus::Succeeded, 0),
+        ] {
+            let call = ToolCall::new(
+                ToolCallId::new(format!("neutral-command-{index}-{}", "c".repeat(80))),
+                ToolName::new("run_command"),
+                json!({"argv":["/usr/bin/printf",large]}),
+            );
+            append(
+                &mut events,
+                SessionEvent::HistoryItemRecorded {
+                    item: ContentItem::ToolCall { call: call.clone() },
+                },
+            );
+            events.last_mut().unwrap().event_id =
+                EventId::new(format!("neutral-call-event-{index}-{}", "i".repeat(180)));
+            let receipt: ExecutionReceipt=serde_json::from_value(json!({
+            "execution_id":ExecutionId::for_model_call(&call.call_id),"plan_fingerprint":"neutral-plan",
+            "status":status,"exit_reason":null,"output_artifact_ids":[],"environment_change":null
+        })).unwrap();
+            let receipt_id = append(
+                &mut events,
+                SessionEvent::ExecutionReceiptRecorded { receipt },
+            );
+            if status == ToolResultStatus::Failed {
+                friction.push(receipt_id);
+            }
+            append(
+                &mut events,
+                SessionEvent::HistoryItemRecorded {
+                    item: ContentItem::ToolResult {
+                        result: ToolResult {
+                            call_id: call.call_id,
+                            tool_name: call.name,
+                            status,
+                            output: json!({"exit_code":exit_code,"verified_inputs":identities,"stdout":large,"stderr":""}),
+                        },
+                    },
+                },
+            );
+            events.last_mut().unwrap().event_id =
+                EventId::new(format!("neutral-result-event-{index}-{}", "i".repeat(180)));
+        }
+        let state = SessionReducer.reduce(events).unwrap();
+        let current = state.history_items_with_event_ids().collect::<Vec<_>>();
+        for limit in [8192, 65536] {
+            let source = crate::app::improvement::diagnostic_source(
+                &state,
+                "Review the retained CSV observations.",
+                &current,
+                &friction,
+                limit,
+            )
+            .unwrap();
+            let encoded = serde_json::to_vec(&source).unwrap();
+            assert!(encoded.len() <= limit);
+            let observations = source["observations"].as_array().unwrap();
+            if serde_json::to_vec(&identities).unwrap().len() > limit {
+                assert!(
+                    observations.is_empty(),
+                    "oversized exact identities must omit whole pairs"
+                );
+                assert_eq!(source["omitted_history_items"], current.len());
+            } else {
+                assert!(
+                    !observations.is_empty(),
+                    "a complete identity pair fits the package"
+                );
+            }
+            for observation in observations {
+                let pair = observation["source_pair"].as_array().unwrap();
+                assert_eq!(pair.len(), 2);
+                assert_eq!(pair[0]["tool_name"], "run_command");
+                assert_eq!(pair[0]["arguments"]["excerpted"], true);
+                let result = &pair[1];
+                assert_eq!(result["verified_inputs"], identities);
+                assert_eq!(result["output"]["excerpted"], true);
+                assert_eq!(
+                    result["exit_code"],
+                    if result["status"] == "failed" { 7 } else { 0 }
+                );
+                assert!(result["event_id"].as_str().unwrap().len() > 180);
+                let excerpt = result["output"]["encoded_value_excerpt"].as_str().unwrap();
+                assert!(!excerpt.contains('\u{fffd}'));
+                assert!(excerpt.len() <= limit / 8);
+            }
+            assert!(!String::from_utf8(encoded).unwrap().contains(&large));
+        }
+        assert_eq!(state.history().items().iter().filter(|item|matches!(item,ContentItem::ToolResult {result} if result.output["stdout"].as_str().unwrap().len()==large.len())).count(),2);
+    }
+}
+
+#[test]
+fn readiness_compares_large_borrowed_commands_without_prefix_based_duplicates() {
+    let mut events = started();
+    append(
+        &mut events,
+        SessionEvent::HistoryItemRecorded {
+            item: ContentItem::user_text("Review neutral command results."),
+        },
+    );
+    let inputs = json!([{"path":"neutral.csv","blake3":"a".repeat(64)}]);
+    let mut results = Vec::new();
+    for suffix in ["first", "different", "first"] {
+        let first = events.len();
+        let (_, result) = recorded_tool(
+            &mut events,
+            "run_command",
+            ToolResultStatus::Succeeded,
+            inputs.clone(),
+            true,
+        );
+        events[first].payload["item"]["call"]["arguments"] =
+            json!({"argv":["fixture",format!("{}{suffix}","neutral argument ".repeat(20_000))]});
+        results.push(result);
+    }
+    let state = SessionReducer.reduce(events).unwrap();
+    let budget = ModelRequestBudget::new(0);
+    let ImprovementReadiness::Ready { friction, .. } =
+        readiness(&state, "Review neutral command results.", 0, &budget)
+    else {
+        panic!("exactly repeated command must be retained");
+    };
+    assert_eq!(friction, vec![results[2].clone()]);
+}
+
+#[test]
+fn checkpoint_assessment_watermark_keeps_old_activity_readable_and_filters_only_considered_friction()
+ {
+    use crate::domain::session::{ImprovementActivity, ImprovementFact};
+    let mut events = Vec::new();
+    append(
+        &mut events,
+        SessionEvent::StartedWithAgent {
+            primary_provider_session: ProviderSessionRef {
+                id: ProviderSessionId::new("checkpoint-policy"),
+                role: ProviderSessionRole::Primary,
+                generation: 1,
+            },
+            binding: binding(Some(true)),
+        },
+    );
+    append(
+        &mut events,
+        SessionEvent::HistoryItemRecorded {
+            item: ContentItem::user_text("neutral task"),
+        },
+    );
+    let first = recorded_tool(
+        &mut events,
+        "read_file",
+        ToolResultStatus::Failed,
+        json!([]),
+        true,
+    )
+    .0
+    .unwrap();
+    let before = SessionReducer.reduce(events.clone()).unwrap();
+    let start = SessionEvent::ImprovementActivityRecorded {
+        activity: ImprovementActivity {
+            schema_version: 2,
+            attempt_id: "checkpoint-policy-first".to_owned(),
+            fact: ImprovementFact::CheckpointStarted {
+                parent_digest: binding(Some(true))
+                    .definition()
+                    .digest()
+                    .as_str()
+                    .to_owned(),
+                history_start: 0,
+                history_end: before.history().items().len(),
+                friction: vec![first],
+            },
+        },
+    };
+    for schema in [0, 1, 3] {
+        let mut changed = events.clone();
+        append(&mut changed, start.clone());
+        changed.last_mut().unwrap().payload["schema_version"] = json!(schema);
+        assert!(
+            SessionReducer.reduce(changed).is_err(),
+            "checkpoint fact accepted wrong schema{schema}"
+        );
+    }
+    append(&mut events, start);
+    append(
+        &mut events,
+        SessionEvent::ImprovementActivityRecorded {
+            activity: ImprovementActivity {
+                schema_version: 1,
+                attempt_id: "checkpoint-policy-first".to_owned(),
+                fact: ImprovementFact::Finished {
+                    disposition: "no_change".to_owned(),
+                    reason: "No local oracle available.".to_owned(),
+                },
+            },
+        },
+    );
+    let state = SessionReducer.reduce(events.clone()).unwrap();
+    let budget = ModelRequestBudget::new(0);
+    assert!(matches!(
+        readiness(&state, "neutral task", 0, &budget),
+        ImprovementReadiness::NoFriction
+    ));
+    let recent = recorded_tool(
+        &mut events,
+        "read_file",
+        ToolResultStatus::Failed,
+        json!([]),
+        true,
+    )
+    .0
+    .unwrap();
+    let state = SessionReducer.reduce(events).unwrap();
+    let ImprovementReadiness::Ready { friction, .. } =
+        readiness(&state, "neutral task", 0, &budget)
+    else {
+        panic!("new friction was discarded with old history");
+    };
+    assert_eq!(friction, [recent]);
 }
 
 #[test]

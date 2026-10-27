@@ -36,8 +36,16 @@ mod research_turn;
 #[path = "private_cases/tool_catalog.rs"]
 mod tool_catalog;
 
+#[path = "private_cases/compaction_continuity.rs"]
+mod compaction_continuity;
 #[path = "private_cases/compaction_replay.rs"]
 mod compaction_replay;
 
 #[path = "private_cases/improvement_policy.rs"]
 mod improvement_policy;
+
+#[path = "private_cases/argument_correction_checkpoint.rs"]
+mod argument_correction_checkpoint;
+
+#[path = "private_cases/session_read_reuse.rs"]
+mod session_read_reuse;

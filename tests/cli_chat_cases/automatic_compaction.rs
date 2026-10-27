@@ -1,4 +1,4 @@
-//! Completed-Turn auto-compaction uses the generic pinned Agent and live catalog.
+//! Auto-compaction samples explicit tool-free handoffs through the pinned Agent.
 
 use super::*;
 
@@ -78,6 +78,24 @@ fn reasoning_answer(text: &str) -> String {
     ].iter().map(|event|format!("data: {event}\n\n")).collect()
 }
 
+fn assert_handoff_request(request: &Value) {
+    assert!(
+        request.get("tools").is_none(),
+        "summary cannot advertise tools"
+    );
+    assert!(request["previous_response_id"].is_null());
+    assert!(
+        request["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("continuation handoff")
+    );
+    assert!(json_contains_text(
+        &request["input"],
+        "active_normalized_history"
+    ));
+}
+
 #[test]
 fn generic_auto_compaction_keeps_scoped_memory_persona_rsi_and_one_mcp_catalog() {
     for rsi in [false, true] {
@@ -113,7 +131,17 @@ fn generic_auto_compaction_keeps_scoped_memory_persona_rsi_and_one_mcp_catalog()
             ),
             (
                 200,
-                reasoning_answer(&"completed clerk notes ".repeat(10_000)),
+                reasoning_answer("Scoped memory saved; clerk task complete.").replace(
+                    "volatile-only-reasoning",
+                    &"volatile-only-reasoning ".repeat(18_000),
+                ),
+            ),
+            (
+                200,
+                compaction_summary_response(
+                    "The scoped memory was saved and clerk notes completed.",
+                    "auto-handoff",
+                ),
             ),
             (200, text_response("NEXT-TASK-COMPLETE", "auto-next")),
         ]);
@@ -122,7 +150,9 @@ fn generic_auto_compaction_keeps_scoped_memory_persona_rsi_and_one_mcp_catalog()
             &config,
             format!(
                 "{}\n[mcp_servers.fixture]\nurl = {}\nprotocol_version = \"2026-07-28\"\n",
-                fs::read_to_string(&config).unwrap(),
+                fs::read_to_string(&config)
+                    .unwrap()
+                    .replace("context_window = 32768", "context_window = 1048576"),
                 serde_json::to_string(&mcp.base_url).unwrap()
             ),
         )
@@ -138,7 +168,7 @@ fn generic_auto_compaction_keeps_scoped_memory_persona_rsi_and_one_mcp_catalog()
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let requests: Vec<_> = (0..3)
+        let requests: Vec<_> = (0..4)
             .map(|_| request_body(&server.requests.recv_timeout(F2A_WAIT).unwrap()))
             .collect();
         assert!(server.requests.try_recv().is_err());
@@ -150,7 +180,7 @@ fn generic_auto_compaction_keeps_scoped_memory_persona_rsi_and_one_mcp_catalog()
             "no catalog rediscovery after reset"
         );
         mcp.join();
-        for request in &requests {
+        for request in [&requests[0], &requests[1], &requests[3]] {
             assert!(
                 request["instructions"]
                     .as_str()
@@ -165,14 +195,15 @@ fn generic_auto_compaction_keeps_scoped_memory_persona_rsi_and_one_mcp_catalog()
                     .any(|tool| tool["name"] == remote_name)
             );
         }
+        assert_handoff_request(&requests[2]);
         assert!(json_contains_text(
-            &requests[2]["input"],
+            &requests[3]["input"],
             "CLERK-AGENT-SCOPED-MEMORY"
         ));
-        assert!(json_contains_text(&requests[2]["input"], "second task"));
-        assert!(requests[2]["previous_response_id"].is_null());
-        assert!(!json_contains_type(&requests[2]["input"], "reasoning"));
-        assert!(!requests[2].to_string().contains("volatile-only-reasoning"));
+        assert!(json_contains_text(&requests[3]["input"], "second task"));
+        assert!(requests[3]["previous_response_id"].is_null());
+        assert!(!json_contains_type(&requests[3]["input"], "reasoning"));
+        assert!(!requests[3].to_string().contains("volatile-only-reasoning"));
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert_eq!(
             stdout
@@ -195,9 +226,14 @@ fn generic_auto_compaction_keeps_scoped_memory_persona_rsi_and_one_mcp_catalog()
         );
         let project = Project::discover(root.path()).unwrap();
         let state = reduced_session(&project, &session_id(root.path()));
-        assert_eq!(state.request_audits().len(), 3);
+        assert_eq!(state.request_audits().len(), 4);
+        let audits = serde_json::to_value(state.request_audits()).unwrap();
+        assert_ne!(
+            audits[2]["provider_session"], audits[1]["provider_session"],
+            "summary has its own ProviderSession"
+        );
         assert_eq!(
-            state.request_audits()[2].delivery().reason(),
+            state.request_audits()[3].delivery().reason(),
             echidna::domain::request_audit::RequestAuditDeliveryReason::Full(
                 echidna::domain::context::BaselineInvalidationReason::CompactionReset
             )
@@ -211,6 +247,24 @@ fn generic_auto_compaction_keeps_scoped_memory_persona_rsi_and_one_mcp_catalog()
             "only the actual local memory operation ran"
         );
         let summary = serde_json::to_value(state.latest_compaction().unwrap().summary()).unwrap();
+        assert_eq!(summary["schema_version"], 5);
+        assert_eq!(
+            summary["narrative"]["concise_progress"],
+            "The scoped memory was saved and clerk notes completed."
+        );
+        let sample = events
+            .iter()
+            .find(|event| event["event_type"] == "session.compaction_sample_recorded")
+            .unwrap();
+        assert_eq!(summary["model_sample_event_ref"], sample["event_id"]);
+        assert_eq!(
+            sample["payload"]["request_audit_event_id"],
+            state.request_audits()[2].audit_event_id().as_str()
+        );
+        assert_eq!(
+            sample["payload"]["provider_session"],
+            audits[2]["provider_session"]
+        );
         assert!(
             summary["evidence_spine"].is_null(),
             "generic task needs no fake research target"
@@ -294,6 +348,7 @@ fn long_tool_loop_compacts_settled_batches_without_replaying_or_losing_task() {
         let definition = definition(root.path(), false, None);
         fs::write(root.path().join("task.png"), png_bytes(9, 7)).unwrap();
         let mut responses = Vec::new();
+        let mut handoff_indices = Vec::new();
         if incremental {
             let manifest = definition.join("agent.toml");
             fs::write(
@@ -319,17 +374,25 @@ fn long_tool_loop_compacts_settled_batches_without_replaying_or_losing_task() {
                 "data: {}\n\n",
                 json!({
                 "type":"response.output_item.done", "output_index":0,
-                "item":{"type":"reasoning", "content":[{"type":"reasoning_text", "text":format!("batch-{index}-reasoning")}]} })
+                "item":{"type":"reasoning", "content":[{"type":"reasoning_text", "text":format!("batch-{index}-reasoning ").repeat(20_000)}]} })
             );
             response.push_str(&m4_long_flow_tool_response(
                 &format!("batch-{index}"),
                 "run_command",
-                json!({"argv":["/usr/bin/printf", "%s", "neutral-output ".repeat(7_000)]}),
+                json!({"argv":["/usr/bin/printf", "%s", "neutral-output ".repeat(2_000)]}),
                 &format!("batch-response-{index}"),
             ));
             responses.push((200, response));
+            if enabled {
+                handoff_indices.push(responses.len());
+                responses.push((200, compaction_summary_response(
+                    &format!("Neutral command batches zero through {index} completed; continue without replaying them."),
+                    &format!("batch-handoff-{index}"),
+                )));
+            }
         }
         responses.push((200, text_response("WORKING-SET-DONE", "batch-final")));
+        let request_count = responses.len();
         let server = spawn_responses_server(responses);
         let config = config(root.path(), &server.base_url, Some(enabled));
         fs::write(
@@ -361,13 +424,26 @@ fn long_tool_loop_compacts_settled_batches_without_replaying_or_losing_task() {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let requests: Vec<_> = (0..4 + usize::from(incremental))
+        let requests: Vec<_> = (0..request_count)
             .map(|_| request_body(&server.requests.recv_timeout(F2A_WAIT).unwrap()))
             .collect();
         assert!(server.requests.try_recv().is_err());
         server.join();
         assert!(String::from_utf8_lossy(&output.stdout).contains("WORKING-SET-DONE"));
-        for request in &requests {
+        for index in &handoff_indices {
+            assert_handoff_request(&requests[*index]);
+            assert!(!json_contains_type(&requests[*index]["input"], "reasoning"));
+        }
+        for index in handoff_indices.iter().skip(1) {
+            let source = requests[*index]["input"].to_string();
+            assert!(source.contains("previous_derived_summary"));
+            assert!(source.contains("projection_version"));
+            assert!(!source.contains("task_references"));
+        }
+        for (index, request) in requests.iter().enumerate() {
+            if handoff_indices.contains(&index) {
+                continue;
+            }
             if !request["previous_response_id"].is_null() {
                 continue;
             }
@@ -417,7 +493,15 @@ fn long_tool_loop_compacts_settled_batches_without_replaying_or_losing_task() {
             1,
             "no fabricated repeated user History"
         );
-        assert_eq!(state.request_audits().len(), 4 + usize::from(incremental));
+        assert_eq!(state.request_audits().len(), request_count);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event["event_type"] == "session.compaction_sample_recorded")
+                .count(),
+            handoff_indices.len(),
+            "every extra summary request produces one separately scoped sample"
+        );
         let resets: Vec<_> = state
             .request_audits()
             .iter()
@@ -436,9 +520,11 @@ fn long_tool_loop_compacts_settled_batches_without_replaying_or_losing_task() {
                 "tool-batch pressure must trigger before completion"
             );
             assert!(resets.iter().all(|index| *index > 0));
+            assert_eq!(resets.len(), 3);
+            assert_eq!(compactions(root.path()).len(), 3);
             for index in resets {
                 assert!(!json_contains_type(&requests[index]["input"], "reasoning"));
-                assert!(requests[index].to_string().len() < requests[index - 1].to_string().len());
+                assert!(handoff_indices.contains(&(index - 1)));
                 assert!(
                     requests[index]["tools"]
                         .as_array()
@@ -462,7 +548,7 @@ fn long_tool_loop_compacts_settled_batches_without_replaying_or_losing_task() {
     }
     assert!(
         measured[1] * 100 < measured[0] * 65,
-        "opted-in working set must measurably reduce Full payload bytes: {measured:?}"
+        "opted-in working set must reduce total Full payload bytes, including summary requests: {measured:?}"
     );
     eprintln!(
         "Full request bytes, baseline={} bounded={}",
@@ -516,7 +602,7 @@ fn tool_batch_compaction_defers_when_original_task_alone_exceeds_working_target(
     server.join();
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("no smaller usable Context working set"),
+        stdout.contains("Compaction did not yield a smaller usable next-Turn Context"),
         "{stdout}"
     );
     assert!(stdout.contains("LARGE-TASK-DONE"));
@@ -535,6 +621,13 @@ fn completed_reasoning_delivery_alone_can_trigger_opted_in_compaction() {
     );
     let server = spawn_responses_server(vec![
         (200, first),
+        (
+            200,
+            compaction_summary_response(
+                "The first task finished with a short final answer.",
+                "reasoning-handoff",
+            ),
+        ),
         (200, text_response("NEXT-COMPLETE", "next-reasoning")),
     ]);
     let config = config(root.path(), &server.base_url, Some(true));
@@ -557,7 +650,11 @@ fn completed_reasoning_delivery_alone_can_trigger_opted_in_compaction() {
         String::from_utf8_lossy(&output.stderr)
     );
     server.requests.recv_timeout(F2A_WAIT).unwrap();
+    let handoff = request_body(&server.requests.recv_timeout(F2A_WAIT).unwrap());
+    assert_handoff_request(&handoff);
+    assert!(!handoff.to_string().contains("retained-reasoning"));
     let next = request_body(&server.requests.recv_timeout(F2A_WAIT).unwrap());
+    assert!(server.requests.try_recv().is_err());
     server.join();
     assert!(next["previous_response_id"].is_null());
     assert!(!json_contains_type(&next["input"], "reasoning"));
@@ -634,7 +731,7 @@ fn tool_batch_does_not_compact_when_initial_vision_consumed_the_final_admission(
 }
 
 #[test]
-fn automatic_compaction_runs_after_completed_rsi_diagnosis_without_extra_requests() {
+fn automatic_compaction_samples_handoff_after_completed_rsi_diagnosis() {
     let root = TemporaryDirectory::new("auto-rsi-completed");
     initialize_project(root.path());
     let definition = definition(root.path(), true, None);
@@ -658,6 +755,13 @@ fn automatic_compaction_runs_after_completed_rsi_diagnosis_without_extra_request
                 "auto-diagnosis-completed",
             ),
         ),
+        (
+            200,
+            compaction_summary_response(
+                "The task finished; RSI diagnosed no justified reusable change.",
+                "auto-after-diagnosis-handoff",
+            ),
+        ),
         (200, text_response("NEXT-AFTER-RSI", "auto-after-rsi")),
     ]);
     let config = config(root.path(), &server.base_url, Some(true));
@@ -676,6 +780,8 @@ fn automatic_compaction_runs_after_completed_rsi_diagnosis_without_extra_request
     let diagnosis = request_body(&server.requests.recv_timeout(F2A_WAIT).unwrap());
     assert!(diagnosis.to_string().contains("RSI2 diagnosis"));
     assert!(diagnosis.get("tools").is_none());
+    let handoff = request_body(&server.requests.recv_timeout(F2A_WAIT).unwrap());
+    assert_handoff_request(&handoff);
     let next = request_body(&server.requests.recv_timeout(F2A_WAIT).unwrap());
     assert!(next["previous_response_id"].is_null());
     assert!(!next.to_string().contains("auto-diagnosis-completed"));
@@ -699,15 +805,22 @@ fn automatic_compaction_runs_after_completed_rsi_diagnosis_without_extra_request
     let state = reduced_session(&project, &session_id(root.path()));
     assert_eq!(
         state.request_audits().len(),
-        3,
-        "two ordinary requests and one existing RSI diagnostic only"
+        4,
+        "two ordinary requests, one RSI diagnosis and one explicit compaction sample"
     );
     assert_eq!(
-        state.request_audits()[2].delivery().reason(),
+        state.request_audits()[3].delivery().reason(),
         echidna::domain::request_audit::RequestAuditDeliveryReason::Full(
             echidna::domain::context::BaselineInvalidationReason::CompactionReset
         )
     );
+    let audits = serde_json::to_value(state.request_audits()).unwrap();
+    assert_ne!(audits[1]["provider_session"], audits[2]["provider_session"]);
+    let sampled = events
+        .iter()
+        .position(|event| event["event_type"] == "session.compaction_sample_recorded")
+        .unwrap();
+    assert!(last_rsi < sampled && sampled < compacted);
 }
 
 #[test]

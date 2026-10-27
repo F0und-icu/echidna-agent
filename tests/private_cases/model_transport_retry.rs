@@ -839,6 +839,7 @@ mod retry_contracts {
         let result = agent
             .sample_improvement(
                 ImprovementSampleInput {
+                    boundary: crate::app::agent_loop::ImprovementBoundary::CompletedTurn,
                     attempt_id: "retry-attempt",
                     stage: ImprovementStage::Old,
                     prompt: &prompt,

@@ -31,11 +31,12 @@ pub(super) struct ProviderConfigV1 {
     pub(super) mcp_servers: BTreeMap<String, McpServerConfig>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct RuntimeSettings {
     pub(crate) model_request_limit_per_turn: usize,
     pub(crate) auto_compact: bool,
+    pub(crate) compaction_reasoning_effort: Option<ReasoningEffort>,
 }
 
 impl Default for RuntimeSettings {
@@ -44,6 +45,7 @@ impl Default for RuntimeSettings {
             model_request_limit_per_turn:
                 crate::app::model_request_budget::DEFAULT_MODEL_REQUEST_LIMIT,
             auto_compact: false,
+            compaction_reasoning_effort: None,
         }
     }
 }

@@ -12,6 +12,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+mod argument_correction;
+mod checkpoint_binding;
+
 use super::agent_definition::AgentDefinitionBinding;
 use super::context::{ProviderSessionId, ProviderSessionRef, ProviderSessionRole};
 use super::domain_profile::{DomainProfile, DomainProfileSelection};
@@ -65,8 +68,8 @@ pub use improvement::ImprovementActivity;
 pub(crate) use improvement::{ImprovementFact, ImprovementStage, scoped_call_id};
 
 pub use compaction::{
-    CompactionValidationContext, EvidenceSpine, NarrativeSummary, ResearchStreamIdentity,
-    SessionCompaction, SessionSummary, SessionSummaryDraft,
+    CompactionModelSample, CompactionValidationContext, EvidenceSpine, NarrativeSummary,
+    ResearchStreamIdentity, SessionCompaction, SessionSummary, SessionSummaryDraft,
 };
 pub(crate) use compaction::{SessionSourceIdentity, TaskCompactionValidationFacts};
 
@@ -92,6 +95,9 @@ pub enum SessionLifecycle {
 /// the Tool domain's `ExecutionReceipt` rather than defining a Session copy.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionEvent {
+    CompactionSampleRecorded {
+        sample: CompactionModelSample,
+    },
     ModelUsageRecorded {
         request_audit_event_id: EventId,
         provider_session: ProviderSessionRef,
@@ -112,10 +118,29 @@ pub enum SessionEvent {
         primary_provider_session: ProviderSessionRef,
         binding: AgentDefinitionBinding,
     },
+    AgentDefinitionAppliedAtCheckpoint {
+        primary_provider_session: ProviderSessionRef,
+        binding: AgentDefinitionBinding,
+        attempt_id: String,
+        parent_digest: String,
+        compaction_revision: u64,
+        compaction_fingerprint: String,
+    },
     ModelSampleRejected {
         request_audit_event_id: EventId,
         diagnostic: ToolArgumentDiagnostic,
         corrections_used: u8,
+    },
+    ConsecutiveModelSampleRejected {
+        request_audit_event_id: EventId,
+        diagnostic: ToolArgumentDiagnostic,
+        corrections_used: u8,
+        reset_anchor: Option<EventId>,
+    },
+    ModelArgumentCorrectionReset {
+        accepted_request_audit_event_id: EventId,
+        prior_rejection_audit_event_id: EventId,
+        accepted_history_event_refs: Vec<EventId>,
     },
     SubcommandCheckpointed {
         checkpoint: SubcommandCheckpoint,
@@ -188,6 +213,9 @@ impl SessionEvent {
 
     fn event_type(&self) -> EventType {
         match self {
+            Self::CompactionSampleRecorded { .. } => {
+                EventType::new("session.compaction_sample_recorded")
+            }
             Self::ModelUsageRecorded { .. } => EventType::new(MODEL_USAGE_RECORDED_EVENT_TYPE),
             Self::ExecutionOutcomeRecorded { .. } => {
                 EventType::new(EXECUTION_OUTCOME_RECORDED_EVENT_TYPE)
@@ -199,7 +227,16 @@ impl SessionEvent {
             Self::AgentDefinitionApplied { .. } => {
                 EventType::new(AGENT_DEFINITION_APPLIED_EVENT_TYPE)
             }
+            Self::AgentDefinitionAppliedAtCheckpoint { .. } => {
+                EventType::new("session.agent_definition_checkpoint_applied")
+            }
             Self::ModelSampleRejected { .. } => EventType::new(MODEL_SAMPLE_REJECTED_EVENT_TYPE),
+            Self::ConsecutiveModelSampleRejected { .. } => {
+                EventType::new(MODEL_SAMPLE_REJECTED_EVENT_TYPE)
+            }
+            Self::ModelArgumentCorrectionReset { .. } => {
+                EventType::new("model.argument_correction_reset")
+            }
             Self::SubcommandCheckpointed { .. } => EventType::new(SUBCOMMAND_CHECKPOINT_EVENT_TYPE),
             Self::Started { .. } => EventType::new(SESSION_STARTED_EVENT_TYPE),
             Self::Resumed { .. } => EventType::new(SESSION_RESUMED_EVENT_TYPE),
@@ -226,6 +263,7 @@ impl SessionEvent {
 
     fn encode_payload(&self, event_type: &EventType) -> Result<Value, SessionError> {
         let payload = match self {
+            Self::CompactionSampleRecorded { sample } => serde_json::to_value(sample),
             Self::ModelUsageRecorded {
                 request_audit_event_id,
                 provider_session,
@@ -265,6 +303,44 @@ impl SessionEvent {
                 request_audit_event_id: request_audit_event_id.clone(),
                 diagnostic: *diagnostic,
                 corrections_used: *corrections_used,
+            }),
+            Self::AgentDefinitionAppliedAtCheckpoint {
+                primary_provider_session,
+                binding,
+                attempt_id,
+                parent_digest,
+                compaction_revision,
+                compaction_fingerprint,
+            } => serde_json::to_value(checkpoint_binding::CheckpointDefinitionPayload {
+                schema_version: 1,
+                primary_provider_session: primary_provider_session.clone(),
+                binding: binding.clone(),
+                attempt_id: attempt_id.clone(),
+                parent_digest: parent_digest.clone(),
+                compaction_revision: *compaction_revision,
+                compaction_fingerprint: compaction_fingerprint.clone(),
+            }),
+            Self::ConsecutiveModelSampleRejected {
+                request_audit_event_id,
+                diagnostic,
+                corrections_used,
+                reset_anchor,
+            } => serde_json::to_value(argument_correction::ConsecutiveRejectionPayload {
+                schema_version: 2,
+                request_audit_event_id: request_audit_event_id.clone(),
+                diagnostic: *diagnostic,
+                corrections_used: *corrections_used,
+                reset_anchor: reset_anchor.clone(),
+            }),
+            Self::ModelArgumentCorrectionReset {
+                accepted_request_audit_event_id,
+                prior_rejection_audit_event_id,
+                accepted_history_event_refs,
+            } => serde_json::to_value(argument_correction::CorrectionResetPayload {
+                schema_version: 1,
+                accepted_request_audit_event_id: accepted_request_audit_event_id.clone(),
+                prior_rejection_audit_event_id: prior_rejection_audit_event_id.clone(),
+                accepted_history_event_refs: accepted_history_event_refs.clone(),
             }),
             Self::SubcommandCheckpointed { checkpoint } => serde_json::to_value(checkpoint),
             Self::Started {
@@ -309,7 +385,7 @@ impl SessionEvent {
         })
     }
 
-    fn decode(event_type: &EventType, payload: Value) -> Result<Self, SessionError> {
+    pub(crate) fn decode(event_type: &EventType, payload: Value) -> Result<Self, SessionError> {
         match event_type.as_str() {
             MODEL_USAGE_RECORDED_EVENT_TYPE => {
                 let payload: ModelUsagePayload = decode_strict_payload(event_type, payload)?;
@@ -322,7 +398,7 @@ impl SessionEvent {
             }
             "session.rsi_activity_recorded" => {
                 let activity: ImprovementActivity = decode_strict_payload(event_type, payload)?;
-                require_current_payload_schema(event_type, activity.schema_version)?;
+                activity.validate_schema()?;
                 Ok(Self::ImprovementActivityRecorded { activity })
             }
             SESSION_STARTED_WITH_AGENT_EVENT_TYPE | AGENT_DEFINITION_APPLIED_EVENT_TYPE => {
@@ -347,6 +423,16 @@ impl SessionEvent {
                 }
             }
             MODEL_SAMPLE_REJECTED_EVENT_TYPE => {
+                if payload.get("schema_version").and_then(Value::as_u64) == Some(2) {
+                    let payload: argument_correction::ConsecutiveRejectionPayload =
+                        decode_strict_payload(event_type, payload)?;
+                    return Ok(Self::ConsecutiveModelSampleRejected {
+                        request_audit_event_id: payload.request_audit_event_id,
+                        diagnostic: payload.diagnostic,
+                        corrections_used: payload.corrections_used,
+                        reset_anchor: payload.reset_anchor,
+                    });
+                }
                 let payload: ModelSampleRejectedPayload =
                     decode_strict_payload(event_type, payload)?;
                 require_current_payload_schema(event_type, payload.schema_version)?;
@@ -354,6 +440,35 @@ impl SessionEvent {
                     request_audit_event_id: payload.request_audit_event_id,
                     diagnostic: payload.diagnostic,
                     corrections_used: payload.corrections_used,
+                })
+            }
+            "session.agent_definition_checkpoint_applied" => {
+                let payload: checkpoint_binding::CheckpointDefinitionPayload =
+                    decode_strict_payload(event_type, payload)?;
+                require_current_payload_schema(event_type, payload.schema_version)?;
+                payload
+                    .binding
+                    .validate()
+                    .map_err(|error| SessionError::AgentDefinition {
+                        message: error.to_string(),
+                    })?;
+                Ok(Self::AgentDefinitionAppliedAtCheckpoint {
+                    primary_provider_session: payload.primary_provider_session,
+                    binding: payload.binding,
+                    attempt_id: payload.attempt_id,
+                    parent_digest: payload.parent_digest,
+                    compaction_revision: payload.compaction_revision,
+                    compaction_fingerprint: payload.compaction_fingerprint,
+                })
+            }
+            "model.argument_correction_reset" => {
+                let payload: argument_correction::CorrectionResetPayload =
+                    decode_strict_payload(event_type, payload)?;
+                require_current_payload_schema(event_type, payload.schema_version)?;
+                Ok(Self::ModelArgumentCorrectionReset {
+                    accepted_request_audit_event_id: payload.accepted_request_audit_event_id,
+                    prior_rejection_audit_event_id: payload.prior_rejection_audit_event_id,
+                    accepted_history_event_refs: payload.accepted_history_event_refs,
                 })
             }
             SUBCOMMAND_CHECKPOINT_EVENT_TYPE => {
@@ -418,6 +533,11 @@ impl SessionEvent {
                     truncated_from_offset: payload.truncated_from_offset,
                     resumed_after_sequence: payload.resumed_after_sequence,
                 })
+            }
+            "session.compaction_sample_recorded" => {
+                let sample: CompactionModelSample = decode_strict_payload(event_type, payload)?;
+                sample.validate()?;
+                Ok(Self::CompactionSampleRecorded { sample })
             }
             HISTORY_ITEM_RECORDED_EVENT_TYPE => {
                 let payload: SessionHistoryItemPayload =
@@ -511,9 +631,13 @@ pub struct SessionState {
     cache_hit_count: u64,
     recovery_count: u64,
     latest_compaction: Option<SessionCompaction>,
+    compaction_samples: Vec<(EventId, CompactionModelSample)>,
     request_audits: Vec<RequestAuditManifest>,
+    latest_audit_history_len: usize,
     model_usage: BTreeMap<EventId, ModelUsage>,
     rejected_requests: BTreeSet<EventId>,
+    consecutive_rejection: Option<argument_correction::ConsecutiveRejection>,
+    correction_reset_anchor: Option<EventId>,
     vision_routes: Vec<VisionRouteRecord>,
     vision_observations: Vec<VisionObservation>,
     vision_failures: Vec<VisionAnalysisFailure>,
@@ -541,9 +665,13 @@ impl Default for SessionState {
             cache_hit_count: 0,
             recovery_count: 0,
             latest_compaction: None,
+            compaction_samples: Vec::new(),
             request_audits: Vec::new(),
+            latest_audit_history_len: 0,
             model_usage: BTreeMap::new(),
             rejected_requests: BTreeSet::new(),
+            consecutive_rejection: None,
+            correction_reset_anchor: None,
             vision_routes: Vec::new(),
             vision_observations: Vec::new(),
             vision_failures: Vec::new(),
@@ -554,6 +682,9 @@ impl Default for SessionState {
 }
 
 impl SessionState {
+    pub(crate) fn compaction_samples(&self) -> &[(EventId, CompactionModelSample)] {
+        &self.compaction_samples
+    }
     pub fn agent_definition_binding(&self) -> Option<&AgentDefinitionBinding> {
         self.agent_definition_binding.as_ref()
     }
@@ -661,7 +792,7 @@ impl SessionState {
     /// Event identities, without duplicating the stored ContentItems.
     pub(crate) fn history_items_with_event_ids(
         &self,
-    ) -> impl Iterator<Item = (&EventId, &ContentItem)> {
+    ) -> impl DoubleEndedIterator<Item = (&EventId, &ContentItem)> {
         self.history_event_ids.iter().zip(self.history.items())
     }
 
@@ -956,6 +1087,40 @@ fn apply_session_event(
     event_id: &EventId,
 ) -> Result<(), SessionError> {
     match event {
+        SessionEvent::CompactionSampleRecorded { sample } => {
+            require_transition(
+                state.lifecycle,
+                "session.compaction_sample_recorded",
+                SessionLifecycle::Active,
+            )?;
+            state.ensure_completed_history()?;
+            sample.validate()?;
+            let audit = state.request_audits.last().ok_or_else(|| {
+                SessionError::CompactionContextProvenance {
+                    message: "Compaction sample requires its actual audited request".to_owned(),
+                }
+            })?;
+            if audit.audit_event_id() != sample.audit_event_id()
+                || audit.provider_session() != Some(sample.provider_session())
+                || audit.improvement_scope().is_some()
+                || audit.delivery().mode() != crate::domain::request_audit::RequestAuditDeliveryMode::Full
+                || audit.resolved_tool_plan_fingerprint().is_none()
+                || audit.context_delivery_map().is_none()
+                || audit.components().iter().any(|component| component.source() == crate::domain::request_audit::RequestAuditComponentSource::RenderedToolSpec)
+                || Some(sample.source().stream_id()) != state.stream_id()
+                || source_event_sequence
+                    .is_none_or(|sequence| sample.source().watermark() >= sequence)
+                || state
+                    .compaction_samples
+                    .iter()
+                    .any(|(_, previous)| previous.provider_session() == sample.provider_session())
+            {
+                return Err(SessionError::CompactionContextProvenance {
+                    message: "Compaction sample source/audit/scope mismatch".to_owned(),
+                });
+            }
+            state.compaction_samples.push((event_id.clone(), sample));
+        }
         SessionEvent::ModelUsageRecorded {
             request_audit_event_id,
             provider_session,
@@ -998,6 +1163,10 @@ fn apply_session_event(
                 }
                 (ProviderSessionRole::Primary, None) => {
                     state.primary_provider_session.as_ref() == Some(&provider_session)
+                        || state.compaction_samples.iter().any(|(_, sample)| {
+                            sample.audit_event_id() == &request_audit_event_id
+                                && sample.provider_session() == &provider_session
+                        })
                 }
                 (ProviderSessionRole::Vision, None) => {
                     state.vision_observations.iter().any(|observation| {
@@ -1030,6 +1199,28 @@ fn apply_session_event(
             state.lifecycle = SessionLifecycle::Active;
             state.primary_provider_session = Some(primary_provider_session);
         }
+        SessionEvent::AgentDefinitionAppliedAtCheckpoint {
+            primary_provider_session,
+            binding,
+            attempt_id,
+            parent_digest,
+            compaction_revision,
+            compaction_fingerprint,
+        } => {
+            checkpoint_binding::apply(
+                state,
+                checkpoint_binding::CheckpointDefinitionPayload {
+                    schema_version: 1,
+                    primary_provider_session,
+                    binding,
+                    attempt_id,
+                    parent_digest,
+                    compaction_revision,
+                    compaction_fingerprint,
+                },
+                source_event_sequence,
+            )?;
+        }
         SessionEvent::AgentDefinitionApplied {
             primary_provider_session,
             binding,
@@ -1058,6 +1249,8 @@ fn apply_session_event(
             state.primary_provider_session = Some(primary_provider_session);
             state.agent_definition_binding = Some(binding);
             state.recovered_history_item_count = state.history.items().len();
+            state.consecutive_rejection = None;
+            state.correction_reset_anchor = None;
         }
         SessionEvent::SubcommandCheckpointed { checkpoint } => {
             require_transition(
@@ -1118,6 +1311,8 @@ fn apply_session_event(
         SessionEvent::Resumed {
             primary_provider_session,
         } => {
+            state.consecutive_rejection = None;
+            state.correction_reset_anchor = None;
             state.ensure_no_unknown_improvement()?;
             require_primary_provider_session(&primary_provider_session)?;
             require_transition(state.lifecycle, "session.resumed", SessionLifecycle::Active)?;
@@ -1304,6 +1499,32 @@ fn apply_session_event(
             }
             state.latest_compaction = Some(compaction);
         }
+        SessionEvent::ConsecutiveModelSampleRejected {
+            request_audit_event_id,
+            corrections_used,
+            reset_anchor,
+            ..
+        } => {
+            argument_correction::reject(
+                state,
+                request_audit_event_id,
+                corrections_used,
+                reset_anchor,
+            )?;
+        }
+        SessionEvent::ModelArgumentCorrectionReset {
+            accepted_request_audit_event_id,
+            prior_rejection_audit_event_id,
+            accepted_history_event_refs,
+        } => {
+            argument_correction::reset(
+                state,
+                event_id,
+                accepted_request_audit_event_id,
+                prior_rejection_audit_event_id,
+                accepted_history_event_refs,
+            )?;
+        }
         SessionEvent::ModelSampleRejected {
             request_audit_event_id,
             corrections_used,
@@ -1354,6 +1575,7 @@ fn apply_session_event(
                 });
             }
             state.request_audits.push(manifest);
+            state.latest_audit_history_len = state.history.items().len();
         }
         SessionEvent::VisionRouteDecided { route } => {
             require_transition(
