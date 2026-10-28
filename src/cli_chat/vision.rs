@@ -9,7 +9,6 @@ use crate::adapters::research_projection::load_research_state;
 use crate::adapters::tools::{ToolRegistry, ViewImageToolInput};
 use crate::app::agent_loop::{AgentLoopError, InitialImagePrimaryContext};
 use crate::app::cancellation::AgentCancellation;
-use crate::app::session::SessionProjection;
 use crate::app::vision::{
     VisionAnalysisInput, VisionDirectRequest, VisionEventStamp, VisionSecondaryRequest,
     VisionSessionService,
@@ -92,7 +91,7 @@ pub(super) async fn ingest_image(
             message: error.to_string(),
         })?;
     let outcome = tools.execute(plan).await?;
-    session.record_execution(&outcome)?;
+    session.record_operator_execution_receipt(&outcome)?;
     if outcome.result.status != ToolResultStatus::Succeeded {
         return Err(ChatError::ImageIntake {
             message: outcome.result.output.to_string(),
@@ -149,7 +148,8 @@ pub(super) async fn prepare_primary_context(
     let mut writer = session.project.open_writer()?;
     let mut store = writer.open_session(session.session_id.clone(), None)?;
     let stream_id = ProjectEventStream::Session(session.session_id.clone()).stream_id();
-    let mut projection = SessionProjection::replay(EventSource::read_events(&store, &stream_id)?)?;
+    let mut projection =
+        session.replay_session_events(EventSource::read_events(&store, &stream_id)?)?;
     let sequence = store.next_sequence()?;
     let route_event_id = event_id(
         session.project.project_id(),
@@ -173,7 +173,8 @@ pub(super) async fn prepare_primary_context(
             .map(|vision| vision.capabilities().semantic_hash()),
     };
     let service = VisionSessionService::new(&session.artifacts, binding.clone())
-        .with_request_budget(request_budget);
+        .with_request_budget(request_budget)
+        .with_context_budget_policy(composition.runtime().context_budget);
 
     match decision.route {
         VisionRoute::PrimaryDirect => service
@@ -268,7 +269,7 @@ pub(super) async fn prepare_primary_context(
             let mut store = writer.open_session(session.session_id.clone(), None)?;
             let stream_id = ProjectEventStream::Session(session.session_id.clone()).stream_id();
             let mut projection =
-                SessionProjection::replay(EventSource::read_events(&store, &stream_id)?)?;
+                session.replay_session_events(EventSource::read_events(&store, &stream_id)?)?;
             let sequence = store.next_sequence()?;
             let terminal_stamp = VisionEventStamp::new(
                 event_id(
@@ -282,6 +283,15 @@ pub(super) async fn prepare_primary_context(
             let outcome = service
                 .commit_secondary_terminal(terminal, terminal_stamp, &mut projection, &mut store)
                 .map_err(vision_error)?;
+            drop(store);
+            drop(writer);
+            if let Some(usage) = outcome.usage {
+                session.record_model_usage(
+                    &outcome.observation.request_audit_event_id,
+                    &outcome.observation.provider_session,
+                    usage,
+                )?;
+            }
             Ok(outcome.primary_context)
         }
         VisionRoute::NoImage | VisionRoute::Rejected => Err(ChatError::VisionComposition {

@@ -38,6 +38,7 @@ pub(super) fn select_decisions(
     fragments: &[ContextFragment],
     budget: ContextBudget,
     fixed_input_tokens: u32,
+    core_memory_limit: u32,
 ) -> Result<Vec<ContextDecisionEntry>, ContextPlannerError> {
     let available_fragment_tokens = budget
         .input_token_limit()
@@ -70,6 +71,15 @@ pub(super) fn select_decisions(
     let mut remaining = available_fragment_tokens;
     for index in selection_order {
         let fragment = &fragments[index];
+        // Keep one selection/truncation owner. The Core allowance is an
+        // additional ceiling on the same token budget, not a file limit.
+        let available = if fragment.source == ContextFragmentSource::ProjectMemoryCore
+            && fragment.priority != ContextFragmentPriority::Required
+        {
+            remaining.min(core_memory_limit)
+        } else {
+            remaining
+        };
         let artifact_reference = fragment
             .artifact_reference
             .clone()
@@ -78,22 +88,22 @@ pub(super) fn select_decisions(
                     .map(|token_estimate| (artifact_id, token_estimate))
             })
             .transpose()?;
-        let (decision, reason_code) = if fragment.token_estimate <= remaining {
+        let (decision, reason_code) = if fragment.token_estimate <= available {
             remaining -= fragment.token_estimate;
             (ContextDecision::Include, include_reason(fragment))
         } else if let Some((artifact_id, token_estimate)) = artifact_reference
-            && remaining >= token_estimate
+            && available >= token_estimate
         {
             remaining -= token_estimate;
             (
                 ContextDecision::ArtifactRef { artifact_id },
                 ContextReasonCode::BudgetArtifactReference,
             )
-        } else if remaining > 0
-            && truncate_content_to_token_limit(&fragment.content, remaining)?.is_some()
+        } else if available > 0
+            && truncate_content_to_token_limit(&fragment.content, available)?.is_some()
         {
-            let retained_tokens = remaining;
-            remaining = 0;
+            let retained_tokens = available;
+            remaining -= available;
             (
                 ContextDecision::Truncate { retained_tokens },
                 ContextReasonCode::BudgetTruncated,

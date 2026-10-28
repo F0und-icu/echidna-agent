@@ -5,19 +5,19 @@ mod config;
 mod selection;
 mod validation;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::adapters::credentials::{
     AccountBoundCredential, CredentialResolution, CredentialSource, CredentialSourceError,
 };
-use crate::adapters::mcp_http::{McpError, McpRuntime};
+use crate::adapters::mcp::{McpError, McpRuntime};
 use crate::adapters::project_event_store::Project;
 use crate::adapters::responses::{ResponsesHttpAdapter, ResponsesHttpConfig, ResponsesWireProfile};
-use crate::adapters::subscription_auth::SubscriptionAuthService;
+use crate::adapters::subscription_auth::{SubscriptionAuthService, catalog::SubscriptionCatalog};
 use crate::adapters::tools::ToolRegistry;
 use crate::domain::model::{ModelCapabilities, ReasoningEffort};
-use crate::domain::profile::AgentModelProfile;
+use crate::domain::profile::{AgentModelProfile, ProviderProfile};
 use crate::domain::request_audit::RequestAdapterVersion;
 use crate::ports::model::ModelProvider;
 
@@ -31,10 +31,12 @@ pub use validation::ProviderCompositionError;
 pub struct ProviderComposition {
     agent_profile: AgentModelProfile,
     primary: Arc<dyn ModelProvider>,
+    compaction: (Arc<dyn ModelProvider>, AgentModelProfile),
     vision: Option<Arc<dyn ModelProvider>>,
     primary_request_adapter_version: RequestAdapterVersion,
     vision_request_adapter_version: Option<RequestAdapterVersion>,
     prompt_sources: PromptSources,
+    window_policy: crate::domain::context::ContextWindowPolicy,
     runtime: RuntimeSettings,
     mcp: McpRuntime,
 }
@@ -44,6 +46,13 @@ pub struct ProviderComposition {
 /// token preserves config-error precedence without parsing or composing a
 /// Provider twice.
 pub(crate) struct ValidatedProviderConfig(ProviderConfigV1);
+
+/// The two existing transports used by explicit catalog commands. Configuration
+/// credentials, never a Provider ID, URL or model name, select this route.
+pub(crate) enum ConfiguredModelCatalog {
+    ApiKey(ResponsesHttpAdapter),
+    Subscription(SubscriptionCatalog),
+}
 
 impl ProviderComposition {
     /// Loads and validates one explicit config path without resolving a
@@ -56,7 +65,7 @@ impl ProviderComposition {
             Self::load_config(path)?,
             credential_source,
             None,
-            #[cfg(debug_assertions)]
+            None,
             false,
         )
     }
@@ -100,7 +109,7 @@ impl ProviderComposition {
     /// Saves an explicit catalog choice through the one configuration-edit
     /// owner. The candidate is reloaded through the normal Config owner before
     /// the original file is atomically replaced.
-    pub(crate) fn select_codex_model(
+    pub(crate) fn select_model(
         path: impl AsRef<Path>,
         provider_id: &str,
         model: &str,
@@ -117,6 +126,42 @@ impl ProviderComposition {
         )
     }
 
+    pub(crate) fn model_catalog(
+        path: impl AsRef<Path>,
+        provider_id: &str,
+        credential_source: Arc<dyn CredentialSource>,
+    ) -> Result<ConfiguredModelCatalog, ProviderCompositionError> {
+        let config = Self::load_config(path)?.0;
+        let definition = config.providers.get(provider_id).ok_or_else(|| {
+            ProviderCompositionError::InvalidSubscription {
+                provider: provider_id.to_owned(),
+                message: "unknown Provider profile".to_owned(),
+            }
+        })?;
+        match definition.credential() {
+            ProviderCredential::Reference(_) | ProviderCredential::Inline(_) => {
+                let (adapter, _) = compose_provider(
+                    provider_id,
+                    definition,
+                    config.capabilities(definition),
+                    credential_source,
+                    None,
+                    None,
+                    false,
+                )?;
+                Ok(ConfiguredModelCatalog::ApiKey(adapter))
+            }
+            ProviderCredential::ChatGptSubscription(subscription) => {
+                subscription_service(subscription)
+                    .map(|auth| ConfiguredModelCatalog::Subscription(auth.catalog()))
+            }
+            ProviderCredential::CodexSubscription(subscription) => {
+                codex_subscription_service(subscription)
+                    .map(|auth| ConfiguredModelCatalog::Subscription(auth.catalog()))
+            }
+        }
+    }
+
     /// Binds one validated configuration to an already-discovered Project.
     /// Both Primary and optional Vision Providers retain the one protocol
     /// Adapter construction owner.
@@ -124,13 +169,14 @@ impl ProviderComposition {
         config: ValidatedProviderConfig,
         credential_source: Arc<dyn CredentialSource>,
         project: Project,
-        #[cfg(debug_assertions)] debug: bool,
+        debug_failures: Option<PathBuf>,
+        debug: bool,
     ) -> Result<Self, ProviderCompositionError> {
         Self::compose(
             config,
             credential_source,
             Some(project),
-            #[cfg(debug_assertions)]
+            debug_failures,
             debug,
         )
     }
@@ -141,6 +187,10 @@ impl ProviderComposition {
 
     pub fn primary_provider(&self) -> &dyn ModelProvider {
         self.primary.as_ref()
+    }
+
+    pub(crate) fn compaction_provider(&self) -> (&dyn ModelProvider, &AgentModelProfile) {
+        (self.compaction.0.as_ref(), &self.compaction.1)
     }
 
     pub fn vision_provider(&self) -> Option<&dyn ModelProvider> {
@@ -167,27 +217,30 @@ impl ProviderComposition {
     }
 
     pub(crate) fn runtime(&self) -> RuntimeSettings {
-        self.runtime
+        self.runtime.clone()
     }
 
-    /// Discovers explicitly configured MCP tools only for the live Chat path.
-    /// Doctor and all offline composition callers retain a network-free registry.
+    /// Discovers configured MCP tools only for live Chat setup. Default
+    /// diagnostics remain offline and never resolve MCP credentials.
     pub(crate) async fn discover_chat_tools(
         &self,
-        project_root: impl Into<std::path::PathBuf>,
+        project_root: impl Into<PathBuf>,
     ) -> Result<ToolRegistry, McpError> {
         ToolRegistry::with_mcp(project_root, self.mcp.discover().await?)
+            .map(|registry| registry.with_window_policy(self.window_policy))
     }
 
     fn compose(
         config: ValidatedProviderConfig,
         credential_source: Arc<dyn CredentialSource>,
         project: Option<Project>,
-        #[cfg(debug_assertions)] debug: bool,
+        debug_failures: Option<PathBuf>,
+        debug: bool,
     ) -> Result<Self, ProviderCompositionError> {
         let config = config.0;
         let prompt_sources = config.prompts.clone();
-        let mcp = McpRuntime::new(config.mcp_servers.clone(), Arc::clone(&credential_source));
+        let mcp = McpRuntime::new(config.mcp_servers.clone(), Arc::clone(&credential_source))
+            .with_observer(project.as_ref().map(|_| crate::cli_mcp_output::observer()));
 
         let agent = config.active_agent_definition();
         let primary_definition = config.provider(&agent.primary);
@@ -198,9 +251,9 @@ impl ProviderComposition {
             Arc::clone(&credential_source),
             project.as_ref(),
             project.as_ref().map(|_| "primary"),
-            #[cfg(debug_assertions)]
             debug,
         )?;
+        let primary = primary.with_failure_capture(debug_failures.as_deref());
         let vision = agent
             .vision
             .as_deref()
@@ -213,24 +266,77 @@ impl ProviderComposition {
                     Arc::clone(&credential_source),
                     project.as_ref(),
                     project.as_ref().map(|_| "vision"),
-                    #[cfg(debug_assertions)]
                     debug,
                 )
+                .map(|(provider, version)| {
+                    (
+                        provider.with_failure_capture(debug_failures.as_deref()),
+                        version,
+                    )
+                })
             })
             .transpose()?;
         let (vision, vision_request_adapter_version) = match vision {
-            Some((provider, version)) => (Some(provider), Some(version)),
+            Some((provider, version)) => (
+                Some(Arc::new(provider) as Arc<dyn ModelProvider>),
+                Some(version),
+            ),
             None => (None, None),
         };
         let agent_profile = config.active_agent_model_profile()?;
+        let window_policy = config
+            .runtime
+            .context_budget
+            .for_capabilities(&config.capabilities(primary_definition))
+            .map_err(|source| ProviderCompositionError::InvalidContextBudget {
+                mapping: primary_definition.capability_mapping.clone(),
+                source,
+            })?;
+        let compaction = {
+            let mut capabilities = config.capabilities(primary_definition);
+            if let Some(effort) = &config.runtime.compaction_reasoning_effort {
+                capabilities.reasoning_effort = Some(effort.clone());
+            }
+            let (provider, _) = compose_provider(
+                &agent.primary,
+                primary_definition,
+                capabilities.clone(),
+                Arc::clone(&credential_source),
+                project.as_ref(),
+                project.as_ref().map(|_| "compaction"),
+                debug,
+            )?;
+            let primary_profile = agent_profile.primary();
+            let scoped_profile = AgentModelProfile::new(
+                agent_profile.profile().clone(),
+                ProviderProfile::new(
+                    primary_profile.model().clone(),
+                    primary_profile.profile().clone(),
+                    capabilities,
+                ),
+                agent_profile.vision().cloned(),
+                agent_profile.vision_mode(),
+            )
+            .map_err(|source| ProviderCompositionError::InvalidAgentProfile {
+                profile: config.active_agent_profile.clone(),
+                source,
+            })?;
+            (
+                Arc::new(provider.with_failure_capture(debug_failures.as_deref()))
+                    as Arc<dyn ModelProvider>,
+                scoped_profile,
+            )
+        };
 
         Ok(Self {
             agent_profile,
-            primary,
+            primary: Arc::new(primary),
+            compaction,
             vision,
             primary_request_adapter_version,
             vision_request_adapter_version,
             prompt_sources,
+            window_policy,
             runtime: config.runtime,
             mcp,
         })
@@ -244,8 +350,8 @@ fn compose_provider(
     credential_source: Arc<dyn CredentialSource>,
     project: Option<&Project>,
     cli_role: Option<&'static str>,
-    #[cfg(debug_assertions)] debug: bool,
-) -> Result<(Arc<dyn ModelProvider>, RequestAdapterVersion), ProviderCompositionError> {
+    debug: bool,
+) -> Result<(ResponsesHttpAdapter, RequestAdapterVersion), ProviderCompositionError> {
     let (credential_reference, credential_source) = match definition.credential() {
         ProviderCredential::Reference(reference) => (reference.to_owned(), credential_source),
         ProviderCredential::Inline(value) => {
@@ -304,12 +410,9 @@ fn compose_provider(
                 Some(project) => adapter.with_project_image_resolver(project.clone()),
                 None => adapter,
             };
-            let adapter = adapter.with_cli_output(
-                cli_role,
-                #[cfg(debug_assertions)]
-                debug,
-            );
-            Ok((Arc::new(adapter), request_adapter_version))
+            let adapter = adapter
+                .with_observer(cli_role.map(|role| crate::cli_model_output::observer(role, debug)));
+            Ok((adapter, request_adapter_version))
         }
     }
 }

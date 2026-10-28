@@ -16,7 +16,6 @@ use super::{decode_arguments, invalid_plan};
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct InspectProjectArgs {
-    observed_at: String,
     #[serde(default)]
     hash_paths: Vec<String>,
 }
@@ -27,12 +26,6 @@ pub(super) fn normalize(
     value: Value,
 ) -> Result<(Value, Vec<ResourceKey>), ToolExecutorError> {
     let arguments: InspectProjectArgs = decode_arguments("inspect_project", value)?;
-    if arguments.observed_at.trim().is_empty() {
-        return Err(ToolExecutorError::InvalidArguments {
-            tool_name: "inspect_project".to_owned(),
-            message: "`observed_at` must not be empty".to_owned(),
-        });
-    }
     Ok((
         serde_json::to_value(arguments).expect("InspectProjectArgs serialization cannot fail"),
         vec![ResourceKeyResolver::new(project_root).project_file(control_directory, "cache")],
@@ -49,13 +42,10 @@ pub(super) async fn execute(
             Ok(arguments) => arguments,
             Err(error) => return invalid_plan(plan, error),
         };
-    if arguments.observed_at.trim().is_empty() {
-        return ToolExecutionOutcome::failed(
-            plan,
-            "invalid_execution_plan",
-            json!({"error": "`observed_at` must not be empty"}),
-        );
-    }
+    let observed_at = match super::operation_time::current_utc() {
+        Ok(value) => value,
+        Err(error) => return snapshot_failure(plan, "snapshot_clock_unavailable", error),
+    };
     let project = match Project::discover(project_root) {
         Ok(project) => project,
         Err(error) => return snapshot_failure(plan, "snapshot_project_unavailable", error),
@@ -67,7 +57,7 @@ pub(super) async fn execute(
     let result = match LocalProjectSnapshot::new(&project).inspect(
         specs,
         &arguments.hash_paths,
-        &arguments.observed_at,
+        &observed_at,
     ) {
         Ok(result) => result,
         Err(error) => return snapshot_failure(plan, "snapshot_inspection_failed", error),
@@ -108,11 +98,9 @@ pub(super) fn input_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "observed_at": {"type": "string", "minLength": 1},
             "hash_paths": {"type": "array", "items": {"type": "string"},
                 "description": "Project-relative files to read and verify with BLAKE3 now, even on cache hits. Duplicate paths are hashed once. Omit for cheap metadata inspection; unrequested cached hashes are not current-content verification."}
         },
-        "required": ["observed_at"],
         "additionalProperties": false
     })
 }

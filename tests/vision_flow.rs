@@ -795,6 +795,7 @@ async fn secondary_retry_keeps_one_route_and_binds_the_observation_to_the_final_
         vision_capabilities.clone(),
         [
             vec![Err(ModelProviderError::ConnectionFailure {
+                message: "fixture connection failure".to_owned(),
                 timeout: false,
                 io_kind: "Some(ConnectionReset)".to_owned(),
             })],

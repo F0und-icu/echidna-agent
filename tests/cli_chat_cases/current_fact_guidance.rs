@@ -164,6 +164,7 @@ fn repeated_compaction_then_process_resume_refreshes_facts_without_reexecuting_c
             ),
         ),
         (200, text_response(&old_prose, "engineering-old-answer")),
+        (200, compaction_handoff_response("Earlier observations remain historical.", "engineering-handoff-1")),
         (
             200,
             m4_long_flow_tool_response(
@@ -180,6 +181,7 @@ fn repeated_compaction_then_process_resume_refreshes_facts_without_reexecuting_c
                 "engineering-current-answer",
             ),
         ),
+        (200, compaction_handoff_response("The current result remains subject to fresh checks.", "engineering-handoff-2")),
         (
             200,
             m4_long_flow_tool_response(
@@ -191,7 +193,9 @@ fn repeated_compaction_then_process_resume_refreshes_facts_without_reexecuting_c
         ),
         (200, text_response("scripted current currency: JPY", "engineering-latest-answer")),
     ]);
-    let config = write_config(harness.path(), &server.base_url);
+    // Keep the current-facts regression out of a constrained planner window
+    // where optional Core Memory may be excluded.
+    let config = write_context_window_config(harness.path(), &server.base_url, 272_000);
     // Explicit rules are not dependent on historical README reads or Summary.
     let rules = "Only use the configured report/test commands. Never rerun the once-only marker.";
     fs::write(harness.path().join("rules.md"), rules).unwrap();
@@ -264,9 +268,13 @@ fn repeated_compaction_then_process_resume_refreshes_facts_without_reexecuting_c
             String::from_utf8_lossy(&compact.stdout)
                 .contains(&format!("Compaction revision {cycle} applied"))
         );
+        let handoff_wire = f2a_request_body(&server.requests, "engineering compaction handoff");
+        assert!(handoff_wire.get("previous_response_id").is_none());
         assert!(
-            server.requests.try_recv().is_err(),
-            "compaction must not sample a model"
+            handoff_wire
+                .get("tools")
+                .and_then(Value::as_array)
+                .is_none_or(Vec::is_empty)
         );
         let compact_events = session_events(root.path(), &id);
         assert_eq!(
@@ -279,15 +287,19 @@ fn repeated_compaction_then_process_resume_refreshes_facts_without_reexecuting_c
         assert_eq!(compact_state.history().items(), before.history().items());
         let summary = serde_json::to_value(compaction.summary()).unwrap();
         assert!(
-            summary["narrative"]["next_step_notes"]
-                .to_string()
-                .contains("latest assistant continuation is not the original baseline")
+            summary["narrative"]["concise_progress"]
+                .as_str()
+                .is_some_and(|text| !text.is_empty())
         );
         assert_eq!(
             summary["evidence_spine"]["target_snapshot_refs"],
             json!([snapshot.as_str()])
         );
-        assert_eq!(compact_state.request_audits(), before.request_audits());
+        assert_eq!(
+            compact_state.request_audits().len(),
+            before.request_audits().len() + 1
+        );
+        assert_audits_reconstruct(root.path(), &compact_state);
 
         // Operator-boundary changes after exit, not an unsupported mid-turn
         // replacement underneath completed reasoning. Same-size current values.
@@ -316,12 +328,16 @@ fn repeated_compaction_then_process_resume_refreshes_facts_without_reexecuting_c
             assert!(wire["instructions"].as_str().unwrap().contains(rules));
             assert!(wire.get("previous_response_id").is_none());
             let input = wire["input"].as_array().unwrap();
-            assert!(input.iter().any(|item| {
-                item["role"] == "user"
-                    && item
-                        .to_string()
-                        .contains(&format!("report.currency={currency}"))
-            }));
+            assert!(
+                input.iter().any(|item| {
+                    item["role"] == "user"
+                        && item
+                            .to_string()
+                            .contains(&format!("report.currency={currency}"))
+                }),
+                "missing current currency from wire: {}",
+                wire
+            );
             assert!(!input.iter().any(|item| {
                 item["role"] == "user"
                     && item
@@ -331,7 +347,7 @@ fn repeated_compaction_then_process_resume_refreshes_facts_without_reexecuting_c
             assert!(
                 wire["input"]
                     .to_string()
-                    .contains("derived_session_summary_v2")
+                    .contains("derived_session_summary_main_v5")
             );
             assert!(wire["input"].to_string().contains(snapshot.as_str()));
             assert!(
@@ -370,7 +386,7 @@ fn repeated_compaction_then_process_resume_refreshes_facts_without_reexecuting_c
             after.execution_receipt_count(),
             u64::try_from(2 + cycle).unwrap()
         );
-        assert_eq!(after.request_audits().len(), 3 + 2 * cycle);
+        assert_eq!(after.request_audits().len(), 3 + 3 * cycle);
         assert_eq!(
             &after.request_audits()[..before.request_audits().len()],
             before.request_audits()

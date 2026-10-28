@@ -193,6 +193,68 @@ fn service_default_removes_effort_only_in_the_new_mapping_and_avoids_collisions(
 }
 
 #[test]
+fn api_key_and_reference_selections_reuse_isolated_mapping_publication() {
+    for credential in [
+        "api_key = \"fixture-selected-key\"",
+        "credential_ref = \"CYBER_AGENT_SELECTED_API_KEY\"",
+    ] {
+        let before = source().replace(
+            "codex_subscription = { account = \"fixture\", auth_store = \"/tmp/echidna-selection-auth-unused\", catalog_client_version = \"0.145.0\" }",
+            credential,
+        );
+        let directory = FixtureDirectory::new();
+        let path = directory.config();
+        fs::write(&path, &before).unwrap();
+        publish_model_selection(
+            &path,
+            "codex",
+            "future-provider/model",
+            Some("max"),
+            Some(&CatalogCapabilityImport {
+                context_window: Some(1_048_576),
+                input_modalities: Some(vec!["text".to_owned(), "image".to_owned()]),
+                supports_reasoning_summary_parameter: None,
+            }),
+            validate,
+        )
+        .unwrap();
+        let after = fs::read_to_string(&path).unwrap();
+        assert!(after.contains(credential));
+        assert!(after.contains("# Keep this model comment."));
+        let parsed: toml::Value = toml::from_str(&after).unwrap();
+        assert_eq!(
+            parsed["providers"]["other"]["capability_mapping"].as_str(),
+            Some("shared")
+        );
+        assert_eq!(
+            parsed["capability_mappings"]["shared"]["context_window"].as_integer(),
+            Some(32768)
+        );
+        assert_eq!(
+            parsed["capability_mappings"]["codex-selection-2"]["context_window"].as_integer(),
+            Some(1_048_576)
+        );
+        assert!(
+            parsed["providers"]["codex"]
+                .get("codex_subscription")
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn siwc_subscription_selection_stays_unsupported() {
+    let before = source().replace(
+        "codex_subscription = { account = \"fixture\", auth_store = \"/tmp/echidna-selection-auth-unused\", catalog_client_version = \"0.145.0\" }",
+        "chatgpt_subscription = { account = \"fixture\", auth_store = \"/tmp/echidna-selection-auth-unused\" }",
+    );
+    assert!(matches!(
+        edit_model_selection(&before, "codex", "future-model", None, None),
+        Err(ModelSelectionError::UnsupportedProvider)
+    ));
+}
+
+#[test]
 fn explicit_capability_import_updates_only_advertised_selection_fields() {
     let before = source();
     let after = edit_model_selection(

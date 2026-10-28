@@ -61,6 +61,7 @@ pub(crate) struct PreparedVisionSecondaryRequest {
 pub(crate) enum PreparedVisionSecondaryTerminal {
     Observation {
         observation: Box<VisionObservation>,
+        usage: Option<crate::domain::model::ModelUsage>,
         primary_profile: crate::domain::context::ModelProfile,
         primary_capability_hash: String,
     },
@@ -74,6 +75,7 @@ pub struct VisionSessionService<'blobs, Blobs: ?Sized> {
     blobs: &'blobs Blobs,
     binding: RequestAuditBinding,
     request_budget: Option<std::sync::Arc<crate::app::model_request_budget::ModelRequestBudget>>,
+    context_budget: crate::domain::context::ContextBudgetPolicy,
 }
 
 impl<'blobs, Blobs> VisionSessionService<'blobs, Blobs>
@@ -86,6 +88,7 @@ where
             blobs,
             binding,
             request_budget: None,
+            context_budget: crate::domain::context::ContextBudgetPolicy::default(),
         }
     }
 
@@ -94,6 +97,14 @@ where
         budget: std::sync::Arc<crate::app::model_request_budget::ModelRequestBudget>,
     ) -> Self {
         self.request_budget = Some(budget);
+        self
+    }
+
+    pub(crate) fn with_context_budget_policy(
+        mut self,
+        policy: crate::domain::context::ContextBudgetPolicy,
+    ) -> Self {
+        self.context_budget = policy;
         self
     }
 
@@ -224,6 +235,7 @@ where
     {
         let analysis = VisionAnalysisService::new(provider, self.blobs)
             .with_request_budget(self.request_budget.clone())
+            .with_context_budget_policy(self.context_budget)
             .analyze_image(prepared.analysis, audit_context, cancellation, |attempt| {
                 record_audit(attempt).map_err(|error| error.to_string())
             })
@@ -232,6 +244,7 @@ where
         match analysis {
             Ok(output) => Ok(PreparedVisionSecondaryTerminal::Observation {
                 observation: Box::new(output.observation),
+                usage: output.usage,
                 primary_profile: prepared.primary_profile,
                 primary_capability_hash: prepared.primary_capability_hash,
             }),
@@ -268,6 +281,7 @@ where
         match terminal {
             PreparedVisionSecondaryTerminal::Observation {
                 observation,
+                usage,
                 primary_profile,
                 primary_capability_hash,
             } => {
@@ -290,6 +304,7 @@ where
                 Ok(VisionSessionOutcome {
                     observation,
                     primary_context,
+                    usage,
                 })
             }
             PreparedVisionSecondaryTerminal::Failure {
@@ -472,6 +487,7 @@ where
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VisionSessionOutcome {
+    pub(crate) usage: Option<crate::domain::model::ModelUsage>,
     pub observation: VisionObservation,
     pub primary_context: InitialImagePrimaryContext,
 }

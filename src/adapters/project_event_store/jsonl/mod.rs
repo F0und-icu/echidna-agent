@@ -4,7 +4,7 @@ mod recovery;
 mod scan;
 
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{BufReader, Read, Write};
 use std::marker::PhantomData;
 use std::path::PathBuf;
 
@@ -23,6 +23,18 @@ use recovery::{RecoveryArtifact, persist_recovery_artifact, replace_stream_atomi
 use scan::{StreamScan, next_sequence, scan_stream};
 
 pub(crate) use scan::scan_stream_bytes;
+
+/// Process-local proof of the bytes already reduced by one Session consumer.
+/// Reopening verifies these exact bytes, not file metadata, before reading a
+/// newly appended suffix. It is never a persisted authority or checkpoint.
+#[derive(Clone)]
+pub(crate) struct SessionStreamCursor {
+    path: PathBuf,
+    stream_id: StreamId,
+    bytes: usize,
+    hash: blake3::Hasher,
+    last_sequence: Option<EventSequence>,
+}
 
 /// Reads the initialized Research stream without taking the writer lock or
 /// opening a file for append. The shared scanner remains the only source of
@@ -73,6 +85,99 @@ impl RecoveryMetadata {
 }
 
 impl ProjectWriter {
+    pub(crate) fn open_session_projection(
+        &mut self,
+        session_id: StreamId,
+        cursor: Option<&SessionStreamCursor>,
+    ) -> Result<(JsonlEventStore<'_>, Vec<EventEnvelope<Value>>), ProjectEventStoreError> {
+        let stream = ProjectEventStream::Session(session_id.clone());
+        let path = if cursor.is_some() {
+            self.project.session_stream_path_existing(&session_id)?
+        } else {
+            self.project.stream_path(&stream)?
+        };
+        if let Some(parent) = path.parent() {
+            create_directory(parent)?;
+        }
+        if !path.exists() {
+            if cursor.is_some() {
+                return Err(ProjectEventStoreError::ValidatedPrefixChanged { path });
+            }
+            create_empty_stream(&path)?;
+        }
+        let stream_id = stream.stream_id();
+        let registry = EventUpcasterRegistry::current();
+        let mut reader =
+            BufReader::new(
+                File::open(&path).map_err(|source| ProjectEventStoreError::Io {
+                    operation: "read Session Event suffix",
+                    path: path.clone(),
+                    source,
+                })?,
+            );
+        let offset = cursor.map_or(0, |cursor| cursor.bytes);
+        let mut hash = blake3::Hasher::new();
+        if let Some(cursor) = cursor {
+            if cursor.path != path || cursor.stream_id != stream_id {
+                return Err(ProjectEventStoreError::ValidatedPrefixChanged { path });
+            }
+            let mut remaining = offset;
+            let mut chunk = [0; 65_536];
+            while remaining > 0 {
+                let capacity = remaining.min(chunk.len());
+                let count = reader.read(&mut chunk[..capacity]).map_err(|source| {
+                    ProjectEventStoreError::Io {
+                        operation: "verify Session Event prefix",
+                        path: path.clone(),
+                        source,
+                    }
+                })?;
+                if count == 0 {
+                    return Err(ProjectEventStoreError::ValidatedPrefixChanged { path });
+                }
+                hash.update(&chunk[..count]);
+                remaining -= count;
+            }
+            if hash.finalize() != cursor.hash.finalize() {
+                return Err(ProjectEventStoreError::ValidatedPrefixChanged { path });
+            }
+        }
+        let scan = scan::scan_stream_reader(
+            &mut reader,
+            &path,
+            &stream_id,
+            &registry,
+            offset,
+            cursor.and_then(|cursor| cursor.last_sequence),
+            &mut hash,
+        )?;
+        let (events, last_sequence, validated_bytes) = match scan {
+            StreamScan::Complete {
+                events,
+                last_sequence,
+                validated_bytes,
+            } => (events, last_sequence, validated_bytes),
+            StreamScan::Trailing { offset, .. } => {
+                return Err(ProjectEventStoreError::RecoveryMetadataRequired { path, offset });
+            }
+        };
+        let mut store = JsonlEventStore::open(
+            path.clone(),
+            stream_id.clone(),
+            last_sequence,
+            registry,
+            PhantomData,
+        )?;
+        store.projection_cursor = Some(SessionStreamCursor {
+            path,
+            stream_id,
+            bytes: validated_bytes,
+            hash,
+            last_sequence,
+        });
+        Ok((store, events))
+    }
+
     /// Opens the project Research JSONL Writer.
     pub fn open_research(
         &mut self,
@@ -172,6 +277,7 @@ pub struct JsonlEventStore<'writer> {
     file: File,
     last_sequence: Option<EventSequence>,
     registry: EventUpcasterRegistry<Value>,
+    projection_cursor: Option<SessionStreamCursor>,
     _writer: PhantomData<&'writer mut ProjectWriter>,
 }
 
@@ -198,6 +304,7 @@ impl<'writer> JsonlEventStore<'writer> {
             file,
             last_sequence,
             registry,
+            projection_cursor: None,
             _writer: writer,
         })
     }
@@ -205,6 +312,13 @@ impl<'writer> JsonlEventStore<'writer> {
     /// Returns the exact next sequence assigned by this stream Writer.
     pub fn next_sequence(&self) -> Result<EventSequence, ProjectEventStoreError> {
         next_sequence(self.last_sequence, &self.stream_id)
+    }
+
+    pub(crate) fn projection_cursor(&self) -> SessionStreamCursor {
+        self.projection_cursor
+            .as_ref()
+            .expect("Session projection store was opened with a verified cursor")
+            .clone()
     }
 }
 
@@ -258,6 +372,11 @@ impl EventSink<Value> for JsonlEventStore<'_> {
                 source,
             })?;
         self.last_sequence = Some(event.sequence);
+        if let Some(cursor) = &mut self.projection_cursor {
+            cursor.hash.update(&encoded);
+            cursor.bytes += encoded.len();
+            cursor.last_sequence = Some(event.sequence);
+        }
         Ok(())
     }
 }

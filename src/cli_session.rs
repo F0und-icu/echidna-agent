@@ -13,7 +13,7 @@ use crate::adapters::project_event_store::{
 use crate::app::session::SessionProjection;
 use crate::domain::events::{EventId, OccurredAt, StreamId};
 use crate::domain::model::{ContentItem, MessageRole};
-use crate::domain::session::{SessionEvent, SessionLifecycle, SessionReducer, SessionState};
+use crate::domain::session::{SessionEvent, SessionLifecycle, SessionState};
 use crate::ports::EventSource;
 use crate::{CliError, discover_current_project, print_json};
 
@@ -126,9 +126,10 @@ pub(crate) fn resolve_resume_target(
             .ok_or_else(|| CliError::SessionOperation {
                 message: format!("Session `{session_id}` has no durable lifecycle Event"),
             })?;
-        let state = SessionReducer
-            .reduce(events)
-            .map_err(|error| session_error(error.to_string()))?;
+        let state = replay_project_session(project, events)
+            .map_err(session_error)?
+            .state()
+            .clone();
         if state.lifecycle() == SessionLifecycle::Active {
             let candidate = (activity, session_id.as_str().to_owned());
             if latest.as_ref().is_none_or(|current| candidate > *current) {
@@ -219,8 +220,9 @@ pub(crate) fn end(requested: &str) -> Result<(), CliError> {
     let mut writer = project.open_writer()?;
     let mut store = writer.open_session(session_id.clone(), None)?;
     let stream_id = ProjectEventStream::Session(session_id.clone()).stream_id();
-    let mut projection = SessionProjection::replay(EventSource::read_events(&store, &stream_id)?)
-        .map_err(|error| session_error(error.to_string()))?;
+    let mut projection =
+        replay_project_session(&project, EventSource::read_events(&store, &stream_id)?)
+            .map_err(session_error)?;
     if projection.state().lifecycle() != SessionLifecycle::Active {
         return Err(CliError::SessionOperation {
             message: format!("Session `{requested}` is not Active"),
@@ -402,9 +404,34 @@ fn indent(value: &str) -> String {
 fn reduce(project: &Project, session_id: &StreamId) -> Result<SessionState, String> {
     let events =
         read_existing_session_events(project, session_id).map_err(|error| error.to_string())?;
-    SessionReducer
-        .reduce(events)
-        .map_err(|error| error.to_string())
+    Ok(replay_project_session(project, events)?.state().clone())
+}
+
+pub(crate) fn replay_project_session(
+    project: &Project,
+    events: Vec<crate::domain::events::EventEnvelope<serde_json::Value>>,
+) -> Result<SessionProjection, String> {
+    let has_v5 = events.iter().try_fold(false, |found, event| {
+        Ok::<_, crate::domain::session::SessionError>(found || matches!(SessionEvent::decode(&event.event_type, event.payload.clone())?, SessionEvent::CompactionCreated { ref compaction } if compaction.summary().schema_version() == 5))
+    }).map_err(|error| error.to_string())?;
+    let artifacts = crate::adapters::artifact_store::LocalArtifactStore::for_project(project);
+    if !has_v5 {
+        return SessionProjection::replay_verified(events, &artifacts)
+            .map_err(|error| error.to_string());
+    }
+    let research = crate::adapters::project_event_store::read_existing_research_events(project)
+        .map_err(|error| error.to_string())?;
+    let (references, receipts) =
+        crate::adapters::research_projection::load_reference_catalog_and_receipt_ids(project)?;
+    SessionProjection::replay_project_verified(
+        project.project_id().clone(),
+        &events,
+        &research,
+        &references,
+        &receipts,
+        &artifacts,
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn require_session(project: &Project, requested: &str) -> Result<StreamId, CliError> {

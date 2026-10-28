@@ -1,11 +1,10 @@
 use std::collections::BTreeMap;
-use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::adapters::mcp_http::McpServerConfig;
+use crate::adapters::mcp::McpServerConfig;
 use crate::domain::context::{ModelIdentity, ModelProfile};
 use crate::domain::model::{CapabilityMappingVersion, ModelCapabilities, ReasoningEffort};
 use crate::domain::profile::{AgentModelProfile, ProviderProfile, VisionMode};
@@ -30,11 +29,13 @@ pub(super) struct ProviderConfigV1 {
     pub(super) mcp_servers: BTreeMap<String, McpServerConfig>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct RuntimeSettings {
     pub(crate) model_request_limit_per_turn: usize,
     pub(crate) auto_compact: bool,
+    pub(crate) compaction_reasoning_effort: Option<ReasoningEffort>,
+    pub(crate) context_budget: crate::domain::context::ContextBudgetPolicy,
 }
 
 impl Default for RuntimeSettings {
@@ -43,6 +44,8 @@ impl Default for RuntimeSettings {
             model_request_limit_per_turn:
                 crate::app::model_request_budget::DEFAULT_MODEL_REQUEST_LIMIT,
             auto_compact: false,
+            compaction_reasoning_effort: None,
+            context_budget: Default::default(),
         }
     }
 }
@@ -63,19 +66,19 @@ impl ProviderConfigV1 {
             }
         })?;
         config.prompts.validate()?;
-        config
-            .prompts
-            .resolve_relative_to(path.parent().unwrap_or_else(|| Path::new(".")));
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        config.prompts.resolve_relative_to(parent);
         if config
             .mcp_servers
             .values()
             .any(|server| server.command.is_some())
         {
-            let parent = std::path::absolute(path.parent().unwrap_or_else(|| Path::new(".")))
-                .map_err(|source| ProviderCompositionError::ReadConfiguration {
+            let parent = std::path::absolute(parent).map_err(|source| {
+                ProviderCompositionError::ReadConfiguration {
                     path: path.to_path_buf(),
                     source,
-                })?;
+                }
+            })?;
             for server in config.mcp_servers.values_mut() {
                 server.resolve_relative_to(&parent);
             }
@@ -260,19 +263,13 @@ pub(super) struct CodexSubscription {
     pub(super) supports_reasoning_summary_parameter: Option<bool>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(transparent)]
 pub(super) struct InlineApiKey(String);
 
 impl InlineApiKey {
     pub(super) fn expose(&self) -> &str {
         &self.0
-    }
-}
-
-impl fmt::Debug for InlineApiKey {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("InlineApiKey(<redacted>)")
     }
 }
 
@@ -323,15 +320,5 @@ pub(super) struct AgentProfileDefinition {
 }
 
 fn configuration_decode_diagnostic(error: &toml::de::Error) -> String {
-    let category = ["unknown field", "missing field", "unknown variant"]
-        .into_iter()
-        .find(|category| error.message().starts_with(category))
-        .unwrap_or("invalid configuration");
-    match error.span() {
-        Some(span) => format!(
-            "{category} at bytes {}..{}; input details <redacted>",
-            span.start, span.end
-        ),
-        None => format!("{category}; input details <redacted> (position unavailable)"),
-    }
+    error.to_string()
 }

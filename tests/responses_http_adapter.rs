@@ -58,12 +58,274 @@ mod support;
 
 const FIXTURE_SECRET: &str = "fixture-secret";
 
+#[path = "responses_cases/context_capacity.rs"]
+mod context_capacity;
+#[path = "responses_cases/continuation_http_limit.rs"]
+mod continuation_http_limit;
 #[path = "responses_cases/text_finalization.rs"]
 mod text_finalization;
 #[path = "responses_cases/transport.rs"]
 mod transport;
+#[path = "responses_cases/usage.rs"]
+mod usage;
 const FIXTURE_CREDENTIAL_REFERENCE: &str = "CYBER_AGENT_FIXTURE_API_KEY";
 type CredentialReadResult = Result<Option<String>, CredentialSourceError>;
+async fn error_event_fixture(profile: &str, event: Value) -> ModelProviderError {
+    let (base_url, request, server) = spawn_sse_server(200, &format!("data: {event}\n\n")).await;
+    let credentials = FakeCredentialSource::value(Some(FIXTURE_SECRET));
+    let account_credentials = AccountBoundCredentialSource::new(
+        "codex_subscription:fixture",
+        FIXTURE_SECRET,
+        "workspace-error-secret",
+    );
+    let provider = match profile {
+        "standard" => adapter(base_url, credentials.clone()),
+        "siwc" => subscription_adapter(base_url, credentials.clone()),
+        "codex" => codex_subscription_adapter(base_url, account_credentials.clone()),
+        _ => unreachable!("fixed fixture profiles"),
+    };
+    let error = ModelStreamingService::new(&provider)
+        .consume(
+            full(fixture_input(ModelRequestRequirements::default())),
+            ModelStreamCancellation::new(),
+        )
+        .await
+        .unwrap_err();
+    request.await.unwrap();
+    server.await.unwrap();
+    if profile == "codex" {
+        assert_eq!(account_credentials.resolutions(), 1);
+    } else {
+        assert_eq!(credentials.references().len(), 1);
+    }
+    match error {
+        ModelStreamingError::Provider(error) => error,
+        other => panic!("expected a typed Provider error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn error_event_projects_top_level_nested_nullable_and_missing_fields() {
+    for profile in ["standard", "siwc", "codex"] {
+        for (event, code, expected) in [
+            (
+                json!({"type":"error","code":"server_error","message":"temporarily unavailable","param":"reasoning.effort","sequence_number":7,"unknown":"not-visible"}),
+                Some("server_error"),
+                "Responses SSE error (origin=top-level; param=reasoning.effort; sequence_number=7): message=temporarily unavailable",
+            ),
+            (
+                json!({"type":"error","error":{"type":"unknown-type-canary","code":"invalid_request","message":"unsupported input","param":"input","unknown":"not-visible"},"sequence_number":8}),
+                Some("invalid_request"),
+                "Responses SSE error (origin=nested error; param=input; sequence_number=8): message=unsupported input",
+            ),
+            (
+                json!({"type":"error","code":null,"message":"fixture failure","param":null,"sequence_number":1.5}),
+                None,
+                "Responses SSE error (origin=top-level; param=<absent>; sequence_number=1.5): message=fixture failure",
+            ),
+            (
+                json!({"type":"error"}),
+                None,
+                "Responses SSE error (origin=top-level; param=<absent>; sequence_number=<absent>): message=<missing>",
+            ),
+            (
+                json!({"type":"error","error":{"message":" \n\t "}}),
+                None,
+                "Responses SSE error (origin=nested error; param=<absent>; sequence_number=<absent>): message= \n\t ",
+            ),
+        ] {
+            assert_eq!(
+                error_event_fixture(profile, event).await,
+                ModelProviderError::ProviderFailure {
+                    code: code.map(str::to_owned),
+                    message: expected.to_owned(),
+                },
+                "{profile}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn error_event_rejects_wrong_typed_fields_without_projecting_values() {
+    for (event, field) in [
+        (json!({"type":"error","message":null}), "message"),
+        (
+            json!({"type":"error","message":{"secret":"MALFORMED_CANARY"}}),
+            "message",
+        ),
+        (json!({"type":"error","code":["MALFORMED_CANARY"]}), "code"),
+        (
+            json!({"type":"error","param":{"secret":"MALFORMED_CANARY"}}),
+            "param",
+        ),
+        (
+            json!({"type":"error","sequence_number":"MALFORMED_CANARY"}),
+            "sequence_number",
+        ),
+        (
+            json!({"type":"error","sequence_number":null}),
+            "sequence_number",
+        ),
+        (json!({"type":"error","error":"MALFORMED_CANARY"}), "error"),
+        (json!({"type":"error","error":null}), "error"),
+        (json!({"type":"error","error":{"message":42}}), "message"),
+    ] {
+        for profile in ["standard", "codex"] {
+            let error = error_event_fixture(profile, event.clone()).await;
+            assert!(
+                matches!(&error, ModelProviderError::ProtocolFailure {message}
+                if message.contains(&format!("`{field}`")))
+            );
+            assert!(!error.to_string().contains("MALFORMED_CANARY"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn error_event_preserves_selected_fields_without_truncation() {
+    let account = "workspace-error-secret";
+    for nested in [false, true] {
+        let mut details = json!({
+            "code":format!("{FIXTURE_SECRET}/{account}\u{1b}[31m"),
+            "message":format!("failure {FIXTURE_SECRET}/{account}\r\u{7}"),
+            "param":format!("{FIXTURE_SECRET}/{account}\u{1b}[2J"),
+            "unknown":"UNKNOWN_ERROR_CANARY",
+        });
+        let event = if nested {
+            json!({"type":"error","error":details,"unknown":"UNKNOWN_ENVELOPE_CANARY"})
+        } else {
+            details["type"] = json!("error");
+            details
+        };
+        let error = error_event_fixture("codex", event).await;
+        let visible = error.to_string();
+        for included in [FIXTURE_SECRET, account, "\u{1b}", "\r", "\u{7}", "failure"] {
+            assert!(visible.contains(included), "{visible:?}");
+        }
+    }
+    for secret in [FIXTURE_SECRET, account] {
+        let error = error_event_fixture(
+            "codex",
+            json!({
+                "type":"error",
+                "code":format!("{}{secret}TAIL_CANARY", "c".repeat(125)),
+                "message":format!("{}{secret}TAIL_CANARY", "中".repeat(1021)),
+                "param":format!("{}{secret}TAIL_CANARY", "p".repeat(253)),
+            }),
+        )
+        .await;
+        let ModelProviderError::ProviderFailure {
+            code: Some(code),
+            message,
+        } = error
+        else {
+            panic!("expected the bounded Provider failure");
+        };
+        assert!(code.contains(secret));
+        assert!(code.contains("TAIL_CANARY"));
+        assert!(message.contains(secret));
+        assert!(message.contains("TAIL_CANARY"));
+    }
+}
+
+#[tokio::test]
+async fn error_event_is_atomic_for_staged_tools_and_subscription_opaque_reasoning() {
+    for profile in ["standard", "codex"] {
+        let mut events = Vec::new();
+        if profile == "codex" {
+            events.push(
+                json!({"type":"response.output_item.done","output_index":0,"item":{
+                    "type":"reasoning","id":"error-reasoning","status":"completed","content":[],
+                    "encrypted_content":"error-opaque-secret","summary":[]
+                }}),
+            );
+        }
+        events.extend([
+            json!({"type":"response.output_item.done","output_index":1,"item":{
+                "type":"function_call","call_id":"uncommitted-error-call","name":"write_file",
+                "arguments":"{\"path\":\"must-not-exist.txt\",\"content\":\"not committed\",\"expected_hash\":null}"
+            }}),
+            json!({"type":"error","code":"server_error","message":"atomic fixture failed"}),
+        ]);
+        let body = events
+            .iter()
+            .map(|event| format!("data: {event}\n\n"))
+            .collect::<String>();
+        let (base_url, request, server) = spawn_sse_server(200, &body).await;
+        let provider = match profile {
+            "standard" => adapter(base_url, FakeCredentialSource::value(Some(FIXTURE_SECRET))),
+            "codex" => codex_subscription_adapter(
+                base_url,
+                AccountBoundCredentialSource::new(
+                    "codex_subscription:fixture",
+                    FIXTURE_SECRET,
+                    "workspace-error-secret",
+                ),
+            ),
+            _ => unreachable!("fixed fixture profiles"),
+        };
+        let directory = support::TemporaryDirectory::new("error-event-atomic");
+        let tools = ToolRegistry::for_project(directory.path());
+        let mut agent = AgentLoop::new(&provider, &tools);
+        let error = agent
+            .run_turn("reject the failed sample", AgentCancellation::new())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("atomic fixture failed"));
+        assert_eq!(
+            agent.history().items(),
+            &[ContentItem::user_text("reject the failed sample")]
+        );
+        assert!(!directory.path().join("must-not-exist.txt").exists());
+        request.await.unwrap();
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn error_event_preserves_only_exact_standard_incremental_rejection() {
+    for (code, incremental, expected_rejection) in [
+        ("previous_response_not_found", true, true),
+        ("previous_response_not_found", false, false),
+        ("Previous_Response_Not_Found", true, false),
+        ("server_error", true, false),
+    ] {
+        let body = format!(
+            "data: {}\n\n",
+            json!({"type":"error","code":code,"message":"fixture"})
+        );
+        let (base_url, request, server) = spawn_sse_server(200, &body).await;
+        let provider = adapter(base_url, FakeCredentialSource::value(Some(FIXTURE_SECRET)));
+        let input = fixture_input(ModelRequestRequirements::default());
+        let model_request = if incremental {
+            ModelRequest::incremental(input, ProviderResponseId::new("prior-response"))
+        } else {
+            full(input)
+        };
+        let error = ModelStreamingService::new(&provider)
+            .consume(model_request, ModelStreamCancellation::new())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            matches!(
+                error,
+                ModelStreamingError::Provider(ModelProviderError::ContinuationRejected { .. })
+            ),
+            expected_rejection
+        );
+        request.await.unwrap();
+        server.await.unwrap();
+    }
+    assert!(matches!(
+        error_event_fixture(
+            "codex",
+            json!({"type":"error","code":"previous_response_not_found","message":"fixture"})
+        )
+        .await,
+        ModelProviderError::ProviderFailure { .. }
+    ));
+}
 
 #[derive(Clone)]
 enum FakeCredentialResult {
@@ -728,6 +990,8 @@ async fn full_request_and_chunked_sse_decode_to_ordered_model_events() {
                     usage: ModelUsage {
                         input_tokens: 21,
                         output_tokens: 34,
+                        cached_input_tokens: None,
+                        reasoning_output_tokens: None,
                     },
                 },
             ],
@@ -809,6 +1073,8 @@ async fn reasoning_extension_tool_usage_and_full_only_completion_share_one_decod
                     usage: ModelUsage {
                         input_tokens: 13,
                         output_tokens: 21,
+                        cached_input_tokens: None,
+                        reasoning_output_tokens: None,
                     },
                 },
             ],
@@ -1690,7 +1956,7 @@ async fn codex_metadata_annotation_does_not_complete_or_mask_later_stream_errors
                     "code": "metadata-terminal-failure", "message": "metadata terminal failure"
                 }}})
             ),
-            "Codex subscription Responses stream reported response.failed",
+            "metadata terminal failure",
         ),
         (
             "incomplete",
@@ -2468,16 +2734,19 @@ async fn subscription_failed_or_incomplete_opaque_tool_samples_are_atomic_and_no
                 .await
                 .unwrap_err();
             let visible_error = error.to_string();
-            assert!(
-                visible_error.contains(expected),
-                "{profile}/{case}: {visible_error}"
-            );
-            for secret in [&code_secret, &detail_secret, &large_secret] {
+            if case == "failed" {
+                assert!(visible_error.contains(&detail_secret), "{visible_error}");
+                assert!(visible_error.contains(&code_secret), "{visible_error}");
+            } else {
                 assert!(
-                    !visible_error.contains(secret),
-                    "{profile}/{case}: terminal provider values must not enter the error: {visible_error}"
+                    visible_error.contains(expected),
+                    "{profile}/{case}: {visible_error}"
                 );
+                if case == "incomplete" {
+                    assert!(visible_error.contains(&detail_secret), "{visible_error}");
+                }
             }
+            assert!(!visible_error.contains(&large_secret));
             assert_eq!(
                 agent.history().items(),
                 &[ContentItem::user_text(
@@ -2536,11 +2805,13 @@ async fn subscription_http_quota_error_is_structured_safe_and_not_retried() {
         Err(ModelStreamingError::Provider(
             ModelProviderError::ProviderFailure {
                 code: Some("insufficient_quota".to_owned()),
-                message: "ChatGPT subscription Responses request failed with HTTP 429".to_owned(),
+                message: format!(
+                    "ChatGPT subscription Responses request failed with HTTP 429: {body}"
+                ),
             }
         ))
     );
-    assert!(!format!("{result:?}").contains("account-routing-secret"));
+    assert!(format!("{result:?}").contains("account-routing-secret"));
     assert_eq!(
         credentials.references(),
         vec!["chatgpt_subscription:fixture"]
@@ -2575,12 +2846,11 @@ async fn subscription_failed_event_keeps_only_the_allowlisted_quota_code() {
         Err(ModelStreamingError::Provider(
             ModelProviderError::ProviderFailure {
                 code: Some("insufficient_quota".to_owned()),
-                message: "ChatGPT subscription Responses stream reported response.failed"
-                    .to_owned(),
+                message: secret.to_owned(),
             }
         ))
     );
-    assert!(!format!("{result:?}").contains(secret));
+    assert!(format!("{result:?}").contains(secret));
     assert_eq!(
         credentials.references(),
         vec!["chatgpt_subscription:fixture"]
@@ -2610,14 +2880,16 @@ async fn subscription_http_error_omits_unrecognized_remote_code() {
         result,
         Err(ModelStreamingError::Provider(
             ModelProviderError::ProviderFailure {
-                code: None,
-                message: "ChatGPT subscription Responses request failed with HTTP 403: unrecognized error code".to_owned(),
+                code: Some(code_secret.to_owned()),
+                message: format!(
+                    "ChatGPT subscription Responses request failed with HTTP 403: {body}"
+                ),
             }
         ))
     );
     let visible = format!("{result:?}");
-    assert!(!visible.contains(code_secret));
-    assert!(!visible.contains(message_secret));
+    assert!(visible.contains(code_secret));
+    assert!(visible.contains(message_secret));
     assert_eq!(
         credentials.references(),
         vec!["chatgpt_subscription:fixture"]
@@ -2628,7 +2900,7 @@ async fn subscription_http_error_omits_unrecognized_remote_code() {
 
 #[tokio::test]
 async fn subscription_http_error_classifies_malformed_and_missing_codes() {
-    for (case, body, suffix, secret) in [
+    for (case, body, _suffix, secret) in [
         (
             "malformed",
             r#"{"error":"subscription-malformed-secret""#,
@@ -2660,12 +2932,12 @@ async fn subscription_http_error_classifies_malformed_and_missing_codes() {
                 ModelProviderError::ProviderFailure {
                     code: None,
                     message: format!(
-                        "ChatGPT subscription Responses request failed with HTTP 400: {suffix}"
+                        "ChatGPT subscription Responses request failed with HTTP 400: {body}"
                     ),
                 }
             ))
         );
-        assert!(!format!("{result:?}").contains(secret));
+        assert!(format!("{result:?}").contains(secret));
         assert_eq!(
             credentials.references(),
             vec!["chatgpt_subscription:fixture"],
@@ -2730,15 +3002,9 @@ async fn subscription_http_error_classifies_truncated_body_as_unreadable() {
             ModelStreamCancellation::new(),
         )
         .await;
-    assert_eq!(
-        result,
-        Err(ModelStreamingError::Provider(
-            ModelProviderError::ProviderFailure {
-                code: None,
-                message: "ChatGPT subscription Responses request failed with HTTP 503: error body unavailable".to_owned(),
-            }
-        ))
-    );
+    assert!(matches!(&result, Err(ModelStreamingError::Provider(
+        ModelProviderError::ProviderFailure { code: None, message }
+    )) if message.contains("HTTP 503: error body unavailable: ")));
     assert!(!format!("{result:?}").contains(secret));
     assert_eq!(
         credentials.references(),
@@ -3489,7 +3755,10 @@ async fn http_rejection_is_a_typed_provider_error() {
             )
             .await,
         Err(ModelStreamingError::Provider(
-            ModelProviderError::HttpFailure { status: 401 }
+            ModelProviderError::HttpFailure {
+                status: 401,
+                body: "unauthorized".to_owned()
+            }
         ))
     );
     let _ = request_receiver.await.unwrap();
@@ -3655,7 +3924,10 @@ async fn http_previous_response_rejection_is_typed_only_for_incremental_delivery
             assert_eq!(
                 result,
                 Err(ModelStreamingError::Provider(
-                    ModelProviderError::HttpFailure { status: 400 }
+                    ModelProviderError::HttpFailure {
+                        status: 400,
+                        body: body.to_owned()
+                    }
                 ))
             );
         }

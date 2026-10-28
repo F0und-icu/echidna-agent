@@ -8,9 +8,11 @@ use super::error::ContextPlannerError;
 use super::fragment::ContextFragmentContent;
 
 const INSTRUCTION_SEPARATOR_BYTES: usize = 2;
+pub(crate) const ESTIMATED_BYTES_PER_TOKEN: usize = 4;
 
 pub(super) fn estimate_encoded_tokens(encoded_bytes: usize) -> u32 {
-    let tokens = encoded_bytes.saturating_add(3) / 4;
+    let tokens =
+        encoded_bytes.saturating_add(ESTIMATED_BYTES_PER_TOKEN - 1) / ESTIMATED_BYTES_PER_TOKEN;
     u32::try_from(tokens).unwrap_or(u32::MAX)
 }
 

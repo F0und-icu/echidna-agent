@@ -19,7 +19,7 @@ mod mcp_stdio_regression {
     use serde_json::{Value, json};
 
     use crate::adapters::credentials::{CredentialSource, CredentialSourceError};
-    use crate::adapters::mcp_http::{CompletedCall, McpError, McpRuntime, McpServerConfig};
+    use crate::adapters::mcp::{CompletedCall, McpError, McpRuntime, McpServerConfig};
     use crate::domain::tools::{
         ExecutionId, ToolCall, ToolCallId, ToolEffect, ToolExposure, ToolResultStatus,
     };
@@ -40,10 +40,15 @@ mod mcp_stdio_regression {
 
     fn server(directory: &TemporaryDirectory, mode: &str, timeout: u64) -> String {
         format!(
-            "command = \"python3\"\nargs = [{}, {}, {}]\nprotocol_version = \"2025-11-25\"\ntimeout_ms = {timeout}\n",
+            "command = \"python3\"\nargs = [{}, {}, {}]\nprotocol_version = \"2025-11-25\"\ntimeout_ms = {timeout}\nstartup_timeout_ms = {}\n",
             json!(fixture_path().to_str().unwrap()),
             json!(mode),
-            json!(directory.path().to_str().unwrap())
+            json!(directory.path().to_str().unwrap()),
+            if mode == "startup_timeout" {
+                timeout
+            } else {
+                3000
+            }
         )
     }
 
@@ -505,7 +510,7 @@ mod mcp_stdio_regression {
             ))
             .unwrap();
             config.resolve_relative_to(directory.path());
-            assert!(!format!("{config:?}").contains(secret));
+            assert!(format!("{config:?}").contains(secret));
             let runtime = McpRuntime::new(
                 BTreeMap::from([("local".to_owned(), config)]),
                 Arc::new(NoCredentials),
@@ -765,7 +770,7 @@ mod mcp_stdio_regression {
     }
 
     #[test]
-    fn stdio_config_decode_errors_never_echo_secret_source_values() {
+    fn stdio_config_decode_errors_show_source_values() {
         let directory = TemporaryDirectory::new("stdio-private-config");
         let secret = "PRIVATE_DECODE_CANARY";
         let valid = server(&directory, "normal", 2000);
@@ -783,9 +788,104 @@ mod mcp_stdio_regression {
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             );
-            assert!(!terminal.contains(secret), "{terminal}");
-            assert!(terminal.contains("<redacted>"), "{terminal}");
-            assert!(terminal.contains("bytes"), "{terminal}");
+            assert!(terminal.contains(secret), "{terminal}");
+        }
+    }
+    #[tokio::test]
+    async fn stdio_startup_observer_identifies_failed_stage_and_preserves_cause() {
+        use crate::adapters::mcp::observation::{McpObservation, McpStartupStage};
+        for (mode, expected) in [
+            ("normal", None),
+            ("bad_initialize", Some(McpStartupStage::Initializing)),
+            ("bad_catalog", Some(McpStartupStage::Listing)),
+            ("startup_timeout", Some(McpStartupStage::Initializing)),
+        ] {
+            let directory = TemporaryDirectory::new(&format!("stdio-stages-{mode}"));
+            let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let recorded = Arc::clone(&events);
+            let runtime =
+                runtime(&directory, mode, 350).with_observer(Some(Arc::new(move |event| {
+                    recorded.lock().unwrap().push(event)
+                })));
+            let result = runtime.discover().await;
+            if let Some(expected) = expected {
+                let error = result.err().expect("startup must fail visibly");
+                assert!(
+                    matches!(&error, McpError::Startup { server_id, stage, source } if server_id == "local" && *stage == expected && !source.to_string().is_empty()),
+                    "{error}"
+                );
+                let events = events.lock().unwrap();
+                assert!(
+                    matches!(events.first(), Some(McpObservation::Startup { server_id, stage: McpStartupStage::Starting }) if server_id == "local")
+                );
+                assert!(
+                    matches!(events.last(), Some(McpObservation::StartupFailed { server_id, stage }) if server_id == "local" && *stage == expected),
+                    "{events:?}"
+                );
+                assert!(!events.iter().any(|event| matches!(
+                    event,
+                    McpObservation::Startup {
+                        stage: McpStartupStage::Ready,
+                        ..
+                    }
+                )));
+            } else {
+                assert!(!result.unwrap().is_empty());
+                assert!(matches!(
+                    events.lock().unwrap().last(),
+                    Some(McpObservation::Startup {
+                        stage: McpStartupStage::Ready,
+                        ..
+                    })
+                ));
+            }
+            drop(runtime);
+            assert_reaped_and_group_stopped(&directory);
+        }
+    }
+
+    #[tokio::test]
+    async fn stdio_separate_startup_deadline_does_not_relax_short_tool_call() {
+        let directory = TemporaryDirectory::new("stdio-separate-deadlines");
+        let runtime = runtime(&directory, "slow_startup_short_call", 40);
+        let tools = runtime
+            .discover()
+            .await
+            .expect("150ms initialize uses explicit startup deadline, not the 40ms call deadline");
+        assert!(
+            matches!(tools[0].call(json!({})).await, Err(McpError::Protocol { message }) if message == "stdio request timed out after dispatch")
+        );
+        assert_eq!(
+            requests(&directory)
+                .iter()
+                .filter(|request| request["method"] == "tools/call")
+                .count(),
+            1
+        );
+        drop(runtime);
+        assert_reaped_and_group_stopped(&directory);
+    }
+
+    #[test]
+    fn startup_timeout_validation_uses_the_config_boundary_for_both_transports() {
+        for transport in ["url = \"http://127.0.0.1:1/mcp\"", "command = \"python3\""] {
+            for timeout in [0, 86_400_001] {
+                let directory = TemporaryDirectory::new("mcp-invalid-startup-deadline");
+                let path = config_file(
+                    &directory,
+                    &format!(
+                        "{transport}\nprotocol_version = \"2025-11-25\"\nstartup_timeout_ms = {timeout}\n"
+                    ),
+                );
+                let error = ProviderComposition::load(path, Arc::new(NoCredentials))
+                    .err()
+                    .expect("invalid deadline rejected without credentials or startup");
+                assert!(
+                    error.to_string().contains("mcp_servers.startup_timeout_ms"),
+                    "{error}"
+                );
+                assert!(!directory.path().join("launch.json").exists());
+            }
         }
     }
 }

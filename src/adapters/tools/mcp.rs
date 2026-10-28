@@ -2,7 +2,7 @@
 
 use serde_json::{Value, json};
 
-use crate::adapters::mcp_http::{CompletedCall, McpCatalogTool, McpError, McpProtocolVersion};
+use crate::adapters::mcp::{CompletedCall, McpCatalogTool, McpError, McpProtocolVersion};
 use crate::domain::canonical_json::canonical_blake3_hash;
 use crate::domain::tools::{
     ExecutionId, ResolvedToolPlan, ToolCachePolicy, ToolCall, ToolDeterminism, ToolEffect,

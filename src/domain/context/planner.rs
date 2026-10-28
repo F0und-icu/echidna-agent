@@ -10,6 +10,8 @@ mod manifest;
 mod render;
 mod selection;
 
+pub(crate) use estimator::ESTIMATED_BYTES_PER_TOKEN;
+
 /// Estimates audit component bytes with the same deterministic conservative
 /// rule used by Context budgeting. Audit inspection does not own a second
 /// token formula.
@@ -31,9 +33,75 @@ pub(crate) fn tool_schema_token_cost(specs: &[ToolSpec]) -> Result<u32, ContextP
 use serde::Serialize;
 
 use super::canonical::{RequestHash, canonical_tool_schemas};
-use super::window_policy::ContextWindowPolicy;
+use super::window_policy::ContextBudgetPolicy;
 use crate::domain::model::{ModelCapabilities, ModelInputIR, ModelRequestRequirements};
 use crate::domain::tools::ToolSpec;
+
+/// Planner estimates for the exact candidate; not Provider token usage.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ContextCapacityBreakdown {
+    pub(crate) tool_schema_tokens: u32,
+    pub(crate) fragment_budget: Option<u32>,
+    pub(crate) instructions: u64,
+    pub(crate) memory: u64,
+    pub(crate) summary: u64,
+    pub(crate) input: u64,
+    pub(crate) history: u64,
+    pub(crate) turn_updates: u64,
+    pub(crate) project_facts: u64,
+    pub(crate) required_fragments: u64,
+    pub(crate) images: usize,
+    pub(crate) opaque_items: usize,
+}
+
+pub(crate) fn capacity_breakdown(
+    fragments: &[ContextFragment],
+    budget: ContextBudget,
+    specs: &[ToolSpec],
+) -> Result<ContextCapacityBreakdown, ContextPlannerError> {
+    let tools = tool_schema_token_cost(specs)?;
+    let mut result = ContextCapacityBreakdown {
+        tool_schema_tokens: tools,
+        fragment_budget: budget.input_token_limit().checked_sub(tools),
+        ..Default::default()
+    };
+    for fragment in fragments {
+        let estimate = u64::from(fragment.token_estimate());
+        let bucket =
+            match fragment.source() {
+                ContextFragmentSource::BasePrompt
+                | ContextFragmentSource::PersonalPreferences
+                | ContextFragmentSource::ProjectPrompt
+                | ContextFragmentSource::ModePrompt
+                | ContextFragmentSource::DomainPrompt
+                | ContextFragmentSource::PhasePrompt => &mut result.instructions,
+                ContextFragmentSource::ProjectMemoryCore
+                | ContextFragmentSource::RetrievedMemory => &mut result.memory,
+                ContextFragmentSource::SessionSummary => &mut result.summary,
+                ContextFragmentSource::UserInput => &mut result.input,
+                ContextFragmentSource::RecentHistory => &mut result.history,
+                ContextFragmentSource::TurnLocalUpdates => &mut result.turn_updates,
+                ContextFragmentSource::ResearchWorldState
+                | ContextFragmentSource::ProjectSnapshot => &mut result.project_facts,
+            };
+        *bucket = bucket.saturating_add(estimate);
+        if fragment.priority() == ContextFragmentPriority::Required {
+            result.required_fragments = result.required_fragments.saturating_add(estimate);
+        }
+        if let ContextFragmentContent::ContentItems { items } = fragment.content() {
+            for item in items {
+                match item {
+                    crate::domain::model::ContentItem::ImageArtifact { .. } => result.images += 1,
+                    crate::domain::model::ContentItem::OpaqueContinuation { .. } => {
+                        result.opaque_items += 1
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    Ok(result)
+}
 
 pub use cache_key::{
     CONTEXT_FRAGMENT_CACHE_KEY_VERSION, ContextFragmentCacheKey, ContextSourceFingerprint,
@@ -69,6 +137,7 @@ use selection::{
 pub struct ContextPlanner {
     versions: ContextPlannerVersions,
     renderer: PromptRendererIdentity,
+    budget_policy: ContextBudgetPolicy,
 }
 
 impl ContextPlanner {
@@ -76,15 +145,37 @@ impl ContextPlanner {
         Self::new(ContextPlannerVersions::new(
             "context-planner:1",
             "utf8-rendered-channel-budget:2",
-            "capped-output-and-tool-loop-eighths:2",
+            "recoverable-capacity-scoped-handoff:5",
         ))
+        .with_budget_policy(ContextBudgetPolicy::default())
     }
 
     pub fn new(versions: ContextPlannerVersions) -> Self {
         Self {
             versions,
             renderer: PromptRendererIdentity::generic_v1(),
+            budget_policy: ContextBudgetPolicy::default(),
         }
+    }
+
+    pub(crate) fn with_budget_policy(mut self, policy: ContextBudgetPolicy) -> Self {
+        self.budget_policy = policy;
+        self.versions.budget_policy_version = format!(
+            "recoverable-capacity-configured:5:{}",
+            serde_json::to_string(&policy).expect("fixed policy is serializable")
+        );
+        self
+    }
+
+    pub(crate) fn budget_policy(&self) -> ContextBudgetPolicy {
+        self.budget_policy
+    }
+
+    pub(crate) fn window_policy(
+        &self,
+        capabilities: &ModelCapabilities,
+    ) -> Result<super::window_policy::ContextWindowPolicy, ContextPlannerError> {
+        self.budget_policy.for_capabilities(capabilities)
     }
 
     pub fn renderer_identity(&self) -> &PromptRendererIdentity {
@@ -95,23 +186,14 @@ impl ContextPlanner {
         &self,
         capabilities: &ModelCapabilities,
     ) -> Result<ContextBudget, ContextPlannerError> {
-        let policy = ContextWindowPolicy::for_window(capabilities.context_window);
-        let output_limit = capabilities.resolve_output_token_limit(None)?.unwrap_or(0);
-        // Chat, Compaction and scoped Vision share explicit-window defaults.
-        // A reservation does not create Provider output-limit support.
-        let budget = ContextBudget::new(
-            capabilities.context_window,
-            policy.output_reserve_tokens().max(output_limit),
-            policy.tool_loop_reserve_tokens(),
-        )?;
-        if output_limit > 0 && budget.input_token_limit() == 0 {
-            return Err(ContextPlannerError::InvalidBudget {
-                context_window_tokens: budget.context_window_tokens(),
-                reserved_output_tokens: budget.reserved_output_tokens(),
-                reserved_tool_loop_tokens: budget.reserved_tool_loop_tokens(),
-            });
-        }
-        Ok(budget)
+        Ok(self.window_policy(capabilities)?.budget())
+    }
+
+    pub(crate) fn tool_free_compaction_budget(
+        &self,
+        capabilities: &ModelCapabilities,
+    ) -> Result<ContextBudget, ContextPlannerError> {
+        self.default_budget(capabilities)?.without_tool_reserve()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -176,7 +258,10 @@ impl ContextPlanner {
         }
         ensure_unique_ids(&fragments)?;
         sort_full_order(&mut fragments);
-        let decisions = select_decisions(&fragments, budget, fixed_input_tokens)?;
+        let core_limit = estimator::estimate_encoded_tokens(
+            self.budget_policy.for_budget(budget).core_memory_bytes(),
+        );
+        let decisions = select_decisions(&fragments, budget, fixed_input_tokens, core_limit)?;
         let full_logical_manifest = FullLogicalManifest {
             entries: fragments
                 .iter()
@@ -284,6 +369,24 @@ impl ContextPlanner {
             });
         }
         Ok(())
+    }
+    pub(crate) fn estimate_rendered_model_input(
+        &self,
+        input: &ModelInputIR,
+    ) -> Result<u32, ContextPlannerError> {
+        let tools = canonical_tool_schemas(&input.tool_specs).map_err(|error| {
+            ContextPlannerError::CanonicalEncoding {
+                message: error.to_string(),
+            }
+        })?;
+        Ok(
+            fixed_input_tokens(&tools).saturating_add(
+                estimator::estimate_rendered_channels_tokens(
+                    &input.instructions,
+                    &input.content_items,
+                )?,
+            ),
+        )
     }
 }
 

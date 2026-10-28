@@ -9,7 +9,7 @@ use super::config::{
     AgentProfileDefinition, CapabilityMappingDefinition, PROVIDER_CONFIG_SCHEMA_VERSION,
     ProviderConfigV1, ProviderDefinition,
 };
-use crate::adapters::mcp_http::McpServerConfig;
+use crate::adapters::mcp::McpServerConfig;
 
 impl ProviderConfigV1 {
     pub(super) fn validate(&self) -> Result<(), ProviderCompositionError> {
@@ -26,11 +26,15 @@ impl ProviderConfigV1 {
             });
         }
         self.prompts.validate()?;
-        if !(1..=crate::app::model_request_budget::MAX_MODEL_REQUEST_LIMIT)
-            .contains(&self.runtime.model_request_limit_per_turn)
+        if self.runtime.model_request_limit_per_turn
+            > crate::app::model_request_budget::MAX_MODEL_REQUEST_LIMIT
         {
             return Err(ProviderCompositionError::InvalidModelRequestLimit);
         }
+        self.runtime
+            .context_budget
+            .validate()
+            .map_err(|message| ProviderCompositionError::InvalidContextBudgetPolicy { message })?;
 
         for (name, mapping) in &self.capability_mappings {
             validate_identifier("capability_mapping", name)?;
@@ -46,6 +50,7 @@ impl ProviderConfigV1 {
                 });
             }
             crate::domain::context::ContextPlanner::current()
+                .with_budget_policy(self.runtime.context_budget)
                 .default_budget(&mapping.to_domain())
                 .map_err(|source| ProviderCompositionError::InvalidContextBudget {
                     mapping: name.clone(),
@@ -115,9 +120,7 @@ fn validate_mcp_server(id: &str, server: &McpServerConfig) -> Result<(), Provide
             if !cfg!(unix) {
                 return Err(invalid("stdio MCP requires Unix"));
             }
-            if server.protocol_version
-                != crate::adapters::mcp_http::McpProtocolVersion::Legacy20251125
-            {
+            if server.protocol_version != crate::adapters::mcp::McpProtocolVersion::Legacy20251125 {
                 return Err(invalid("stdio MCP supports only protocol 2025-11-25"));
             }
             if server.credential_ref.is_some() {
@@ -145,6 +148,14 @@ fn validate_mcp_server(id: &str, server: &McpServerConfig) -> Result<(), Provide
     if server.timeout_ms == 0 || server.timeout_ms > 86_400_000 {
         return Err(ProviderCompositionError::InvalidTimeout {
             field: "mcp_servers.timeout_ms",
+        });
+    }
+    if server
+        .startup_timeout_ms
+        .is_some_and(|timeout| timeout == 0 || timeout > 86_400_000)
+    {
+        return Err(ProviderCompositionError::InvalidTimeout {
+            field: "mcp_servers.startup_timeout_ms",
         });
     }
     if let Some(reference) = &server.credential_ref {
@@ -362,6 +373,8 @@ fn validate_credential_reference(
 
 #[derive(Debug, Error)]
 pub enum ProviderCompositionError {
+    #[error("invalid runtime.context_budget: {message}")]
+    InvalidContextBudgetPolicy { message: &'static str },
     #[error("MCP server `{server}` is invalid: {message}")]
     InvalidMcpServer { server: String, message: String },
     #[error("capability mapping `{mapping}` has an invalid Context/output budget: {source}")]
@@ -370,7 +383,7 @@ pub enum ProviderCompositionError {
         #[source]
         source: crate::domain::context::ContextPlannerError,
     },
-    #[error("runtime.model_request_limit_per_turn must be between 1 and 10000")]
+    #[error("runtime.model_request_limit_per_turn must be 0 (unlimited) or between 1 and 10000")]
     InvalidModelRequestLimit,
     #[error("configuration field `{field}` must name a non-empty prompt file path")]
     InvalidPromptPath { field: &'static str },

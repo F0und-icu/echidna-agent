@@ -6,7 +6,7 @@ use crate::domain::events::{EventId, OccurredAt};
 use crate::domain::model::ModelInputIR;
 use crate::domain::request_audit::{
     PublishedAuditBlob, RequestAuditAttempt, RequestAuditBinding, RequestAuditError,
-    RequestAuditManifest, RequestAuditReconstructionError,
+    RequestAuditManifest, RequestAuditReconstructionError, VerifiedRequestAuditInput,
 };
 use crate::domain::session::{SessionError, SessionEvent};
 use crate::ports::EventSink;
@@ -46,16 +46,23 @@ where
             .map_err(RequestAuditServiceError::Audit)?;
         self.require_projection(projection, &event_id)?;
         let rendered = attempt.render().map_err(RequestAuditServiceError::Audit)?;
+        let mut published = std::collections::BTreeMap::<&[u8], PublishedAuditBlob>::new();
         let blobs = rendered
             .component_bytes()
             .map(|bytes| {
-                self.blobs
+                if let Some(blob) = published.get(bytes) {
+                    return Ok(blob.clone());
+                }
+                let blob = self
+                    .blobs
                     .publish_bytes(bytes)
                     .map(|stored| PublishedAuditBlob {
                         blob_id: stored.blob_id,
                         size_bytes: stored.size_bytes,
                     })
-                    .map_err(RequestAuditServiceError::Blob)
+                    .map_err(RequestAuditServiceError::Blob)?;
+                published.insert(bytes, blob.clone());
+                Ok(blob)
             })
             .collect::<Result<Vec<_>, _>>()?;
         let manifest = rendered
@@ -86,6 +93,16 @@ where
         self.require_binding(manifest.binding())
             .map_err(RequestAuditReconstructionError::Audit)?;
         manifest.reconstruct(|blob_id| self.blobs.read_blob(blob_id))
+    }
+
+    pub(crate) fn reconstruct_full_logical(
+        &self,
+        manifest: &RequestAuditManifest,
+    ) -> Result<Option<VerifiedRequestAuditInput>, RequestAuditReconstructionError<Store::Error>>
+    {
+        self.require_binding(manifest.binding())
+            .map_err(RequestAuditReconstructionError::Audit)?;
+        manifest.reconstruct_full_logical(|blob_id| self.blobs.read_blob(blob_id))
     }
 
     fn require_binding(&self, binding: &RequestAuditBinding) -> Result<(), RequestAuditError> {

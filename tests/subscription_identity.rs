@@ -1,9 +1,15 @@
 #[allow(dead_code)]
+#[path = "../src/adapters/http_error_body.rs"]
+pub(crate) mod http_error_body;
+#[allow(dead_code)]
 #[path = "../src/adapters/subscription_auth/jwt.rs"]
 mod jwt;
 #[allow(dead_code)]
 #[path = "../src/adapters/subscription_auth/types.rs"]
 mod types;
+mod adapters {
+    pub(crate) use crate::http_error_body;
+}
 
 use base64::Engine;
 use ring::rand::SystemRandom;

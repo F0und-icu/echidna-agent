@@ -2,12 +2,28 @@
 
 mod argument_correction;
 mod compaction;
+mod compaction_sample;
+pub(crate) use compaction_sample::{
+    CompactionGraphSample, CompactionSampleInput, compile_captured_compaction_source,
+    minimum_compaction_handoff_bytes,
+};
 mod context_state;
 mod output_capture;
 mod recovery;
 mod request_audit;
 
+pub(crate) use compaction::ToolBatchContext;
 pub(crate) use context_state::CurrentContextState;
+
+pub(crate) trait ToolBatchStage<Provider: ModelProvider + ?Sized, Tools: ToolExecutor + ?Sized> {
+    fn needs_current_context(&self) -> bool;
+
+    fn apply<'call, 'provider: 'call, 'tools: 'call>(
+        &'call mut self,
+        agent: &'call mut AgentLoop<'provider, 'tools, Provider, Tools>,
+        active: &'call ToolBatchContext<'_>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), AgentLoopError>> + 'call>>;
+}
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -195,10 +211,25 @@ pub type ToolExecutionReceiptStage<'a> =
 /// checkpointed at scheduler completion; and ordered paired Tool Results are
 /// checkpointed before a later model sample.
 pub(crate) enum ChatDurabilityCheckpoint<'a> {
+    OperatorInputAccepted {
+        items: &'a [ContentItem],
+        provenance: &'a mut BTreeMap<usize, ContextProvenance>,
+    },
+    OperatorTurnCompleted,
+    ModelDeliveryCommitted {
+        step_id: &'a str,
+        previous_step_id: Option<&'a str>,
+        provider_session: &'a crate::domain::context::ProviderSessionRef,
+    },
+    Usage {
+        provider_session: &'a crate::domain::context::ProviderSessionRef,
+        usage: crate::domain::model::ModelUsage,
+    },
     ModelSampleRejected {
         diagnostic: &'a crate::domain::model::ToolArgumentDiagnostic,
         corrections_used: u8,
     },
+    ArgumentCorrectionReset,
     History(&'a [ContentItem]),
     ExecutionReceipt(&'a ToolExecutionOutcome),
     Subcommand(&'a crate::domain::tools::SubcommandCheckpoint),
@@ -294,10 +325,12 @@ pub struct AgentLoop<'provider, 'tools, Provider: ?Sized, Tools: ?Sized> {
     context_planner: ContextPlanner,
     fragment_cache: Option<Arc<dyn ContextFragmentCache>>,
     committed_context_manifest: Option<FullLogicalManifest>,
+    committed_step_id: Option<String>,
     last_context_plan: Option<ContextPlan>,
     last_successful_context: Option<ContextInspection>,
     last_sampling_step_plan: Option<SamplingStepPlan>,
     next_turn_sequence: u64,
+    consecutive_argument_corrections: u8,
     last_baseline_assessment: Option<BaselineAssessment>,
     active_agent_model_profile: Option<AgentModelProfile>,
     pending_agent_model_profile: Option<AgentModelProfile>,
@@ -312,6 +345,7 @@ pub struct AgentLoop<'provider, 'tools, Provider: ?Sized, Tools: ?Sized> {
     committed_project_snapshot: Option<ProjectSnapshotContext>,
     committed_project_memory_core: Option<crate::domain::context::ContextFragment>,
     history_provenance: BTreeMap<usize, ContextProvenance>,
+    protected_input: crate::domain::session::ProtectedOperatorContext,
     bound_session_stream: Option<StreamId>,
     applied_compaction: Option<AppliedCompaction>,
 }
@@ -394,10 +428,12 @@ where
             context_planner: ContextPlanner::current(),
             fragment_cache: None,
             committed_context_manifest: None,
+            committed_step_id: None,
             last_context_plan: None,
             last_successful_context: None,
             last_sampling_step_plan: None,
             next_turn_sequence: 0,
+            consecutive_argument_corrections: 0,
             last_baseline_assessment: None,
             active_agent_model_profile: None,
             pending_agent_model_profile: None,
@@ -410,6 +446,7 @@ where
             committed_project_snapshot: None,
             committed_project_memory_core: None,
             history_provenance: BTreeMap::new(),
+            protected_input: Default::default(),
             bound_session_stream: None,
             applied_compaction: None,
         })
@@ -417,6 +454,14 @@ where
 
     pub fn history(&self) -> &ConversationHistory {
         &self.history
+    }
+
+    pub(crate) fn with_context_budget_policy(
+        mut self,
+        policy: crate::domain::context::ContextBudgetPolicy,
+    ) -> Self {
+        self.context_planner = ContextPlanner::current().with_budget_policy(policy);
+        self
     }
 
     /// Replaces volatile runtime History from a strictly replayed Session
@@ -455,7 +500,7 @@ where
                 .ok_or(AgentLoopConfigurationError::CompactionValidationContextRequired)?;
             compaction.validate_references(validation)?;
         }
-        let normalized_items = session.normalized_history_items()?;
+        let normalized_items = session.compaction_source_history()?;
         let history = ConversationHistory::from_complete_content_items(&normalized_items)?;
         let applied_compaction = session
             .latest_compaction()
@@ -463,8 +508,10 @@ where
             .transpose()?;
         provider_session.reset(BaselineInvalidationReason::SessionResumed);
         self.history = history;
-        self.history_provenance.clear();
+        self.protected_input = session.current_protected_operator_context()?;
+        self.history_provenance = self.protected_input.retained_provenance.clone();
         self.provider_session = provider_session;
+        self.consecutive_argument_corrections = 0;
         self.bound_session_stream = Some(stream_id);
         self.session_summary = session
             .latest_compaction()
@@ -626,6 +673,7 @@ where
             Vec::new(),
             None,
             StreamingStages::none(),
+            None,
         )
         .await
     }
@@ -648,6 +696,7 @@ where
             Vec::new(),
             None,
             StreamingStages::none(),
+            None,
         )
         .await
     }
@@ -674,6 +723,7 @@ where
             vec![initial_image],
             None,
             StreamingStages::none(),
+            None,
         )
         .await
     }
@@ -698,6 +748,7 @@ where
             Vec::new(),
             Some(follow_up),
             StreamingStages::none(),
+            None,
         )
         .await
     }
@@ -729,6 +780,7 @@ where
                 durability: None,
                 context_refresh: None,
             },
+            None,
         )
         .await
     }
@@ -737,6 +789,7 @@ where
     /// current-facts refresh before every sampling Step. The refresh runs
     /// after the Turn-boundary configuration has been applied and before a
     /// new immutable SamplingStepPlan exists.
+    #[allow(clippy::too_many_arguments)] // Fixed CLI stages stay explicit at this boundary.
     pub(crate) async fn run_turn_audited_with_context_refresh_and_vision_stages(
         &mut self,
         user_text: impl Into<String>,
@@ -745,6 +798,7 @@ where
         audit_context: &RequestAuditRunContext,
         record_attempt: &mut dyn FnMut(RequestAuditAttempt) -> Result<(), AgentLoopError>,
         stages: CliRuntimeStages<'_>,
+        tool_batch: Option<&mut dyn ToolBatchStage<Provider, Tools>>,
     ) -> Result<AgentTurnOutcome, AgentLoopError> {
         let primary_capability_hash = self.provider.capabilities().semantic_hash();
         let initial_images = initial_images
@@ -765,10 +819,12 @@ where
                 durability: Some(stages.durability),
                 context_refresh: Some(stages.context_refresh),
             },
+            tool_batch,
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)] // One Turn owner consumes the fixed execution stages.
     async fn run_turn_inner(
         &mut self,
         user_text: impl Into<String>,
@@ -777,6 +833,7 @@ where
         initial_images: Vec<(ContentItem, ContextProvenance)>,
         mut view_image_follow_up: Option<&mut ViewImageFollowUp<'_>>,
         stages: StreamingStages<'_>,
+        mut tool_batch: Option<&mut dyn ToolBatchStage<Provider, Tools>>,
     ) -> Result<AgentTurnOutcome, AgentLoopError> {
         let StreamingStages {
             request_budget,
@@ -797,7 +854,7 @@ where
         }
         let user_text = user_text.into();
         let user_provenance = ContextProvenance::operator_input(&user_text)?;
-        let turn_history_start = self.history.items().len();
+        let mut turn_history_start = self.history.items().len();
         self.history.append_user_text(user_text);
         self.history_provenance
             .insert(turn_history_start, user_provenance);
@@ -811,6 +868,24 @@ where
                 &self.history.items()[turn_history_start..],
             ))?;
         }
+        let original_input = self.history.items()[turn_history_start..].to_vec();
+        let mut input_provenance: BTreeMap<_, _> = self
+            .history_provenance
+            .range(turn_history_start..)
+            .map(|(index, provenance)| (index - turn_history_start, provenance.clone()))
+            .collect();
+        if let Some(stage) = durability.as_deref_mut() {
+            stage(ChatDurabilityCheckpoint::OperatorInputAccepted {
+                items: &original_input,
+                provenance: &mut input_provenance,
+            })?;
+            self.history_provenance.extend(
+                input_provenance
+                    .iter()
+                    .map(|(index, provenance)| (index + turn_history_start, provenance.clone())),
+            );
+        }
+        let mut detached_input = false;
         let capabilities = self.provider.capabilities();
         let context_budget = self.context_planner.default_budget(&capabilities)?;
         self.next_turn_sequence += 1;
@@ -820,10 +895,18 @@ where
             .tools
             .resolve_tool_plan(&self.active_tool_exposure_plan, &deferred_activations)?;
         let mut executions = Vec::new();
-        let mut corrections_used = 0;
+        let mut corrections_used = self.consecutive_argument_corrections;
         let mut correction_feedback = Vec::new();
         let mut turn_has_committed_sample = false;
-        for request_index in 0..request_budget.limit() {
+        let mut next_request_index = 0;
+        loop {
+            let request_index = next_request_index;
+            if let Some(limit) = request_budget.limit()
+                && request_index >= limit
+            {
+                return Err(AgentLoopError::ModelRequestLimit { limit });
+            }
+            next_request_index += 1;
             if cancellation.is_cancelled() {
                 return Ok(AgentTurnOutcome::Cancelled {
                     model_requests: request_budget.counts().primary,
@@ -853,6 +936,7 @@ where
                 capabilities.context_window,
                 tool_specs,
             )?;
+            let protected = self.protected_without_active(&input_provenance);
             let (plan, cache_summary) =
                 context_state::compile_context(context_state::ContextCompilationInput {
                     prompt_composition: &self.prompt_composition,
@@ -862,7 +946,10 @@ where
                     session_summary: self.session_summary.as_ref(),
                     history: self.history.items(),
                     history_provenance: &self.history_provenance,
+                    protected_input: Some((&protected.0, &protected.1)),
                     turn_history_start,
+                    detached_input: detached_input
+                        .then_some((original_input.as_slice(), &input_provenance)),
                     planner: &self.context_planner,
                     cache: self.fragment_cache.as_deref(),
                     budget: context_budget,
@@ -870,6 +957,7 @@ where
                     tool_specs,
                     prior_manifest: self.committed_context_manifest.as_ref(),
                     correction_feedback: &correction_feedback,
+                    capacity_breakdown: None,
                 })?;
             let sampling_step = SamplingStepPlan::new(
                 format!("{}:step:{request_index}", turn_id),
@@ -1137,7 +1225,7 @@ where
                         })?;
                     }
                     if corrections_used
-                        >= crate::domain::model::MAX_TOOL_ARGUMENT_CORRECTIONS_PER_TURN
+                        >= crate::domain::model::MAX_TOOL_ARGUMENT_CORRECTIONS_PER_CHAIN
                     {
                         return Err(ModelStreamingError::Provider(
                             ModelProviderError::InvalidToolArguments { diagnostic },
@@ -1145,6 +1233,7 @@ where
                         .into());
                     }
                     corrections_used += 1;
+                    self.consecutive_argument_corrections = corrections_used;
                     correction_feedback.push(argument_correction::feedback(
                         sampling_step.step_id(),
                         &diagnostic,
@@ -1169,6 +1258,7 @@ where
                 return Err(AgentLoopError::EmptyModelResponse);
             }
             self.require_continuation_identity(&completion, capabilities.incremental_input)?;
+            let previous_step_id = self.committed_step_id.clone();
             let server_output_items = sample.content_items();
             let sample_history_start = self.history.items().len();
             sample.commit(&mut self.history)?;
@@ -1176,7 +1266,12 @@ where
                 stage(ChatDurabilityCheckpoint::History(
                     &self.history.items()[sample_history_start..],
                 ))?;
+                if corrections_used > 0 {
+                    stage(ChatDurabilityCheckpoint::ArgumentCorrectionReset)?;
+                }
             }
+            corrections_used = 0;
+            self.consecutive_argument_corrections = 0;
             self.provider_session
                 .record_completed_sample(&snapshot, server_output_items.clone())?;
             self.commit_continuation(&completion);
@@ -1203,8 +1298,27 @@ where
                     .expect("the actual request always has a Baseline assessment"),
                 cache_summary,
             });
+            if let Some(usage) = sample.usage()
+                && let Some(stage) = durability.as_deref_mut()
+            {
+                stage(ChatDurabilityCheckpoint::Usage {
+                    provider_session: self.provider_session.reference(),
+                    usage,
+                })?;
+            }
+            if let Some(stage) = durability.as_deref_mut() {
+                stage(ChatDurabilityCheckpoint::ModelDeliveryCommitted {
+                    step_id: sampling_step.step_id(),
+                    previous_step_id: previous_step_id.as_deref(),
+                    provider_session: self.provider_session.reference(),
+                })?;
+            }
+            self.committed_step_id = Some(sampling_step.step_id().to_owned());
 
             if tool_calls.is_empty() {
+                if let Some(stage) = durability.as_deref_mut() {
+                    stage(ChatDurabilityCheckpoint::OperatorTurnCompleted)?;
+                }
                 return Ok(AgentTurnOutcome::Completed {
                     assistant_text,
                     model_requests: request_budget.counts().primary,
@@ -1256,11 +1370,44 @@ where
                     executions,
                 });
             }
+            if !cancellation.is_cancelled()
+                && let Some(stage) = tool_batch.as_deref_mut()
+            {
+                if (stage.needs_current_context() || self.delivery_needs_compaction()?)
+                    && let Some(refresh) = context_refresh.as_deref_mut()
+                {
+                    self.refresh_current_context(refresh()?)?;
+                }
+                let before = self.applied_compaction.clone();
+                let previous_len = self.history.items().len();
+                let tool_plan = self
+                    .tools
+                    .resolve_tool_plan(&self.active_tool_exposure_plan, &deferred_activations)?;
+                let active = ToolBatchContext {
+                    history_start: turn_history_start,
+                    original_input: &original_input,
+                    input_provenance: &input_provenance,
+                    detached: detached_input,
+                    tool_specs: tool_plan.advertised_specs(),
+                };
+                stage.apply(self, &active).await?;
+                if self.applied_compaction != before {
+                    correction_feedback.clear();
+                    let dropped = previous_len
+                        .checked_sub(self.history.items().len())
+                        .ok_or(AgentLoopError::ContextStateMismatch)?;
+                    if detached_input || dropped > turn_history_start {
+                        detached_input = true;
+                        turn_history_start = 0;
+                    } else {
+                        turn_history_start -= dropped;
+                        self.history_provenance.extend(input_provenance.iter().map(
+                            |(index, provenance)| (turn_history_start + index, provenance.clone()),
+                        ));
+                    }
+                }
+            }
         }
-
-        Err(AgentLoopError::ModelRequestLimit {
-            limit: request_budget.limit(),
-        })
     }
 
     // Keep the existing immutable audit inputs explicit at this fixed stage.
@@ -1398,6 +1545,7 @@ where
     fn clear_committed_primary_delivery_state(&mut self) {
         self.continuation = None;
         self.committed_context_manifest = None;
+        self.committed_step_id = None;
         self.committed_delivery_input = None;
         self.committed_delivery_map = None;
         self.committed_unactivated_tool_plan = None;
@@ -1787,12 +1935,20 @@ pub enum ContinuationRejection {
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum AgentLoopError {
+    #[error("Tool-batch Compaction failed: {message}")]
+    ToolBatchCompaction { message: String },
+    #[error("compaction model sample cancelled")]
+    CompactionCancelled,
+    #[error("compaction model summary rejected: {reason}")]
+    CompactionSummaryRejected { reason: String },
     #[error("Tool output persistence failed: {message}; execution is not retried")]
     ToolOutputPublication { message: String },
     #[error(transparent)]
     Model(#[from] ModelStreamingError),
     #[error("model rejection checkpoint failed: {message}")]
     ModelRejectionCommit { message: String },
+    #[error("Provider usage checkpoint commit failed: {message}")]
+    ModelUsageCommit { message: String },
     #[error(transparent)]
     History(#[from] HistoryError),
     #[error(transparent)]

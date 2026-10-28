@@ -3,7 +3,7 @@ use super::*;
 fn limit_config(config: &std::path::Path, limit: Option<usize>, incremental: bool) {
     let mut text = fs::read_to_string(config)
         .unwrap()
-        .replace("context_window = 32768", "context_window = 1048576");
+        .replace("context_window = 272000", "context_window = 1048576");
     if !incremental {
         text = text.replace("incremental_input = true", "incremental_input = false");
     }

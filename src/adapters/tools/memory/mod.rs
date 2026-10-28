@@ -34,7 +34,6 @@ use super::{decode_arguments, invalid_plan};
 struct MemoryReadArgs {
     path: String,
     event_id: String,
-    occurred_at: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -44,7 +43,6 @@ struct MemoryWriteArgs {
     content: String,
     expected_hash: Option<String>,
     event_id: String,
-    occurred_at: String,
 }
 
 pub(super) fn normalize_read(
@@ -54,7 +52,7 @@ pub(super) fn normalize_read(
 ) -> Result<(Value, Vec<ResourceKey>), ToolExecutorError> {
     let arguments: MemoryReadArgs = decode_arguments("memory_read", value)?;
     let path = parse_path("memory_read", &arguments.path)?;
-    require_event_metadata("memory_read", &arguments.event_id, &arguments.occurred_at)?;
+    require_event_id("memory_read", &arguments.event_id)?;
     Ok((
         serde_json::to_value(&arguments).expect("MemoryReadArgs serialization cannot fail"),
         memory_resources(project_root, control_directory, &path),
@@ -68,7 +66,7 @@ pub(super) fn normalize_write(
 ) -> Result<(Value, Vec<ResourceKey>), ToolExecutorError> {
     let arguments: MemoryWriteArgs = decode_arguments("memory_write", value)?;
     let path = parse_path("memory_write", &arguments.path)?;
-    require_event_metadata("memory_write", &arguments.event_id, &arguments.occurred_at)?;
+    require_event_id("memory_write", &arguments.event_id)?;
     validate_expected_hash("memory_write", arguments.expected_hash.as_deref())?;
     Ok((
         serde_json::to_value(&arguments).expect("MemoryWriteArgs serialization cannot fail"),
@@ -90,11 +88,13 @@ pub(super) async fn execute_read(
         Ok(path) => path,
         Err(error) => return invalid_plan(plan, error),
     };
-    if let Err(error) =
-        require_event_metadata("memory_read", &arguments.event_id, &arguments.occurred_at)
-    {
+    if let Err(error) = require_event_id("memory_read", &arguments.event_id) {
         return invalid_plan(plan, error);
     }
+    let occurred_at = match super::operation_time::current_utc() {
+        Ok(value) => value,
+        Err(error) => return memory_failure(plan, "memory_clock_unavailable", error),
+    };
     let project = match Project::discover(project_root) {
         Ok(project) => project,
         Err(error) => return memory_failure(plan, "memory_project_unavailable", error),
@@ -135,7 +135,7 @@ pub(super) async fn execute_read(
             &mut research_state,
             &mut memory_state,
             event_id,
-            &arguments.occurred_at,
+            &occurred_at,
             event,
         ) {
             return memory_failure(plan, "memory_external_audit_failed", error);
@@ -169,14 +169,15 @@ pub(super) async fn execute_write(
         Ok(path) => path,
         Err(error) => return invalid_plan(plan, error),
     };
-    if let Err(error) =
-        require_event_metadata("memory_write", &arguments.event_id, &arguments.occurred_at)
-            .and_then(|()| {
-                validate_expected_hash("memory_write", arguments.expected_hash.as_deref())
-            })
+    if let Err(error) = require_event_id("memory_write", &arguments.event_id)
+        .and_then(|()| validate_expected_hash("memory_write", arguments.expected_hash.as_deref()))
     {
         return invalid_plan(plan, error);
     }
+    let occurred_at = match super::operation_time::current_utc() {
+        Ok(value) => value,
+        Err(error) => return memory_failure(plan, "memory_clock_unavailable", error),
+    };
     let project = match Project::discover(project_root) {
         Ok(project) => project,
         Err(error) => return memory_failure(plan, "memory_project_unavailable", error),
@@ -223,7 +224,7 @@ pub(super) async fn execute_write(
             &mut research_state,
             &mut memory_state,
             external_id,
-            &arguments.occurred_at,
+            &occurred_at,
             event,
         ) {
             return memory_failure(plan, "memory_external_audit_failed", error);
@@ -267,7 +268,7 @@ pub(super) async fn execute_write(
         &mut research_state,
         &mut memory_state,
         event_id.clone(),
-        &arguments.occurred_at,
+        &occurred_at,
         MemoryEvent::Changed(revision.clone()),
     ) {
         return ToolExecutionOutcome::failed(
@@ -316,15 +317,11 @@ fn parse_path(tool_name: &str, value: &str) -> Result<MemoryPath, ToolExecutorEr
     })
 }
 
-fn require_event_metadata(
-    tool_name: &str,
-    event_id: &str,
-    occurred_at: &str,
-) -> Result<(), ToolExecutorError> {
-    if event_id.trim().is_empty() || occurred_at.trim().is_empty() {
+fn require_event_id(tool_name: &str, event_id: &str) -> Result<(), ToolExecutorError> {
+    if event_id.trim().is_empty() {
         Err(ToolExecutorError::InvalidArguments {
             tool_name: tool_name.to_owned(),
-            message: "`event_id` and `occurred_at` must not be empty".to_owned(),
+            message: "`event_id` must not be empty".to_owned(),
         })
     } else {
         Ok(())

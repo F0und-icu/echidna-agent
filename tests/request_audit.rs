@@ -594,11 +594,11 @@ fn request_audit_rejects_unknown_schema_reordered_duplicate_and_mismatched_conte
     assert_eq!(sink.events.len(), 1);
 
     let mut unknown_schema = encoded.clone();
-    unknown_schema["schema_version"] = json!(4);
+    unknown_schema["schema_version"] = json!(5);
     let unknown_schema: RequestAuditManifest = serde_json::from_value(unknown_schema).unwrap();
     assert!(matches!(
         unknown_schema.validate(),
-        Err(RequestAuditError::UnsupportedManifestSchema { schema_version: 4 })
+        Err(RequestAuditError::UnsupportedManifestSchema { schema_version: 5 })
     ));
 
     let mut forged_renderer = encoded.clone();

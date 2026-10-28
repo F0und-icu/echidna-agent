@@ -1,33 +1,30 @@
 //! No-network regression coverage for the private auth selection picker.
-//!
-//! Compile the library as this test crate so it can exercise the crate-private
-//! picker helpers without widening the product API.
 
 include!("../src/lib.rs");
 
 mod picker_regression {
     use std::io::Cursor;
 
-    use crate::adapters::subscription_auth::{SubscriptionModel, SubscriptionReasoningLevel};
     use crate::cli_auth::{read_selection_choice, select_effort_choice, select_model_choice};
     use crate::domain::model::ReasoningEffort;
+    use crate::model_catalog::{CatalogModel, CatalogReasoningLevel};
 
-    fn catalog() -> Vec<SubscriptionModel> {
+    fn catalog() -> Vec<CatalogModel> {
         vec![
-            SubscriptionModel {
+            CatalogModel {
                 slug: "first".to_owned(),
                 display_name: "First".to_owned(),
                 default_reasoning_level: None,
                 supported_reasoning_levels: vec![
-                    SubscriptionReasoningLevel {
+                    CatalogReasoningLevel {
                         effort: "medium".to_owned(),
                         description: "Balanced".to_owned(),
                     },
-                    SubscriptionReasoningLevel {
+                    CatalogReasoningLevel {
                         effort: "high".to_owned(),
                         description: "Thorough".to_owned(),
                     },
-                    SubscriptionReasoningLevel {
+                    CatalogReasoningLevel {
                         effort: "future".to_owned(),
                         description: "Server-defined".to_owned(),
                     },
@@ -36,8 +33,9 @@ mod picker_regression {
                 max_context_window: Some(256_000),
                 input_modalities: Some(vec!["text".to_owned(), "future".to_owned()]),
                 supports_reasoning_summary_parameter: Some(true),
+                reasoning_levels_advertised: true,
             },
-            SubscriptionModel {
+            CatalogModel {
                 slug: "second".to_owned(),
                 display_name: "Second".to_owned(),
                 default_reasoning_level: None,
@@ -46,6 +44,7 @@ mod picker_regression {
                 max_context_window: None,
                 input_modalities: None,
                 supports_reasoning_summary_parameter: None,
+                reasoning_levels_advertised: true,
             },
         ]
     }
@@ -98,5 +97,28 @@ mod picker_regression {
             select_effort_choice(&catalog[0], blank.as_deref()).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn absent_api_effort_metadata_accepts_only_explicit_domain_valid_efforts() {
+        let mut model = catalog().remove(1);
+        assert!(select_effort_choice(&model, Some("high")).is_err());
+        model.reasoning_levels_advertised = false;
+        assert_eq!(
+            select_effort_choice(&model, Some("max")).unwrap(),
+            Some(ReasoningEffort::Max)
+        );
+        assert_eq!(
+            select_effort_choice(&model, Some("future-v2")).unwrap(),
+            Some(ReasoningEffort::Custom("future-v2".to_owned()))
+        );
+        assert_eq!(select_effort_choice(&model, None).unwrap(), None);
+        assert_eq!(select_effort_choice(&model, Some("0")).unwrap(), None);
+        for invalid in ["", " space", "a/b", "line\nbreak", &"x".repeat(65)] {
+            assert!(
+                select_effort_choice(&model, Some(invalid)).is_err(),
+                "{invalid:?}"
+            );
+        }
     }
 }

@@ -1,7 +1,7 @@
 //! Atomic decoding and local commit of one completed model sample.
 
 use crate::domain::history::{ConversationHistory, HistoryError};
-use crate::domain::model::{ContentItem, ModelEvent, OpaqueContinuationReference};
+use crate::domain::model::{ContentItem, ModelEvent, ModelUsage, OpaqueContinuationReference};
 use crate::domain::tools::ToolCall;
 
 enum SampleItem {
@@ -13,12 +13,14 @@ enum SampleItem {
 
 pub(super) struct ModelSample {
     items: Vec<SampleItem>,
+    usage: Option<ModelUsage>,
 }
 
 impl ModelSample {
     pub(super) fn from_events(events: Vec<ModelEvent>) -> Self {
         let mut items = Vec::new();
         let mut text = String::new();
+        let mut usage = None;
         for event in events {
             match event {
                 ModelEvent::TextDelta { text: delta } => text.push_str(&delta),
@@ -41,13 +43,17 @@ impl ModelSample {
                     }
                     items.push(SampleItem::ToolCall(call));
                 }
-                ModelEvent::Usage { .. } => {}
+                ModelEvent::Usage { usage: reported } => usage = Some(reported),
             }
         }
         if !text.is_empty() {
             items.push(SampleItem::AssistantText(text));
         }
-        Self { items }
+        Self { items, usage }
+    }
+
+    pub(super) fn usage(&self) -> Option<ModelUsage> {
+        self.usage
     }
 
     pub(super) fn tool_calls(&self) -> Vec<ToolCall> {

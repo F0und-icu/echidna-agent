@@ -66,6 +66,8 @@ pub enum ProjectEventStoreError {
         expected: StreamId,
         received: StreamId,
     },
+    #[error("previously validated Event prefix changed in `{path}`")]
+    ValidatedPrefixChanged { path: PathBuf },
     #[error("non-tail JSONL corruption in `{path}` at exact byte offset {offset}: {reason}")]
     NonTailCorruption {
         path: PathBuf,

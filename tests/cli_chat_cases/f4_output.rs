@@ -25,9 +25,9 @@ fn f4_default_reasoning_is_separate_from_answer_and_history_in_all_builds() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stdout.contains("F4_FINAL_MARKER"));
     assert!(!stdout.contains("F4_THINKING_MARKER"));
-    assert_eq!(stderr.matches("[思考 primary #").count(), 1);
+    assert_eq!(stderr.matches("[reasoning primary #").count(), 1);
     assert_eq!(stderr.matches("F4_THINKING_MARKER").count(), 1);
-    assert!(stderr.contains("[思考响应已完成]"));
+    assert!(stderr.contains("[reasoning completed]"));
     assert!(!stderr.contains("[provider-reasoning]"));
     assert!(!stderr.contains("reasoning_delta_uncommitted"));
     assert!(!stderr.contains("[provider-debug]"));
@@ -61,21 +61,62 @@ fn f4_item_only_reasoning_and_incomplete_stream_are_labeled_without_success() {
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("F4_ITEM_ONLY"));
-    assert!(stderr.contains("[思考中断：响应未完成]"));
-    assert!(!stderr.contains("[思考响应已完成]"));
+    assert!(stderr.contains("[reasoning interrupted: response not completed]"));
+    assert!(!stderr.contains("[reasoning completed]"));
     server.join();
 }
 
-#[cfg(debug_assertions)]
+#[test]
+fn f4_default_shows_raw_rejected_events_without_committing_them() {
+    for event in [
+        json!({"type":"response.failed","response":{"error":{"code":"server_error","message":"failure","param":"RAW_FAILED_PARAM"}}}),
+        json!({"type":"response.incomplete","response":{"incomplete_details":{"reason":"RAW_INCOMPLETE_REASON"}}}),
+        json!({"type":"error","error":{"code":"context_length_exceeded","message":"RAW_CAPACITY_DETAIL"}}),
+        json!({"type":"response.future","detail":"RAW_PROTOCOL_DETAIL"}),
+    ] {
+        let root = TemporaryDirectory::new("f4-rejected-event-default");
+        initialize_project(root.path());
+        let body = format!("data: {event}\n\n");
+        let server = spawn_responses_server(vec![(200, body)]);
+        let config = write_config(root.path(), &server.base_url);
+        let output = run_chat(root.path(), &config, "hello\n/exit\n", &[]);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("[rejected response]"), "{stderr}");
+        for marker in [
+            "RAW_FAILED_PARAM",
+            "RAW_INCOMPLETE_REASON",
+            "RAW_CAPACITY_DETAIL",
+            "RAW_PROTOCOL_DETAIL",
+        ] {
+            if event.to_string().contains(marker) {
+                assert!(stderr.contains(marker), "{stderr}");
+            }
+        }
+        let project = Project::discover(root.path()).unwrap();
+        let state = reduced_session(&project, &session_id(root.path()));
+        assert_eq!(state.execution_receipt_count(), 0);
+        assert_eq!(
+            state.history().items(),
+            &[echidna::domain::model::ContentItem::user_text("hello")]
+        );
+        server.join();
+    }
+}
+
 fn debug_requests(stderr: &[u8]) -> Vec<String> {
     String::from_utf8_lossy(stderr)
-        .split("[debug 发送 ")
+        .split("[debug sending ")
         .skip(1)
-        .map(|section| section.split("[debug 发送结束").next().unwrap().to_owned())
+        .map(|section| {
+            section
+                .split("[debug send finished")
+                .next()
+                .unwrap()
+                .to_owned()
+        })
         .collect()
 }
 
-#[cfg(debug_assertions)]
 fn assert_request_content(view: &str, actual: &Value) {
     // Compare displayed content with the wire; Tool schemas and transport
     // fields are deliberately omitted from the terminal projection.
@@ -93,7 +134,7 @@ fn assert_request_content(view: &str, actual: &Value) {
         }
     }
     assert_eq!(
-        view.contains("增量（仅本次发送内容）"),
+        view.contains("incremental (this delivery only)"),
         actual.get("previous_response_id").is_some()
     );
 }
@@ -118,7 +159,7 @@ fn f4_reasoning_dedup_requires_exact_delta_text_match() {
         assert_eq!(stderr.matches("F4_A_").count(), 1);
         assert_eq!(stderr.matches("F4_B").count(), 1);
         assert!(stderr.contains("F4_A_F4_B\n"));
-        assert_eq!(stderr.matches("[思考 primary #").count(), 1);
+        assert_eq!(stderr.matches("[reasoning primary #").count(), 1);
         if completed == "F4_DISTINCT_ITEM" {
             assert_eq!(stderr.matches(completed).count(), 1);
         }
@@ -131,7 +172,6 @@ fn f4_reasoning_text_is_flushed_before_response_completion() {
     assert_reasoning_streams(&[]);
 }
 
-#[cfg(debug_assertions)]
 #[test]
 fn f5_debug_reasoning_also_streams_without_sse_envelopes() {
     assert_reasoning_streams(&["--debug"]);
@@ -213,24 +253,23 @@ fn assert_reasoning_streams(extra_args: &[&str]) {
         String::from_utf8_lossy(&early).contains("F4_STREAM_"),
         "text was buffered until completion"
     );
-    assert!(!String::from_utf8_lossy(&early).contains("[思考响应已完成]"));
+    assert!(!String::from_utf8_lossy(&early).contains("[reasoning completed]"));
     assert!(
         stderr.contains("F4_STREAM_VISIBLE\nnext\tline\\u{1b}[31m\n"),
         "{stderr}"
     );
     assert!(!stderr.contains('\u{1b}'));
-    assert_eq!(stderr.matches("[思考 primary #").count(), 1);
+    assert_eq!(stderr.matches("[reasoning primary #").count(), 1);
     assert!(stderr.contains(if extra_args.is_empty() {
-        "[思考响应已完成]"
+        "[reasoning completed]"
     } else {
-        "响应已完成]"
+        "response completed]"
     }));
     assert!(!stderr.contains("response.reasoning_text.delta"));
 }
 
-#[cfg(debug_assertions)]
 #[test]
-fn f4_debug_omits_unparseable_sse_and_http_bodies() {
+fn f4_debug_shows_unparseable_sse_and_http_bodies() {
     for status in [200, 500] {
         let root = TemporaryDirectory::new("f4-malformed-debug");
         initialize_project(root.path());
@@ -246,14 +285,12 @@ fn f4_debug_omits_unparseable_sse_and_http_bodies() {
         let output = run_chat(root.path(), &config, "hello\n", &["--debug"]);
         assert!(!output.status.success());
         let stderr = String::from_utf8(output.stderr).unwrap();
-        assert!(stderr.contains("non-JSON response cannot be structurally redacted"));
-        assert!(!stderr.contains("OPAQUE_MALFORMED"));
+        assert!(stderr.contains("OPAQUE_MALFORMED"));
         assert!(!stderr.contains("loopback-primary-secret"));
         server.join();
     }
 }
 
-#[cfg(debug_assertions)]
 #[test]
 fn f4_debug_bounds_http_error_capture_without_partial_body_output() {
     let root = TemporaryDirectory::new("f4-bounded-debug");
@@ -265,13 +302,12 @@ fn f4_debug_bounds_http_error_capture_without_partial_body_output() {
     let output = run_chat(root.path(), &config, "hello\n", &["--debug"]);
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("HTTP error body omitted: exceeds 65536 bytes"));
-    assert!(stderr.contains("HTTP 错误]\n500"));
+    assert!(stderr.contains("HTTP error body exceeds the configured read limit"));
+    assert!(stderr.contains("HTTP error]\n500"));
     assert!(!stderr.contains("F4_OVERSIZED_BODY"));
     server.join();
 }
 
-#[cfg(debug_assertions)]
 #[test]
 fn f4_debug_matches_actual_full_and_incremental_wire_and_paired_tool_output() {
     let root = TemporaryDirectory::new("f4-debug-wire");
@@ -311,9 +347,9 @@ fn f4_debug_matches_actual_full_and_incremental_wire_and_paired_tool_output() {
         "debug must preserve actual wire ToolSpecs"
     );
     for request in &requests {
-        assert!(request.contains("省略工具定义及传输字段"));
-        assert!(request.contains("非逐字 wire 抓包"));
-        assert!(!request.contains("── 工具定义 ──"));
+        assert!(request.contains("tool definitions and transport fields omitted"));
+        assert!(request.contains("not a verbatim wire capture"));
+        assert!(!request.contains("── Tools ──"));
         for tool in tools {
             let description = tool["description"].as_str().unwrap();
             assert!(!description.is_empty());
@@ -330,7 +366,7 @@ fn f4_debug_matches_actual_full_and_incremental_wire_and_paired_tool_output() {
         "F4_USER_PROMPT",
         "F4_TOOL_RESULT",
         "F4_THINKING_MARKER",
-        "模型工具调用（尚未执行）",
+        "model tool call (not executed)",
     ] {
         assert!(stderr.contains(marker), "missing {marker}");
     }
@@ -354,47 +390,45 @@ fn f4_debug_matches_actual_full_and_incremental_wire_and_paired_tool_output() {
 
 #[test]
 fn f4_large_continuation_rejection_preserves_full_fallback() {
-    let root = TemporaryDirectory::new("f4-large-continuation");
-    initialize_project(root.path());
-    let body = json!({"error":{"code":"previous_response_not_found","message":format!("F4_LARGE_REJECTION{}", "x".repeat(70 * 1024))}}).to_string();
-    let server = spawn_responses_server(vec![
-        (200, text_response("F4_FIRST", "f4-first")),
-        (400, body),
-        (200, text_response("F4_RECOVERED", "f4-recovered")),
-    ]);
-    let config = write_config(root.path(), &server.base_url);
-    #[cfg(debug_assertions)]
-    let args = &["--debug"][..];
-    #[cfg(not(debug_assertions))]
-    let args = &[][..];
-    let output = run_chat(root.path(), &config, "first\nsecond\n/exit\n", args);
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("F4_RECOVERED"));
-    let first = f2a_request_body(&server.requests, "first Full request");
-    let incremental = f2a_request_body(&server.requests, "rejected incremental request");
-    let fallback = f2a_request_body(&server.requests, "Full fallback request");
-    assert!(first.get("previous_response_id").is_none());
-    assert_eq!(incremental["previous_response_id"], "f4-first");
-    assert!(fallback.get("previous_response_id").is_none());
-    #[cfg(debug_assertions)]
-    {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("HTTP error body omitted: exceeds 65536 bytes"));
-        assert!(!stderr.contains("F4_LARGE_REJECTION"));
-        let requests = debug_requests(&output.stderr);
-        assert_eq!(requests.len(), 3);
-        for (record, actual) in requests.iter().zip([first, incremental, fallback]) {
-            assert_request_content(record, &actual);
+    for debug in [false, true] {
+        let root = TemporaryDirectory::new("f4-large-continuation");
+        initialize_project(root.path());
+        let body = json!({"error":{"code":"previous_response_not_found","message":format!("F4_LARGE_REJECTION{}", "x".repeat(70 * 1024))}}).to_string();
+        let server = spawn_responses_server(vec![
+            (200, text_response("F4_FIRST", "f4-first")),
+            (400, body),
+            (200, text_response("F4_RECOVERED", "f4-recovered")),
+        ]);
+        let config = write_config(root.path(), &server.base_url);
+        let args = if debug { &["--debug"][..] } else { &[][..] };
+        let output = run_chat(root.path(), &config, "first\nsecond\n/exit\n", args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("F4_RECOVERED"));
+        let first = f2a_request_body(&server.requests, "first Full request");
+        let incremental = f2a_request_body(&server.requests, "rejected incremental request");
+        let fallback = f2a_request_body(&server.requests, "Full fallback request");
+        assert!(first.get("previous_response_id").is_none());
+        assert_eq!(incremental["previous_response_id"], "f4-first");
+        assert!(fallback.get("previous_response_id").is_none());
+        {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert_eq!(stderr.matches("F4_LARGE_REJECTION").count(), 1);
+            if debug {
+                let requests = debug_requests(&output.stderr);
+                assert_eq!(requests.len(), 3);
+                for (record, actual) in requests.iter().zip([first, incremental, fallback]) {
+                    assert_request_content(record, &actual);
+                }
+            }
         }
+        server.join();
     }
-    server.join();
 }
 
-#[cfg(debug_assertions)]
 #[test]
 fn f4_debug_reports_http_error_body_without_printing_credential() {
     let root = TemporaryDirectory::new("f4-debug-http-error");
@@ -406,14 +440,13 @@ fn f4_debug_reports_http_error_body_without_printing_credential() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("F4_HTTP_ERROR"));
-    assert!(stderr.contains("HTTP 错误]\n500"));
-    assert!(stderr.contains("响应中断：未观察到完成"));
-    assert!(!stderr.contains("loopback-primary-secret"));
-    assert!(!stderr.contains("other-secret-value"));
+    assert!(stderr.contains("HTTP error]\n500"));
+    assert!(stderr.contains("response interrupted: completion not observed"));
+    assert!(stderr.contains("loopback-primary-secret"));
+    assert!(stderr.contains("other-secret-value"));
     server.join();
 }
 
-#[cfg(debug_assertions)]
 #[test]
 fn f4_debug_covers_both_image_routes_and_omits_image_bytes() {
     for direct in [false, true] {
@@ -458,12 +491,11 @@ fn f4_debug_covers_both_image_routes_and_omits_image_bytes() {
             }
         );
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("[image data omitted;"));
-        assert!(!stderr.contains("data:image/png;base64,"));
+        assert!(stderr.contains("data:image/png;base64,"));
         assert!(!stderr.contains("loopback-primary-secret"));
         assert!(!stderr.contains("loopback-vision-secret"));
         if !direct {
-            assert!(stderr.contains("[debug Vision 输出 · 未完成]"));
+            assert!(stderr.contains("[debug Vision output · pending]"));
             assert!(stderr.contains("F4_IMAGE_OBSERVATION"));
         }
         let wire = match &vision {
@@ -478,13 +510,47 @@ fn f4_debug_covers_both_image_routes_and_omits_image_bytes() {
     }
 }
 
-#[cfg(not(debug_assertions))]
 #[test]
-fn f4_release_rejects_debug_flag() {
-    let output = Command::new(env!("CARGO_BIN_EXE_echidna"))
-        .args(["chat", "--debug"])
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("unexpected argument '--debug'"));
+fn f4_debug_flag_works_in_all_builds() {
+    let root = TemporaryDirectory::new("f4-debug-all-builds");
+    initialize_project(root.path());
+    let server = spawn_responses_server(vec![(200, text_response("F4_ALL_BUILDS", "f4-all"))]);
+    let config = write_config(root.path(), &server.base_url);
+    let output = run_chat(root.path(), &config, "hello\n/exit\n", &["--debug"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("F4_ALL_BUILDS"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("[debug sending primary"));
+    server.join();
+}
+
+#[test]
+fn f4_reasoning_redaction_does_not_merge_distinct_original_items() {
+    let root = TemporaryDirectory::new("f4-redaction-equality");
+    initialize_project(root.path());
+    let body = format!(
+        "data: {}\n\ndata: {}\n\n{}",
+        json!({"type":"response.reasoning_text.delta","delta":"loopback-primary-secret"}),
+        json!({"type":"response.output_item.done","item":{"type":"reasoning","content":[{"type":"reasoning_text","text":"[redacted]"}]}}),
+        text_response("F4_FINAL_MARKER", "f4-redaction-equality")
+    );
+    let server = spawn_responses_server(vec![(200, body)]);
+    let config = write_config(root.path(), &server.base_url);
+    let output = run_chat(root.path(), &config, "hello\n/exit\n", &[]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(
+        stderr.matches("[redacted]").count(),
+        1,
+        "distinct original items must remain distinct: {stderr}"
+    );
+    assert!(stderr.contains("loopback-primary-secret"));
+    server.join();
 }

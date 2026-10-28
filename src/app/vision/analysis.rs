@@ -105,6 +105,7 @@ impl VisionAnalysisInput {
     fn context_plan(
         &self,
         capabilities: &crate::domain::model::ModelCapabilities,
+        policy: crate::domain::context::ContextBudgetPolicy,
     ) -> Result<ContextPlan, VisionAnalysisError> {
         let mut artifact_refs = vec![self.source_artifact_id.clone()];
         if !artifact_refs.contains(&self.delivery_artifact_id) {
@@ -167,7 +168,7 @@ impl VisionAnalysisInput {
             .map_err(context_error)?,
             input_fragment,
         ];
-        let planner = ContextPlanner::current();
+        let planner = ContextPlanner::current().with_budget_policy(policy);
         let budget = planner
             .default_budget(capabilities)
             .map_err(context_error)?;
@@ -190,6 +191,7 @@ impl VisionAnalysisInput {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VisionAnalysisOutput {
     pub observation: VisionObservation,
+    pub(crate) usage: Option<crate::domain::model::ModelUsage>,
 }
 
 /// A fixed service with no History, tools, continuation, Memory or Research.
@@ -197,6 +199,7 @@ pub struct VisionAnalysisService<'provider, 'blobs, Provider: ?Sized, Blobs: ?Si
     provider: &'provider Provider,
     blobs: &'blobs Blobs,
     request_budget: Option<std::sync::Arc<crate::app::model_request_budget::ModelRequestBudget>>,
+    context_budget: crate::domain::context::ContextBudgetPolicy,
 }
 
 impl<'provider, 'blobs, Provider, Blobs> VisionAnalysisService<'provider, 'blobs, Provider, Blobs>
@@ -210,6 +213,7 @@ where
             provider,
             blobs,
             request_budget: None,
+            context_budget: crate::domain::context::ContextBudgetPolicy::default(),
         }
     }
 
@@ -218,6 +222,14 @@ where
         budget: Option<std::sync::Arc<crate::app::model_request_budget::ModelRequestBudget>>,
     ) -> Self {
         self.request_budget = budget;
+        self
+    }
+
+    pub(crate) fn with_context_budget_policy(
+        mut self,
+        policy: crate::domain::context::ContextBudgetPolicy,
+    ) -> Self {
+        self.context_budget = policy;
         self
     }
 
@@ -245,7 +257,7 @@ where
         if actual_capability_hash != input.capability_hash {
             return Err(VisionAnalysisError::CapabilityIdentityMismatch);
         }
-        let context_plan = input.context_plan(&capabilities)?;
+        let context_plan = input.context_plan(&capabilities, self.context_budget)?;
         let model_input = context_plan.model_input();
         capabilities.validate_input(&model_input)?;
         let no_tool_plan = ResolvedToolPlan::resolve(
@@ -285,6 +297,7 @@ where
                 .and_then(|attempt| {
                     attempt.bind_scoped_no_tool_context(&context_plan, &no_tool_plan)
                 })
+                .map(|attempt| attempt.bind_provider_session(input.provider_session.clone()))
                 .map_err(|error| VisionAnalysisError::AuditShape {
                     message: error.to_string(),
                 })?;
@@ -391,6 +404,10 @@ where
                 VisionAnalysisError::Cancelled,
             ));
         };
+        let usage = events.iter().rev().find_map(|event| match event {
+            ModelEvent::Usage { usage } => Some(*usage),
+            _ => None,
+        });
         let raw = collect_json_response(events).map_err(|error| {
             attempt_failed(
                 &input,
@@ -479,7 +496,7 @@ where
                     error,
                 )
             })?;
-        Ok(VisionAnalysisOutput { observation })
+        Ok(VisionAnalysisOutput { observation, usage })
     }
 }
 

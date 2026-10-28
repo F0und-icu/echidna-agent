@@ -11,8 +11,8 @@ use crate::app::context_compilation::{ContextCacheSummary, resolve_context_fragm
 use crate::domain::context::{
     ContextBudget, ContextDecision, ContextDeliveryMap, ContextFragment, ContextFragmentContent,
     ContextFragmentId, ContextFragmentPriority, ContextFragmentSource, ContextPlan, ContextPlanner,
-    ContextPlannerError, ContextProvenance, ContextSourceFingerprint, ContextWindowPolicy,
-    FragmentCachePolicy, FullLogicalManifest,
+    ContextPlannerError, ContextProvenance, ContextSourceFingerprint, FragmentCachePolicy,
+    FullLogicalManifest,
 };
 use crate::domain::model::{
     ContentItem, ModelCapabilities, ModelInputIR, ModelRequestRequirements,
@@ -34,7 +34,9 @@ pub(super) struct ContextCompilationInput<'a> {
     pub(super) session_summary: Option<&'a SessionSummary>,
     pub(super) history: &'a [ContentItem],
     pub(super) history_provenance: &'a BTreeMap<usize, ContextProvenance>,
+    pub(super) protected_input: Option<(&'a [ContentItem], &'a BTreeMap<usize, ContextProvenance>)>,
     pub(super) turn_history_start: usize,
+    pub(super) detached_input: Option<(&'a [ContentItem], &'a BTreeMap<usize, ContextProvenance>)>,
     pub(super) planner: &'a ContextPlanner,
     pub(super) cache: Option<&'a dyn ContextFragmentCache>,
     pub(super) budget: ContextBudget,
@@ -42,6 +44,8 @@ pub(super) struct ContextCompilationInput<'a> {
     pub(super) tool_specs: &'a [ToolSpec],
     pub(super) prior_manifest: Option<&'a FullLogicalManifest>,
     pub(super) correction_feedback: &'a [ContextFragment],
+    pub(super) capacity_breakdown:
+        Option<&'a mut Option<crate::domain::context::ContextCapacityBreakdown>>,
 }
 
 /// One fixed, typed replacement for volatile facts before a later sampling
@@ -136,7 +140,9 @@ pub(super) fn compile_context(
         session_summary,
         history,
         history_provenance,
+        protected_input,
         turn_history_start,
+        detached_input,
         planner,
         cache,
         budget,
@@ -144,14 +150,19 @@ pub(super) fn compile_context(
         tool_specs,
         prior_manifest,
         correction_feedback,
+        capacity_breakdown,
     } = input;
-    if history.len() <= turn_history_start {
+    if history.len() < turn_history_start
+        || (detached_input.is_none() && history.len() == turn_history_start)
+    {
         return Err(AgentLoopError::ContextStateMismatch);
     }
 
     let mut cache_summary = ContextCacheSummary::default();
-    let section_bytes =
-        ContextWindowPolicy::for_window(capabilities.context_window).state_section_bytes();
+    let section_bytes = planner
+        .budget_policy()
+        .for_budget(budget)
+        .state_section_bytes();
     let mut fragments = Vec::new();
     for prompt_fragment in prompt_composition.fragments()? {
         push_cached_fragment(
@@ -212,6 +223,27 @@ pub(super) fn compile_context(
         }
         fragments.push(summary_fragment);
     }
+    let (input_items, input_start, input_provenance, updates_start) = match detached_input {
+        Some((items, provenance)) => (items, 0, provenance, turn_history_start),
+        None => (
+            &history[turn_history_start..=turn_history_start],
+            turn_history_start,
+            history_provenance,
+            turn_history_start + 1,
+        ),
+    };
+    if let Some((items, provenance)) = protected_input {
+        push_content_fragment(
+            &mut fragments,
+            ContentFragmentInput {
+                id: "input:protected".to_owned(),
+                source: ContextFragmentSource::UserInput,
+                items,
+                history_start: 0,
+                history_provenance: provenance,
+            },
+        )?;
+    }
     push_content_fragment(
         &mut fragments,
         ContentFragmentInput {
@@ -227,9 +259,9 @@ pub(super) fn compile_context(
         ContentFragmentInput {
             id: "input:current-user".to_owned(),
             source: ContextFragmentSource::UserInput,
-            items: &history[turn_history_start..=turn_history_start],
-            history_start: turn_history_start,
-            history_provenance,
+            items: input_items,
+            history_start: input_start,
+            history_provenance: input_provenance,
         },
     )?;
     push_content_fragment(
@@ -237,13 +269,18 @@ pub(super) fn compile_context(
         ContentFragmentInput {
             id: "turn:local-updates".to_owned(),
             source: ContextFragmentSource::TurnLocalUpdates,
-            items: &history[turn_history_start + 1..],
-            history_start: turn_history_start + 1,
+            items: &history[updates_start..],
+            history_start: updates_start,
             history_provenance,
         },
     )?;
 
     fragments.extend_from_slice(correction_feedback);
+    if let Some(breakdown) = capacity_breakdown {
+        *breakdown = Some(crate::domain::context::capacity_breakdown(
+            &fragments, budget, tool_specs,
+        )?);
+    }
     let plan = planner.compile(
         fragments,
         budget,
@@ -310,8 +347,10 @@ pub(super) fn state_diff_delivery_input(
     }
 
     let mut state_fragments = Vec::new();
-    let section_bytes =
-        ContextWindowPolicy::for_window(budget.context_window_tokens()).state_section_bytes();
+    let section_bytes = planner
+        .budget_policy()
+        .for_budget(budget)
+        .state_section_bytes();
     match (committed_world_state, world_state) {
         (Some(previous), Some(current)) => {
             let previous_full = previous.full_fragment_with_limit(section_bytes)?;

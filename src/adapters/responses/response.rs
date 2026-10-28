@@ -1,12 +1,14 @@
 //! Shared Responses streaming-event wire decoding.
 
+mod error_event;
 mod text;
 
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::adapters::http_error_body::HttpErrorBody;
 use crate::domain::model::{
-    ModelEvent, ModelUsage, OpaqueContinuationReference, OpaqueContinuationScope,
+    ModelEvent, ModelUsage, ModelUsageError, OpaqueContinuationReference, OpaqueContinuationScope,
     ToolArgumentDiagnostic, ToolArgumentErrorCategory,
 };
 use crate::domain::tools::{ToolCall, ToolCallId, ToolName};
@@ -16,7 +18,7 @@ use super::ResponsesWireProfile;
 use super::request::{ECHIDNA_TOOL_NAMESPACE, SubscriptionOpaqueReasoning};
 
 const PREVIOUS_RESPONSE_NOT_FOUND_CODE: &str = "previous_response_not_found";
-const SUBSCRIPTION_QUOTA_CODE: &str = "insufficient_quota";
+const CONTEXT_CAPACITY_CODE: &str = "context_length_exceeded";
 
 #[derive(Debug)]
 pub(super) struct DecodedResponsesEvent {
@@ -194,8 +196,12 @@ impl ResponseDecoder {
                     decoded.reasoning_summaries = reasoning_summaries;
                     Ok(decoded)
                 } else {
-                    let mut decoded =
-                        decode_output_item(item, self.profile, self.opaque_scope.as_ref())?;
+                    let mut decoded = decode_output_item(
+                        item,
+                        self.profile,
+                        self.opaque_scope.as_ref(),
+                        CompletedItemSource::OutputItemDone,
+                    )?;
                     if !decoded.events.is_empty() {
                         self.text.barrier(event.output_index);
                     }
@@ -228,6 +234,7 @@ impl ResponseDecoder {
                                 item.clone(),
                                 self.profile,
                                 self.opaque_scope.as_ref(),
+                                CompletedItemSource::CompletedSnapshot,
                             )?;
                             if !self.completed_items.get(completed_item_index).is_some_and(
                                 |(prior_index, prior)| {
@@ -256,6 +263,11 @@ impl ResponseDecoder {
                 }
                 Ok(decoded)
             }
+            "error" => Err(error_event::decode(
+                data,
+                self.profile,
+                continuation_requested,
+            )),
             "response.failed" => Err(decode_provider_failure(
                 self.profile,
                 event.response,
@@ -380,14 +392,15 @@ fn decode_output_item(
     item: Value,
     profile: ResponsesWireProfile,
     opaque_scope: Option<&OpaqueContinuationScope>,
+    source: CompletedItemSource,
 ) -> Result<DecodedResponsesEvent, ModelProviderError> {
-    if item.get("status").is_some_and(|status| {
-        status != "completed"
-            && !(status.is_null() && item.get("type").and_then(Value::as_str) == Some("reasoning"))
-    }) {
-        return Err(protocol_error(
-            "completed output item has non-completed status",
-        ));
+    if let Some((item_family, status_class)) = invalid_completed_item_status(&item) {
+        return Err(protocol_error(format!(
+            "completed output item has non-completed status (source={} item_family={} status_class={})",
+            source.label(),
+            item_family.label(),
+            status_class.label(),
+        )));
     }
     let item_kind = item
         .get("type")
@@ -421,9 +434,6 @@ fn decode_output_item(
                 ));
             }
             let arguments = serde_json::from_str(&function_call.arguments).map_err(|error| {
-                // Invalid inner JSON cannot be structurally redacted. Report
-                // coordinates and size only, never a payload snippet or serde's
-                // token-bearing error text. Strict decoding remains the owner.
                 let category = match error.classify() {
                     serde_json::error::Category::Syntax => ToolArgumentErrorCategory::Syntax,
                     serde_json::error::Category::Data => ToolArgumentErrorCategory::Data,
@@ -455,6 +465,84 @@ fn decode_output_item(
             "unsupported completed output item `{unknown}`"
         ))),
     }
+}
+
+#[derive(Clone, Copy)]
+enum CompletedItemSource {
+    OutputItemDone,
+    CompletedSnapshot,
+}
+
+impl CompletedItemSource {
+    fn label(self) -> &'static str {
+        match self {
+            Self::OutputItemDone => "output_item_done",
+            Self::CompletedSnapshot => "completed_snapshot",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum CompletedItemFamily {
+    Reasoning,
+    FunctionCall,
+    Other,
+}
+
+impl CompletedItemFamily {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Reasoning => "reasoning",
+            Self::FunctionCall => "function_call",
+            Self::Other => "other",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CompletedItemStatusClass {
+    KnownNonCompleted,
+    NullOutsideReasoning,
+    UnknownString,
+    NonString,
+}
+
+impl CompletedItemStatusClass {
+    fn label(self) -> &'static str {
+        match self {
+            Self::KnownNonCompleted => "known_non_completed",
+            Self::NullOutsideReasoning => "null_outside_reasoning",
+            Self::UnknownString => "unknown_string",
+            Self::NonString => "non_string",
+        }
+    }
+}
+
+fn invalid_completed_item_status(
+    item: &Value,
+) -> Option<(CompletedItemFamily, CompletedItemStatusClass)> {
+    let item_family = match item.get("type").and_then(Value::as_str) {
+        Some("reasoning") => CompletedItemFamily::Reasoning,
+        Some("function_call") => CompletedItemFamily::FunctionCall,
+        _ => CompletedItemFamily::Other,
+    };
+    let status_class = match item.get("status") {
+        None => return None,
+        Some(Value::String(status)) if status == "completed" => return None,
+        Some(Value::Null) if item_family == CompletedItemFamily::Reasoning => return None,
+        Some(Value::String(status))
+            if matches!(
+                status.as_str(),
+                "in_progress" | "incomplete" | "failed" | "cancelled"
+            ) =>
+        {
+            CompletedItemStatusClass::KnownNonCompleted
+        }
+        Some(Value::String(_)) => CompletedItemStatusClass::UnknownString,
+        Some(Value::Null) => CompletedItemStatusClass::NullOutsideReasoning,
+        Some(_) => CompletedItemStatusClass::NonString,
+    };
+    Some((item_family, status_class))
 }
 
 fn decode_reasoning_item(
@@ -563,10 +651,7 @@ fn decode_completed(
     }
     match response.usage {
         Some(usage) => events.push(ModelEvent::Usage {
-            usage: ModelUsage {
-                input_tokens: usage.input_tokens,
-                output_tokens: usage.output_tokens,
-            },
+            usage: usage.into_model_usage()?,
         }),
         None if usage_required => {
             return Err(protocol_error(
@@ -608,23 +693,19 @@ fn decode_provider_failure(
     response: Option<Value>,
     continuation_requested: bool,
 ) -> ModelProviderError {
-    if profile.is_subscription() {
-        return ModelProviderError::ProviderFailure {
-            code: subscription_error_code(response.as_ref()),
-            message: format!(
-                "{} Responses stream reported response.failed",
-                profile.subscription_label()
-            ),
-        };
-    }
     let error = response
         .as_ref()
         .and_then(|value| value.get("error"))
         .cloned()
         .and_then(|value| serde_json::from_value::<ProviderErrorBody>(value).ok());
-
+    if let Some(failure) = response.as_ref().and_then(validated_capacity_failure) {
+        return failure;
+    }
     let code = error.as_ref().and_then(|error| error.code.clone());
-    if continuation_requested && code.as_deref() == Some(PREVIOUS_RESPONSE_NOT_FOUND_CODE) {
+    if !profile.is_subscription()
+        && continuation_requested
+        && code.as_deref() == Some(PREVIOUS_RESPONSE_NOT_FOUND_CODE)
+    {
         return ModelProviderError::ContinuationRejected {
             code: PREVIOUS_RESPONSE_NOT_FOUND_CODE.to_owned(),
         };
@@ -632,33 +713,42 @@ fn decode_provider_failure(
 
     ModelProviderError::ProviderFailure {
         code,
-        message: error
-            .and_then(|error| error.message)
-            .filter(|message| !message.trim().is_empty())
-            .unwrap_or_else(|| "Responses provider failed without an error message".to_string()),
+        message: error.and_then(|error| error.message).unwrap_or_else(|| {
+            if profile.is_subscription() {
+                format!(
+                    "{} Responses stream reported response.failed",
+                    profile.subscription_label()
+                )
+            } else {
+                "Responses provider failed without an error message".to_string()
+            }
+        }),
     }
 }
 
 fn decode_incomplete(profile: ResponsesWireProfile, response: Option<Value>) -> ModelProviderError {
-    if profile.is_subscription() {
-        return ModelProviderError::ProviderFailure {
-            code: Some("response_incomplete".to_owned()),
-            message: format!(
-                "{} Responses stream reported response.incomplete",
-                profile.subscription_label()
-            ),
-        };
-    }
     let reason = response
         .as_ref()
         .and_then(|value| value.get("incomplete_details"))
         .and_then(|value| value.get("reason"))
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
+        .and_then(Value::as_str);
 
     ModelProviderError::ProviderFailure {
         code: Some("response_incomplete".to_string()),
-        message: format!("Responses provider response was incomplete: {reason}"),
+        message: match (profile.is_subscription(), reason) {
+            (true, Some(reason)) => format!(
+                "{} Responses stream reported response.incomplete: {reason}",
+                profile.subscription_label()
+            ),
+            (true, None) => format!(
+                "{} Responses stream reported response.incomplete",
+                profile.subscription_label()
+            ),
+            (false, reason) => format!(
+                "Responses provider response was incomplete: {}",
+                reason.unwrap_or("unknown")
+            ),
+        },
     }
 }
 
@@ -679,56 +769,79 @@ fn decoded_summary(summary: Option<ReasoningSummary>) -> DecodedResponsesEvent {
     decoded
 }
 
-pub(super) enum BoundedHttpErrorBody {
-    Complete(String),
-    Unreadable,
-    Oversized,
+pub(super) fn capacity_failure(code: Option<&str>) -> Option<ModelProviderError> {
+    (code == Some(CONTEXT_CAPACITY_CODE)).then(|| ModelProviderError::ContextCapacityExceeded {
+        code: CONTEXT_CAPACITY_CODE.to_owned(),
+    })
 }
 
-/// Subscription admission failures expose only a fixed local classification,
-/// the HTTP status, and the one code the runtime already handles explicitly.
-pub(super) fn subscription_http_failure(
+fn validated_capacity_failure(value: &Value) -> Option<ModelProviderError> {
+    // HTTP errors and response.failed require their nested error envelope;
+    // only the standalone SSE error event permits top-level error fields.
+    value.get("error")?.as_object()?;
+    let code = error_event::validated_code(value).ok()?;
+    capacity_failure(code)
+}
+
+pub(super) fn http_failure(
     profile: ResponsesWireProfile,
     status: u16,
-    body: &BoundedHttpErrorBody,
+    continuation_requested: bool,
+    body: &HttpErrorBody,
 ) -> ModelProviderError {
-    let (code, suffix) = match body {
-        BoundedHttpErrorBody::Unreadable => (None, "error body unavailable"),
-        BoundedHttpErrorBody::Oversized => (None, "error body exceeds 65536 bytes"),
-        BoundedHttpErrorBody::Complete(body) => {
-            match serde_json::from_str::<SubscriptionHttpErrorEnvelope>(body) {
-                Err(_) => (None, "malformed error body"),
-                Ok(envelope) => match envelope.error.and_then(|error| error.code) {
-                    None => (None, "missing error code"),
-                    Some(code) if code == SUBSCRIPTION_QUOTA_CODE => (Some(code), ""),
-                    Some(_) => (None, "unrecognized error code"),
-                },
-            }
+    if let HttpErrorBody::Complete(text) = body {
+        if status == 400
+            && let Some(failure) = serde_json::from_str::<Value>(text)
+                .ok()
+                .as_ref()
+                .and_then(validated_capacity_failure)
+        {
+            return failure;
         }
-    };
-    ModelProviderError::ProviderFailure {
-        code,
-        message: if suffix.is_empty() {
-            format!(
-                "{} Responses request failed with HTTP {status}",
-                profile.subscription_label()
-            )
-        } else {
-            format!(
-                "{} Responses request failed with HTTP {status}: {suffix}",
-                profile.subscription_label()
-            )
-        },
+        if !profile.is_subscription()
+            && continuation_requested
+            && continuation_rejected_http_body(text)
+        {
+            return ModelProviderError::ContinuationRejected {
+                code: PREVIOUS_RESPONSE_NOT_FOUND_CODE.to_owned(),
+            };
+        }
+    }
+    if profile.is_subscription() {
+        subscription_http_failure(profile, status, body)
+    } else {
+        let body = match body {
+            HttpErrorBody::Complete(body) => body.clone(),
+            HttpErrorBody::Unreadable(reason) => format!("error body unavailable: {reason}"),
+            HttpErrorBody::Oversized => "error body exceeds the configured read limit".to_owned(),
+        };
+        ModelProviderError::HttpFailure { status, body }
     }
 }
 
-fn subscription_error_code(response: Option<&Value>) -> Option<String> {
-    response
-        .and_then(|response| response.get("error"))
-        .and_then(|error| error.get("code"))
-        .and_then(Value::as_str)
-        .filter(|code| *code == SUBSCRIPTION_QUOTA_CODE)
-        .map(str::to_owned)
+pub(super) fn subscription_http_failure(
+    profile: ResponsesWireProfile,
+    status: u16,
+    body: &HttpErrorBody,
+) -> ModelProviderError {
+    let (code, detail) = match body {
+        HttpErrorBody::Unreadable(reason) => (None, format!("error body unavailable: {reason}")),
+        HttpErrorBody::Oversized => (None, "error body exceeds 65536 bytes".to_owned()),
+        HttpErrorBody::Complete(body) => (
+            serde_json::from_str::<HttpErrorEnvelope>(body)
+                .ok()
+                .and_then(|envelope| envelope.error)
+                .and_then(|error| error.code),
+            body.clone(),
+        ),
+    };
+    ModelProviderError::ProviderFailure {
+        code,
+        message: format!(
+            "{} Responses request failed with HTTP {status}: {detail}",
+            profile.subscription_label()
+        ),
+    }
 }
 
 fn protocol_error(message: impl Into<String>) -> ModelProviderError {
@@ -769,6 +882,63 @@ struct CompletedResponse {
 struct ResponseUsage {
     input_tokens: u64,
     output_tokens: u64,
+    #[serde(default)]
+    input_tokens_details: Option<InputTokensDetails>,
+    #[serde(default)]
+    output_tokens_details: Option<OutputTokensDetails>,
+}
+
+impl ResponseUsage {
+    fn into_model_usage(self) -> Result<ModelUsage, ModelProviderError> {
+        let cached_input_tokens = self
+            .input_tokens_details
+            .and_then(|details| details.cached_tokens);
+        let reasoning_output_tokens = self
+            .output_tokens_details
+            .and_then(|details| details.reasoning_tokens);
+        let usage = ModelUsage {
+            input_tokens: self.input_tokens,
+            output_tokens: self.output_tokens,
+            cached_input_tokens,
+            reasoning_output_tokens,
+        };
+        usage.validate().map_err(|error| {
+            let (field, subset, total) = match error {
+                ModelUsageError::CachedInputExceedsTotal {
+                    cached_input_tokens,
+                    input_tokens,
+                } => (
+                    "input_tokens_details.cached_tokens",
+                    cached_input_tokens,
+                    input_tokens,
+                ),
+                ModelUsageError::ReasoningOutputExceedsTotal {
+                    reasoning_output_tokens,
+                    output_tokens,
+                } => (
+                    "output_tokens_details.reasoning_tokens",
+                    reasoning_output_tokens,
+                    output_tokens,
+                ),
+            };
+            protocol_error(format!(
+                "invalid completed response Usage: `{field}` {subset} exceeds total {total}"
+            ))
+        })?;
+        Ok(usage)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct InputTokensDetails {
+    #[serde(default)]
+    cached_tokens: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OutputTokensDetails {
+    #[serde(default)]
+    reasoning_tokens: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -783,16 +953,4 @@ struct ProviderErrorBody {
 struct HttpErrorEnvelope {
     #[serde(default)]
     error: Option<ProviderErrorBody>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SubscriptionHttpErrorEnvelope {
-    #[serde(default)]
-    error: Option<SubscriptionHttpError>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SubscriptionHttpError {
-    #[serde(default)]
-    code: Option<String>,
 }

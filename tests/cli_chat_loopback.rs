@@ -30,6 +30,14 @@ mod f5_output;
 mod f6a_geometry;
 #[path = "cli_chat_cases/legacy_layout.rs"]
 mod legacy_layout;
+#[path = "cli_chat_cases/main_batch_compaction.rs"]
+mod main_batch_compaction;
+#[path = "cli_chat_cases/main_capacity_recovery.rs"]
+mod main_capacity_recovery;
+#[path = "cli_chat_cases/main_compaction_graph.rs"]
+mod main_compaction_graph;
+#[path = "cli_chat_cases/main_memory_status.rs"]
+mod main_memory_status;
 #[path = "cli_chat_cases/mcp_http.rs"]
 mod mcp_http;
 #[path = "cli_chat_cases/operator_steering.rs"]
@@ -422,7 +430,9 @@ fn write_config(directory: &std::path::Path, base_url: &str) -> std::path::PathB
     let config = directory.join("provider-config.toml");
     fs::write(
         &config,
-        provider_config::fixture().replace("http://127.0.0.1:1/v1", base_url),
+        provider_config::fixture()
+            .replace("http://127.0.0.1:1/v1", base_url)
+            .replace("context_window = 32768", "context_window = 272000"),
     )
     .unwrap();
     config
@@ -703,6 +713,14 @@ fn text_response(text: &str, response_id: &str) -> String {
     format!(
         "data: {{\"type\":\"response.output_text.delta\",\"delta\":{text}}}\n\n\
          data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"{response_id}\"}}}}\n\n"
+    )
+}
+
+fn compaction_handoff_response(progress: &str, response_id: &str) -> String {
+    text_response(
+        &json!({"concise_progress": progress, "unresolved_questions": [], "next_step_notes": []})
+            .to_string(),
+        response_id,
     )
 }
 
@@ -1221,9 +1239,20 @@ fn f2a_secondary_cli_image_is_observed_before_primary_tool_loop_and_remains_audi
     assert_eq!(
         events
             .iter()
+            .filter(
+                |event| event["event_type"] == "tool.execution_outcome_recorded"
+                    && event["payload"]["result"]["call_id"] == "f2a-read-secondary"
+            )
+            .count(),
+        1,
+        "the model result and its Receipt are durable in one fact"
+    );
+    assert_eq!(
+        events
+            .iter()
             .filter(|event| event["event_type"] == "tool.execution_receipt_recorded")
             .count(),
-        2,
+        1,
         "operator view_image and model read_file must each keep a real Receipt"
     );
     assert_eq!(
@@ -1304,9 +1333,20 @@ fn f2a_primary_direct_cli_image_reaches_only_primary_and_keeps_real_tool_receipt
     assert_eq!(
         events
             .iter()
+            .filter(
+                |event| event["event_type"] == "tool.execution_outcome_recorded"
+                    && event["payload"]["result"]["call_id"] == "f2a-read-direct"
+            )
+            .count(),
+        1,
+        "the model result and its Receipt are durable in one fact"
+    );
+    assert_eq!(
+        events
+            .iter()
             .filter(|event| event["event_type"] == "tool.execution_receipt_recorded")
             .count(),
-        2
+        1
     );
 }
 
@@ -1380,10 +1420,19 @@ fn ec_k4_two_primary_direct_images_keep_order_without_duplicate_history_and_surv
         2
     );
 
-    let resumed_server = spawn_responses_server(vec![(
-        200,
-        text_response("TWO_DIRECT_RESUMED", "two-direct-resumed"),
-    )]);
+    let resumed_server = spawn_responses_server(vec![
+        (
+            200,
+            compaction_handoff_response(
+                "Both images were inspected in order.",
+                "two-direct-handoff",
+            ),
+        ),
+        (
+            200,
+            text_response("TWO_DIRECT_RESUMED", "two-direct-resumed"),
+        ),
+    ]);
     let resumed_config = write_direct_config(root.path(), &resumed_server.base_url);
     let resumed = run_chat(
         root.path(),
@@ -1397,6 +1446,13 @@ fn ec_k4_two_primary_direct_images_keep_order_without_duplicate_history_and_surv
         String::from_utf8_lossy(&resumed.stderr)
     );
     assert!(String::from_utf8_lossy(&resumed.stdout).contains("Compaction revision 1 applied"));
+    let handoff = f2a_request_body(&resumed_server.requests, "two direct handoff");
+    assert!(
+        handoff
+            .get("tools")
+            .and_then(Value::as_array)
+            .is_none_or(Vec::is_empty)
+    );
     let resumed_request = f2a_request_body(&resumed_server.requests, "two direct resumed Primary");
     f2a_join_server(resumed_server, "two direct resumed Primary");
     assert!(json_contains_text(
@@ -1601,7 +1657,7 @@ fn f2a_model_view_image_follow_up_runs_secondary_before_the_next_primary_sample(
     assert_eq!(
         session_events(root.path(), &session)
             .iter()
-            .filter(|event| event["event_type"] == "tool.execution_receipt_recorded")
+            .filter(|event| event["event_type"] == "tool.execution_outcome_recorded")
             .count(),
         1
     );
@@ -2417,14 +2473,14 @@ fn synthetic_long_flow_preserves_authoritative_evidence_across_compaction_and_re
     let raw_session_events = session_events(root.path(), &session);
     let receipt_event_ids = raw_session_events
         .iter()
-        .filter(|event| event["event_type"] == "tool.execution_receipt_recorded")
+        .filter(|event| event["event_type"] == "tool.execution_outcome_recorded")
         .map(|event| event["event_id"].as_str().unwrap().to_owned())
         .collect::<Vec<_>>();
     assert_eq!(receipt_event_ids.len(), 5);
     let artifact_receipt_event_id = raw_session_events
         .iter()
         .find(|event| {
-            event["event_type"] == "tool.execution_receipt_recorded"
+            event["event_type"] == "tool.execution_outcome_recorded"
                 && event["payload"]["receipt"]["execution_id"] == "execution:call-m4-s4-artifact"
         })
         .and_then(|event| event["event_id"].as_str())
@@ -2433,7 +2489,7 @@ fn synthetic_long_flow_preserves_authoritative_evidence_across_compaction_and_re
     let read_receipt_event_id = raw_session_events
         .iter()
         .find(|event| {
-            event["event_type"] == "tool.execution_receipt_recorded"
+            event["event_type"] == "tool.execution_outcome_recorded"
                 && event["payload"]["receipt"]["execution_id"] == "execution:call-m4-s4-read"
         })
         .and_then(|event| event["event_id"].as_str())
@@ -3101,7 +3157,7 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
     let old_artifact_receipt = first_events
         .iter()
         .find(|event| {
-            event["event_type"] == "tool.execution_receipt_recorded"
+            event["event_type"] == "tool.execution_outcome_recorded"
                 && event["payload"]["receipt"]["execution_id"]
                     == "execution:m5-compact-old-artifact"
         })
@@ -3111,7 +3167,7 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
     let artifact_receipt = first_events
         .iter()
         .find(|event| {
-            event["event_type"] == "tool.execution_receipt_recorded"
+            event["event_type"] == "tool.execution_outcome_recorded"
                 && event["payload"]["receipt"]["execution_id"] == "execution:m5-compact-artifact"
         })
         .and_then(|event| event["event_id"].as_str())
@@ -3120,7 +3176,7 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
     let read_receipt = first_events
         .iter()
         .find(|event| {
-            event["event_type"] == "tool.execution_receipt_recorded"
+            event["event_type"] == "tool.execution_outcome_recorded"
                 && event["payload"]["receipt"]["execution_id"] == "execution:m5-compact-read"
         })
         .and_then(|event| event["event_id"].as_str())
@@ -3316,13 +3372,19 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
         ),
     );
 
-    let compacted_server = spawn_responses_server(vec![(
-        200,
-        text_response(
-            "Continue from the exact compacted evidence boundary.",
-            "m5-compact-second-final",
+    let compacted_server = spawn_responses_server(vec![
+        (
+            200,
+            compaction_handoff_response("The candidate remains unverified.", "m5-compact-handoff"),
         ),
-    )]);
+        (
+            200,
+            text_response(
+                "Continue from the exact compacted evidence boundary.",
+                "m5-compact-second-final",
+            ),
+        ),
+    ]);
     let compacted_config = write_config(root.path(), &compacted_server.base_url);
     let compacted = run_chat(
         root.path(),
@@ -3336,17 +3398,23 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
         String::from_utf8_lossy(&compacted.stderr)
     );
     let compacted_output = String::from_utf8(compacted.stdout).unwrap();
-    assert!(
-        compacted_output.contains("Context pressure is unavailable before the first model request")
-    );
+    assert!(compacted_output.contains("No successful model plan is available"));
     assert!(compacted_output.contains("Compaction revision 1 applied"));
     assert!(compacted_output.contains("next Primary request will be CompactionReset Full"));
+    let handoff_request = request_body(&compacted_server.requests.recv().unwrap());
+    assert!(
+        handoff_request
+            .get("tools")
+            .and_then(Value::as_array)
+            .is_none_or(Vec::is_empty)
+    );
+    assert!(handoff_request.get("previous_response_id").is_none());
     let compacted_request = request_body(&compacted_server.requests.recv().unwrap());
     compacted_server.join();
     assert!(compacted_request["previous_response_id"].is_null());
     let compacted_wire = serde_json::to_string(&compacted_request).unwrap();
     for expected in [
-        "derived_session_summary_v2",
+        "derived_session_summary_main_v5",
         "snapshot-m5-compact",
         "hypothesis-m5-compact",
         "experiment-m5-compact",
@@ -3379,7 +3447,7 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
     );
     let summary =
         serde_json::to_value(compacted_state.latest_compaction().unwrap().summary()).unwrap();
-    assert_eq!(summary["schema_version"], 2);
+    assert_eq!(summary["schema_version"], 5);
     assert_eq!(summary["revision"], 1);
     assert_eq!(
         summary["evidence_spine"]["target_snapshot_refs"],
@@ -3481,7 +3549,7 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
             .contains("execute the smallest decisive experiment")
     );
     let resumed_wire = serde_json::to_string(&resumed_request).unwrap();
-    assert!(resumed_wire.contains("derived_session_summary_v2"));
+    assert!(resumed_wire.contains("derived_session_summary_main_v5"));
     assert!(resumed_wire.contains("continue after explicit compaction"));
     assert!(resumed_wire.contains("resume the compacted boundary"));
 }
@@ -3492,7 +3560,10 @@ fn m5_compaction_preconditions_never_append_a_partial_fact() {
     initialize_project(missing_research.path());
     let server = spawn_responses_server(vec![(
         200,
-        text_response("history exists", "m5-compact-missing-research"),
+        text_response(
+            &"history exists ".repeat(800),
+            "m5-compact-missing-research",
+        ),
     )]);
     let config = write_config(missing_research.path(), &server.base_url);
     let first = run_chat(
@@ -3529,22 +3600,42 @@ fn m5_compaction_preconditions_never_append_a_partial_fact() {
             keep_independent: false,
         },
     );
-    let offline_config = write_config(missing_research.path(), "http://127.0.0.1:1/v1");
-    let rejected = run_chat(
+    let handoff_server = spawn_responses_server(vec![(
+        200,
+        compaction_handoff_response(
+            "An unbound hypothesis remains unverified.",
+            "m5-no-target-handoff",
+        ),
+    )]);
+    let handoff_config = write_config(missing_research.path(), &handoff_server.base_url);
+    let accepted = run_chat(
         missing_research.path(),
-        &offline_config,
-        "/compact\n",
+        &handoff_config,
+        "/compact\n/exit\n",
         &["--resume", "latest"],
     );
-    assert!(!rejected.status.success());
     assert!(
-        String::from_utf8_lossy(&rejected.stderr).contains("requires a current TargetSnapshot")
+        accepted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&accepted.stderr)
     );
+    assert!(String::from_utf8_lossy(&accepted.stdout).contains("Compaction revision 1 applied"));
+    let handoff = request_body(&handoff_server.requests.recv().unwrap());
     assert!(
-        session_events(missing_research.path(), &session)
-            .iter()
-            .all(|event| event["event_type"] != "session.compaction_created")
+        handoff
+            .get("tools")
+            .and_then(Value::as_array)
+            .is_none_or(Vec::is_empty)
     );
+    handoff_server.join();
+    let events = session_events(missing_research.path(), &session);
+    let summary = &events
+        .iter()
+        .find(|event| event["event_type"] == "session.compaction_created")
+        .unwrap()["payload"]["summary"];
+    assert_eq!(summary["schema_version"], 5);
+    assert_eq!(summary["research_source"]["kind"], "nonempty");
+    assert!(summary["evidence_spine"].is_null());
 
     let empty_history = TemporaryDirectory::new("m5-compact-empty-history");
     initialize_project(empty_history.path());
@@ -3632,12 +3723,20 @@ fn m5_compaction_preconditions_never_append_a_partial_fact() {
         "/compact\n",
         &["--session", session_id.as_str()],
     );
-    assert!(!rejected.status.success());
-    assert!(String::from_utf8_lossy(&rejected.stderr).contains("has no Tool Result"));
+    assert!(rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stdout).contains("Compaction deferred"));
     assert!(
         session_events(incomplete_pair.path(), session_id.as_str())
             .iter()
             .all(|event| event["event_type"] != "session.compaction_created")
+    );
+    assert!(
+        session_events(incomplete_pair.path(), session_id.as_str())
+            .iter()
+            .all(
+                |event| event["event_type"] != "tool.execution_receipt_recorded"
+                    && event["event_type"] != "tool.execution_outcome_recorded"
+            )
     );
 }
 
@@ -3656,9 +3755,30 @@ fn f3_compaction_rejects_negative_reduction_without_appending() {
     );
     server.join();
     let session = session_id(root.path());
-    let output = run_chat(root.path(), &config, "/compact\n", &["--session", &session]);
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("smaller usable next-Turn Context"));
+    let handoff_server = spawn_responses_server(vec![(
+        200,
+        compaction_handoff_response(
+            "This handoff is longer than the short original exchange.",
+            "f3-negative-handoff",
+        ),
+    )]);
+    let handoff_config = write_config(root.path(), &handoff_server.base_url);
+    let output = run_chat(
+        root.path(),
+        &handoff_config,
+        "/compact\n/exit\n",
+        &["--session", &session],
+    );
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Compaction deferred"));
+    let handoff = request_body(&handoff_server.requests.recv().unwrap());
+    assert!(
+        handoff
+            .get("tools")
+            .and_then(Value::as_array)
+            .is_none_or(Vec::is_empty)
+    );
+    handoff_server.join();
     assert!(
         session_events(root.path(), &session)
             .iter()
@@ -3716,9 +3836,11 @@ fn f3_large_compaction_bounds_reference_subset_and_drops_oversized_recent_histor
             },
         );
     }
+    let compaction_server = spawn_responses_server(vec![(200, text_response(&json!({"concise_progress":"Parser candidates remain unverified.","unresolved_questions":["Which candidate is reachable?"],"next_step_notes":[]}).to_string(), "f3-handoff"))]);
+    let compaction_config = write_config(root.path(), &compaction_server.base_url);
     let output = run_chat(
         root.path(),
-        &config,
+        &compaction_config,
         "/compact\n/exit\n",
         &["--session", &session],
     );
@@ -3727,21 +3849,32 @@ fn f3_large_compaction_bounds_reference_subset_and_drops_oversized_recent_histor
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    let handoff = request_body(&compaction_server.requests.recv().unwrap());
+    assert!(
+        handoff
+            .get("tools")
+            .and_then(Value::as_array)
+            .is_none_or(Vec::is_empty)
+    );
+    compaction_server.join();
     let events = session_events(root.path(), &session);
     let compaction = &events
         .iter()
         .find(|event| event["event_type"] == "session.compaction_created")
         .unwrap()["payload"];
-    assert!(serde_json::to_vec(&compaction["summary"]).unwrap().len() <= 8192);
+    assert!(
+        serde_json::to_vec(&compaction["summary"]["narrative"])
+            .unwrap()
+            .len()
+            <= compaction["summary"]["byte_limit"].as_u64().unwrap() as usize
+    );
     let references = compaction["summary"]["evidence_spine"]["active_hypothesis_refs"]
         .as_array()
         .unwrap();
-    assert!(!references.is_empty() && references.len() <= 32);
+    assert!(!references.is_empty() && references.len() <= 64);
     assert!(
-        compaction["retained_history"]
-            .as_array()
-            .unwrap()
-            .is_empty()
+        compaction["retained_history"].as_array().unwrap().len()
+            < compaction["source_history_item_count"].as_u64().unwrap() as usize
     );
     assert!(
         compaction["summary"]["narrative"]["current_goal"]
@@ -3891,8 +4024,15 @@ fn ec_h1_auto_compacts_once_after_completed_turn_and_resets_the_next_request() {
             200,
             plaintext_reasoning_response(
                 "retain only as volatile Provider delivery state",
-                &"analysis ".repeat(20_000),
+                &"analysis ".repeat(10_000),
                 "ec-h1-first",
+            ),
+        ),
+        (
+            200,
+            compaction_handoff_response(
+                "Earlier analysis is retained as a bounded handoff.",
+                "ec-h1-handoff",
             ),
         ),
         (200, text_response("EC_H1_SECOND_COMPLETE", "ec-h1-second")),
@@ -3910,7 +4050,15 @@ fn ec_h1_auto_compacts_once_after_completed_turn_and_resets_the_next_request() {
         String::from_utf8_lossy(&output.stderr)
     );
     let first_request = request_body(&server.requests.recv().unwrap());
+    let handoff_request = request_body(&server.requests.recv().unwrap());
     let second_request = request_body(&server.requests.recv().unwrap());
+    assert!(
+        handoff_request
+            .get("tools")
+            .and_then(Value::as_array)
+            .is_none_or(Vec::is_empty)
+    );
+    assert!(handoff_request.get("previous_response_id").is_none());
     assert!(server.requests.try_recv().is_err());
     server.join();
     assert!(json_contains_text(
@@ -3938,7 +4086,7 @@ fn ec_h1_auto_compacts_once_after_completed_turn_and_resets_the_next_request() {
     assert!(stdout.contains("CompactionReset Full"), "{stdout}");
     assert!(stdout.contains("EC_H1_SECOND_COMPLETE"), "{stdout}");
     assert!(
-        stdout.contains("[context pressure: normal] last model-request planner demand estimate="),
+        stdout.contains("[context pressure: normal] planner demand estimate="),
         "{stdout}"
     );
     assert!(stdout.contains("No Compaction is suggested."), "{stdout}");
@@ -3976,14 +4124,14 @@ fn ec_h1_auto_compacts_once_after_completed_turn_and_resets_the_next_request() {
     assert_eq!(
         events
             .iter()
-            .filter(|event| event["event_type"] == "tool.execution_receipt_recorded")
+            .filter(|event| event["event_type"] == "tool.execution_outcome_recorded")
             .count(),
         0
     );
     let state = reduced_session(&project, &session_id(root.path()));
-    assert_eq!(state.request_audits().len(), 2);
+    assert_eq!(state.request_audits().len(), 3);
     assert_eq!(
-        state.request_audits()[1].delivery().reason(),
+        state.request_audits()[2].delivery().reason(),
         echidna::domain::request_audit::RequestAuditDeliveryReason::Full(
             echidna::domain::context::BaselineInvalidationReason::CompactionReset
         )
@@ -4040,11 +4188,8 @@ fn ec_h1_auto_compact_skips_cancelled_budget_stopped_and_failed_turns() {
     let cancelled_stdout = String::from_utf8_lossy(&cancelled_output.stdout);
     assert!(cancelled_stdout.contains("[request cancelled]"));
     assert!(
-        cancelled_stdout
-            .contains("[context pressure: warning] last model-request planner demand estimate=")
-            || cancelled_stdout.contains(
-                "[context pressure: critical] last model-request planner demand estimate="
-            ),
+        cancelled_stdout.contains("[context pressure: warning] planner demand estimate=")
+            || cancelled_stdout.contains("[context pressure: critical] planner demand estimate="),
         "{cancelled_stdout}"
     );
     assert!(
@@ -4100,11 +4245,8 @@ fn ec_h1_auto_compact_skips_cancelled_budget_stopped_and_failed_turns() {
     );
     let budget_stdout = String::from_utf8_lossy(&budget_output.stdout);
     assert!(
-        budget_stdout
-            .contains("[context pressure: warning] last model-request planner demand estimate=")
-            || budget_stdout.contains(
-                "[context pressure: critical] last model-request planner demand estimate="
-            ),
+        budget_stdout.contains("[context pressure: warning] planner demand estimate=")
+            || budget_stdout.contains("[context pressure: critical] planner demand estimate="),
         "{budget_stdout}"
     );
     assert!(
@@ -4151,11 +4293,8 @@ fn ec_h1_auto_compact_skips_cancelled_budget_stopped_and_failed_turns() {
     assert!(String::from_utf8_lossy(&failed_output.stderr).contains("ec-h1 provider failure"));
     let failed_stdout = String::from_utf8_lossy(&failed_output.stdout);
     assert!(
-        failed_stdout
-            .contains("[context pressure: warning] last model-request planner demand estimate=")
-            || failed_stdout.contains(
-                "[context pressure: critical] last model-request planner demand estimate="
-            ),
+        failed_stdout.contains("[context pressure: warning] planner demand estimate=")
+            || failed_stdout.contains("[context pressure: critical] planner demand estimate="),
         "{failed_stdout}"
     );
     assert!(
@@ -4173,10 +4312,16 @@ fn ec_h1_auto_compact_skips_cancelled_budget_stopped_and_failed_turns() {
 fn ec_h1_auto_compact_defers_without_a_target_or_under_low_pressure() {
     let empty_stream = TemporaryDirectory::new("ec-h1-auto-compact-empty-stream");
     initialize_project(empty_stream.path());
-    let empty_stream_server = spawn_responses_server(vec![(
-        200,
-        text_response(&"analysis ".repeat(20_000), "ec-h1-empty-stream"),
-    )]);
+    let empty_stream_server = spawn_responses_server(vec![
+        (
+            200,
+            text_response(&"analysis ".repeat(10_000), "ec-h1-empty-stream"),
+        ),
+        (
+            200,
+            compaction_handoff_response("The text-only task remains open.", "ec-h1-empty-handoff"),
+        ),
+    ]);
     let empty_stream_config = write_auto_compact_context_window_config(
         empty_stream.path(),
         &empty_stream_server.base_url,
@@ -4194,20 +4339,27 @@ fn ec_h1_auto_compact_defers_without_a_target_or_under_low_pressure() {
         String::from_utf8_lossy(&empty_stream_output.stderr)
     );
     empty_stream_server.requests.recv().unwrap();
+    let empty_handoff = request_body(&empty_stream_server.requests.recv().unwrap());
+    assert!(
+        empty_handoff
+            .get("tools")
+            .and_then(Value::as_array)
+            .is_none_or(Vec::is_empty)
+    );
     assert!(empty_stream_server.requests.try_recv().is_err());
     empty_stream_server.join();
     let empty_stream_stdout = String::from_utf8(empty_stream_output.stdout).unwrap();
     assert!(
-        empty_stream_stdout.contains(
-            "Automatic completed-Turn compaction deferred: the Project Research stream is empty"
-        ),
+        empty_stream_stdout.contains("Automatic completed-Turn compaction applied"),
         "{empty_stream_stdout}"
     );
-    assert!(
-        session_events(empty_stream.path(), &session_id(empty_stream.path()))
-            .iter()
-            .all(|event| event["event_type"] != "session.compaction_created")
-    );
+    let empty_events = session_events(empty_stream.path(), &session_id(empty_stream.path()));
+    let empty_summary = &empty_events
+        .iter()
+        .find(|event| event["event_type"] == "session.compaction_created")
+        .unwrap()["payload"]["summary"];
+    assert_eq!(empty_summary["research_source"]["kind"], "empty");
+    assert!(empty_summary["evidence_spine"].is_null());
 
     let no_target = TemporaryDirectory::new("ec-h1-auto-compact-no-target");
     initialize_project(no_target.path());
@@ -4224,10 +4376,19 @@ fn ec_h1_auto_compact_defers_without_a_target_or_under_low_pressure() {
             diff_blob_id: Some(BlobId::new("c".repeat(64)).unwrap()),
         })),
     );
-    let no_target_server = spawn_responses_server(vec![(
-        200,
-        text_response(&"analysis ".repeat(20_000), "ec-h1-no-target"),
-    )]);
+    let no_target_server = spawn_responses_server(vec![
+        (
+            200,
+            text_response(&"analysis ".repeat(10_000), "ec-h1-no-target"),
+        ),
+        (
+            200,
+            compaction_handoff_response(
+                "No TargetSnapshot has been recorded.",
+                "ec-h1-no-target-handoff",
+            ),
+        ),
+    ]);
     let no_target_config = write_auto_compact_context_window_config(
         no_target.path(),
         &no_target_server.base_url,
@@ -4245,18 +4406,27 @@ fn ec_h1_auto_compact_defers_without_a_target_or_under_low_pressure() {
         String::from_utf8_lossy(&no_target_output.stderr)
     );
     no_target_server.requests.recv().unwrap();
+    let no_target_handoff = request_body(&no_target_server.requests.recv().unwrap());
+    assert!(
+        no_target_handoff
+            .get("tools")
+            .and_then(Value::as_array)
+            .is_none_or(Vec::is_empty)
+    );
     assert!(no_target_server.requests.try_recv().is_err());
     no_target_server.join();
     let no_target_stdout = String::from_utf8(no_target_output.stdout).unwrap();
     assert!(
-        no_target_stdout.contains("Automatic completed-Turn compaction deferred: the current Project has no TargetSnapshot"),
+        no_target_stdout.contains("Automatic completed-Turn compaction applied"),
         "{no_target_stdout}"
     );
-    assert!(
-        session_events(no_target.path(), &session_id(no_target.path()))
-            .iter()
-            .all(|event| event["event_type"] != "session.compaction_created")
-    );
+    let no_target_events = session_events(no_target.path(), &session_id(no_target.path()));
+    let no_target_summary = &no_target_events
+        .iter()
+        .find(|event| event["event_type"] == "session.compaction_created")
+        .unwrap()["payload"]["summary"];
+    assert_eq!(no_target_summary["research_source"]["kind"], "nonempty");
+    assert!(no_target_summary["evidence_spine"].is_null());
 
     let low_pressure = TemporaryDirectory::new("ec-h1-auto-compact-low-pressure");
     initialize_project(low_pressure.path());
@@ -4341,10 +4511,16 @@ fn ec_h1_auto_compact_defers_without_a_target_or_under_low_pressure() {
         "stable prompt constraint ".repeat(16_000),
     )
     .unwrap();
-    let not_useful_server = spawn_responses_server(vec![(
-        200,
-        text_response("small answer", "ec-h1-not-useful"),
-    )]);
+    let not_useful_server = spawn_responses_server(vec![
+        (200, text_response("small answer", "ec-h1-not-useful")),
+        (
+            200,
+            compaction_handoff_response(
+                "This handoff cannot reduce the stable prompt pressure.",
+                "ec-h1-not-useful-handoff",
+            ),
+        ),
+    ]);
     let not_useful_config = write_auto_compact_context_window_config(
         not_useful.path(),
         &not_useful_server.base_url,
@@ -4370,6 +4546,13 @@ fn ec_h1_auto_compact_defers_without_a_target_or_under_low_pressure() {
         String::from_utf8_lossy(&not_useful_output.stderr)
     );
     not_useful_server.requests.recv().unwrap();
+    let handoff = request_body(&not_useful_server.requests.recv().unwrap());
+    assert!(
+        handoff
+            .get("tools")
+            .and_then(Value::as_array)
+            .is_none_or(Vec::is_empty)
+    );
     assert!(not_useful_server.requests.try_recv().is_err());
     not_useful_server.join();
     let not_useful_stdout = String::from_utf8(not_useful_output.stdout).unwrap();
@@ -4433,7 +4616,7 @@ fn m5_cli_reports_real_tool_start_and_persisted_terminal_receipt() {
     assert_eq!(
         session_events(project.path(), &session_id(project.path()))
             .iter()
-            .filter(|event| event["event_type"] == "tool.execution_receipt_recorded")
+            .filter(|event| event["event_type"] == "tool.execution_outcome_recorded")
             .count(),
         1
     );
@@ -4555,7 +4738,7 @@ fn m5_cli_labels_deduplicated_tool_calls_without_a_second_start_or_receipt() {
     assert_eq!(
         events
             .iter()
-            .filter(|event| event["event_type"] == "tool.execution_receipt_recorded")
+            .filter(|event| event["event_type"] == "tool.execution_outcome_recorded")
             .count(),
         1,
         "the follower reuses the leader Receipt fact"
@@ -4680,7 +4863,7 @@ fn f3_graceful_interrupt_never_fabricates_a_receipt_for_unobserved_external_effe
     let events = session_events(project.path(), &session_id(project.path()));
     let receipt_statuses = events
         .iter()
-        .filter(|event| event["event_type"] == "tool.execution_receipt_recorded")
+        .filter(|event| event["event_type"] == "tool.execution_outcome_recorded")
         .map(|event| event["payload"]["receipt"]["status"].as_str().unwrap())
         .collect::<Vec<_>>();
     assert_eq!(receipt_statuses, vec!["failed"]);
@@ -5062,7 +5245,7 @@ fn durable_receipt_survives_a_later_provider_failure_without_a_stale_projection_
     assert_eq!(
         events
             .iter()
-            .filter(|event| event["event_type"] == "tool.execution_receipt_recorded")
+            .filter(|event| event["event_type"] == "tool.execution_outcome_recorded")
             .count(),
         1,
         "the cache-owned source Receipt must be replayed and deduplicated"

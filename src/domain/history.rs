@@ -160,6 +160,15 @@ pub(crate) fn normalize_with_subcommands(
     items: &[ContentItem],
     children: &[super::tools::SubcommandCheckpoint],
 ) -> Result<Vec<ContentItem>, HistoryError> {
+    normalize_with_recorded_results(items, children, &[])
+}
+
+/// Recover only results actually recorded with a durable Receipt.
+pub(crate) fn normalize_with_recorded_results(
+    items: &[ContentItem],
+    children: &[super::tools::SubcommandCheckpoint],
+    recorded_results: &[&ToolResult],
+) -> Result<Vec<ContentItem>, HistoryError> {
     let mut history = ConversationHistory::default();
     for item in items {
         match item {
@@ -203,11 +212,17 @@ pub(crate) fn normalize_with_subcommands(
                 std::mem::take(&mut group),
                 &history,
                 children,
+                recorded_results,
             )?);
         }
         group.append_content_item(item.clone())?;
     }
-    normalized.extend(finish_recovery_group(group, &history, children)?);
+    normalized.extend(finish_recovery_group(
+        group,
+        &history,
+        children,
+        recorded_results,
+    )?);
     Ok(normalized)
 }
 
@@ -215,10 +230,18 @@ fn finish_recovery_group(
     mut group: ConversationHistory,
     complete_input: &ConversationHistory,
     children: &[super::tools::SubcommandCheckpoint],
+    recorded_results: &[&ToolResult],
 ) -> Result<Vec<ContentItem>, HistoryError> {
     for (call_id, tool_name) in group.unpaired_tool_calls_in_call_order() {
         if complete_input.tool_pairs[&call_id].completed {
             return Err(HistoryError::ToolResultAfterUserMessage { call_id });
+        }
+        if let Some(result) = recorded_results
+            .iter()
+            .find(|result| result.call_id == call_id)
+        {
+            group.append_tool_result((*result).clone())?;
+            continue;
         }
         let mut output = serde_json::json!({
             "error": "aborted",
@@ -285,6 +308,29 @@ pub(crate) fn retain_recent_complete_history(
 
 /// Validates externally assembled Context items by replaying Tool pairing
 /// through the same History owner used by the AgentLoop.
+pub(crate) fn latest_complete_tool_batch_items(
+    items: &[ContentItem],
+) -> Result<usize, HistoryError> {
+    ConversationHistory::from_complete_content_items(items)?;
+    let mut pending = std::collections::BTreeSet::new();
+    let mut latest_start = None;
+    for (index, item) in items.iter().enumerate() {
+        match item {
+            ContentItem::ToolCall { call } => {
+                if pending.is_empty() {
+                    latest_start = Some(index);
+                }
+                pending.insert(&call.call_id);
+            }
+            ContentItem::ToolResult { result } => {
+                pending.remove(&result.call_id);
+            }
+            _ => {}
+        }
+    }
+    Ok(latest_start.map_or(0, |start| items.len() - start))
+}
+
 pub(crate) fn validate_content_items(items: &[ContentItem]) -> Result<(), HistoryError> {
     let mut history = ConversationHistory::default();
     for item in items {

@@ -89,7 +89,7 @@ async fn snapshot_inspection_validates_cache_without_rebuilding_or_rewriting_it(
     let call = ToolCall::new(
         ToolCallId::new("build-snapshot-cache"),
         ToolName::new("inspect_project"),
-        json!({"observed_at": "2026-08-23T12:00:00Z"}),
+        json!({}),
     );
     let plan = tools
         .plan(ExecutionId::new("build-snapshot-cache"), call)
@@ -128,7 +128,6 @@ async fn snapshot_inspection_reports_a_current_hit_after_an_incremental_cache_re
             ToolCallId::new(execution_id),
             ToolName::new("inspect_project"),
             json!({
-                "observed_at": "2026-08-23T12:00:00Z",
                 "hash_paths": hash_paths,
             }),
         );

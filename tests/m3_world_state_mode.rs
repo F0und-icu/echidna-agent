@@ -69,7 +69,7 @@ fn capabilities(image_input: bool) -> ModelCapabilities {
         usage_reporting: true,
         max_output_tokens: None,
         reasoning_effort: None,
-        context_window: 32_768,
+        context_window: 272_000,
         capability_mapping_version: CapabilityMappingVersion::new(7),
     }
 }
@@ -169,7 +169,7 @@ fn context_metrics(composition: &PromptComposition, tool_specs: Vec<ToolSpec>) -
     let plan = ContextPlanner::current()
         .compile(
             fragments,
-            ContextBudget::new(32_768, 0, 0).unwrap(),
+            ContextBudget::new(272_000, 0, 0).unwrap(),
             &capabilities(false),
             tool_specs,
             ModelRequestRequirements::default(),

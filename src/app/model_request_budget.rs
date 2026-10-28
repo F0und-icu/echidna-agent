@@ -20,20 +20,25 @@ impl RequestCounts {
 }
 
 pub(crate) struct ModelRequestBudget {
-    limit: usize,
+    limit: Option<usize>,
     counts: Mutex<RequestCounts>,
 }
 
 impl ModelRequestBudget {
     pub(crate) fn new(limit: usize) -> Self {
         Self {
-            limit,
+            limit: (limit != 0).then_some(limit),
             counts: Mutex::new(RequestCounts::default()),
         }
     }
 
-    pub(crate) fn limit(&self) -> usize {
+    pub(crate) fn limit(&self) -> Option<usize> {
         self.limit
+    }
+
+    pub(crate) fn remaining(&self) -> Option<usize> {
+        self.limit
+            .map(|limit| limit.saturating_sub(self.counts().total()))
     }
 
     pub(crate) fn counts(&self) -> RequestCounts {
@@ -44,8 +49,10 @@ impl ModelRequestBudget {
     /// not refunded; admitted attempts are not claimed as delivered requests.
     pub(crate) fn admit(&self, role: ProviderSessionRole) -> Result<(), usize> {
         let mut counts = self.counts.lock().expect("request admission lock poisoned");
-        if counts.total() >= self.limit {
-            return Err(self.limit);
+        if let Some(limit) = self.limit
+            && counts.total() >= limit
+        {
+            return Err(limit);
         }
         match role {
             ProviderSessionRole::Primary => counts.primary += 1,

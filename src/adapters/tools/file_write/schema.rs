@@ -94,10 +94,9 @@ pub(in super::super) fn output_schema() -> Value {
                     "before_hash": {"type": ["string", "null"]},
                     "before_size": {"type": ["integer", "null"], "minimum": 0},
                     "after_hash": {"type": ["string", "null"]},
-                    "after_size": {"type": ["integer", "null"], "minimum": 0},
-                    "actual_diff": {"type": "string"}
+                    "after_size": {"type": ["integer", "null"], "minimum": 0}
                 },
-                "required": ["path", "expected_preimage_hash", "before_hash", "before_size", "after_hash", "after_size", "actual_diff"],
+                "required": ["path", "expected_preimage_hash", "before_hash", "before_size", "after_hash", "after_size"],
                 "additionalProperties": false
             }}
         },

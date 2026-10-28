@@ -46,7 +46,7 @@ fn ctf_r3a2_blob_failure_never_records_a_durable_receipt_or_tool_result() {
                 .any(|event| event["payload"]["item"]["kind"] == "tool_call")
         );
         assert!(!events.iter().any(|event| event["event_type"]
-            == "tool.execution_receipt_recorded"
+            == "tool.execution_outcome_recorded"
             || event["event_type"] == "tool.result_cache_hit"));
         let projection = echidna::app::session::SessionProjection::replay(
             events
@@ -86,7 +86,7 @@ fn ctf_r3a2_durable_output_can_be_read_after_explicit_resume() {
     let mut config_text = fs::read_to_string(&config)
         .unwrap()
         .replace("incremental_input = true", "incremental_input = false")
-        .replace("context_window = 32768", "context_window = 1048576");
+        .replace("context_window = 272000", "context_window = 1048576");
     config_text.push_str("\n[runtime]\nmodel_request_limit_per_turn = 1\n");
     fs::write(&config, config_text).unwrap();
     let stopped = f2a_wait_child(
@@ -122,7 +122,7 @@ fn ctf_r3a2_durable_output_can_be_read_after_explicit_resume() {
     let config_text = fs::read_to_string(&config)
         .unwrap()
         .replace("incremental_input = true", "incremental_input = false")
-        .replace("context_window = 32768", "context_window = 1048576");
+        .replace("context_window = 272000", "context_window = 1048576");
     fs::write(&config, config_text).unwrap();
     let output = f2a_wait_child(
         spawn_f2a_chat(
@@ -154,11 +154,11 @@ fn ctf_r3a2_durable_output_can_be_read_after_explicit_resume() {
     let receipt = events
         .iter()
         .find(|event| {
-            event["event_type"] == "tool.execution_receipt_recorded"
+            event["event_type"] == "tool.execution_outcome_recorded"
                 && event["payload"]["receipt"]["execution_id"] == "execution:capture"
         })
         .unwrap();
-    assert_eq!(receipt["payload"]["schema_version"], 2);
+    assert_eq!(receipt["payload"]["schema_version"], 1);
     let captures = &receipt["payload"]["receipt"]["output_captures"];
     assert_eq!(captures[0]["blob_id"], blob_id);
     assert_eq!(captures[0]["complete"], true);

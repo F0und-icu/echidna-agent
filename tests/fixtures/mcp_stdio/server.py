@@ -3,22 +3,40 @@
 import json
 import os
 from pathlib import Path
-import subprocess
 import sys
 import time
 
 mode, record_dir, *literal_args = sys.argv[1:]
 root = Path(record_dir)
 root.mkdir(exist_ok=True)
-descendant = subprocess.Popen(
-    [sys.executable, "-c", "import time; time.sleep(60)"],
-    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-)
-(root / "launch.json").write_text(json.dumps({
-    "pid": os.getpid(), "descendant": descendant.pid, "cwd": os.getcwd(),
+ready_read, ready_write = os.pipe()
+descendant = os.fork()
+if descendant == 0:
+    os.close(ready_read)
+    devnull = os.open(os.devnull, os.O_RDWR)
+    for stream in (0, 1, 2):
+        os.dup2(devnull, stream)
+    if devnull > 2:
+        os.close(devnull)
+    os.write(ready_write, b"R")
+    os.close(ready_write)
+    time.sleep(60)
+    os._exit(0)
+os.close(ready_write)
+launch = {
+    "pid": os.getpid(), "descendant": descendant, "cwd": os.getcwd(),
     "env_keys": sorted(os.environ), "literal": os.environ.get("MCP_LITERAL"),
     "explicit": os.environ.get("MCP_EXPLICIT"), "args": literal_args,
-}))
+    "descendant_ready": False,
+}
+(root / "launch.json").write_text(json.dumps(launch))
+# Establish a real same-group descendant before serving initialize, without
+# charging a second interpreter launch to the fixture's startup deadline.
+if os.read(ready_read, 1) != b"R":
+    raise RuntimeError("fixture descendant did not acknowledge readiness")
+os.close(ready_read)
+launch["descendant_ready"] = True
+(root / "launch.json").write_text(json.dumps(launch))
 
 
 def record(value):
@@ -58,6 +76,8 @@ for line in sys.stdin.buffer:
     record(request)
     method = request.get("method")
     if method == "initialize":
+        if mode == "slow_startup_short_call":
+            time.sleep(0.15)
         if mode == "startup_stderr":
             flood_stderr()
         if mode == "startup_timeout":
@@ -83,7 +103,7 @@ for line in sys.stdin.buffer:
     elif method == "tools/call":
         if mode == "stderr":
             flood_stderr()
-        if mode in ("timeout", "cancel"):
+        if mode in ("timeout", "cancel", "slow_startup_short_call"):
             time.sleep(60)
         if mode == "eof":
             break

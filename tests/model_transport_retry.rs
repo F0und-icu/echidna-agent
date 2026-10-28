@@ -341,6 +341,7 @@ mod retry_contracts {
             vec![Err(ModelProviderError::ConnectionFailure {
                 timeout: false,
                 io_kind: "Some(ConnectionReset)".to_owned(),
+                message: "fixture connection failure".to_owned(),
             })],
             completed("recovered"),
         ]);
@@ -371,6 +372,7 @@ mod retry_contracts {
                 Err(ModelProviderError::ConnectionFailure {
                     timeout: false,
                     io_kind: "Some(ConnectionReset)".to_owned(),
+                    message: "fixture connection failure".to_owned(),
                 }),
             ],
             completed("committed after reconnect"),
@@ -426,6 +428,7 @@ mod retry_contracts {
         let interruption = ModelProviderError::ConnectionFailure {
             timeout: false,
             io_kind: "Some(ConnectionReset)".to_owned(),
+            message: "fixture connection failure".to_owned(),
         };
         for limit in 1..=3 {
             let mut responses = vec![vec![Err(interruption.clone())]; limit];
@@ -510,6 +513,7 @@ mod retry_contracts {
             PreparedFixtureProvider::new([vec![Err(ModelProviderError::ConnectionFailure {
                 timeout: true,
                 io_kind: "None".to_owned(),
+                message: "fixture connection timeout".to_owned(),
             })]]);
         let cancellation = AgentCancellation::new();
         let mut before_attempts = 0;
@@ -602,6 +606,7 @@ mod retry_contracts {
             [vec![Err(ModelProviderError::ConnectionFailure {
                 timeout: false,
                 io_kind: "Some(ConnectionReset)".to_owned(),
+                message: "fixture connection failure".to_owned(),
             })]],
         );
         let binding = vision_binding();
@@ -669,6 +674,7 @@ mod retry_contracts {
             [vec![Err(ModelProviderError::ConnectionFailure {
                 timeout: false,
                 io_kind: "Some(ConnectionReset)".to_owned(),
+                message: "fixture connection failure".to_owned(),
             })]],
         );
         let binding = vision_binding();

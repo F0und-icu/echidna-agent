@@ -5,7 +5,7 @@
 //! generic envelope remains the owner of schema/upcasting, event identity and
 //! sequence validation.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -18,13 +18,18 @@ use super::events::{
     ApplyOutcome, CurrentEventUpcaster, EventEnvelope, EventError, EventId, EventReducer,
     EventSequence, EventType, EventUpcaster, OccurredAt, State, StreamId,
 };
-use super::history::{ConversationHistory, HistoryError, normalize_with_subcommands};
+use super::history::{ConversationHistory, HistoryError, normalize_with_recorded_results};
 use super::model::ContentItem;
-use super::model::{MAX_TOOL_ARGUMENT_CORRECTIONS_PER_TURN, ToolArgumentDiagnostic};
+use super::model::{
+    MAX_TOOL_ARGUMENT_CORRECTIONS_PER_TURN, ModelUsage, ModelUsageError, ToolArgumentDiagnostic,
+};
 use super::request_audit::{RequestAuditError, RequestAuditManifest};
 use super::research_control::{ResearchPhase, ResearchPhaseSelection};
 use super::tools::SubcommandCheckpoint;
-use super::tools::{ExecutionReceipt, ExecutionReceiptEventPayload, ExecutionReceiptPayloadError};
+use super::tools::{
+    ExecutionReceipt, ExecutionReceiptEventPayload, ExecutionReceiptPayloadError, ToolCallId,
+    ToolResult,
+};
 use super::vision::{
     VisionAnalysisFailure, VisionFactError, VisionObservation, VisionObservationId,
     VisionRouteRecord,
@@ -35,11 +40,14 @@ const SESSION_STARTED_EVENT_TYPE: &str = "session.started";
 const SESSION_RESUMED_EVENT_TYPE: &str = "session.resumed";
 const SESSION_ENDED_EVENT_TYPE: &str = "session.ended";
 const RECEIPT_RECORDED_EVENT_TYPE: &str = "tool.execution_receipt_recorded";
+const EXECUTION_OUTCOME_RECORDED_EVENT_TYPE: &str = "tool.execution_outcome_recorded";
+const EXECUTION_RESULT_REUSED_EVENT_TYPE: &str = "tool.execution_result_reused";
 const SUBCOMMAND_CHECKPOINT_EVENT_TYPE: &str = "tool.subcommand_checkpointed";
 const CACHE_HIT_EVENT_TYPE: &str = "tool.result_cache_hit";
 const STREAM_RECOVERED_EVENT_TYPE: &str = "StreamRecovered";
 const HISTORY_ITEM_RECORDED_EVENT_TYPE: &str = "session.history_item_recorded";
 const MODEL_SAMPLE_REJECTED_EVENT_TYPE: &str = "model.sample_rejected";
+const MODEL_USAGE_RECORDED_EVENT_TYPE: &str = "model.usage_recorded";
 pub(super) const COMPACTION_CREATED_EVENT_TYPE: &str = "session.compaction_created";
 pub(super) const REQUEST_AUDIT_RECORDED_EVENT_TYPE: &str = "session.request_audit_recorded";
 const VISION_ROUTE_DECIDED_EVENT_TYPE: &str = "vision.route_decided";
@@ -49,11 +57,35 @@ const RESEARCH_PHASE_SELECTED_EVENT_TYPE: &str = "session.research_phase_selecte
 const DOMAIN_PROFILE_SELECTED_EVENT_TYPE: &str = "session.domain_profile_selected";
 pub(super) const CURRENT_SESSION_PAYLOAD_SCHEMA_VERSION: u16 = 1;
 
-mod compaction;
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CompactionContextCapturedPayload {
+    schema_version: u16,
+    blob_id: crate::domain::artifacts::BlobId,
+}
 
+mod argument_correction;
+mod compaction;
+mod model_delivery;
+mod operator_boundary;
+
+pub use model_delivery::ModelDeliveryCommitted;
+pub(crate) use operator_boundary::ProtectedOperatorContext;
+pub use operator_boundary::{OperatorInputRef, OperatorTurnBoundary};
+
+pub use compaction::CompactionModelSample;
+pub(crate) use compaction::MainV5ValidationFacts;
+pub(crate) use compaction::{
+    CompactionContextCapture, CompactionSourceEntry, CompactionSourceNode,
+    CompactionSourceNodeInput, CompactionSourcePlan, CompactionSourceRange,
+    VerifiedCompactionGraph, compaction_instructions, node_template_hash,
+};
 pub use compaction::{
     CompactionValidationContext, EvidenceSpine, NarrativeSummary, ResearchStreamIdentity,
     SessionCompaction, SessionSummary, SessionSummaryDraft,
+};
+pub(crate) use compaction::{
+    ResearchSourceIdentity, SessionSourceIdentity, ValidatedResearchSource,
 };
 
 /// A read-only projection of one existing Receipt fact. It deliberately
@@ -62,7 +94,16 @@ pub use compaction::{
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SessionExecutionReceiptRecord {
     pub(crate) event_id: EventId,
+    pub(crate) sequence: EventSequence,
     pub(crate) receipt: ExecutionReceipt,
+    pub(crate) result: Option<ToolResult>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ReusedExecutionResult {
+    event_id: EventId,
+    receipt_event_id: EventId,
+    result: ToolResult,
 }
 
 /// The distinct lifecycle state reconstructed from a Session stream.
@@ -77,10 +118,46 @@ pub enum SessionLifecycle {
 /// the Tool domain's `ExecutionReceipt` rather than defining a Session copy.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionEvent {
+    CompactionContextCaptured {
+        blob_id: crate::domain::artifacts::BlobId,
+    },
+    CompactionSampleRecorded {
+        sample: CompactionModelSample,
+    },
+    OperatorTurnBoundaryRecorded {
+        boundary: OperatorTurnBoundary,
+    },
+    ModelDeliveryCommitted {
+        delivery: ModelDeliveryCommitted,
+    },
+    ModelUsageRecorded {
+        request_audit_event_id: EventId,
+        provider_session: ProviderSessionRef,
+        usage: ModelUsage,
+    },
+    ExecutionOutcomeRecorded {
+        receipt: ExecutionReceipt,
+        result: ToolResult,
+    },
+    ExecutionResultReused {
+        receipt_event_id: EventId,
+        result: ToolResult,
+    },
     ModelSampleRejected {
         request_audit_event_id: EventId,
         diagnostic: ToolArgumentDiagnostic,
         corrections_used: u8,
+    },
+    ConsecutiveModelSampleRejected {
+        request_audit_event_id: EventId,
+        diagnostic: ToolArgumentDiagnostic,
+        corrections_used: u8,
+        reset_anchor: Option<EventId>,
+    },
+    ModelArgumentCorrectionReset {
+        accepted_request_audit_event_id: EventId,
+        prior_rejection_audit_event_id: EventId,
+        accepted_history_event_refs: Vec<EventId>,
     },
     SubcommandCheckpointed {
         checkpoint: SubcommandCheckpoint,
@@ -153,7 +230,32 @@ impl SessionEvent {
 
     fn event_type(&self) -> EventType {
         match self {
+            Self::CompactionContextCaptured { .. } => {
+                EventType::new("session.compaction_context_captured")
+            }
+            Self::CompactionSampleRecorded { .. } => {
+                EventType::new("session.compaction_sample_recorded")
+            }
+            Self::OperatorTurnBoundaryRecorded { .. } => {
+                EventType::new("session.operator_turn_boundary_recorded")
+            }
+            Self::ModelDeliveryCommitted { .. } => {
+                EventType::new("session.model_delivery_committed")
+            }
+            Self::ModelUsageRecorded { .. } => EventType::new(MODEL_USAGE_RECORDED_EVENT_TYPE),
+            Self::ExecutionOutcomeRecorded { .. } => {
+                EventType::new(EXECUTION_OUTCOME_RECORDED_EVENT_TYPE)
+            }
+            Self::ExecutionResultReused { .. } => {
+                EventType::new(EXECUTION_RESULT_REUSED_EVENT_TYPE)
+            }
             Self::ModelSampleRejected { .. } => EventType::new(MODEL_SAMPLE_REJECTED_EVENT_TYPE),
+            Self::ConsecutiveModelSampleRejected { .. } => {
+                EventType::new(MODEL_SAMPLE_REJECTED_EVENT_TYPE)
+            }
+            Self::ModelArgumentCorrectionReset { .. } => {
+                EventType::new("model.argument_correction_reset")
+            }
             Self::SubcommandCheckpointed { .. } => EventType::new(SUBCOMMAND_CHECKPOINT_EVENT_TYPE),
             Self::Started { .. } => EventType::new(SESSION_STARTED_EVENT_TYPE),
             Self::Resumed { .. } => EventType::new(SESSION_RESUMED_EVENT_TYPE),
@@ -180,6 +282,40 @@ impl SessionEvent {
 
     fn encode_payload(&self, event_type: &EventType) -> Result<Value, SessionError> {
         let payload = match self {
+            Self::CompactionContextCaptured { blob_id } => {
+                serde_json::to_value(CompactionContextCapturedPayload {
+                    schema_version: 1,
+                    blob_id: blob_id.clone(),
+                })
+            }
+            Self::CompactionSampleRecorded { sample } => serde_json::to_value(sample),
+            Self::OperatorTurnBoundaryRecorded { boundary } => serde_json::to_value(boundary),
+            Self::ModelDeliveryCommitted { delivery } => serde_json::to_value(delivery),
+            Self::ModelUsageRecorded {
+                request_audit_event_id,
+                provider_session,
+                usage,
+            } => serde_json::to_value(ModelUsagePayload {
+                schema_version: CURRENT_SESSION_PAYLOAD_SCHEMA_VERSION,
+                request_audit_event_id: request_audit_event_id.clone(),
+                provider_session: provider_session.clone(),
+                usage: *usage,
+            }),
+            Self::ExecutionOutcomeRecorded { receipt, result } => {
+                serde_json::to_value(ExecutionOutcomePayload {
+                    schema_version: CURRENT_SESSION_PAYLOAD_SCHEMA_VERSION,
+                    receipt: receipt.clone(),
+                    result: result.clone(),
+                })
+            }
+            Self::ExecutionResultReused {
+                receipt_event_id,
+                result,
+            } => serde_json::to_value(ReusedExecutionResultPayload {
+                schema_version: CURRENT_SESSION_PAYLOAD_SCHEMA_VERSION,
+                receipt_event_id: receipt_event_id.clone(),
+                result: result.clone(),
+            }),
             Self::ModelSampleRejected {
                 request_audit_event_id,
                 diagnostic,
@@ -189,6 +325,28 @@ impl SessionEvent {
                 request_audit_event_id: request_audit_event_id.clone(),
                 diagnostic: *diagnostic,
                 corrections_used: *corrections_used,
+            }),
+            Self::ConsecutiveModelSampleRejected {
+                request_audit_event_id,
+                diagnostic,
+                corrections_used,
+                reset_anchor,
+            } => serde_json::to_value(argument_correction::ConsecutiveRejectionPayload {
+                schema_version: 2,
+                request_audit_event_id: request_audit_event_id.clone(),
+                diagnostic: *diagnostic,
+                corrections_used: *corrections_used,
+                reset_anchor: reset_anchor.clone(),
+            }),
+            Self::ModelArgumentCorrectionReset {
+                accepted_request_audit_event_id,
+                prior_rejection_audit_event_id,
+                accepted_history_event_refs,
+            } => serde_json::to_value(argument_correction::CorrectionResetPayload {
+                schema_version: 1,
+                accepted_request_audit_event_id: accepted_request_audit_event_id.clone(),
+                prior_rejection_audit_event_id: prior_rejection_audit_event_id.clone(),
+                accepted_history_event_refs: accepted_history_event_refs.clone(),
             }),
             Self::SubcommandCheckpointed { checkpoint } => serde_json::to_value(checkpoint),
             Self::Started {
@@ -233,9 +391,80 @@ impl SessionEvent {
         })
     }
 
-    fn decode(event_type: &EventType, payload: Value) -> Result<Self, SessionError> {
+    pub(crate) fn decode(event_type: &EventType, payload: Value) -> Result<Self, SessionError> {
         match event_type.as_str() {
+            "session.operator_turn_boundary_recorded" => Ok(Self::OperatorTurnBoundaryRecorded {
+                boundary: decode_strict_payload(event_type, payload)?,
+            }),
+            "session.model_delivery_committed" => Ok(Self::ModelDeliveryCommitted {
+                delivery: decode_strict_payload(event_type, payload)?,
+            }),
+            "session.compaction_context_captured" => {
+                let capture: CompactionContextCapturedPayload =
+                    decode_strict_payload(event_type, payload)?;
+                require_current_payload_schema(event_type, capture.schema_version)?;
+                crate::domain::artifacts::BlobId::new(capture.blob_id.as_str()).map_err(
+                    |error| SessionError::CompactionSourceInvalid {
+                        message: error.to_string(),
+                    },
+                )?;
+                Ok(Self::CompactionContextCaptured {
+                    blob_id: capture.blob_id,
+                })
+            }
+            "session.compaction_sample_recorded" => {
+                let sample: CompactionModelSample = decode_strict_payload(event_type, payload)?;
+                sample.validate()?;
+                Ok(Self::CompactionSampleRecorded { sample })
+            }
+            MODEL_USAGE_RECORDED_EVENT_TYPE => {
+                let payload: ModelUsagePayload = decode_strict_payload(event_type, payload)?;
+                require_current_payload_schema(event_type, payload.schema_version)?;
+                Ok(Self::ModelUsageRecorded {
+                    request_audit_event_id: payload.request_audit_event_id,
+                    provider_session: payload.provider_session,
+                    usage: payload.usage,
+                })
+            }
+            EXECUTION_OUTCOME_RECORDED_EVENT_TYPE => {
+                let payload: ExecutionOutcomePayload = decode_strict_payload(event_type, payload)?;
+                require_current_payload_schema(event_type, payload.schema_version)?;
+                Ok(Self::ExecutionOutcomeRecorded {
+                    receipt: decode_execution_receipt(
+                        serde_json::to_value(ExecutionReceiptEventPayload::current(
+                            payload.receipt,
+                        ))
+                        .map_err(|error| {
+                            SessionError::MalformedPayload {
+                                event_type: event_type.clone(),
+                                message: error.to_string(),
+                            }
+                        })?,
+                        event_type,
+                    )?,
+                    result: payload.result,
+                })
+            }
+            EXECUTION_RESULT_REUSED_EVENT_TYPE => {
+                let payload: ReusedExecutionResultPayload =
+                    decode_strict_payload(event_type, payload)?;
+                require_current_payload_schema(event_type, payload.schema_version)?;
+                Ok(Self::ExecutionResultReused {
+                    receipt_event_id: payload.receipt_event_id,
+                    result: payload.result,
+                })
+            }
             MODEL_SAMPLE_REJECTED_EVENT_TYPE => {
+                if payload.get("schema_version").and_then(Value::as_u64) == Some(2) {
+                    let payload: argument_correction::ConsecutiveRejectionPayload =
+                        decode_strict_payload(event_type, payload)?;
+                    return Ok(Self::ConsecutiveModelSampleRejected {
+                        request_audit_event_id: payload.request_audit_event_id,
+                        diagnostic: payload.diagnostic,
+                        corrections_used: payload.corrections_used,
+                        reset_anchor: payload.reset_anchor,
+                    });
+                }
                 let payload: ModelSampleRejectedPayload =
                     decode_strict_payload(event_type, payload)?;
                 require_current_payload_schema(event_type, payload.schema_version)?;
@@ -243,6 +472,16 @@ impl SessionEvent {
                     request_audit_event_id: payload.request_audit_event_id,
                     diagnostic: payload.diagnostic,
                     corrections_used: payload.corrections_used,
+                })
+            }
+            "model.argument_correction_reset" => {
+                let payload: argument_correction::CorrectionResetPayload =
+                    decode_strict_payload(event_type, payload)?;
+                require_current_payload_schema(event_type, payload.schema_version)?;
+                Ok(Self::ModelArgumentCorrectionReset {
+                    accepted_request_audit_event_id: payload.accepted_request_audit_event_id,
+                    prior_rejection_audit_event_id: payload.prior_rejection_audit_event_id,
+                    accepted_history_event_refs: payload.accepted_history_event_refs,
                 })
             }
             SUBCOMMAND_CHECKPOINT_EVENT_TYPE => {
@@ -371,17 +610,31 @@ pub struct SessionState {
     used_primary_provider_session_ids: BTreeSet<ProviderSessionId>,
     history: ConversationHistory,
     history_event_ids: Vec<EventId>,
+    history_event_sequences: Vec<EventSequence>,
+    operator_boundaries: Vec<OperatorTurnBoundary>,
+    recovered_history_item_count: usize,
+    recovered_history_start: Option<usize>,
     resume_count: u64,
     execution_receipt_count: u64,
     execution_receipts: Vec<SessionExecutionReceiptRecord>,
+    reused_execution_results: Vec<ReusedExecutionResult>,
     subcommand_checkpoints: Vec<SubcommandCheckpoint>,
     cache_hit_count: u64,
     recovery_count: u64,
     latest_compaction: Option<SessionCompaction>,
+    compaction_samples: Vec<(EventId, EventSequence, CompactionModelSample)>,
     request_audits: Vec<RequestAuditManifest>,
-    last_rejected_request: Option<EventId>,
+    request_audit_sequences: Vec<EventSequence>,
+    model_usage: BTreeMap<EventId, ModelUsage>,
+    model_deliveries: Vec<ModelDeliveryCommitted>,
+    latest_audit_history_len: usize,
+    rejected_requests: BTreeSet<EventId>,
+    consecutive_rejection: Option<argument_correction::ConsecutiveRejection>,
+    correction_reset_anchor: Option<EventId>,
     vision_routes: Vec<VisionRouteRecord>,
+    vision_route_sequences: Vec<EventSequence>,
     vision_observations: Vec<VisionObservation>,
+    vision_observation_event_ids: Vec<(EventId, EventSequence)>,
     vision_failures: Vec<VisionAnalysisFailure>,
     research_phase_selection: Option<ResearchPhaseSelection>,
     domain_profile_selection: Option<DomainProfileSelection>,
@@ -397,17 +650,31 @@ impl Default for SessionState {
             used_primary_provider_session_ids: BTreeSet::new(),
             history: ConversationHistory::default(),
             history_event_ids: Vec::new(),
+            history_event_sequences: Vec::new(),
+            operator_boundaries: Vec::new(),
+            recovered_history_item_count: 0,
+            recovered_history_start: None,
             resume_count: 0,
             execution_receipt_count: 0,
             execution_receipts: Vec::new(),
+            reused_execution_results: Vec::new(),
             subcommand_checkpoints: Vec::new(),
             cache_hit_count: 0,
             recovery_count: 0,
             latest_compaction: None,
+            compaction_samples: Vec::new(),
             request_audits: Vec::new(),
-            last_rejected_request: None,
+            request_audit_sequences: Vec::new(),
+            model_usage: BTreeMap::new(),
+            model_deliveries: Vec::new(),
+            latest_audit_history_len: 0,
+            rejected_requests: BTreeSet::new(),
+            consecutive_rejection: None,
+            correction_reset_anchor: None,
             vision_routes: Vec::new(),
+            vision_route_sequences: Vec::new(),
             vision_observations: Vec::new(),
+            vision_observation_event_ids: Vec::new(),
             vision_failures: Vec::new(),
             research_phase_selection: None,
             domain_profile_selection: None,
@@ -445,11 +712,110 @@ impl SessionState {
         };
         let mut items = compaction.retained_history().to_vec();
         items.extend_from_slice(&self.history.items()[compaction.source_history_item_count()..]);
-        normalize_with_subcommands(&items, &self.subcommand_checkpoints)
+        self.normalize_items(&items)
     }
 
     pub(crate) fn full_normalized_history(&self) -> Result<Vec<ContentItem>, HistoryError> {
-        normalize_with_subcommands(self.history.items(), &self.subcommand_checkpoints)
+        self.normalize_items(self.history.items())
+    }
+
+    fn normalize_items(&self, items: &[ContentItem]) -> Result<Vec<ContentItem>, HistoryError> {
+        let results = self
+            .execution_receipts
+            .iter()
+            .filter_map(|record| record.result.as_ref())
+            .chain(
+                self.reused_execution_results
+                    .iter()
+                    .map(|record| &record.result),
+            )
+            .collect::<Vec<_>>();
+        normalize_with_recorded_results(items, &self.subcommand_checkpoints, &results)
+    }
+
+    pub(crate) fn recorded_tool_result(&self, call_id: &ToolCallId) -> Option<&ToolResult> {
+        self.execution_receipts
+            .iter()
+            .filter_map(|record| record.result.as_ref())
+            .chain(
+                self.reused_execution_results
+                    .iter()
+                    .map(|record| &record.result),
+            )
+            .find(|result| &result.call_id == call_id)
+    }
+
+    pub(crate) fn recorded_result_source(&self, result: &ToolResult) -> Option<&EventId> {
+        self.execution_receipts
+            .iter()
+            .find(|record| record.result.as_ref() == Some(result))
+            .map(|record| &record.event_id)
+            .or_else(|| {
+                self.reused_execution_results
+                    .iter()
+                    .find(|record| &record.result == result)
+                    .map(|record| &record.event_id)
+            })
+    }
+
+    pub(crate) fn recorded_result_by_event(&self, id: &EventId) -> Option<&ToolResult> {
+        self.execution_receipts
+            .iter()
+            .find(|record| &record.event_id == id)
+            .and_then(|record| record.result.as_ref())
+            .or_else(|| {
+                self.reused_execution_results
+                    .iter()
+                    .find(|record| &record.event_id == id)
+                    .map(|record| &record.result)
+            })
+    }
+
+    pub(crate) fn receipt_for_call(
+        &self,
+        call_id: &ToolCallId,
+    ) -> Option<&SessionExecutionReceiptRecord> {
+        self.execution_receipts
+            .iter()
+            .find(|record| {
+                record.receipt.execution_id == super::tools::ExecutionId::for_model_call(call_id)
+            })
+            .or_else(|| {
+                self.reused_execution_results
+                    .iter()
+                    .find(|record| &record.result.call_id == call_id)
+                    .and_then(|reused| {
+                        self.execution_receipts
+                            .iter()
+                            .find(|record| record.event_id == reused.receipt_event_id)
+                    })
+            })
+    }
+
+    /// Explicit Resume marks the only historical cutoff whose unknown calls
+    /// may remain as unknown. New gaps and known Receipts cannot be invented.
+    pub(crate) fn ensure_completed_history(&self) -> Result<(), HistoryError> {
+        let recovered_calls = self.history.items()[..self.recovered_history_item_count]
+            .iter()
+            .filter_map(|item| match item {
+                ContentItem::ToolCall { call } => Some(&call.call_id),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        for (call_id, _) in self.history.unpaired_tool_calls_in_call_order() {
+            if self.recorded_tool_result(&call_id).is_some() {
+                continue;
+            }
+            if !recovered_calls.contains(&call_id)
+                || self.execution_receipts.iter().any(|record| {
+                    record.receipt.execution_id
+                        == super::tools::ExecutionId::for_model_call(&call_id)
+                })
+            {
+                return Err(HistoryError::MissingToolResult { call_id });
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn subcommand_checkpoints(&self) -> &[SubcommandCheckpoint] {
@@ -476,7 +842,7 @@ impl SessionState {
     /// Event identities, without duplicating the stored ContentItems.
     pub(crate) fn history_items_with_event_ids(
         &self,
-    ) -> impl Iterator<Item = (&EventId, &ContentItem)> {
+    ) -> impl DoubleEndedIterator<Item = (&EventId, &ContentItem)> {
         self.history_event_ids.iter().zip(self.history.items())
     }
 
@@ -518,6 +884,39 @@ impl SessionState {
             &self.full_normalized_history()?,
             SessionSummary::from_draft(summary, revision, validation)?,
             source_event_sequence,
+            requested_recent_items,
+        )
+    }
+
+    pub(crate) fn next_main_compaction(
+        &self,
+        summary: SessionSummary,
+        requested_recent_items: usize,
+    ) -> Result<SessionCompaction, SessionError> {
+        require_transition(
+            self.lifecycle,
+            "session.compaction_created",
+            SessionLifecycle::Active,
+        )?;
+        let expected_revision = match self.latest_compaction.as_ref() {
+            Some(compaction) => increment("Compaction revision", compaction.summary().revision())?,
+            None => 1,
+        };
+        if summary.schema_version() != 5 || summary.revision() != expected_revision {
+            return Err(SessionError::CompactionRevisionMismatch {
+                expected: expected_revision,
+                received: summary.revision(),
+            });
+        }
+        let sequence = self
+            .stream_id()
+            .and_then(|stream_id| self.event_state.last_sequence_for(stream_id))
+            .ok_or(SessionError::CompactionSourceSequenceMissing)?;
+        SessionCompaction::from_history(
+            &self.history,
+            &self.full_normalized_history()?,
+            summary,
+            sequence,
             requested_recent_items,
         )
     }
@@ -625,7 +1024,7 @@ impl SessionReducer {
     /// Applies one transition to state exclusively owned by the caller.
     /// Full replay owns a fresh state and discards it on any error; public
     /// incremental apply stages a clone before entering this owner.
-    fn apply_in_place(
+    pub(crate) fn apply_in_place(
         &self,
         state: &mut SessionState,
         event: EventEnvelope<Value>,
@@ -746,6 +1145,111 @@ fn apply_session_event(
     event_id: &EventId,
 ) -> Result<(), SessionError> {
     match event {
+        SessionEvent::CompactionContextCaptured { .. } => {
+            require_transition(
+                state.lifecycle,
+                "session.compaction_context_captured",
+                SessionLifecycle::Active,
+            )?;
+            state.ensure_completed_history()?;
+        }
+        SessionEvent::CompactionSampleRecorded { sample } => {
+            require_transition(
+                state.lifecycle,
+                "session.compaction_sample_recorded",
+                SessionLifecycle::Active,
+            )?;
+            state.ensure_completed_history()?;
+            sample.validate()?;
+            let audit = state.request_audits.last().ok_or_else(|| {
+                SessionError::CompactionSourceInvalid {
+                    message: "compaction sample requires its actual audit".to_owned(),
+                }
+            })?;
+            if audit.audit_event_id() != sample.audit_event_id()
+                || audit.provider_session() != Some(sample.provider_session())
+                || audit.delivery().mode() != crate::domain::request_audit::RequestAuditDeliveryMode::Full
+                || audit.resolved_tool_plan_fingerprint().is_none()
+                || audit.context_delivery_map().is_none()
+                || audit.components().iter().any(|component| component.source() == crate::domain::request_audit::RequestAuditComponentSource::RenderedToolSpec)
+                || Some(sample.source().stream_id()) != state.stream_id()
+                || source_event_sequence.is_none_or(|sequence| sample.source().watermark() >= sequence)
+                || state.compaction_samples.iter().any(|(_, _, previous)| previous.provider_session() == sample.provider_session())
+            { return Err(SessionError::CompactionSourceInvalid { message: "compaction sample source/audit/scope mismatch".to_owned() }); }
+            let sequence = EventSequence::new(
+                source_event_sequence
+                    .and_then(|sequence| sequence.get().checked_add(1))
+                    .ok_or(SessionError::StateOverflow {
+                        field: "Compaction sample sequence",
+                    })?,
+            );
+            state
+                .compaction_samples
+                .push((event_id.clone(), sequence, sample));
+        }
+        SessionEvent::OperatorTurnBoundaryRecorded { boundary } => {
+            require_transition(
+                state.lifecycle,
+                "session.operator_turn_boundary_recorded",
+                SessionLifecycle::Active,
+            )?;
+            operator_boundary::apply(state, boundary, source_event_sequence)?;
+        }
+        SessionEvent::ModelDeliveryCommitted { delivery } => {
+            require_transition(
+                state.lifecycle,
+                "session.model_delivery_committed",
+                SessionLifecycle::Active,
+            )?;
+            model_delivery::apply(state, delivery)?;
+        }
+        SessionEvent::ModelUsageRecorded {
+            request_audit_event_id,
+            provider_session,
+            usage,
+        } => {
+            require_transition(
+                state.lifecycle,
+                MODEL_USAGE_RECORDED_EVENT_TYPE,
+                SessionLifecycle::Active,
+            )?;
+            usage.validate()?;
+            let invalid = || SessionError::InvalidModelUsageReference {
+                request_audit_event_id: request_audit_event_id.clone(),
+            };
+            let audit = state
+                .request_audits
+                .iter()
+                .rev()
+                .find(|audit| audit.provider_session() == Some(&provider_session))
+                .ok_or_else(invalid)?;
+            if audit.audit_event_id() != &request_audit_event_id
+                || state.model_usage.contains_key(&request_audit_event_id)
+                || state.rejected_requests.contains(&request_audit_event_id)
+            {
+                return Err(invalid());
+            }
+            let accepted = match provider_session.role {
+                ProviderSessionRole::Primary => {
+                    (state.primary_provider_session.as_ref() == Some(&provider_session)
+                        && state.history.items().len() > state.latest_audit_history_len)
+                        || state.compaction_samples.iter().any(|(_, _, sample)| {
+                            sample.audit_event_id() == &request_audit_event_id
+                                && sample.provider_session() == &provider_session
+                        })
+                }
+                ProviderSessionRole::Vision => {
+                    state.vision_observations.iter().any(|observation| {
+                        observation.request_audit_event_id == request_audit_event_id
+                            && observation.provider_session == provider_session
+                    })
+                }
+            };
+            if !accepted {
+                return Err(invalid());
+            }
+            state.model_usage.insert(request_audit_event_id, usage);
+        }
         SessionEvent::SubcommandCheckpointed { checkpoint } => {
             require_transition(
                 state.lifecycle,
@@ -805,15 +1309,123 @@ fn apply_session_event(
         SessionEvent::Resumed {
             primary_provider_session,
         } => {
+            state.consecutive_rejection = None;
+            state.correction_reset_anchor = None;
             require_primary_provider_session(&primary_provider_session)?;
             require_transition(state.lifecycle, "session.resumed", SessionLifecycle::Active)?;
             record_fresh_primary_provider_session_id(state, &primary_provider_session)?;
             state.resume_count = increment("resume count", state.resume_count)?;
             state.primary_provider_session = Some(primary_provider_session);
+            state.recovered_history_item_count = state.history.items().len();
+            state.capture_recovered_history_start()?;
         }
         SessionEvent::Ended => {
             require_transition(state.lifecycle, "session.ended", SessionLifecycle::Active)?;
             state.lifecycle = SessionLifecycle::Ended;
+        }
+        SessionEvent::ExecutionOutcomeRecorded { receipt, result } => {
+            require_transition(
+                state.lifecycle,
+                EXECUTION_OUTCOME_RECORDED_EVENT_TYPE,
+                SessionLifecycle::Active,
+            )?;
+            let call = state
+                .history
+                .items()
+                .iter()
+                .find_map(|item| match item {
+                    ContentItem::ToolCall { call } if call.call_id == result.call_id => Some(call),
+                    _ => None,
+                })
+                .ok_or(SessionError::ExecutionOutcomeMismatch)?;
+            if call.name != result.tool_name
+                || receipt.execution_id != super::tools::ExecutionId::for_model_call(&result.call_id)
+                || receipt.status != result.status
+                || state.history.items().iter().any(|item| matches!(item, ContentItem::ToolResult { result: previous } if previous.call_id == result.call_id))
+                || state.subcommand_checkpoints.iter().filter(|child| child.call_id == result.call_id).any(|child| !child.agrees_with_result(&result))
+            {
+                return Err(SessionError::ExecutionOutcomeMismatch);
+            }
+            validate_child_receipt(state, &receipt)?;
+            receipt
+                .validate_output_captures(&result)
+                .map_err(|_| SessionError::OutputCaptureMismatch)?;
+            if let Some(record) = state
+                .execution_receipts
+                .iter_mut()
+                .find(|record| record.receipt.execution_id == receipt.execution_id)
+            {
+                if record.receipt != receipt || record.result.is_some() {
+                    return Err(SessionError::ExecutionOutcomeMismatch);
+                }
+                record.result = Some(result);
+            } else {
+                let fact = if receipt.cache_source.is_some() {
+                    SessionEvent::ToolResultCacheHit { receipt }
+                } else {
+                    SessionEvent::ExecutionReceiptRecorded { receipt }
+                };
+                apply_session_event(state, fact, source_event_sequence, event_id)?;
+                state
+                    .execution_receipts
+                    .last_mut()
+                    .expect("Receipt transition appended its record")
+                    .result = Some(result);
+            }
+        }
+        SessionEvent::ExecutionResultReused {
+            receipt_event_id,
+            result,
+        } => {
+            require_transition(
+                state.lifecycle,
+                EXECUTION_RESULT_REUSED_EVENT_TYPE,
+                SessionLifecycle::Active,
+            )?;
+            let original = state
+                .execution_receipts
+                .iter()
+                .find(|record| record.event_id == receipt_event_id)
+                .ok_or(SessionError::ExecutionOutcomeMismatch)?;
+            let original_result = original
+                .result
+                .as_ref()
+                .ok_or(SessionError::ExecutionOutcomeMismatch)?;
+            let find_call = |id: &ToolCallId| {
+                state.history.items().iter().find_map(|item| match item {
+                    ContentItem::ToolCall { call } if &call.call_id == id => Some(call),
+                    _ => None,
+                })
+            };
+            let original_call = find_call(&original_result.call_id)
+                .ok_or(SessionError::ExecutionOutcomeMismatch)?;
+            let follower =
+                find_call(&result.call_id).ok_or(SessionError::ExecutionOutcomeMismatch)?;
+            let (source_arguments, _) =
+                super::tools::split_execution_control(original_call.arguments.clone())
+                    .map_err(|_| SessionError::ExecutionOutcomeMismatch)?;
+            let (follower_arguments, rerun) =
+                super::tools::split_execution_control(follower.arguments.clone())
+                    .map_err(|_| SessionError::ExecutionOutcomeMismatch)?;
+            if original_result.call_id == result.call_id
+                || follower.name != original_call.name || follower.name != result.tool_name
+                || source_arguments != follower_arguments || rerun.is_some()
+                || original_result.for_deduplicated_call(follower) != result || original.receipt.status != result.status
+                || state.recorded_tool_result(&result.call_id).is_some()
+                || state.receipt_for_call(&result.call_id).is_some()
+                || state.history.items().iter().any(|item| matches!(item, ContentItem::ToolResult { result: previous } if previous.call_id == result.call_id))
+            {
+                return Err(SessionError::ExecutionOutcomeMismatch);
+            }
+            original
+                .receipt
+                .validate_output_captures(&result)
+                .map_err(|_| SessionError::OutputCaptureMismatch)?;
+            state.reused_execution_results.push(ReusedExecutionResult {
+                event_id: event_id.clone(),
+                receipt_event_id,
+                result,
+            });
         }
         SessionEvent::ExecutionReceiptRecorded { receipt } => {
             validate_child_receipt(state, &receipt)?;
@@ -823,7 +1435,11 @@ fn apply_session_event(
                 .execution_receipts
                 .push(SessionExecutionReceiptRecord {
                     event_id: event_id.clone(),
+                    sequence: EventSequence::new(
+                        source_event_sequence.map_or(1, |sequence| sequence.get() + 1),
+                    ),
                     receipt,
+                    result: None,
                 });
         }
         SessionEvent::ToolResultCacheHit { receipt } => {
@@ -833,7 +1449,11 @@ fn apply_session_event(
                 .execution_receipts
                 .push(SessionExecutionReceiptRecord {
                     event_id: event_id.clone(),
+                    sequence: EventSequence::new(
+                        source_event_sequence.map_or(1, |sequence| sequence.get() + 1),
+                    ),
                     receipt,
+                    result: None,
                 });
         }
         SessionEvent::StreamRecovered { .. } => {
@@ -847,6 +1467,12 @@ fn apply_session_event(
             )?;
             if let ContentItem::ToolResult { result } = &item {
                 if state
+                    .recorded_tool_result(&result.call_id)
+                    .is_some_and(|recorded| recorded != result)
+                {
+                    return Err(SessionError::ExecutionOutcomeMismatch);
+                }
+                if state
                     .subcommand_checkpoints
                     .iter()
                     .filter(|child| child.call_id == result.call_id)
@@ -854,12 +1480,7 @@ fn apply_session_event(
                 {
                     return Err(SessionError::SubcommandCheckpointMismatch);
                 }
-                let execution_id = super::tools::ExecutionId::for_model_call(&result.call_id);
-                if let Some(record) = state
-                    .execution_receipts
-                    .iter()
-                    .find(|record| record.receipt.execution_id == execution_id)
-                {
+                if let Some(record) = state.receipt_for_call(&result.call_id) {
                     record
                         .receipt
                         .validate_output_captures(result)
@@ -870,6 +1491,9 @@ fn apply_session_event(
             }
             state.history.append_content_item(item)?;
             state.history_event_ids.push(event_id.clone());
+            state.history_event_sequences.push(EventSequence::new(
+                source_event_sequence.map_or(1, |sequence| sequence.get() + 1),
+            ));
             if state.latest_compaction.is_some() {
                 state.normalized_history_items()?;
             }
@@ -906,6 +1530,28 @@ fn apply_session_event(
             }
             state.latest_compaction = Some(compaction);
         }
+        SessionEvent::ConsecutiveModelSampleRejected {
+            request_audit_event_id,
+            corrections_used,
+            reset_anchor,
+            ..
+        } => argument_correction::reject(
+            state,
+            request_audit_event_id,
+            corrections_used,
+            reset_anchor,
+        )?,
+        SessionEvent::ModelArgumentCorrectionReset {
+            accepted_request_audit_event_id,
+            prior_rejection_audit_event_id,
+            accepted_history_event_refs,
+        } => argument_correction::reset(
+            state,
+            event_id,
+            accepted_request_audit_event_id,
+            prior_rejection_audit_event_id,
+            accepted_history_event_refs,
+        )?,
         SessionEvent::ModelSampleRejected {
             request_audit_event_id,
             corrections_used,
@@ -918,7 +1564,7 @@ fn apply_session_event(
             )?;
             state.history.ensure_all_tool_calls_paired()?;
             if corrections_used > MAX_TOOL_ARGUMENT_CORRECTIONS_PER_TURN
-                || state.last_rejected_request.as_ref() == Some(&request_audit_event_id)
+                || state.rejected_requests.contains(&request_audit_event_id)
                 || state
                     .request_audits
                     .last()
@@ -926,7 +1572,7 @@ fn apply_session_event(
             {
                 return Err(SessionError::InvalidModelSampleRejection);
             }
-            state.last_rejected_request = Some(request_audit_event_id);
+            state.rejected_requests.insert(request_audit_event_id);
         }
         SessionEvent::RequestAuditRecorded { manifest } => {
             require_transition(
@@ -950,7 +1596,11 @@ fn apply_session_event(
                     received: manifest.binding().session_stream_id().clone(),
                 });
             }
+            state.latest_audit_history_len = state.history.items().len();
             state.request_audits.push(manifest);
+            state.request_audit_sequences.push(EventSequence::new(
+                source_event_sequence.map_or(1, |sequence| sequence.get() + 1),
+            ));
         }
         SessionEvent::VisionRouteDecided { route } => {
             require_transition(
@@ -975,6 +1625,13 @@ fn apply_session_event(
                 });
             }
             state.vision_routes.push(route);
+            state.vision_route_sequences.push(EventSequence::new(
+                source_event_sequence
+                    .and_then(|sequence| sequence.get().checked_add(1))
+                    .ok_or(SessionError::StateOverflow {
+                        field: "Vision route sequence",
+                    })?,
+            ));
         }
         SessionEvent::VisionObservationRecorded { observation } => {
             require_transition(
@@ -1007,6 +1664,16 @@ fn apply_session_event(
                 });
             }
             state.vision_observations.push(observation);
+            state.vision_observation_event_ids.push((
+                event_id.clone(),
+                EventSequence::new(
+                    source_event_sequence
+                        .and_then(|sequence| sequence.get().checked_add(1))
+                        .ok_or(SessionError::StateOverflow {
+                            field: "Vision observation sequence",
+                        })?,
+                ),
+            ));
         }
         SessionEvent::VisionAnalysisFailed { failure } => {
             require_transition(
@@ -1328,6 +1995,31 @@ struct SessionHistoryItemPayload {
     item: ContentItem,
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ModelUsagePayload {
+    schema_version: u16,
+    request_audit_event_id: EventId,
+    provider_session: ProviderSessionRef,
+    usage: ModelUsage,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ExecutionOutcomePayload {
+    schema_version: u16,
+    receipt: ExecutionReceipt,
+    result: ToolResult,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ReusedExecutionResultPayload {
+    schema_version: u16,
+    receipt_event_id: EventId,
+    result: ToolResult,
+}
+
 impl SessionHistoryItemPayload {
     fn current(item: ContentItem) -> Self {
         Self {
@@ -1372,6 +2064,18 @@ impl ResearchPhaseSelectedPayload {
 /// Explicit Session schema, stream, payload and transition failures.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum SessionError {
+    #[error("invalid Compaction source: {message}")]
+    CompactionSourceInvalid { message: String },
+    #[error(
+        "model usage must reference one accepted request with the same ProviderSession: `{request_audit_event_id}`"
+    )]
+    InvalidModelUsageReference { request_audit_event_id: EventId },
+    #[error(transparent)]
+    ModelUsage(#[from] ModelUsageError),
+    #[error(
+        "recorded execution outcome does not agree with its pending Call, Receipt or later Result"
+    )]
+    ExecutionOutcomeMismatch,
     #[error(
         "model sample rejection does not reference one unrejected latest request audit or exceeds the correction bound"
     )]

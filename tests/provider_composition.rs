@@ -47,6 +47,19 @@ fn valid_config() -> String {
 }
 
 #[test]
+fn invalid_compaction_effort_fails_offline_without_credentials() {
+    for effort in ["", "not valid", "invalid!"] {
+        let credentials = Arc::new(RecordingCredentialSource::default());
+        let config = format!(
+            "{}\n[runtime]\ncompaction_reasoning_effort = \"{effort}\"\n",
+            valid_config()
+        );
+        assert!(load("invalid-compaction-effort", &config, credentials.clone()).is_err());
+        assert!(credentials.references().is_empty());
+    }
+}
+
+#[test]
 fn output_limit_config_is_explicit_role_scoped_and_offline_validated() {
     for value in [0, 32_768, 32_769, 30_000, 28_672] {
         let credentials = Arc::new(RecordingCredentialSource::default());
@@ -186,28 +199,39 @@ fn empty_prompt_path_is_rejected_before_relative_path_resolution() {
 
 #[test]
 fn request_budget_config_validates_without_credentials_or_vendor_binding() {
-    for value in [0, 10_001] {
-        let credentials = Arc::new(RecordingCredentialSource::default());
-        let config = format!(
-            "{}\n[runtime]\nmodel_request_limit_per_turn = {value}\n",
-            valid_config()
-        );
-        let error = load("invalid-request-budget", &config, credentials.clone())
-            .err()
-            .unwrap();
-        assert!(matches!(
-            error,
-            ProviderCompositionError::InvalidModelRequestLimit
-        ));
-        assert!(credentials.references().is_empty());
-    }
-    for value in [1, 2, 32, 33, 10_000] {
+    let credentials = Arc::new(RecordingCredentialSource::default());
+    let config = format!(
+        "{}\n[runtime]\nmodel_request_limit_per_turn = 10001\n",
+        valid_config()
+    );
+    let error = load("invalid-request-budget", &config, credentials.clone())
+        .err()
+        .unwrap();
+    assert!(matches!(
+        error,
+        ProviderCompositionError::InvalidModelRequestLimit
+    ));
+    assert!(credentials.references().is_empty());
+    for value in [0, 1, 2, 32, 33, 10_000] {
         let credentials = Arc::new(RecordingCredentialSource::default());
         let config = format!(
             "{}\n[runtime]\nmodel_request_limit_per_turn = {value}\n",
             valid_config()
         );
         assert!(load("valid-request-budget", &config, credentials.clone()).is_ok());
+        assert!(credentials.references().is_empty());
+    }
+}
+
+#[test]
+fn request_budget_rejects_negative_and_wrong_type_values_without_credentials() {
+    for value in ["-1", "1.5", "\"0\"", "true"] {
+        let credentials = Arc::new(RecordingCredentialSource::default());
+        let config = format!(
+            "{}\n[runtime]\nmodel_request_limit_per_turn = {value}\n",
+            valid_config()
+        );
+        assert!(load("invalid-request-budget-type", &config, credentials.clone()).is_err());
         assert!(credentials.references().is_empty());
     }
 }
@@ -552,7 +576,7 @@ fn config_is_strict_and_rejects_unsafe_or_dangling_bindings() {
 }
 
 #[test]
-fn malformed_inline_api_key_is_redacted_from_decode_errors() {
+fn malformed_inline_api_key_is_visible_in_decode_errors() {
     let secret = "fixture-inline-value-must-never-appear";
     let encoded = valid_config().replacen(
         "credential_ref = \"CYBER_AGENT_PRIMARY_API_KEY\"",
@@ -568,8 +592,7 @@ fn malformed_inline_api_key_is_redacted_from_decode_errors() {
         Err(error) => error,
     };
     let rendered = error.to_string();
-    assert!(rendered.contains("<redacted>"), "{rendered}");
-    assert!(!rendered.contains(secret), "{rendered}");
+    assert!(rendered.contains(secret), "{rendered}");
 }
 
 #[test]

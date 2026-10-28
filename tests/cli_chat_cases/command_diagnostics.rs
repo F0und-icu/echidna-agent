@@ -74,7 +74,7 @@ fn command_failure_diagnostics_survive_child_checkpoint_history_and_provider_del
     assert_eq!(
         events
             .iter()
-            .filter(|event| event["event_type"] == "tool.execution_receipt_recorded")
+            .filter(|event| event["event_type"] == "tool.execution_outcome_recorded")
             .count(),
         1
     );

@@ -21,6 +21,40 @@ use crate::domain::session::{
 
 const MAX_COMPACTION_NARRATIVE_FIELD_BYTES: usize = 1536;
 
+pub(crate) fn continuation_goal(
+    history: &[ContentItem],
+    previous: Option<&crate::domain::session::SessionSummary>,
+    policy: crate::domain::context::ContextWindowPolicy,
+) -> Result<String, SessionError> {
+    crate::domain::history::ConversationHistory::from_complete_content_items(history)?;
+    let latest = latest_text(history, MessageRole::User)
+        .or_else(|| {
+            previous
+                .and_then(|summary| summary.narrative())
+                .map(|value| value.current_goal())
+        })
+        .ok_or(SessionError::CompactionResumableHistoryRequired)?;
+    let initial = history
+        .iter()
+        .find_map(|item| match item {
+            ContentItem::Text {
+                role: MessageRole::User,
+                text,
+            } if !text.trim().is_empty() => Some(text.as_str()),
+            _ => None,
+        })
+        .unwrap_or(latest);
+    Ok(if initial == latest {
+        bounded_text(latest, policy.continuation_field_bytes())?
+    } else {
+        format!(
+            "Initial request: {}\nLatest request: {}",
+            bounded_text(initial, policy.continuation_goal_part_bytes())?,
+            bounded_text(latest, policy.continuation_goal_part_bytes())?
+        )
+    })
+}
+
 /// Ephemeral receipt-only cache for one interactive process. It is not a
 /// fact store: every Session entry is guarded by an exact JSONL byte digest
 /// and can be discarded/rebuilt from the existing authoritative streams.
@@ -190,12 +224,12 @@ impl CompactionValidationFacts {
             })
             .unwrap_or(latest_goal);
         let current_goal = if initial_goal == latest_goal {
-            bounded_text(latest_goal, MAX_COMPACTION_NARRATIVE_FIELD_BYTES)
+            bounded_text(latest_goal, MAX_COMPACTION_NARRATIVE_FIELD_BYTES)?
         } else {
             format!(
                 "Initial request: {}\nLatest request: {}",
-                bounded_text(initial_goal, 640),
-                bounded_text(latest_goal, 640)
+                bounded_text(initial_goal, 640)?,
+                bounded_text(latest_goal, 640)?
             )
         };
         let progress = latest_text(history, MessageRole::Assistant).map_or_else(
@@ -403,7 +437,7 @@ impl CompactionValidationFacts {
         )?;
         let narrative = NarrativeSummary::new(
             current_goal,
-            bounded_text(&progress, MAX_COMPACTION_NARRATIVE_FIELD_BYTES),
+            bounded_text(&progress, MAX_COMPACTION_NARRATIVE_FIELD_BYTES)?,
             unresolved,
             next_steps,
         )?;
@@ -481,19 +515,34 @@ fn latest_text(history: &[ContentItem], expected_role: MessageRole) -> Option<&s
     })
 }
 
-fn bounded_text(value: &str, maximum_bytes: usize) -> String {
+fn bounded_text(value: &str, maximum_bytes: usize) -> Result<String, SessionError> {
     if value.len() <= maximum_bytes {
-        return value.to_owned();
+        return Ok(value.to_owned());
     }
-    let suffix = "…";
-    let limit = maximum_bytes.saturating_sub(suffix.len());
+    let minimum = value
+        .char_indices()
+        .find(|(_, character)| !character.is_whitespace())
+        .map(|(index, character)| index + character.len_utf8())
+        .ok_or(SessionError::CompactionResumableHistoryRequired)?;
+    if minimum > maximum_bytes {
+        return Err(SessionError::CompactionSummaryTooLarge {
+            actual: minimum,
+            maximum: maximum_bytes,
+        });
+    }
+    let suffix = if maximum_bytes - minimum >= "…".len() {
+        "…"
+    } else {
+        ""
+    };
+    let limit = maximum_bytes - suffix.len();
     let boundary = value
         .char_indices()
         .map(|(index, _)| index)
         .take_while(|index| *index <= limit)
         .last()
         .unwrap_or(0);
-    format!("{}{suffix}", &value[..boundary])
+    Ok(format!("{}{suffix}", &value[..boundary]))
 }
 
 pub(crate) fn load_reference_catalog(
@@ -502,7 +551,7 @@ pub(crate) fn load_reference_catalog(
     load_reference_catalog_and_receipt_ids(project).map(|(catalog, _)| catalog)
 }
 
-fn load_reference_catalog_and_receipt_ids(
+pub(crate) fn load_reference_catalog_and_receipt_ids(
     project: &Project,
 ) -> Result<(ResearchReferenceCatalog, BTreeSet<ExecutionReceiptId>), String> {
     let mut references = ResearchReferenceCatalog::default();

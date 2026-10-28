@@ -96,7 +96,7 @@ fn ctf_r3b1_real_executor_deadline_preserves_acknowledged_children() {
     );
     let receipt = events
         .iter()
-        .find(|event| event["event_type"] == "tool.execution_receipt_recorded")
+        .find(|event| event["event_type"] == "tool.execution_outcome_recorded")
         .unwrap();
     assert_eq!(receipt["payload"]["receipt"]["status"], "cancelled");
     assert_eq!(
@@ -154,7 +154,7 @@ fn ctf_r3b1_session_append_failure_does_not_ack_or_launch_the_next_child() {
         1
     );
     assert!(!events.iter().any(
-        |event| event["event_type"] == "tool.execution_receipt_recorded"
+        |event| event["event_type"] == "tool.execution_outcome_recorded"
             || event["payload"]["item"]["kind"] == "tool_result"
     ));
 }
@@ -244,7 +244,7 @@ fn ctf_r3b1_completed_child_survives_killed_batch_and_resume_without_rerun() {
         assert!(
             !events
                 .iter()
-                .any(|event| event["event_type"] == "tool.execution_receipt_recorded")
+                .any(|event| event["event_type"] == "tool.execution_outcome_recorded")
         );
         assert!(checkpoints[0].to_string().contains("CHILD_OUTPUT"));
         let blob = checkpoints[0]["payload"]["output_captures"][0]["blob_id"]
@@ -346,7 +346,7 @@ fn ctf_r3b1_failed_publication_stops_before_next_serial_child_and_preserves_prio
             failed_child
         );
         assert!(!events.iter().any(|event| event["event_type"]
-            == "tool.execution_receipt_recorded"
+            == "tool.execution_outcome_recorded"
             || event["payload"]["item"]["kind"] == "tool_result"));
     }
 }
@@ -398,7 +398,7 @@ fn ctf_r3b1_completed_batch_has_ordered_parent_and_individual_durable_children()
         }
         let receipts = events
             .iter()
-            .filter(|event| event["event_type"] == "tool.execution_receipt_recorded")
+            .filter(|event| event["event_type"] == "tool.execution_outcome_recorded")
             .collect::<Vec<_>>();
         assert_eq!(receipts.len(), 1);
         for checkpoint in &children {
@@ -469,7 +469,7 @@ fn ec_k4_incomplete_batch_child_checkpoints_before_parent_receipt_in_serial_and_
         assert_eq!(children.len(), 2);
         let receipt = events
             .iter()
-            .find(|event| event["event_type"] == "tool.execution_receipt_recorded")
+            .find(|event| event["event_type"] == "tool.execution_outcome_recorded")
             .expect("parent Receipt follows both child checkpoints");
         let held = children
             .iter()
@@ -548,7 +548,7 @@ fn ec_k4_incomplete_batch_capture_publication_failure_is_fatal_before_parent_rec
     let events = session_events(root.path(), &session_id(root.path()));
     assert!(!events.iter().any(|event| {
         event["event_type"] == "tool.subcommand_checkpointed"
-            || event["event_type"] == "tool.execution_receipt_recorded"
+            || event["event_type"] == "tool.execution_outcome_recorded"
             || event["payload"]["item"]["kind"] == "tool_result"
     }));
 }

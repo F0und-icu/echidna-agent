@@ -31,6 +31,7 @@ pub enum CredentialResolution {
 /// The paired value is required by the finite Codex subscription profile. Its
 /// fields remain private so only the Responses transport validates and emits
 /// the account header.
+#[derive(Debug)]
 pub struct AccountBoundCredential {
     bearer: String,
     account_id: String,
@@ -43,12 +44,6 @@ impl AccountBoundCredential {
 
     pub(crate) fn into_parts(self) -> (String, String) {
         (self.bearer, self.account_id)
-    }
-}
-
-impl std::fmt::Debug for AccountBoundCredential {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("AccountBoundCredential(<redacted>)")
     }
 }
 

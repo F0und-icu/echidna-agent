@@ -35,8 +35,7 @@ fn explicit_large_window_extends_core_memory_schema_and_execution_together() {
                         "path":"core.md",
                         "content":content,
                         "expected_hash":null,
-                        "event_id":"large-window-memory-write",
-                        "occurred_at":"2026-10-22T00:00:00Z"
+                        "event_id":"large-window-memory-write"
                     }),
                     "large-window-write",
                 ),
@@ -125,6 +124,10 @@ fn explicit_large_window_reads_extended_core_memory_during_context_refresh() {
 
 #[test]
 fn explicit_large_window_extends_read_output_schema_default_and_execution_together() {
+    // 1,048,576 tokens, less two 12.5% reserves, gives B = 786,432.
+    // Four estimated bytes per token, 4% maximum and 1% default, rounded up.
+    const MAX_READBACK_BYTES: usize = 125_830;
+    const DEFAULT_READBACK_BYTES: usize = 31_458;
     let root = TemporaryDirectory::new("large-window-read-output");
     let harness = TemporaryDirectory::new("large-window-read-output-provider");
     initialize_project(root.path());
@@ -191,7 +194,7 @@ fn explicit_large_window_extends_read_output_schema_default_and_execution_togeth
         .unwrap();
     assert_eq!(
         read_output["parameters"]["properties"]["max_bytes"]["maximum"],
-        json!(128 * 1024)
+        json!(MAX_READBACK_BYTES)
     );
     let delivered = wires[2]["input"]
         .as_array()
@@ -202,19 +205,24 @@ fn explicit_large_window_extends_read_output_schema_default_and_execution_togeth
         })
         .unwrap();
     let delivered: Value = serde_json::from_str(delivered["output"].as_str().unwrap()).unwrap();
-    assert_eq!(delivered["output"]["next_offset"], json!(32 * 1024));
+    assert_eq!(
+        delivered["output"]["next_offset"],
+        json!(DEFAULT_READBACK_BYTES)
+    );
     assert_eq!(delivered["output"]["has_more"], true);
 }
 
 #[test]
 fn explicit_large_window_extends_http_preview_schema_and_execution_together() {
+    // Four percent of the 786,432-token usable budget at four bytes/token.
+    const MAX_PREVIEW_BYTES: usize = 125_830;
     let root = TemporaryDirectory::new("large-window-http-preview");
     let harness = TemporaryDirectory::new("large-window-http-preview-provider");
     initialize_project(root.path());
     let http_listener = TcpListener::bind("127.0.0.1:0").unwrap();
     http_listener.set_nonblocking(true).unwrap();
     let http_url = format!("http://{}/preview", http_listener.local_addr().unwrap());
-    let response_body = "p".repeat(128 * 1024);
+    let response_body = "p".repeat(MAX_PREVIEW_BYTES);
     let http_response_body = response_body.clone();
     let http_server = thread::spawn(move || {
         let mut socket = f3_context::accept_before_deadline(&http_listener, "large HTTP preview");
@@ -280,7 +288,7 @@ fn explicit_large_window_extends_http_preview_schema_and_execution_together() {
                         "method":"post",
                         "url":http_url,
                         "body":{"kind":"text","value":"fixture"},
-                        "preview_bytes":128 * 1024,
+                        "preview_bytes":MAX_PREVIEW_BYTES,
                         "capture_bytes":128 * 1024,
                         "artifact":{
                             "event_id":"large-window-preview-artifact",
@@ -330,7 +338,7 @@ fn explicit_large_window_extends_http_preview_schema_and_execution_together() {
         .unwrap();
     assert_eq!(
         http_request["parameters"]["properties"]["preview_bytes"]["maximum"],
-        json!(128 * 1024)
+        json!(MAX_PREVIEW_BYTES)
     );
     let delivered = wires[3]["input"]
         .as_array()
@@ -343,7 +351,7 @@ fn explicit_large_window_extends_http_preview_schema_and_execution_together() {
     let delivered: Value = serde_json::from_str(delivered["output"].as_str().unwrap()).unwrap();
     assert_eq!(
         delivered["output"]["body_preview"]["captured_bytes"],
-        json!(128 * 1024)
+        json!(MAX_PREVIEW_BYTES)
     );
     assert_eq!(delivered["output"]["body_preview"]["data"], response_body);
     assert_eq!(delivered["output"]["body_preview"]["truncated"], false);

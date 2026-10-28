@@ -5,6 +5,51 @@ changes remain available in Git history.
 
 ## Unreleased
 
+### Actual diagnostic content — 2026-10-28
+
+- Prioritize personal use, functionality and efficiency. Remove message and
+  debug redaction, safety-only omission of failure payloads, and masking of
+  explicitly requested failure snapshots. Preserve actual server errors and
+  configuration diagnostics through the existing presentation owners.
+- Make explicit `chat --debug` available in release builds through the same
+  diagnostic path as development builds.
+- Keep protocol decoding, real Tool outcomes, Session/source integrity and
+  concrete resource limits as functional contracts; no new safety workflow or
+  masked/unmasked configuration switch is added.
+
+### Current mainline configuration and harness repairs — 2026-10-28
+
+- Synchronize generic model discovery, error diagnostics, optional complete failed
+  request snapshots, independent MCP startup deadlines and responsive terminal
+  input. Preserve the mainline research identity and existing input editing.
+- Persist observed terminal Receipt/Result pairs atomically, validate exact Session
+  prefixes during incremental reads, distinguish recovered old unknowns from new
+  missing outcomes, and bind reported usage to the actual accepted audit attempt.
+  Tools are not replayed and missing usage remains unknown.
+- Reset the bounded malformed-argument correction chain only after an accepted
+  sample is durable. Explicit request limit `0` permits unlimited admission;
+  cancellation, capacity checks and the per-request retry limit still apply.
+- Generate Memory and project-inspection timestamps from actual operations.
+  File-write model results retain paths, hashes and sizes while full diffs remain
+  in the durable execution receipts.
+- Use main-specific Summary v5 for model-generated continuation handoffs, with
+  independent Session/Research source proof, protected unfinished inputs and
+  Target images, the latest complete batch, and finite source/merge plans.
+  Explicit oversized recovery retains local context/compact/exit commands.
+  Old main v1/v2/v4 retain their original meanings; persona formats are separate.
+- Configure proportional context budgets and explicit byte/count caps, plus
+  optional compaction reasoning effort. Default output/tool-loop reserves use
+  12.5% of the window each; pressure/soft target use 80%/50% of usable input.
+  Templates and the ordinary development/acceptance baseline now start at
+  272000 tokens; explicitly supported 1M windows use their actual capability value.
+  These supersede historical small caps and the eight-step multiplier below.
+- Update six self-contained Provider templates, bilingual guides and the examples
+  index for mainline-supported fields only. AgentDefinition and RSI remain on
+  their separate development branch; no generic registry or model router is added.
+
+Entries tagged F/R/CTF below describe their original deliveries. Use the current
+configuration reference where a later entry supersedes an old default.
+
 ### Changed
 
 - E0: continue development as Echidna in the new `echidna-agent` repository.
@@ -163,7 +208,7 @@ changes remain available in Git history.
 
 - Tool activity now shows bounded arguments, file/directory results and explicit
   partial failures, cache/deduplication and uncertain outcomes instead of long IDs.
-- The sole ContextPlanner caps default output/tool-loop reserves at 8192/16384
+- F5 historical default: the sole ContextPlanner capped output/tool-loop reserves at 8192/16384
   tokens respectively while preserving proportional reserves for small windows.
   An explicitly configured 1048576-token window permits 1024000 estimated input
   tokens; this is not a claim of verified server capacity.

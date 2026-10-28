@@ -23,7 +23,12 @@ pub mod trace_eval_runtime;
 mod cli_auth;
 mod cli_chat;
 mod cli_inspection;
+mod cli_mcp_output;
+mod cli_model_output;
 mod cli_session;
+mod diagnostic_text;
+mod model_catalog;
+mod terminal_console;
 mod terminal_content;
 
 #[derive(Debug, Parser)]
@@ -47,10 +52,13 @@ enum CliCommand {
     Init,
     /// Start an interactive research session.
     Chat {
-        /// Show sanitized sent prompts and model content, without SSE envelopes (development builds only).
-        #[cfg(debug_assertions)]
+        /// Show sent prompts and model content, without SSE envelopes.
+
         #[arg(long)]
         debug: bool,
+        /// Save diagnostic snapshots of failed Provider requests to this directory.
+        #[arg(long, value_name = "DIR")]
+        debug_failures: Option<PathBuf>,
         /// Resume one durable Session ID, or `latest`; `--session` is kept as an alias.
         #[arg(
             long = "resume",
@@ -67,7 +75,7 @@ enum CliCommand {
     },
     /// Inspect local configuration and runtime readiness.
     Doctor,
-    /// Manage the explicitly configured Echidna subscription account.
+    /// Manage explicit subscriptions and select configured Provider models.
     Auth {
         #[command(subcommand)]
         command: cli_auth::AuthCommand,
@@ -380,7 +388,8 @@ fn run_chat(
     session: Option<String>,
     domain: Option<CliDomainProfile>,
     phase: Option<CliResearchPhase>,
-    #[cfg(debug_assertions)] debug: bool,
+    debug_failures: Option<PathBuf>,
+    debug: bool,
 ) -> Result<(), CliError> {
     let config = config.ok_or(CliError::ChatConfigurationRequired)?;
     let config = ProviderComposition::load_config(config)?;
@@ -390,10 +399,10 @@ fn run_chat(
         config,
         Arc::new(adapters::credentials::ProcessEnvironmentCredentialSource),
         project.clone(),
-        #[cfg(debug_assertions)]
+        debug_failures,
         debug,
     )?;
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_io()
         .enable_time()
         .build()
@@ -424,14 +433,15 @@ where
             session,
             domain,
             phase,
-            #[cfg(debug_assertions)]
+            debug_failures,
+
             debug,
         }) => run_chat(
             cli.config.as_deref(),
             session,
             domain,
             phase,
-            #[cfg(debug_assertions)]
+            debug_failures,
             debug,
         ),
         Some(CliCommand::Doctor) => {

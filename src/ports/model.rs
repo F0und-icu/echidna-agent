@@ -6,7 +6,8 @@ use futures_core::Stream;
 use thiserror::Error;
 
 use crate::domain::model::{
-    ModelCapabilities, ModelCapabilityError, ModelEvent, ModelInputIR, OpaqueContinuationScope,
+    ContentItem, ModelCapabilities, ModelCapabilityError, ModelEvent, ModelInputIR,
+    OpaqueContinuationScope,
 };
 
 /// An opaque Provider-issued identity for one completed response.
@@ -34,12 +35,21 @@ pub enum ModelRequestDelivery {
     Incremental { continuation: ProviderResponseId },
 }
 
+/// Whether Adapter-local continuation state outlives this sample.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum ContinuationRetention {
+    #[default]
+    Session,
+    SingleSample,
+}
+
 /// One semantic request plus the App-selected delivery mode.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelRequest {
     input: ModelInputIR,
     delivery: ModelRequestDelivery,
     opaque_continuation_scope: Option<OpaqueContinuationScope>,
+    continuation_retention: ContinuationRetention,
 }
 
 impl ModelRequest {
@@ -48,6 +58,7 @@ impl ModelRequest {
             input,
             delivery: ModelRequestDelivery::Full,
             opaque_continuation_scope: None,
+            continuation_retention: ContinuationRetention::Session,
         }
     }
 
@@ -56,6 +67,7 @@ impl ModelRequest {
             input,
             delivery: ModelRequestDelivery::Incremental { continuation },
             opaque_continuation_scope: None,
+            continuation_retention: ContinuationRetention::Session,
         }
     }
 
@@ -82,6 +94,15 @@ impl ModelRequest {
         self.opaque_continuation_scope.as_ref()
     }
 
+    pub(crate) fn with_continuation_retention(mut self, retention: ContinuationRetention) -> Self {
+        self.continuation_retention = retention;
+        self
+    }
+
+    pub(crate) fn continuation_retention(&self) -> ContinuationRetention {
+        self.continuation_retention
+    }
+
     pub fn into_parts(
         self,
     ) -> (
@@ -98,6 +119,19 @@ impl ModelRequest {
         &self,
         capabilities: &ModelCapabilities,
     ) -> Result<(), ModelProviderError> {
+        if self.continuation_retention == ContinuationRetention::SingleSample
+            && (self.is_incremental()
+                || self
+                    .input
+                    .content_items
+                    .iter()
+                    .any(|item| matches!(item, ContentItem::OpaqueContinuation { .. })))
+        {
+            return Err(ModelProviderError::RequestEncodingFailure {
+                message: "single-sample continuation requires Full input without opaque references"
+                    .to_owned(),
+            });
+        }
         capabilities.validate_input(&self.input)?;
         if self.is_incremental() && !capabilities.incremental_input {
             return Err(ModelProviderError::Capability(
@@ -205,8 +239,12 @@ pub enum ModelProviderError {
     RequestEncodingFailure { message: String },
     #[error("model transport failed: {message}")]
     TransportFailure { message: String },
-    #[error("model connection failed: timeout={timeout}, io_kind={io_kind}")]
-    ConnectionFailure { timeout: bool, io_kind: String },
+    #[error("model connection failed: {message}; timeout={timeout}, io_kind={io_kind}")]
+    ConnectionFailure {
+        timeout: bool,
+        io_kind: String,
+        message: String,
+    },
     #[error(
         "model response interrupted: status={status}, elapsed_ms={elapsed_ms}, timeout={timeout}, io_kind={io_kind}"
     )]
@@ -216,12 +254,14 @@ pub enum ModelProviderError {
         timeout: bool,
         io_kind: String,
     },
-    #[error("model HTTP request failed with status {status}")]
-    HttpFailure { status: u16 },
+    #[error("model HTTP request failed with status {status}: {body}")]
+    HttpFailure { status: u16, body: String },
+    #[error("model context capacity exceeded ({code})")]
+    ContextCapacityExceeded { code: String },
     #[error("model stream protocol failed: {message}")]
     ProtocolFailure { message: String },
     #[error(
-        "model stream protocol failed: function call arguments are not valid JSON: {diagnostic}; rejected before dispatch; malformed payload omitted"
+        "model stream protocol failed: function call arguments are not valid JSON: {diagnostic}; rejected before dispatch"
     )]
     InvalidToolArguments {
         diagnostic: crate::domain::model::ToolArgumentDiagnostic,

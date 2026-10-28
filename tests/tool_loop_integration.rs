@@ -123,10 +123,7 @@ fn tool_guidance_keeps_time_provenance_visibility_and_rerun_boundaries_explicit(
     let catalog = tools.catalog();
     let spec = |name: &str| catalog.iter().find(|s| s.name.as_str() == name).unwrap();
     for name in [
-        "inspect_project",
         "research_update",
-        "memory_read",
-        "memory_write",
         "artifact_store",
         "http_request",
         "view_image",
@@ -137,6 +134,9 @@ fn tool_guidance_keeps_time_provenance_visibility_and_rerun_boundaries_explicit(
                 .description
                 .contains("preserve source timestamps")
         );
+    }
+    for name in ["inspect_project", "memory_read", "memory_write"] {
+        assert!(!spec(name).description.contains("observed timestamps"));
     }
     assert!(
         spec("inspect_project")
@@ -218,10 +218,16 @@ async fn builtin_tools_cover_files_search_argv_failures_and_bounded_output() {
         "src/lib.rs",
         "// candidate: path traversal\npub fn normalize(path: &str) -> &str { path }\n",
     );
-    project.write("large.txt", "x".repeat(140 * 1024));
     let tools = ToolRegistry::for_project(&project.root);
 
     let default_specs = tools.specs();
+    let read_limit = default_specs
+        .iter()
+        .find(|spec| spec.name.as_str() == "read_file")
+        .unwrap()
+        .output_policy
+        .max_bytes;
+    project.write("large.txt", "x".repeat(read_limit + 10 * 1024));
     assert_eq!(
         default_specs
             .iter()
@@ -401,7 +407,7 @@ async fn builtin_tools_cover_files_search_argv_failures_and_bounded_output() {
     assert_eq!(large.result.output["truncated"], true);
     assert_eq!(
         large.result.output["content"].as_str().unwrap().len(),
-        128 * 1024
+        read_limit
     );
 
     assert!(matches!(
@@ -1043,11 +1049,7 @@ async fn agent_loop_executes_inspect_project_through_the_fixed_registry() {
     let project = TestProject::new("agent-loop-inspect-project");
     Project::initialize(&project.root).unwrap();
     project.write("target.rs", "fn fixture() {}\n");
-    let requested_call = tool_call(
-        "call-inspect-project",
-        "inspect_project",
-        json!({"observed_at": "2026-08-23T12:00:00Z"}),
-    );
+    let requested_call = tool_call("call-inspect-project", "inspect_project", json!({}));
     let provider = ScriptedProvider::new([
         vec![ModelEvent::ToolCall {
             call: requested_call,

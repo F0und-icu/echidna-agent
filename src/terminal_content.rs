@@ -2,22 +2,8 @@
 
 use serde_json::Value;
 
-/// Preserve readable whitespace without interpreting terminal control sequences.
-pub(crate) fn escaped_text(text: &str) -> String {
-    let mut rendered = String::new();
-    for character in text.chars() {
-        escape_character(character, |character| rendered.push(character));
-    }
-    rendered
-}
-
-fn escape_character(character: char, mut emit: impl FnMut(char)) {
-    if character.is_control() && !matches!(character, '\n' | '\t') {
-        character.escape_default().for_each(emit);
-    } else {
-        emit(character);
-    }
-}
+use crate::diagnostic_text::escape_character;
+pub(crate) use crate::diagnostic_text::escaped_text;
 
 pub(crate) struct ContentView {
     text: String,
@@ -31,7 +17,6 @@ impl ContentView {
         Self::render(value, 4096, 36)
     }
 
-    #[cfg(debug_assertions)]
     pub(crate) fn full(value: &Value) -> String {
         Self::render(value, usize::MAX, usize::MAX)
     }

@@ -60,11 +60,22 @@ where
             }
             return Err(VisionReplayError::ObservationMissing);
         };
+        let audit = session
+            .request_audits()
+            .iter()
+            .find(|audit| audit.audit_event_id() == &observation.request_audit_event_id);
+        self.verify_observation(&observation, audit)?;
+        Ok(observation)
+    }
+
+    pub(crate) fn verify_observation(
+        &self,
+        observation: &VisionObservation,
+        audit: Option<&crate::domain::request_audit::RequestAuditManifest>,
+    ) -> Result<(), VisionReplayError> {
         if let Some(geometry) = &observation.image_geometry {
-            let audit = session
-                .request_audits()
-                .iter()
-                .find(|audit| audit.audit_event_id() == &observation.request_audit_event_id)
+            let audit = audit
+                .filter(|audit| audit.audit_event_id() == &observation.request_audit_event_id)
                 .ok_or(VisionReplayError::GeometryAuditMismatch)?;
             let input = audit
                 .reconstruct(|id| self.blobs.read_blob(id))
@@ -100,10 +111,10 @@ where
             decode_model_reply(raw).map_err(|error| VisionReplayError::ObservationBlobInvalid {
                 message: error.to_string(),
             })?;
-        if !reply.matches_observation(&observation) {
+        if !reply.matches_observation(observation) {
             return Err(VisionReplayError::ObservationBlobMismatch);
         }
-        Ok(observation)
+        Ok(())
     }
 }
 

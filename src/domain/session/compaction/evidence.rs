@@ -106,7 +106,7 @@ impl ResearchStreamIdentity {
         &self.stream_hash
     }
 
-    fn validate(&self) -> Result<(), SessionError> {
+    pub(super) fn validate(&self) -> Result<(), SessionError> {
         require_text("evidence_spine.source.project_id", self.project_id.as_str())?;
         require_text("evidence_spine.source.stream_id", self.stream_id.as_str())?;
         if self.watermark.get() == 0 {
@@ -126,9 +126,10 @@ impl ResearchStreamIdentity {
 /// store.
 pub struct CompactionValidationContext<'facts> {
     project_id: &'facts ProjectId,
-    research_stream: &'facts ResearchStreamIdentity,
+    research_stream: Option<&'facts ResearchStreamIdentity>,
     research_state: &'facts ResearchState,
     execution_receipt_ids: &'facts BTreeSet<ExecutionReceiptId>,
+    main_v5: Option<&'facts super::summary::MainV5ValidationFacts>,
 }
 
 impl<'facts> CompactionValidationContext<'facts> {
@@ -140,10 +141,34 @@ impl<'facts> CompactionValidationContext<'facts> {
     ) -> Self {
         Self {
             project_id,
+            research_stream: Some(research_stream),
+            research_state,
+            execution_receipt_ids,
+            main_v5: None,
+        }
+    }
+
+    pub(crate) fn for_main_v5(
+        project_id: &'facts ProjectId,
+        research_stream: Option<&'facts ResearchStreamIdentity>,
+        research_state: &'facts ResearchState,
+        execution_receipt_ids: &'facts BTreeSet<ExecutionReceiptId>,
+        main_v5: &'facts super::summary::MainV5ValidationFacts,
+    ) -> Self {
+        Self {
+            project_id,
             research_stream,
             research_state,
             execution_receipt_ids,
+            main_v5: Some(main_v5),
         }
+    }
+
+    pub(super) fn main_v5(&self) -> Option<&super::summary::MainV5ValidationFacts> {
+        self.main_v5
+    }
+    pub(super) fn research_state(&self) -> &ResearchState {
+        self.research_state
     }
 }
 
@@ -270,17 +295,23 @@ impl EvidenceSpine {
                 received: self.source.project_id().clone(),
             });
         }
-        if self.source.stream_id() != context.research_stream.stream_id() {
+        let research_stream =
+            context
+                .research_stream
+                .ok_or_else(|| SessionError::CompactionSourceInvalid {
+                    message: "EvidenceSpine requires a nonempty Research source".to_owned(),
+                })?;
+        if self.source.stream_id() != research_stream.stream_id() {
             return Err(SessionError::CompactionEvidenceResearchStreamMismatch {
-                expected: context.research_stream.stream_id().clone(),
+                expected: research_stream.stream_id().clone(),
                 received: self.source.stream_id().clone(),
             });
         }
-        if self.source.watermark() != context.research_stream.watermark()
-            || self.source.stream_hash() != context.research_stream.stream_hash()
+        if self.source.watermark() != research_stream.watermark()
+            || self.source.stream_hash() != research_stream.stream_hash()
         {
             return Err(SessionError::CompactionEvidenceStaleResearchRevision {
-                expected_watermark: context.research_stream.watermark(),
+                expected_watermark: research_stream.watermark(),
                 received_watermark: self.source.watermark(),
             });
         }

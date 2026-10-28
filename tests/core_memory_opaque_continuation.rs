@@ -127,7 +127,6 @@ mod opaque_core_memory_continuation {
                 "content": CURRENT_MEMORY,
                 "expected_hash": expected_hash,
                 "event_id": "opaque-core-memory-change",
-                "occurred_at": "2026-10-21T00:00:00Z",
             }).to_string(),
         })
     }
@@ -235,7 +234,6 @@ mod opaque_core_memory_continuation {
                 "content": content,
                 "expected_hash": expected_hash,
                 "event_id": event_id,
-                "occurred_at": "2026-10-20T00:00:00Z",
             }),
         );
         let plan = tools
@@ -428,6 +426,7 @@ mod opaque_core_memory_continuation {
                     &mut context_refresh,
                     Arc::new(ModelRequestBudget::new(3)),
                 ),
+                None,
             )
             .await
             .expect("opaque continuation with a proven Core Memory replacement completes");

@@ -87,7 +87,7 @@ fn r5a_raw_capture_hints_distinguish_complete_and_unretained_output() {
         let events = session_events(root.path(), &session_id(root.path()));
         let receipt = events
             .iter()
-            .find(|event| event["event_type"] == "tool.execution_receipt_recorded")
+            .find(|event| event["event_type"] == "tool.execution_outcome_recorded")
             .unwrap();
         let capture = &receipt["payload"]["receipt"]["output_captures"][0];
         assert_eq!(capture["complete"], complete);
@@ -193,7 +193,7 @@ fn f5_tool_views_show_directory_results_partial_failures_and_bounded_text() {
     assert_eq!(
         session_events(root.path(), &session_id(root.path()))
             .iter()
-            .filter(|event| event["event_type"] == "tool.execution_receipt_recorded")
+            .filter(|event| event["event_type"] == "tool.execution_outcome_recorded")
             .count(),
         4
     );
@@ -211,9 +211,11 @@ fn f5_million_token_mapping_reaches_formal_chat_without_32k_working_limit() {
     let config = write_config(root.path(), &server.base_url);
     let encoded = fs::read_to_string(&config)
         .unwrap()
-        .replace("context_window = 32768", "context_window = 1048576");
+        .replace("context_window = 272000", "context_window = 1048576");
     fs::write(&config, encoded).unwrap();
-    let prompt = format!("F5_LARGE_INPUT{}", "x".repeat(150000));
+    // Exceeds the ordinary 272K input budget, so a stale template replacement
+    // cannot accidentally pass this explicit 1M-window fixture.
+    let prompt = format!("F5_LARGE_INPUT{}", "x".repeat(900000));
     let output = run_chat(root.path(), &config, &format!("{prompt}\n/exit\n"), &[]);
     assert!(
         output.status.success(),

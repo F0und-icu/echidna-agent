@@ -155,6 +155,24 @@ async fn write_file_is_atomic_auditable_and_rejects_a_stale_preimage() {
     assert_eq!(audit.after_size, Some(6));
     assert_eq!(audit.actual_diff, "--- notes.txt\n+++ notes.txt\n+first\n");
     assert_eq!(created.result.output["changes"][0]["after_size"], 6);
+    assert!(
+        created.result.output["changes"][0]
+            .get("actual_diff")
+            .is_none()
+    );
+    let spec = tools
+        .catalog()
+        .into_iter()
+        .find(|spec| spec.name.as_str() == "write_file")
+        .unwrap();
+    let change_schema = &spec.output_schema["properties"]["changes"]["items"];
+    assert!(change_schema["properties"]["actual_diff"].is_null());
+    assert!(
+        !change_schema["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("actual_diff"))
+    );
 
     let stale = execute(
         &tools,
@@ -176,6 +194,33 @@ async fn write_file_is_atomic_auditable_and_rejects_a_stale_preimage() {
         fs::read(project.root().join("notes.txt")).unwrap(),
         b"first\n"
     );
+}
+
+#[tokio::test]
+async fn write_file_reply_omits_large_diff_while_receipt_retains_it() {
+    let (_root, project) = initialized_project("file-write-compact-reply");
+    let tools = ToolRegistry::for_project(project.root());
+    let content = (0..256)
+        .map(|i| format!("payload-line-{i:04}\n"))
+        .collect::<String>();
+    let expected_diff = format!(
+        "--- large.txt\n+++ large.txt\n{}",
+        content
+            .lines()
+            .map(|line| format!("+{line}\n"))
+            .collect::<String>()
+    );
+    let outcome = execute(
+        &tools,
+        "large-write",
+        "write_file",
+        json!({"path":"large.txt", "content":content, "expected_hash":null}),
+    )
+    .await;
+    assert_eq!(outcome.result.status, ToolResultStatus::Succeeded);
+    assert!(serde_json::to_vec(&outcome.result.output).unwrap().len() < expected_diff.len());
+    assert!(!outcome.result.output.to_string().contains("payload-line-"));
+    assert_eq!(outcome.receipt.file_mutations[0].actual_diff, expected_diff);
 }
 
 #[tokio::test]

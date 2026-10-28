@@ -6,12 +6,29 @@
 //! duplicate sequences. Context, History, RequestAudit, Tool execution and
 //! model streaming retain their existing owners.
 
+// These macros route the existing CLI presentation through the active Chat
+// console. Outside a capable terminal the original streams/bytes are retained.
+macro_rules! console_print {
+    ($($arg:tt)*) => {{ use std::io::Write as _; write!(crate::terminal_console::stdout(), $($arg)*).expect("CLI stdout failed"); }};
+}
+macro_rules! console_println {
+    () => { console_print!("\n") };
+    ($($arg:tt)*) => { console_print!("{}\n", format_args!($($arg)*)) };
+}
+macro_rules! console_eprintln {
+    ($($arg:tt)*) => {{ use std::io::Write as _; writeln!(crate::terminal_console::stderr(), $($arg)*).expect("CLI stderr failed"); }};
+}
+
 mod compaction;
+mod compaction_graph;
 mod context;
 mod input;
+mod memory;
+mod persistence;
 mod recovery;
 mod theme;
 mod tool_output;
+mod usage;
 mod vision;
 
 use std::cell::Cell;
@@ -21,13 +38,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
-use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::adapters::artifact_store::LocalArtifactStore;
 use crate::adapters::fragment_cache::LocalFragmentCache;
 use crate::adapters::project_event_store::{Project, ProjectEventStream};
 use crate::adapters::research_projection::{
-    CompactionValidationFacts, CompactionValidationFactsError, load_compaction_validation_facts,
+    CompactionValidationFactsError, load_compaction_validation_facts,
 };
 use crate::adapters::tools::ToolRegistry;
 use crate::app::agent_loop::{
@@ -73,14 +89,7 @@ pub(crate) async fn run(
     let tools = composition
         .discover_chat_tools(session.project.root())
         .await?
-        .with_project(&session.project)
-        .with_context_window(
-            composition
-                .agent_profile()
-                .primary()
-                .capabilities()
-                .context_window,
-        );
+        .with_project(&session.project);
     let (session_state, provider_session, mut disposition, compaction_validation) =
         session.start_or_resume(explicit_resume, composition, &tools)?;
     let domain = requested_domain.unwrap_or_else(|| session_state.effective_domain_profile());
@@ -93,6 +102,7 @@ pub(crate) async fn run(
         composition.agent_profile().primary().profile().clone(),
         provider_session.clone(),
     )?
+    .with_context_budget_policy(composition.runtime().context_budget)
     .with_fragment_cache(Arc::new(LocalFragmentCache::for_project(&session.project)))
     .with_output_store(LocalArtifactStore::for_project(&session.project))
     .with_domain_profile(domain);
@@ -113,8 +123,8 @@ pub(crate) async fn run(
 
     let theme = theme::Theme::detect();
     theme.welcome();
-    println!(
-        "{} session `{}` with domain `{}` and phase `{}`. Enter a line, or use /paste, /image, /domain, /phase, /context, /compact, /resume, /stop, /exit or EOF. While running in a terminal, /stop or a new instruction interrupts the current Turn before further input is handled.",
+    console_println!(
+        "{} session `{}` with domain `{}` and phase `{}`. Enter a line, or use /paste, /image, /domain, /phase, /context, /memory, /compact, /resume, /stop, /exit or EOF. While running in a terminal, /stop or a new instruction interrupts the current Turn before further input is handled.",
         disposition.message(),
         session_id.as_str(),
         domain.id(),
@@ -125,47 +135,76 @@ pub(crate) async fn run(
     let mut pending_domain = requested_domain.map(DomainProfileSelection::operator);
     let mut pending_phase = requested_phase.map(ResearchPhaseSelection::operator);
     let mut pending_images: Vec<vision::PendingImage> = Vec::new();
-    let mut recovery_required = false;
+    let mut recovery_state = recovery::RecoveryState::Ready;
+    if explicit_resume {
+        let current = context_cache.refresh(&session.project, &tools, composition)?;
+        agent.refresh_current_context(current)?;
+        if recovery::requires_context_change(&agent, false)? {
+            recovery_state = recovery::RecoveryState::ContextChangeRequired;
+            console_println!(
+                "Session restored after source validation. Context exceeds available capacity; use /context, /compact or /exit. No request sent or Tool retried."
+            );
+        }
+    }
     let terminal_input = io::stdin().is_terminal();
     let mut input_closed = false;
     let mut pending_input = None;
-    let mut lines = BufReader::new(tokio::io::stdin()).lines();
+    let mut lines = input::ChatInput::new()?;
     let tool_output = std::cell::RefCell::new(tool_output::ToolOutput::default());
+    let committed_step = std::cell::RefCell::new(
+        None::<(String, EventId, crate::domain::context::ProviderSessionRef)>,
+    );
     loop {
-        print!("you> ");
-        io::stdout().flush()?;
+        lines.prompt(crate::terminal_console::InputMode::Task)?;
+        let follow_up = pending_input.is_some();
         let line = if pending_input.is_some() {
             pending_input.take()
         } else if input_closed {
             None
         } else {
             tokio::select! {
-                line = lines.next_line() => line?,
+                line = lines.next_line() => match line {
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                        console_println!("\nInterrupted while waiting for input; Session `{}` remains active.", session_id.as_str());
+                        return recovery::exit_status(recovery_state);
+                    }
+                    result => result?,
+                },
                 signal = tokio::signal::ctrl_c() => {
                     signal?;
-                    println!("\nInterrupted while waiting for input; Session `{}` remains active.", session_id.as_str());
-                    return recovery::exit_status(recovery_required);
+                    console_println!("\nInterrupted while waiting for input; Session `{}` remains active.", session_id.as_str());
+                    return recovery::exit_status(recovery_state);
                 }
             }
         };
         let Some(line) = line else {
-            println!(
+            console_println!(
                 "EOF received; Session `{}` remains active.",
                 session_id.as_str()
             );
-            return recovery::exit_status(recovery_required);
+            return recovery::exit_status(recovery_state);
         };
+        if line == "/paste" && recovery_state != recovery::RecoveryState::Ready {
+            console_println!("Task input not accepted or saved while recovery is required.");
+            continue;
+        }
         let line = if line == "/paste" {
-            println!("Paste mode; finish with /end on its own line.");
+            console_println!("Paste mode; finish with /end on its own line.");
             let mut pasted = Vec::new();
-            loop {
-                print!("...> ");
-                io::stdout().flush()?;
+            let pasted = loop {
+                lines.prompt(crate::terminal_console::InputMode::Paste)?;
                 let next = tokio::select! {
-                    line = lines.next_line() => line?,
+                    line = lines.next_line() => match line {
+                        Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                            console_println!("\n[paste cancelled]");
+                            pasted.clear();
+                            break None;
+                        }
+                        result => result?,
+                    },
                     signal = tokio::signal::ctrl_c() => {
                         signal?;
-                        println!("\n[paste cancelled]");
+                        console_println!("\n[paste cancelled]");
                         pasted.clear();
                         break None;
                     }
@@ -174,14 +213,16 @@ pub(crate) async fn run(
                     Some(value) if value == "/end" => break Some(pasted.join("\n")),
                     Some(value) => pasted.push(value),
                     None => {
-                        println!(
+                        console_println!(
                             "EOF received during paste; Session `{}` remains active and the incomplete paste was discarded.",
                             session_id.as_str()
                         );
-                        return recovery::exit_status(recovery_required);
+                        return recovery::exit_status(recovery_state);
                     }
                 }
-            }
+            };
+            lines.end_paste()?;
+            pasted
         } else {
             Some(line)
         };
@@ -189,89 +230,204 @@ pub(crate) async fn run(
             continue;
         };
         if line.is_empty() {
-            println!("Empty input ignored.");
+            console_println!("Empty input ignored.");
             continue;
         }
         if line == "/exit" {
-            println!(
+            console_println!(
                 "Session `{}` remains active for explicit resume.",
                 session_id.as_str()
             );
-            return recovery::exit_status(recovery_required);
+            return recovery::exit_status(recovery_state);
+        }
+        if recovery_state != recovery::RecoveryState::Ready
+            && line != "/context"
+            && line != "/resume"
+            && !(recovery_state == recovery::RecoveryState::ContextChangeRequired
+                && line == "/compact")
+        {
+            match recovery_state {
+                recovery::RecoveryState::ResumeRequired { .. } => console_println!(
+                    "Task input not accepted or saved: use /resume first, or /context /exit. No old input or Tool will be retried."
+                ),
+                recovery::RecoveryState::ContextChangeRequired => console_println!(
+                    "Task input not accepted or saved: use /context, /compact or /exit. No old input or Tool will be retried."
+                ),
+                recovery::RecoveryState::Ready => unreachable!(),
+            }
+            continue;
         }
         if line == "/stop" {
-            println!("No Turn is running. Background Jobs/PTYs, if any, are not stopped by /stop.");
+            console_println!(
+                "No Turn is running. Background Jobs/PTYs, if any, are not stopped by /stop."
+            );
             continue;
         }
         if line == "/context" {
-            match agent.last_context_plan() {
-                Some(plan) => {
-                    println!("{}", compaction::ContextPressure::from_plan(plan).message())
+            if !matches!(
+                recovery_state,
+                recovery::RecoveryState::ResumeRequired { .. }
+            ) {
+                let current = context_cache.refresh(&session.project, &tools, composition)?;
+                agent.refresh_current_context(current)?;
+                match agent.fresh_compaction_context_diagnostic()? {
+                    Ok(plan) => console_println!(
+                        "[current refreshed candidate] {}",
+                        compaction::ContextPressure::from_plan(&plan).message()
+                    ),
+                    Err((error, breakdown)) => {
+                        let budget = agent.context_budget()?;
+                        console_println!(
+                            "[current refreshed candidate] {error}; window={}, output reserve={}, tool-loop reserve={}, full input budget B={}. Committed delivery estimate={} (includes retained reasoning/opaque when present and overlaps the logical candidate; do not add them). Image token cost is unknown. The last successful plan below is not the current failure.",
+                            budget.context_window_tokens(),
+                            budget.reserved_output_tokens(),
+                            budget.reserved_tool_loop_tokens(),
+                            budget.input_token_limit(),
+                            agent.delivery_input_estimate()?.map_or_else(
+                                || "unavailable".to_owned(),
+                                |value| value.to_string()
+                            )
+                        );
+                        if let Some(detail) = breakdown {
+                            let available = detail.fragment_budget.map_or_else(
+                                || "unavailable: tool schema exceeds B".to_owned(),
+                                |value| value.to_string(),
+                            );
+                            console_println!(
+                                "[current candidate components] tool schema={} tokens; fragment budget after tools={available}; instructions={}, Memory={}, Summary={}, current/protected input={}, History/results={}, Turn updates/results={}, Research/project facts={}; required fragments={}; image items={}, opaque references={}. Component values are local fragment estimates, not Provider token counts; History and updates may contain mixed item kinds.",
+                                detail.tool_schema_tokens,
+                                detail.instructions,
+                                detail.memory,
+                                detail.summary,
+                                detail.input,
+                                detail.history,
+                                detail.turn_updates,
+                                detail.project_facts,
+                                detail.required_fragments,
+                                detail.images,
+                                detail.opaque_items
+                            );
+                        }
+                    }
                 }
-                None => println!(
-                    "Context pressure is unavailable before the first model request; Provider usage is not inferred."
+            }
+            if recovery_state != recovery::RecoveryState::Ready {
+                console_println!(
+                    "[original stopped candidate] breakdown unavailable; it was not recorded."
+                );
+            }
+            match agent.last_successful_context() {
+                Some(context) => console_println!(
+                    "[last successful plan] {}",
+                    compaction::ContextPressure::from_plan(context.plan()).message()
+                ),
+                None => console_println!(
+                    "No successful model plan is available; Provider usage is not inferred."
                 ),
             }
             continue;
         }
+        if line == "/memory" {
+            console_println!("{}", memory::status(&session.project, &tools)?);
+            continue;
+        }
         if line == "/resume" {
-            if !recovery_required {
-                println!("No stopped Turn needs recovery; no ProviderSession was replaced.");
+            let recovery::RecoveryState::ResumeRequired { capacity } = recovery_state else {
+                console_println!(
+                    "No stopped Turn needs recovery; no ProviderSession was replaced."
+                );
                 continue;
-            }
+            };
             let (state, provider_session, resumed, validation) =
                 session.start_or_resume(true, composition, &tools)?;
             let validation = validation.as_ref().map(|facts| facts.context());
             agent.resume_from_session(&state, provider_session, validation.as_ref())?;
             disposition = resumed;
-            recovery_required = false;
-            println!(
-                "ProviderSession rebuilt from durable History; volatile reasoning cleared by explicit /resume. No request sent or Tool retried. Enter a new instruction or /compact."
-            );
-            continue;
-        }
-        if recovery_required {
-            println!(
-                "Task input not accepted or saved: use /resume first, or /context /exit. No old input or Tool will be retried."
-            );
+            let current = context_cache.refresh(&session.project, &tools, composition)?;
+            agent.refresh_current_context(current)?;
+            recovery_state = if recovery::requires_context_change(&agent, capacity)? {
+                recovery::RecoveryState::ContextChangeRequired
+            } else {
+                recovery::RecoveryState::Ready
+            };
+            if recovery_state == recovery::RecoveryState::ContextChangeRequired {
+                console_println!(
+                    "ProviderSession rebuilt after source validation. Context exceeds available capacity; use /context, /compact or /exit. No request sent or Tool retried."
+                );
+            } else {
+                console_println!(
+                    "ProviderSession rebuilt from durable History; volatile reasoning cleared by explicit /resume. No request sent or Tool retried. Enter a new instruction or /compact."
+                );
+            }
             continue;
         }
         if line == "/compact" {
             if let Some(image) = pending_images.first() {
-                println!(
+                console_println!(
                     "Compaction is unavailable while {} image(s), starting with `{}`, are queued; submit their Turn first.",
                     pending_images.len(),
                     image.delivery_artifact_id(),
                 );
                 continue;
             }
+            lines.processing()?;
             let current = context_cache.refresh(&session.project, &tools, composition)?;
             agent.refresh_current_context(current)?;
-            println!(
-                "{}",
-                session
-                    .compact(
-                        &mut agent,
-                        crate::domain::context::ContextWindowPolicy::for_window(
-                            composition
-                                .agent_profile()
-                                .primary()
-                                .capabilities()
-                                .context_window,
-                        ),
-                    )?
-                    .message()
-            );
+            let cancellation = AgentCancellation::new();
+            let budget =
+                ModelRequestBudget::new(composition.runtime().model_request_limit_per_turn);
+            let result = input::interruptible(
+                session.compact(
+                    &mut agent,
+                    tools.window_policy(),
+                    compaction::CompactionRequestContext {
+                        composition,
+                        budget: &budget,
+                        cancellation: cancellation.clone(),
+                        audit: &audit_context,
+                    },
+                ),
+                &cancellation,
+                &mut lines,
+                terminal_input,
+                &mut input_closed,
+                &mut pending_input,
+            )
+            .await?;
+            match result {
+                Ok(summary) => {
+                    console_println!("{}", summary.message());
+                    if recovery_state == recovery::RecoveryState::ContextChangeRequired
+                        && !recovery::requires_context_change(&agent, false)?
+                    {
+                        recovery_state = recovery::RecoveryState::Ready;
+                        console_println!(
+                            "Context is locally admissible; enter a new instruction when ready."
+                        );
+                    }
+                }
+                Err(ChatError::CompactionNotUseful)
+                    if recovery_state == recovery::RecoveryState::ContextChangeRequired =>
+                {
+                    console_println!(
+                        "Compaction could not find a smaller admissible Context. The current configuration cannot resume normal sending; retain the Session or explicitly choose a suitable larger-window configuration before --resume."
+                    )
+                }
+                Err(error) if compaction::explicitly_deferred(&error) => console_println!(
+                    "Compaction deferred: {error}; original Context and Provider delivery retained."
+                ),
+                Err(error) => return Err(error),
+            }
             continue;
         }
         if line == "/image" {
-            println!("Usage: /image <path>");
+            console_println!("Usage: /image <path>");
             continue;
         }
         if let Some(path) = line.strip_prefix("/image ") {
             match vision::ingest_image(&session, &tools, composition, path).await {
                 Ok(image) => {
-                    println!(
+                    console_println!(
                         "Queued image `{}` for TargetSnapshot `{}` and the next Turn.",
                         image.delivery_artifact_id(),
                         image
@@ -280,26 +436,28 @@ pub(crate) async fn run(
                     );
                     pending_images.push(image);
                 }
-                Err(error) => println!("Image rejected: {error}"),
+                Err(error) => console_println!("Image rejected: {error}"),
             }
             continue;
         }
         if let Some(value) = line.strip_prefix("/phase ") {
             let phase = parse_phase(value)?;
             pending_phase = Some(ResearchPhaseSelection::operator(phase));
-            println!("Queued phase `{}` for the next Turn.", phase.id());
+            console_println!("Queued phase `{}` for the next Turn.", phase.id());
             continue;
         }
         if let Some(value) = line.strip_prefix("/domain ") {
             let selected_domain = parse_domain(value)?;
             pending_domain = Some(DomainProfileSelection::operator(selected_domain));
-            println!(
+            console_println!(
                 "Queued domain `{}` for the next Turn.",
                 selected_domain.id()
             );
             continue;
         }
 
+        let announce_follow_up = follow_up && lines.is_interactive();
+        lines.processing()?;
         let domain = session.prepare_domain_for_turn(disposition, pending_domain.take())?;
         agent.queue_domain_profile(domain);
         let phase = session.prepare_phase_for_turn(disposition, pending_phase.take())?;
@@ -337,7 +495,9 @@ pub(crate) async fn run(
             if cancellation.is_cancelled() {
                 match prepared {
                     Ok(_) | Err(ChatError::VisionCancelled) => {
-                        println!("\n[vision request cancelled; no Primary request was started]");
+                        console_println!(
+                            "\n[vision request cancelled; no Primary request was started]"
+                        );
                         continue;
                     }
                     Err(error) => {
@@ -352,10 +512,12 @@ pub(crate) async fn run(
                     let error = vision::follow_up_error(error);
                     if agent.permits_explicit_recovery(&error) {
                         session.validate_stopped_runtime(&agent)?;
-                        recovery_required = true;
+                        recovery_state = recovery::RecoveryState::ResumeRequired {
+                            capacity: recovery::is_capacity_error(&error),
+                        };
                         recovery::report_stop(&error, &request_budget);
                         input::reject_pending(&mut pending_input);
-                        println!(
+                        console_println!(
                             "Initial images/task were not submitted to Primary; reattach each image explicitly after /resume if needed."
                         );
                         continue;
@@ -368,26 +530,30 @@ pub(crate) async fn run(
         let answer_started = Cell::new(false);
         let end_answer = || {
             if answer_started.replace(false) {
-                println!();
+                console_println!();
             }
         };
         let mut text_delta = |text: &str| {
             if !answer_started.get() && !text.is_empty() {
-                print!("{}", theme.answer_prefix());
+                console_print!("{}", theme.answer_prefix());
                 answer_started.set(true);
             }
-            print!("{text}");
-            io::stdout()
-                .flush()
+            write!(crate::terminal_console::stdout(), "{text}")
+                .and_then(|_| crate::terminal_console::stdout().flush())
                 .map_err(|error| AgentLoopError::TextDeltaOutput {
                     message: error.to_string(),
                 })
         };
+        let accepted_attempt = std::cell::RefCell::new(None);
         let mut record_attempt = |attempt: RequestAuditAttempt| {
             // Sampling boundaries affect only presentation, never History bytes.
             end_answer();
+            let step_id = attempt.sampling_step_id().map(str::to_owned);
             session
-                .record_request_audit(attempt)
+                .record_request_audit_manifest(attempt, None)
+                .map(|manifest| {
+                    accepted_attempt.replace(Some((step_id, manifest)));
+                })
                 .map_err(ChatError::into_request_audit_agent_loop_error)
         };
         let mut tool_start = |plan: &crate::domain::tools::ToolExecutionPlan| {
@@ -395,6 +561,92 @@ pub(crate) async fn run(
             tool_output.borrow_mut().started(plan);
         };
         let mut durability = |checkpoint: ChatDurabilityCheckpoint<'_>| match checkpoint {
+            ChatDurabilityCheckpoint::OperatorInputAccepted { items, provenance } => {
+                session
+                    .record_operator_input(items, provenance)
+                    .map_err(ChatError::into_history_checkpoint_agent_loop_error)?;
+                if announce_follow_up {
+                    input::report_follow_up_accepted().map_err(|error| {
+                        AgentLoopError::TextDeltaOutput {
+                            message: error.to_string(),
+                        }
+                    })?;
+                }
+                Ok(())
+            }
+            ChatDurabilityCheckpoint::OperatorTurnCompleted => {
+                let audit = accepted_attempt.borrow();
+                let (_, audit) = audit
+                    .as_ref()
+                    .expect("a completed audited sample has an actual attempt");
+                session
+                    .record_operator_completed(audit.audit_event_id())
+                    .map_err(ChatError::into_history_checkpoint_agent_loop_error)
+            }
+            ChatDurabilityCheckpoint::Usage {
+                provider_session,
+                usage,
+            } => {
+                let audit = accepted_attempt.borrow();
+                let (_, audit) = audit
+                    .as_ref()
+                    .expect("a completed audited sample has an actual attempt");
+                session
+                    .record_model_usage(audit.audit_event_id(), provider_session, usage)
+                    .map_err(|error| AgentLoopError::ModelUsageCommit {
+                        message: error.to_string(),
+                    })
+            }
+            ChatDurabilityCheckpoint::ModelDeliveryCommitted {
+                step_id,
+                previous_step_id,
+                provider_session,
+            } => {
+                use crate::domain::request_audit::RequestAuditDeliveryMode;
+                let audit = accepted_attempt.borrow();
+                let (audited_step, manifest) = audit
+                    .as_ref()
+                    .expect("a completed audited sample has an actual attempt");
+                if audited_step.as_deref() != Some(step_id)
+                    || manifest.provider_session() != Some(provider_session)
+                {
+                    return Err(AgentLoopError::HistoryCheckpointCommit {
+                        message:
+                            "accepted sample does not match its audited Step and ProviderSession"
+                                .to_owned(),
+                    });
+                }
+                let previous = match manifest.delivery().mode() {
+                    RequestAuditDeliveryMode::Full => None,
+                    RequestAuditDeliveryMode::Incremental => {
+                        let committed = committed_step.borrow();
+                        let (step, id, session_ref) = committed.as_ref().ok_or_else(|| {
+                            AgentLoopError::HistoryCheckpointCommit {
+                                message: "incremental sample has no durable accepted baseline"
+                                    .to_owned(),
+                            }
+                        })?;
+                        if Some(step.as_str()) != previous_step_id
+                            || session_ref != provider_session
+                        {
+                            return Err(AgentLoopError::HistoryCheckpointCommit {
+                                message: "incremental sample does not match its committed baseline"
+                                    .to_owned(),
+                            });
+                        }
+                        Some(id.clone())
+                    }
+                };
+                session
+                    .record_model_delivery(manifest.audit_event_id(), previous)
+                    .map_err(ChatError::into_history_checkpoint_agent_loop_error)?;
+                committed_step.replace(Some((
+                    step_id.to_owned(),
+                    manifest.audit_event_id().clone(),
+                    provider_session.clone(),
+                )));
+                Ok(())
+            }
             ChatDurabilityCheckpoint::ModelSampleRejected {
                 diagnostic,
                 corrections_used,
@@ -405,22 +657,27 @@ pub(crate) async fn run(
                     .map_err(|error| AgentLoopError::ModelRejectionCommit {
                         message: error.to_string(),
                     })?;
-                let limit = crate::domain::model::MAX_TOOL_ARGUMENT_CORRECTIONS_PER_TURN;
-                eprintln!(
+                let limit = crate::domain::model::MAX_TOOL_ARGUMENT_CORRECTIONS_PER_CHAIN;
+                console_eprintln!(
                     "\n[model sample rejected] {diagnostic}; streamed prose was not committed and no Tool from this sample ran."
                 );
                 if corrections_used < limit {
-                    eprintln!(
+                    console_eprintln!(
                         "[argument correction {}/{limit}] Regenerating the failed sample if budget permits; completed tools will not be replayed.",
                         corrections_used + 1
                     );
                 } else {
-                    eprintln!(
+                    console_eprintln!(
                         "[argument corrections exhausted] Returning control without another request."
                     );
                 }
                 Ok(())
             }
+            ChatDurabilityCheckpoint::ArgumentCorrectionReset => session
+                .record_correction_reset()
+                .map_err(|error| AgentLoopError::ModelRejectionCommit {
+                    message: error.to_string(),
+                }),
             ChatDurabilityCheckpoint::Subcommand(checkpoint) => {
                 session
                     .record_subcommand(checkpoint)
@@ -471,6 +728,18 @@ pub(crate) async fn run(
                     message: error.to_string(),
                 })
         };
+        let mut batch_compaction = compaction::AutomaticToolBatchCompaction {
+            session: &session,
+            policy: tools.window_policy(),
+            request: compaction::CompactionRequestContext {
+                composition,
+                budget: &request_budget,
+                cancellation: signal_cancellation.clone(),
+                audit: &audit_context,
+            },
+            deferred: false,
+            end_answer: &end_answer,
+        };
         let outcome = {
             let turn = agent.run_turn_audited_with_context_refresh_and_vision_stages(
                 line,
@@ -486,6 +755,7 @@ pub(crate) async fn run(
                     &mut refresh_context,
                     Arc::clone(&request_budget),
                 ),
+                Some(&mut batch_compaction),
             );
             input::interruptible(
                 turn,
@@ -502,7 +772,7 @@ pub(crate) async fn run(
         let mut auto_compacted = false;
         match outcome {
             Ok(AgentTurnOutcome::Completed { .. }) => {
-                println!();
+                console_println!();
                 if composition.runtime().auto_compact {
                     let current = context_cache.refresh(&session.project, &tools, composition)?;
                     agent.refresh_current_context(current)?;
@@ -513,39 +783,60 @@ pub(crate) async fn run(
                         Ok(None) => true,
                         Err(error) => return Err(ChatError::Agent(error)),
                     };
-                    if should_compact {
-                        match session.compact(
+                    if should_compact
+                        && (batch_compaction.deferred || request_budget.remaining() == Some(0))
+                    {
+                        console_println!(
+                            "Automatic completed-Turn compaction was not sampled; the completed answer remains durable. Use /compact to attempt a new handoff."
+                        );
+                    } else if should_compact {
+                        let compact = session.compact(
                             &mut agent,
-                            crate::domain::context::ContextWindowPolicy::for_window(
-                                composition
-                                    .agent_profile()
-                                    .primary()
-                                    .capabilities()
-                                    .context_window,
-                            ),
-                        ) {
+                            tools.window_policy(),
+                            compaction::CompactionRequestContext {
+                                composition,
+                                budget: &request_budget,
+                                cancellation: signal_cancellation.clone(),
+                                audit: &audit_context,
+                            },
+                        );
+                        match input::interruptible(
+                            compact,
+                            &signal_cancellation,
+                            &mut lines,
+                            terminal_input,
+                            &mut input_closed,
+                            &mut pending_input,
+                        )
+                        .await?
+                        {
                             Err(ChatError::CompactionFacts(
                                 CompactionValidationFactsError::ResearchStreamEmpty,
                             )) => {
-                                println!(
+                                console_println!(
                                     "Automatic completed-Turn compaction deferred: the Project Research stream is empty; no Compaction was appended and Provider delivery state was retained."
                                 );
                             }
                             Ok(summary) => {
-                                println!("{}", summary.automatic_message());
+                                console_println!("{}", summary.automatic_message());
                                 auto_compacted = true;
                             }
                             Err(ChatError::Session(
                                 SessionError::CompactionCurrentTargetRequired,
                             )) => {
-                                println!(
+                                console_println!(
                                     "Automatic completed-Turn compaction deferred: the current Project has no TargetSnapshot; no Compaction was appended and Provider delivery state was retained."
                                 );
                             }
                             Err(ChatError::CompactionNotUseful) => {
-                                println!(
+                                console_println!(
                                     "Automatic completed-Turn compaction deferred: no smaller usable next-Turn Context was found; no Compaction was appended and Provider delivery state was retained."
                                 );
+                            }
+                            Err(error) if compaction::automatically_deferred(&error) => {
+                                console_println!(
+                                    "Automatic completed-Turn compaction deferred: {error}; original Context and Provider delivery retained."
+                                )
                             }
                             Err(error) => return Err(error),
                         }
@@ -553,26 +844,28 @@ pub(crate) async fn run(
                 }
             }
             Ok(AgentTurnOutcome::Cancelled { .. }) => {
-                println!("\n[request cancelled]");
+                console_println!("\n[request cancelled]");
             }
             Err(error) => {
-                println!();
+                console_println!();
                 input::reject_pending(&mut pending_input);
                 if !agent.permits_explicit_recovery(&error) {
                     return Err(ChatError::Agent(error));
                 }
                 session.validate_stopped_runtime(&agent)?;
-                recovery_required = true;
+                recovery_state = recovery::RecoveryState::ResumeRequired {
+                    capacity: recovery::is_capacity_error(&error),
+                };
                 recovery::report_stop(&error, &request_budget);
             }
         }
-        if !recovery_required {
+        if recovery_state == recovery::RecoveryState::Ready {
             recovery::report_budget(&request_budget);
         }
         if !auto_compacted && let Some(plan) = agent.last_context_plan() {
             let pressure = compaction::ContextPressure::from_plan(plan);
             if pressure.should_remind() {
-                println!("{}", pressure.message());
+                console_println!("{}", pressure.message());
             }
         }
     }
@@ -601,6 +894,7 @@ struct DurableChatSession {
     project: Project,
     session_id: StreamId,
     artifacts: LocalArtifactStore,
+    projection: std::sync::Mutex<Option<persistence::CachedSessionProjection>>,
 }
 
 impl DurableChatSession {
@@ -610,6 +904,7 @@ impl DurableChatSession {
             project,
             session_id,
             artifacts,
+            projection: std::sync::Mutex::new(None),
         })
     }
 
@@ -623,7 +918,7 @@ impl DurableChatSession {
             SessionState,
             ProviderSession,
             SessionDisposition,
-            Option<CompactionValidationFacts>,
+            Option<compaction::ChatCompactionValidation>,
         ),
         ChatError,
     > {
@@ -643,7 +938,7 @@ impl DurableChatSession {
         let mut store = writer.open_session(self.session_id.clone(), None)?;
         let stream_id = ProjectEventStream::Session(self.session_id.clone()).stream_id();
         let mut projection =
-            SessionProjection::replay(EventSource::read_events(&store, &stream_id)?)?;
+            self.replay_session_events(EventSource::read_events(&store, &stream_id)?)?;
         let sequence = store.next_sequence()?;
         let provider_session = ProviderSession::new(
             ProviderSessionId::new(format!(
@@ -673,7 +968,7 @@ impl DurableChatSession {
             if let Some(compaction) = projection
                 .state()
                 .latest_compaction()
-                .filter(|compaction| compaction.summary().schema_version() == 2)
+                .filter(|compaction| matches!(compaction.summary().schema_version(), 2 | 4))
             {
                 let facts = load_compaction_validation_facts(&self.project)
                     .map_err(|error| ChatError::ResearchProjection(error.to_string()))?;
@@ -701,7 +996,18 @@ impl DurableChatSession {
                     },
                     Err(error) => return Err(error.into()),
                 }
-                compaction_validation = Some(facts);
+                compaction_validation = Some(compaction::ChatCompactionValidation::Legacy(
+                    Box::new(facts),
+                ));
+            }
+            if projection
+                .state()
+                .latest_compaction()
+                .is_some_and(|compaction| compaction.summary().schema_version() == 5)
+            {
+                compaction_validation = Some(compaction::ChatCompactionValidation::Main(Box::new(
+                    self.refresh_main_compaction(&mut projection, &mut store, &stream_id, tools)?,
+                )));
             }
             (
                 SessionEvent::Resumed {
@@ -756,7 +1062,7 @@ impl DurableChatSession {
         let mut store = writer.open_session(self.session_id.clone(), None)?;
         let stream_id = ProjectEventStream::Session(self.session_id.clone()).stream_id();
         let mut projection =
-            SessionProjection::replay(EventSource::read_events(&store, &stream_id)?)?;
+            self.replay_session_events(EventSource::read_events(&store, &stream_id)?)?;
         let selection = match requested {
             Some(selection) => selection,
             None => match projection.state().research_phase_selection() {
@@ -796,7 +1102,7 @@ impl DurableChatSession {
         let mut store = writer.open_session(self.session_id.clone(), None)?;
         let stream_id = ProjectEventStream::Session(self.session_id.clone()).stream_id();
         let mut projection =
-            SessionProjection::replay(EventSource::read_events(&store, &stream_id)?)?;
+            self.replay_session_events(EventSource::read_events(&store, &stream_id)?)?;
         let selection = match requested {
             Some(selection) => selection,
             None => match projection.state().domain_profile_selection() {
@@ -825,82 +1131,110 @@ impl DurableChatSession {
         Ok(selection.profile())
     }
 
-    fn record_request_audit(&self, attempt: RequestAuditAttempt) -> Result<(), ChatError> {
-        self.record_request_audit_manifest(attempt, None)
-            .map(|_| ())
-    }
-
     fn record_request_audit_manifest(
         &self,
         attempt: RequestAuditAttempt,
         stamp: Option<(EventId, OccurredAt)>,
     ) -> Result<RequestAuditManifest, ChatError> {
-        let mut writer = self.project.open_writer()?;
-        let mut store = writer.open_session(self.session_id.clone(), None)?;
-        let stream_id = ProjectEventStream::Session(self.session_id.clone()).stream_id();
-        let mut projection =
-            SessionProjection::replay(EventSource::read_events(&store, &stream_id)?)?;
-        let sequence = store.next_sequence()?;
-        let (event_id, occurred_at) = stamp.unwrap_or_else(|| {
-            (
-                event_id(
-                    self.project.project_id(),
-                    &self.session_id,
-                    sequence.get(),
-                    "request-audit",
-                ),
-                occurred_at(),
-            )
-        });
-        let service = RequestAuditService::new(
-            &self.artifacts,
-            RequestAuditBinding::new(self.project.project_id().clone(), stream_id)?,
-        );
-        service
-            .record(attempt, event_id, occurred_at, &mut projection, &mut store)
-            .map_err(|error| ChatError::Agent(error.into_agent_loop_error()))
+        self.with_projection(|projection, store, stream_id| {
+            let sequence = store.next_sequence()?;
+            let (event_id, occurred_at) = stamp.unwrap_or_else(|| {
+                (
+                    event_id(
+                        self.project.project_id(),
+                        &self.session_id,
+                        sequence.get(),
+                        "request-audit",
+                    ),
+                    occurred_at(),
+                )
+            });
+            let service = RequestAuditService::new(
+                &self.artifacts,
+                RequestAuditBinding::new(self.project.project_id().clone(), stream_id)?,
+            );
+            service
+                .record(attempt, event_id, occurred_at, projection, store)
+                .map_err(|error| ChatError::Agent(error.into_agent_loop_error()))
+        })
     }
 
     fn record_execution(
         &self,
         outcome: &ToolExecutionOutcome,
     ) -> Result<ReceiptRecordDisposition, ChatError> {
-        let mut writer = self.project.open_writer()?;
-        let mut store = writer.open_session(self.session_id.clone(), None)?;
-        let stream_id = ProjectEventStream::Session(self.session_id.clone()).stream_id();
-        let mut projection =
-            SessionProjection::replay(EventSource::read_events(&store, &stream_id)?)?;
-        self.record_execution_receipt(&mut projection, &mut store, &stream_id, outcome)
+        self.with_projection(|projection, store, stream_id| {
+            self.record_execution_receipt(projection, store, &stream_id, outcome)
+        })
+    }
+
+    /// Image intake is operator-originated and has no model History call.
+    fn record_operator_execution_receipt(
+        &self,
+        outcome: &ToolExecutionOutcome,
+    ) -> Result<ReceiptRecordDisposition, ChatError> {
+        self.with_projection(|projection, store, stream_id| {
+            if projection
+                .state()
+                .execution_receipts()
+                .iter()
+                .any(|record| record.receipt == outcome.receipt)
+            {
+                return Ok(ReceiptRecordDisposition::Existing);
+            }
+            let sequence = store.next_sequence()?;
+            let event = if outcome.receipt.cache_source.is_some() {
+                SessionEvent::ToolResultCacheHit {
+                    receipt: outcome.receipt.clone(),
+                }
+            } else {
+                SessionEvent::ExecutionReceiptRecorded {
+                    receipt: outcome.receipt.clone(),
+                }
+            }
+            .into_envelope(
+                event_id(
+                    self.project.project_id(),
+                    &self.session_id,
+                    sequence.get(),
+                    "execution-receipt",
+                ),
+                stream_id,
+                sequence,
+                occurred_at(),
+            )?;
+            projection
+                .append(store, event)
+                .map_err(ChatError::from_session_append)?;
+            Ok(ReceiptRecordDisposition::Recorded)
+        })
     }
 
     fn record_subcommand(
         &self,
         checkpoint: &crate::domain::tools::SubcommandCheckpoint,
     ) -> Result<(), ChatError> {
-        let mut writer = self.project.open_writer()?;
-        let mut store = writer.open_session(self.session_id.clone(), None)?;
-        let stream_id = ProjectEventStream::Session(self.session_id.clone()).stream_id();
-        let mut projection =
-            SessionProjection::replay(EventSource::read_events(&store, &stream_id)?)?;
-        let sequence = store.next_sequence()?;
-        let event = SessionEvent::SubcommandCheckpointed {
-            checkpoint: checkpoint.clone(),
-        }
-        .into_envelope(
-            event_id(
-                self.project.project_id(),
-                &self.session_id,
-                sequence.get(),
-                "subcommand-checkpoint",
-            ),
-            stream_id,
-            sequence,
-            occurred_at(),
-        )?;
-        projection
-            .append(&mut store, event)
-            .map_err(ChatError::from_session_append)?;
-        Ok(())
+        self.with_projection(|projection, store, stream_id| {
+            let sequence = store.next_sequence()?;
+            let event = SessionEvent::SubcommandCheckpointed {
+                checkpoint: checkpoint.clone(),
+            }
+            .into_envelope(
+                event_id(
+                    self.project.project_id(),
+                    &self.session_id,
+                    sequence.get(),
+                    "subcommand-checkpoint",
+                ),
+                stream_id,
+                sequence,
+                occurred_at(),
+            )?;
+            projection
+                .append(store, event)
+                .map_err(ChatError::from_session_append)?;
+            Ok(())
+        })
     }
 
     fn record_execution_receipt(
@@ -912,9 +1246,12 @@ impl DurableChatSession {
     ) -> Result<ReceiptRecordDisposition, ChatError> {
         if projection
             .state()
-            .execution_receipts()
-            .iter()
-            .any(|record| record.receipt == outcome.receipt)
+            .recorded_tool_result(&outcome.result.call_id)
+            == Some(&outcome.result)
+            && projection
+                .state()
+                .receipt_for_call(&outcome.result.call_id)
+                .is_some_and(|record| record.receipt == outcome.receipt)
         {
             return Ok(ReceiptRecordDisposition::Existing);
         }
@@ -925,20 +1262,34 @@ impl DurableChatSession {
             sequence.get(),
             "execution-receipt",
         );
-        let event = if outcome.receipt.cache_source.is_some() {
-            SessionEvent::ToolResultCacheHit {
-                receipt: outcome.receipt.clone(),
+        let reused = outcome.receipt.execution_id
+            != crate::domain::tools::ExecutionId::for_model_call(&outcome.result.call_id);
+        let event = if reused {
+            let original = projection
+                .state()
+                .execution_receipts()
+                .iter()
+                .find(|record| record.receipt == outcome.receipt)
+                .ok_or(SessionError::ExecutionOutcomeMismatch)?;
+            SessionEvent::ExecutionResultReused {
+                receipt_event_id: original.event_id.clone(),
+                result: outcome.result.clone(),
             }
         } else {
-            SessionEvent::ExecutionReceiptRecorded {
+            SessionEvent::ExecutionOutcomeRecorded {
                 receipt: outcome.receipt.clone(),
+                result: outcome.result.clone(),
             }
         }
         .into_envelope(receipt_event_id, stream_id.clone(), sequence, occurred_at())?;
         projection
             .append(store, event)
             .map_err(ChatError::from_session_append)?;
-        Ok(ReceiptRecordDisposition::Recorded)
+        Ok(if reused {
+            ReceiptRecordDisposition::Existing
+        } else {
+            ReceiptRecordDisposition::Recorded
+        })
     }
 
     fn record_model_rejection(
@@ -946,51 +1297,81 @@ impl DurableChatSession {
         diagnostic: crate::domain::model::ToolArgumentDiagnostic,
         corrections_used: u8,
     ) -> Result<(), ChatError> {
-        let mut writer = self.project.open_writer()?;
-        let mut store = writer.open_session(self.session_id.clone(), None)?;
-        let stream_id = ProjectEventStream::Session(self.session_id.clone()).stream_id();
-        let mut projection =
-            SessionProjection::replay(EventSource::read_events(&store, &stream_id)?)?;
-        let request_audit_event_id = projection
-            .state()
-            .request_audits()
-            .last()
-            .ok_or(crate::domain::session::SessionError::InvalidModelSampleRejection)?
-            .audit_event_id()
-            .clone();
-        let sequence = store.next_sequence()?;
-        let event = SessionEvent::ModelSampleRejected {
-            request_audit_event_id,
-            diagnostic,
-            corrections_used,
-        }
-        .into_envelope(
-            event_id(
-                self.project.project_id(),
-                &self.session_id,
-                sequence.get(),
-                "model-rejected",
-            ),
-            stream_id,
-            sequence,
-            occurred_at(),
-        )?;
-        projection
-            .append(&mut store, event)
-            .map_err(ChatError::from_session_append)?;
-        Ok(())
+        self.with_projection(|projection, store, stream_id| {
+            let request_audit_event_id = projection
+                .state()
+                .request_audits()
+                .last()
+                .ok_or(crate::domain::session::SessionError::InvalidModelSampleRejection)?
+                .audit_event_id()
+                .clone();
+            let sequence = store.next_sequence()?;
+            let event = SessionEvent::ConsecutiveModelSampleRejected {
+                request_audit_event_id,
+                diagnostic,
+                corrections_used,
+                reset_anchor: projection.state().correction_reset_anchor().cloned(),
+            }
+            .into_envelope(
+                event_id(
+                    self.project.project_id(),
+                    &self.session_id,
+                    sequence.get(),
+                    "model-rejected",
+                ),
+                stream_id,
+                sequence,
+                occurred_at(),
+            )?;
+            projection
+                .append(store, event)
+                .map_err(ChatError::from_session_append)?;
+            Ok(())
+        })
+    }
+
+    fn record_correction_reset(&self) -> Result<(), ChatError> {
+        self.with_projection(|projection, store, stream_id| {
+            let state = projection.state();
+            let (prior_rejection_audit_event_id, accepted_history_event_refs) =
+                state.correction_reset_source()?;
+            let accepted_request_audit_event_id = state
+                .request_audits()
+                .last()
+                .ok_or(SessionError::InvalidModelSampleRejection)?
+                .audit_event_id()
+                .clone();
+            let sequence = store.next_sequence()?;
+            let event = SessionEvent::ModelArgumentCorrectionReset {
+                accepted_request_audit_event_id,
+                prior_rejection_audit_event_id,
+                accepted_history_event_refs,
+            }
+            .into_envelope(
+                event_id(
+                    self.project.project_id(),
+                    &self.session_id,
+                    sequence.get(),
+                    "argument-correction-reset",
+                ),
+                stream_id,
+                sequence,
+                occurred_at(),
+            )?;
+            projection
+                .append(store, event)
+                .map_err(ChatError::from_session_append)?;
+            Ok(())
+        })
     }
 
     fn record_history(&self, items: &[crate::domain::model::ContentItem]) -> Result<(), ChatError> {
         if items.is_empty() {
             return Ok(());
         }
-        let mut writer = self.project.open_writer()?;
-        let mut store = writer.open_session(self.session_id.clone(), None)?;
-        let stream_id = ProjectEventStream::Session(self.session_id.clone()).stream_id();
-        let mut projection =
-            SessionProjection::replay(EventSource::read_events(&store, &stream_id)?)?;
-        self.append_history_items(&mut projection, &mut store, &stream_id, items)
+        self.with_projection(|projection, store, stream_id| {
+            self.append_history_items(projection, store, &stream_id, items)
+        })
     }
 
     fn append_history_items(
@@ -1102,7 +1483,7 @@ pub(crate) enum ChatError {
     #[error(transparent)]
     ToolExecution(#[from] crate::ports::tool::ToolExecutionError),
     #[error(transparent)]
-    Mcp(#[from] crate::adapters::mcp_http::McpError),
+    Mcp(#[from] crate::adapters::mcp::McpError),
     #[error(transparent)]
     RequestAudit(#[from] crate::domain::request_audit::RequestAuditError),
     #[error("rebuild Project Snapshot for Chat: {0}")]
@@ -1166,7 +1547,8 @@ fn unresolved_receipted_tool_call(
                     record.receipt.execution_id
                         == crate::domain::tools::ExecutionId::for_model_call(&call_id)
                 })
-                .then_some(call_id)
+                .then_some(call_id.clone())
+                .filter(|call_id| state.recorded_tool_result(call_id).is_none())
         })
 }
 

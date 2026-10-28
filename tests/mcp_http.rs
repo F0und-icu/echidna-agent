@@ -23,6 +23,7 @@ mod mcp_http_regression {
     use tokio::task::JoinHandle;
 
     use crate::adapters::credentials::{CredentialSource, CredentialSourceError};
+    use crate::adapters::mcp::McpError;
     use crate::app::agent_loop::{AgentLoop, AgentLoopError};
     use crate::app::cancellation::AgentCancellation;
     use crate::domain::model::{
@@ -936,6 +937,29 @@ protocol_version = "2026-07-28"
     }
 
     #[tokio::test]
+    async fn catalog_jsonrpc_error_keeps_complete_details() {
+        let detail = format!("{}TAIL_CANARY", "long-detail-".repeat(30));
+        let mut server = spawn_server(vec![Response::json(json!({
+            "jsonrpc":"2.0", "id":"1", "error":{"code":-32001, "message":detail}
+        }))])
+        .await;
+        let directory = TemporaryDirectory::new("mcp-catalog-error-details");
+        let servers = format!(
+            "[mcp_servers.remote]\nurl = \"{}\"\nprotocol_version = \"2026-07-28\"\n",
+            server.url
+        );
+        let composition =
+            load_composition(&directory, &servers, RecordingCredentials::with_values([]));
+        let error = match composition.discover_chat_tools(directory.path()).await {
+            Ok(_) => panic!("catalog error must fail discovery"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains(&detail), "{error}");
+        let _ = server.requests.recv().await.expect("list request");
+        server.task.await.expect("loopback completes");
+    }
+
+    #[tokio::test]
     async fn mcp_error_results_are_known_failures_and_sse_complete_results_succeed() {
         let definition = json!({
             "name": "remote.result",
@@ -1744,5 +1768,134 @@ credential_ref = "CYBER_AGENT_MCP_ALPHA_API_KEY"
             Err(ProviderCompositionError::InvalidMcpServer { .. })
         ));
         assert!(credentials.reads().is_empty());
+    }
+    #[tokio::test]
+    async fn startup_server_reply_acknowledgements_inherit_the_active_rpc_deadline() {
+        use crate::adapters::mcp::{McpRuntime, McpServerConfig};
+        let ping = |id: &str| json!({"jsonrpc":"2.0","id":id,"method":"ping","params":{}});
+        let mut server = spawn_server(vec![
+            Response::sse_messages([
+                ping("initialize-ping"),
+                json!({"jsonrpc":"2.0","id":"1","result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{}}}}),
+            ]),
+            Response::accepted().delayed(Duration::from_millis(150)),
+            Response::accepted(),
+            Response::sse_messages([
+                ping("list-ping"),
+                json!({"jsonrpc":"2.0","id":"2","result":{"tools":[{"name":"remote.ping","inputSchema":{"type":"object"}}]}}),
+            ]),
+            Response::accepted().delayed(Duration::from_millis(150)),
+            Response::sse_messages([
+                ping("call-ping"),
+                json!({"jsonrpc":"2.0","id":"3","result":{"content":[]}}),
+            ]),
+            Response::accepted().delayed(Duration::from_millis(150)),
+        ]).await;
+        let config: McpServerConfig = toml::from_str(&format!(
+            "url = {}\nprotocol_version = \"2025-11-25\"\ntimeout_ms = 40\nstartup_timeout_ms = 3000\n",
+            json!(server.url)
+        )).unwrap();
+        let runtime = McpRuntime::new(
+            BTreeMap::from([("ping-deadline".to_owned(), config)]),
+            RecordingCredentials::with_values([]),
+        );
+        let tools = runtime.discover().await.expect(
+            "initialize/list ping replies must use the startup deadline for their 150ms ACK",
+        );
+        assert!(
+            matches!(
+                tools[0].call(json!({})).await,
+                Err(McpError::Transport { .. })
+            ),
+            "a tools/call ping reply must retain the 40ms call deadline"
+        );
+        let mut replies = Vec::new();
+        for _ in 0..7 {
+            let request = server.requests.recv().await.unwrap();
+            if request.body.get("method").is_none() {
+                replies.push(request.body["id"].clone());
+            }
+        }
+        assert_eq!(
+            replies,
+            [
+                json!("initialize-ping"),
+                json!("list-ping"),
+                json!("call-ping")
+            ]
+        );
+        server.task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn omitted_startup_deadline_uses_existing_call_timeout() {
+        use crate::adapters::mcp::{McpRuntime, McpServerConfig};
+        let mut server = spawn_server(vec![
+            Response::json(json!({"jsonrpc":"2.0","id":"1","result":{"tools":[]}}))
+                .delayed(Duration::from_millis(150))
+                .tolerate_closed_peer(),
+        ])
+        .await;
+        let config: McpServerConfig = toml::from_str(&format!(
+            "url = {}\nprotocol_version = \"2026-07-28\"\ntimeout_ms = 40\n",
+            json!(server.url)
+        ))
+        .unwrap();
+        let runtime = McpRuntime::new(
+            BTreeMap::from([("http-fixture".to_owned(), config)]),
+            RecordingCredentials::with_values([]),
+        );
+        assert!(matches!(
+            runtime.discover().await,
+            Err(McpError::Startup { .. })
+        ));
+        assert_eq!(
+            server.requests.recv().await.unwrap().body["method"],
+            "tools/list"
+        );
+        server.task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn http_startup_deadline_is_independent_of_short_tool_deadline() {
+        use crate::adapters::mcp::observation::{McpObservation, McpStartupStage};
+        use crate::adapters::mcp::{McpRuntime, McpServerConfig};
+        let mut server = spawn_server(vec![
+            Response::json(json!({"jsonrpc":"2.0","id":"1","result":{"tools":[{"name":"remote.delayed","inputSchema":{"type":"object"}}]}})).delayed(Duration::from_millis(150)),
+            Response::json(json!({"jsonrpc":"2.0","id":"2","result":{"content":[]}})).delayed(Duration::from_millis(150)),
+        ]).await;
+        let config: McpServerConfig = toml::from_str(&format!("url = {}\nprotocol_version = \"2026-07-28\"\ntimeout_ms = 40\nstartup_timeout_ms = 2000\n", json!(server.url))).unwrap();
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&observations);
+        let runtime = McpRuntime::new(
+            BTreeMap::from([("http-fixture".to_owned(), config)]),
+            RecordingCredentials::with_values([]),
+        )
+        .with_observer(Some(Arc::new(move |event| {
+            recorded.lock().unwrap().push(event)
+        })));
+        let tools = runtime
+            .discover()
+            .await
+            .expect("150ms discovery uses the startup deadline, not the 40ms call deadline");
+        assert!(
+            matches!(observations.lock().unwrap().last(), Some(McpObservation::Startup { server_id, stage: McpStartupStage::Ready }) if server_id == "http-fixture")
+        );
+        assert!(
+            matches!(
+                tools[0].call(json!({})).await,
+                Err(McpError::Transport { .. })
+            ),
+            "short tools/call still times out"
+        );
+        assert_eq!(
+            server.requests.recv().await.unwrap().body["method"],
+            "tools/list"
+        );
+        assert_eq!(
+            server.requests.recv().await.unwrap().body["method"],
+            "tools/call"
+        );
+        server.task.await.unwrap();
     }
 }

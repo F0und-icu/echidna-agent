@@ -236,8 +236,7 @@ fn evidence_curation_memory_write_creates_auditable_reasoning_continuation_updat
                         "path":"core.md",
                         "content":"CORE_MEMORY_WRITTEN_CURRENT",
                         "expected_hash":null,
-                        "event_id":"core-memory-write-continuation",
-                        "occurred_at":"2026-10-22T00:00:00Z"
+                        "event_id":"core-memory-write-continuation"
                     }),
                     "core-memory-write-first",
                 )
@@ -343,16 +342,16 @@ fn core_memory_omission_and_delivery_budget_retain_the_existing_fatal_boundaries
     for (case, context_window, initial, replacement, expected) in [
         (
             "omitted",
-            32_768,
+            272_000,
             None,
-            "M".repeat(64 * 1024),
+            "M".repeat(512 * 1024),
             "CORE_MEMORY_CHANGED",
         ),
         (
             "delivery-budget",
-            32_768,
-            Some("O".repeat(24 * 1024)),
-            "N".repeat(24 * 1024),
+            272_000,
+            Some("O".repeat(400 * 1024)),
+            "N".repeat(400 * 1024),
             "DELIVERY_BUDGET_EXCEEDED",
         ),
     ] {
@@ -373,6 +372,15 @@ fn core_memory_omission_and_delivery_budget_retain_the_existing_fatal_boundaries
         listener.set_nonblocking(true).unwrap();
         let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
         let config = write_context_window_config(harness.path(), &base_url, context_window);
+        if case == "delivery-budget" {
+            // Keep both complete Core versions eligible so this case reaches
+            // the retained-delivery hard limit rather than the Core share.
+            let config_text = format!(
+                "{}\n[runtime.context_budget]\ncore_memory_bps = 10000\n",
+                fs::read_to_string(&config).unwrap()
+            );
+            fs::write(&config, config_text).unwrap();
+        }
         let (sender, requests) = mpsc::channel();
         let server_memory = memory.clone();
         let server = thread::spawn(move || {

@@ -1,37 +1,96 @@
 //! CLI presentation and strict durable handoff for App-classified stops.
 
 use super::{ChatError, DurableChatSession, unresolved_receipted_tool_call};
-use crate::adapters::project_event_store::ProjectEventStream;
 use crate::app::agent_loop::{AgentLoop, AgentLoopError};
 use crate::app::model_request_budget::ModelRequestBudget;
-use crate::app::session::SessionProjection;
-use crate::domain::session::{SessionError, SessionState};
-use crate::ports::EventSource;
-use crate::ports::model::ModelProvider;
+use crate::app::model_streaming::ModelStreamingError;
+use crate::domain::session::SessionState;
+use crate::ports::model::{ModelProvider, ModelProviderError};
 use crate::ports::tool::ToolExecutor;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum RecoveryState {
+    Ready,
+    ResumeRequired { capacity: bool },
+    ContextChangeRequired,
+}
+
+pub(super) fn is_capacity_error(error: &AgentLoopError) -> bool {
+    use crate::app::context_compilation::ContextCompilationError;
+    use crate::domain::context::ContextPlannerError;
+    match error {
+        AgentLoopError::Model(ModelStreamingError::Provider(
+            ModelProviderError::ContextCapacityExceeded { .. },
+        )) => true,
+        AgentLoopError::ContextPlanner(error)
+        | AgentLoopError::ContextCompilation(ContextCompilationError::Planner(error)) => matches!(
+            error,
+            ContextPlannerError::FixedInputExceedsBudget { .. }
+                | ContextPlannerError::RequiredFragmentsExceedBudget { .. }
+                | ContextPlannerError::RenderedInputExceedsBudget { .. }
+        ),
+        _ => false,
+    }
+}
+
+pub(super) fn requires_context_change<Provider, Tools>(
+    agent: &AgentLoop<'_, '_, Provider, Tools>,
+    previous_capacity_failure: bool,
+) -> Result<bool, ChatError>
+where
+    Provider: ModelProvider + ?Sized,
+    Tools: ToolExecutor + ?Sized,
+{
+    match agent.fresh_compaction_context_diagnostic() {
+        Ok(Ok(_)) => Ok(previous_capacity_failure),
+        Ok(Err((error, _))) => {
+            let error = AgentLoopError::ContextPlanner(error);
+            if is_capacity_error(&error) {
+                Ok(true)
+            } else {
+                Err(ChatError::Agent(error))
+            }
+        }
+        Err(error) if is_capacity_error(&error) => Ok(true),
+        Err(error) => Err(ChatError::Agent(error)),
+    }
+}
 
 pub(super) fn report_budget(budget: &ModelRequestBudget) {
     let counts = budget.counts();
-    println!(
+    let display = |value: Option<usize>| {
+        value.map_or_else(|| "unlimited".to_owned(), |value| value.to_string())
+    };
+    console_println!(
         "[request budget] admitted={} primary={} vision={} remaining={} limit={} (admission, not Provider usage)",
         counts.total(),
         counts.primary,
         counts.vision,
-        budget.limit().saturating_sub(counts.total()),
-        budget.limit()
+        display(budget.remaining()),
+        display(budget.limit())
     );
 }
 
 pub(super) fn report_stop(error: &AgentLoopError, budget: &ModelRequestBudget) {
-    eprintln!("[turn stopped] {error}");
+    console_eprintln!("[turn stopped] {error}");
     report_budget(budget);
-    println!(
+    if matches!(
+        error,
+        AgentLoopError::Model(ModelStreamingError::Provider(
+            ModelProviderError::ProtocolFailure { .. }
+        ))
+    ) {
+        console_println!(
+            "Protocol sample was rejected before completion; its streamed output was not committed and no Tool from this sample was dispatched."
+        );
+    }
+    console_println!(
         "Durable checkpoint retained. Use /resume to rebuild ProviderSession explicitly, then enter a new task. No further automatic retry or reasoning discard."
     );
 }
 
-pub(super) fn exit_status(stopped: bool) -> Result<(), ChatError> {
-    if stopped {
+pub(super) fn exit_status(state: RecoveryState) -> Result<(), ChatError> {
+    if state != RecoveryState::Ready {
         Err(ChatError::UnresolvedTurnStop)
     } else {
         Ok(())
@@ -46,9 +105,7 @@ where
     Provider: ModelProvider + ?Sized,
     Tools: ToolExecutor + ?Sized,
 {
-    let history = state
-        .normalized_history_items()
-        .map_err(SessionError::from)?;
+    let history = state.compaction_source_history()?;
     if agent.history().items() != history {
         return Err(ChatError::RuntimeHistoryMismatch);
     }
@@ -64,15 +121,13 @@ impl DurableChatSession {
         Provider: ModelProvider + ?Sized,
         Tools: ToolExecutor + ?Sized,
     {
-        let mut writer = self.project.open_writer()?;
-        let store = writer.open_session(self.session_id.clone(), None)?;
-        let stream = ProjectEventStream::Session(self.session_id.clone()).stream_id();
-        let projection = SessionProjection::replay(EventSource::read_events(&store, &stream)?)?;
-        if let Some(call_id) = unresolved_receipted_tool_call(projection.state()) {
-            return Err(ChatError::UnresolvedExecutionReceipt {
-                call_id: call_id.as_str().to_owned(),
-            });
-        }
-        validate_runtime_history(projection.state(), agent)
+        self.with_projection(|projection, _, _| {
+            if let Some(call_id) = unresolved_receipted_tool_call(projection.state()) {
+                return Err(ChatError::UnresolvedExecutionReceipt {
+                    call_id: call_id.as_str().to_owned(),
+                });
+            }
+            validate_runtime_history(projection.state(), agent)
+        })
     }
 }

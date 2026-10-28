@@ -5,10 +5,9 @@ pub(super) fn read_input_schema() -> Value {
         "type": "object",
         "properties": {
             "path": memory_path_schema(),
-            "event_id": {"type": "string", "minLength": 1},
-            "occurred_at": {"type": "string", "minLength": 1}
+            "event_id": {"type": "string", "minLength": 1}
         },
-        "required": ["path", "event_id", "occurred_at"],
+        "required": ["path", "event_id"],
         "additionalProperties": false
     })
 }
@@ -20,10 +19,9 @@ pub(super) fn write_input_schema(max_core_characters: usize) -> Value {
             "path": memory_path_schema(),
             "content": {"type": "string"},
             "expected_hash": {"type": ["string", "null"]},
-            "event_id": {"type": "string", "minLength": 1},
-            "occurred_at": {"type": "string", "minLength": 1}
+            "event_id": {"type": "string", "minLength": 1}
         },
-        "required": ["path", "content", "expected_hash", "event_id", "occurred_at"],
+        "required": ["path", "content", "expected_hash", "event_id"],
         "allOf": [{
             "if": {
                 "properties": {"path": {"const": "core.md"}},

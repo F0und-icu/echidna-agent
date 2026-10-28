@@ -70,7 +70,13 @@ fn complete_catalog_preserves_baseline_outside_explicit_file_contract_additions(
         // The frozen R6 sharing baseline must not be regenerated for R7's
         // intentional file-contract additions. Validate and remove only those
         // additions, then compare every remaining Schema byte/constraint.
-        let schema = without_r7_file_contract_additions(spec.name.as_str(), &spec.input_schema);
+        let schema = historical_input_schema(spec.name.as_str(), &spec.input_schema);
+        if matches!(
+            spec.name.as_str(),
+            "memory_read" | "memory_write" | "inspect_project"
+        ) {
+            assert_eq!(spec.version, "2");
+        }
         let expanded = expanded(&schema, &schema, 0);
         let hash = format!(
             "{:x}",
@@ -105,8 +111,49 @@ fn complete_catalog_preserves_baseline_outside_explicit_file_contract_additions(
     assert_eq!(baseline_saved, 1021);
 }
 
-fn without_r7_file_contract_additions(name: &str, schema: &Value) -> Value {
+fn historical_input_schema(name: &str, schema: &Value) -> Value {
     let mut baseline = schema.clone();
+    let capacity_delta = match name {
+        "http_request" => Some(("/properties/preview_bytes/maximum", 3933, 16384)),
+        "read_output" => Some(("/properties/max_bytes/maximum", 3933, 16384)),
+        "memory_write" => Some(("/allOf/0/then/properties/content/maxLength", 524288, 65536)),
+        _ => None,
+    };
+    if let Some((path, current, historical)) = capacity_delta {
+        let field = baseline.pointer_mut(path).unwrap();
+        assert_eq!(field, &json!(current), "{name} capacity contract");
+        *field = json!(historical);
+        if name == "memory_write" {
+            let description = baseline
+                .pointer_mut("/allOf/0/then/properties/content/description")
+                .unwrap();
+            let text = |limit| {
+                format!(
+                    "core.md is limited to {limit} UTF-8 bytes; non-ASCII content may reach the byte limit before this character limit"
+                )
+            };
+            assert_eq!(description, &json!(text(current)));
+            *description = json!(text(historical));
+        }
+    }
+    if matches!(name, "memory_read" | "memory_write" | "inspect_project") {
+        let field = if name == "inspect_project" {
+            "observed_at"
+        } else {
+            "occurred_at"
+        };
+        let properties = baseline["properties"].as_object_mut().unwrap();
+        assert!(!properties.contains_key(field));
+        properties.insert(field.to_owned(), json!({"type":"string", "minLength":1}));
+        if name == "inspect_project" {
+            assert!(baseline.get("required").is_none());
+            baseline["required"] = json!([field]);
+        } else {
+            let required = baseline["required"].as_array_mut().unwrap();
+            assert!(!required.contains(&json!(field)));
+            required.push(json!(field));
+        }
+    }
     let (descriptions, hash_path): (&[(&str, &str)], &str) = match name {
         "write_file" => (
             &[

@@ -14,6 +14,7 @@ pub const MODEL_INPUT_IR_SCHEMA_VERSION: u16 = 4;
 pub(crate) const MODEL_INPUT_IR_V2_SCHEMA_VERSION: u16 = 2;
 pub(crate) const MODEL_INPUT_IR_V3_SCHEMA_VERSION: u16 = 3;
 pub(crate) const MAX_TOOL_ARGUMENT_CORRECTIONS_PER_TURN: u8 = 2;
+pub(crate) const MAX_TOOL_ARGUMENT_CORRECTIONS_PER_CHAIN: u8 = 2;
 
 /// A version for the provider-neutral input representation.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -542,6 +543,48 @@ pub enum ModelCapabilityError {
 pub struct ModelUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_output_tokens: Option<u64>,
+}
+
+impl ModelUsage {
+    pub(crate) fn validate(self) -> Result<(), ModelUsageError> {
+        if let Some(cached_input_tokens) = self.cached_input_tokens
+            && cached_input_tokens > self.input_tokens
+        {
+            return Err(ModelUsageError::CachedInputExceedsTotal {
+                cached_input_tokens,
+                input_tokens: self.input_tokens,
+            });
+        }
+        if let Some(reasoning_output_tokens) = self.reasoning_output_tokens
+            && reasoning_output_tokens > self.output_tokens
+        {
+            return Err(ModelUsageError::ReasoningOutputExceedsTotal {
+                reasoning_output_tokens,
+                output_tokens: self.output_tokens,
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+pub enum ModelUsageError {
+    #[error("cached input subset {cached_input_tokens} exceeds input total {input_tokens}")]
+    CachedInputExceedsTotal {
+        cached_input_tokens: u64,
+        input_tokens: u64,
+    },
+    #[error(
+        "reasoning output subset {reasoning_output_tokens} exceeds output total {output_tokens}"
+    )]
+    ReasoningOutputExceedsTotal {
+        reasoning_output_tokens: u64,
+        output_tokens: u64,
+    },
 }
 
 /// A provider-neutral event emitted by a model response stream.

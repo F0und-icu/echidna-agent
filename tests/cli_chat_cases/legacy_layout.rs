@@ -48,8 +48,7 @@ fn legacy_control_directory_routes_cli_memory_blob_cache_and_tool_resources_in_p
         "path": "core.md",
         "content": "legacy Core Memory\n",
         "expected_hash": null,
-        "event_id": "legacy-memory-event",
-        "occurred_at": "2026-10-22T00:00:02Z"
+        "event_id": "legacy-memory-event"
     });
     let server = spawn_responses_server(vec![
         (

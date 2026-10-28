@@ -51,7 +51,7 @@ fn ctf_r3b2_unread_tool_preview_does_not_block_child_durability() {
             .count();
         terminal = events
             .iter()
-            .any(|event| event["event_type"] == "tool.execution_receipt_recorded");
+            .any(|event| event["event_type"] == "tool.execution_outcome_recorded");
         if checkpoints == 32 && terminal {
             break;
         }
@@ -152,7 +152,7 @@ fn ctf_r3b2_child_progress_is_visible_before_a_blocked_parent_finishes() {
         assert!(
             !events
                 .iter()
-                .any(|event| event["event_type"] == "tool.execution_receipt_recorded")
+                .any(|event| event["event_type"] == "tool.execution_outcome_recorded")
         );
         assert!(
             events

@@ -74,6 +74,32 @@ Memory、摘要、缓存和图像观察各自保留其用途与来源，不会�
 **本地优先**指项目数据与工具执行位于本地；配置远端模型时，请求中的材料会发送给该 Provider。
 图像支持取决于能力配置，模型观察和回答仍需用实际证据验证。
 
+## 长上下文容量
+
+显式 `capability_mapping.context_window` 决定本地容量，运行时不按模型名猜测。
+默认输出、工具循环各预留声明窗口 W 的12.5%；更大的显式输出要求会增加输出预留。
+扣除两项后的可用输入预算记为 B，其中仍需容纳指令、工具 Schema、历史和模型续接。
+压缩评估阈值为80%B，压缩后的软目标为50%B，不再固定封顶64K/32K。
+
+| 声明窗口 W | 可用输入 B | 压缩阈值 / 软目标 | 摘要叙述额度（bytes） |
+| --- | --- | --- | --- |
+| 272000 | 204000 | 163200 / 102000 | 16320 |
+| 1000000 | 750000 | 600000 / 375000 | 60000 |
+| 4000000 | 3000000 | 2400000 / 1500000 | 240000 |
+
+表按默认比例、无更大显式输出要求计算；容量是本地估算，不是服务端分词或实测容量。
+工具预览、Core上下文、摘要、状态和回读各有独立比例，配置见下方
+`runtime.context_budget` 与[模板索引](examples/README.md)。比例额度是上限，不会预先填满请求；
+每个内置工具的预览上限也不是整个工具批次的合计上限。
+Core存储默认上限512KiB可单独调整，读取和写入校验使用该存储上限；
+常驻上下文分配另由比例与规划器的选择/截断记录决定。
+原始捕获、传输、MCP边界及后台任务仍使用各自既有上限。
+
+新交接使用 main v5：Narrative JSON 占用比例摘要额度，精确未完成输入、图片及机器来源
+单独保护和验真，完整模型投影仍须通过硬预算。历史摘要的原有额度含义保持。
+切换小窗口不会改写已保存的事实；配置不一致或当前必需内容放不下仍会明确报错。
+Core完整来源交给原规划器，是否全部发送由选择与截断记录说明。
+
 ## 快速开始
 
 当前主要面向 macOS。需要 Git 和 Rust/rustup；仓库通过
@@ -95,7 +121,12 @@ ECHIDNA_BIN="$PWD/target/release/echidna"
 
 ### 2. 配置模型
 
+模板和常规开发、验收默认使用至少 **272,000 tokens** 的上下文窗口；模型明确支持
+**1M** 时使用其实际声明的 1M 窗口。通过能力映射或模型目录导入设置容量，不按模型名猜测。
+
 按使用方式选择完整模板，保存到代码仓库之外：
+
+六份模板的字段、默认值、可选设置及复制步骤见[配置模板索引](examples/README.md)。
 
 | 使用方式 | 完整模板 | 图像处理 |
 | --- | --- | --- |
@@ -113,7 +144,7 @@ chmod 600 "$HOME/.config/echidna/provider.toml"
 ```
 
 编辑该文件，填写服务地址和模型，并按服务实际能力核对窗口和各项能力声明。
-模板中的地址、模型名与 32K 窗口都是示例；`cp -n` 保留已有文件。
+模板中的地址和模型名是示例，窗口默认272K；按服务实际能力调整，`cp -n` 保留已有文件。
 这里的路径由命令显式传入，程序不会自动发现它。
 
 当前接入 **HTTP/SSE + Responses** 协议。Chat Completions 接口不适用。
@@ -144,7 +175,10 @@ export CYBER_AGENT_VISION_API_KEY='replace-with-your-vision-key'
 使用 [MCP 模板](examples/provider-mcp.toml)，在 `mcp_servers` 下声明一个或多个远程
 Streamable HTTP 工具服务器。每个服务器需要绝对 HTTP(S) `url`，以及
 `protocol_version = "2025-11-25"` 或 `protocol_version = "2026-07-28"` 之一。
-可选 `timeout_ms` 默认为 60000。
+可选 `timeout_ms` 默认为 60000，限定每次工具调用。HTTP 和 stdio 均可单独配置
+`startup_timeout_ms`，限定该服务器启动、初始化和目录发现的总时间；省略时沿用
+`timeout_ms`。需要短调用超时但启动较慢时，可设置例如 `timeout_ms = 1000`、
+`startup_timeout_ms = 10000`。启动失败会显示服务器名和具体阶段，不跳过或重试。
 
 如果服务器需要 Bearer 认证，只能使用专用引用，例如
 `CYBER_AGENT_MCP_EXAMPLE_API_KEY`；不得复用模型 Provider 密钥或订阅账户。在启动
@@ -202,7 +236,7 @@ echidna --config /absolute/path/subscription.toml auth models --provider chatgpt
 浏览器须能访问运行 Echidna 的回环回调地址；跨机器使用时需要转发对应端口。
 `status` 只检查本地状态；`models` 使用该账户向服务端查询模型。把返回的模型 slug
 填入 `model`，核实并填写能力及窗口后，即可用同一配置运行 `doctor` 和 `chat`。
-模板的 32K 窗口只是显式示例。HTTP 订阅路径要求 `incremental_input = false`，
+模板默认272K，明确支持1M时填写或导入实际窗口。HTTP 订阅路径要求 `incremental_input = false`，
 不能设置 `max_output_tokens`。登录成功和离线 doctor 不代表账户已获模型使用资格。
 
 ```sh
@@ -225,6 +259,9 @@ echidna --config /absolute/path/subscription.toml auth logout --provider chatgpt
 `catalog_client_version = "major.minor.patch"`。缺省值保持现有 `0.144.0`；
 显式值只会同时改变目录请求的 `client_version` 查询参数和 `version` 请求头，
 不是已安装 Codex 版本声明，也不保证返回新模型 ID 或账户访问资格。
+当前模板显式使用曾在目录对照中验证过的 `0.162.0`，并写出
+`supports_reasoning_summary_parameter = true`；不是自动探测或“永远最新”的版本。
+目录仍由服务端按账户和兼容版本决定，不能通过配置保证拿到所有模型。
 
 沿用上面的 `auth login/status/models/logout` 命令，将配置路径与 `--provider`
 改成新模板中的值。Echidna 自行完成浏览器授权，使用自己的令牌存储；不读取
@@ -239,11 +276,23 @@ echidna --config /absolute/path/codex.toml auth refresh --provider codex
 刷新成功后再显式执行选择命令；若刷新被永久拒绝，需要重新登录。
 `status` 只报告本地记录，不保证服务端仍接受授权。SIWC 和 API Key 保持原有流程。
 
+`auth models` / `auth select-model` 也支持 API Key 或 `credential_ref` 的标准
+Responses 服务（包括 DeepSeek）：从所选 Provider 的 `base_url` 请求 `/models`，
+将下面的配置路径和 `--provider` 换成自己的值即可。登录、状态、刷新、退出仍仅用于订阅。
 可用交互选择器查看目录、选择模型与推理强度，并保存到当前配置：
 
 ```sh
 echidna --config /absolute/path/codex.toml auth select-model --provider codex
 ```
+
+若目录声明了模型能力，选型时加 `--apply-capabilities` 同步实际提供的窗口等信息：
+
+```sh
+echidna --config /absolute/path/codex.toml auth select-model --provider codex --apply-capabilities
+```
+
+只换模型 ID 不会自动修改 `context_window`；模板默认按272,000规划，支持1M时需明确配置或导入。
+没有可导入窗口时，按该服务明确给出的容量填写，不要按模型名猜。
 
 也可指定目录返回的模型和该模型支持的强度：
 
@@ -253,6 +302,8 @@ echidna --config /absolute/path/codex.toml auth select-model --provider codex \
 ```
 
 执行强度支持目录声明的有效字符串，包括未来新增的值；交互选择以当前模型目录为准。
+API Key 目录未声明强度时，可明确输入 `--reasoning-effort` 或在选择器中输入强度，
+程序会提示支持情况未知，服务端仍可能拒绝该值；已声明强度时只接受目录内的值。
 直接配置的 `reasoning_effort` 接受 1–64 个 ASCII 字母、数字、下划线或连字符。
 省略强度时使用服务端默认行为；显式 `none` 是不同的请求值，不等于省略。
 保存会为该 Provider 复制独立能力映射，保留其他模型、注释和凭据。
@@ -261,11 +312,14 @@ echidna --config /absolute/path/codex.toml auth select-model --provider codex \
 输入能力及摘要参数支持声明。缺失字段或未知窗口（包括 `null`）保留当前配置；`max_context_window` 仅展示为
 元数据，不会代替默认窗口。导入仍需通过现有配置和输出预算校验，失败不覆盖原文件。
 不加此选项保持原有选择行为；工具等其余能力仍须显式核实，不按模型名推断。
+仅含模型 ID 的 API Key 目录保留原能力映射，使用 `--apply-capabilities` 会明确失败而不保存。
+API Key 目录可导入实际声明的 `context_window`、`input_modalities`；服务端的
+`max_output_tokens` 和其他协议能力不会变成当前配置的输出预算或 Responses 能力。
 `doctor` 可离线查看生效的强度，下一次启动 `chat` 使用保存的设置。
 该兼容链路依据固定版本 Codex 源码实现，实际账号和服务端支持须通过实测确认。
 失败不会切换模型、付费 API 或自动重跑工具。
 
-Codex 链路默认请求服务端可用的推理摘要，在 stderr 上标注“推理摘要”，包括 release
+Codex 链路默认请求服务端可用的推理摘要，在 stderr 上标注 `reasoning summary`，包括 release
 构建。这是提供方返回的摘要，不是完整内部推理；摘要为空时不会补造内容。摘要不进入
 对话正文，也不替代加密续接。推理强度与摘要展示独立，设置 `high` 不保证返回摘要。
 若服务端不接受摘要参数，可在 `codex_subscription` 中显式设置
@@ -308,16 +362,43 @@ generation = 1
 
 能力声明需要匹配实际服务；设置 `image_input = true` 不会让纯文本模型具备图像能力。
 `context_window` 分别填写各模型的真实窗口；`[runtime].model_request_limit_per_turn`
-默认为 `32`，是每轮主模型与视觉模型共享的请求次数上限。
-`[runtime].auto_compact` 默认为 `false`。显式设为 `true` 后，Chat 只会在正常完成的
-Turn 之后，用包含该最终回复的下一 Turn 小探针评估 Planner 压力；达到既有阈值时复用
-耐久压缩流程。成功后下一次 Primary 请求为 `CompactionReset Full`，并清除该已完成
-边界的短暂 Provider 续接状态。探针不代表 Provider 用量，也不保证任意下一条输入可容纳；
-取消、停止、错误和未完成 Turn 不会自动压缩。
-自动压缩沿用目标与研究记录的前提；前提不足或无法减小上下文时会明确暂缓。
-摘要有损，可能省略历史输出和约束；需要长期保留的规则请放入 `prompts.project_file`。
+默认为 `32`，是每轮主模型与视觉模型共享的请求次数上限。显式设为 `0` 可取消此上限；
+`1..=10000` 保持有限额度。不限请求仍记录真实尝试次数，且不改变上下文容量、取消、
+超时和单次请求的重试上限。
 
-在 Chat 中用 `/image PATH` 选择本地图片。可重复输入该命令；图片按输入顺序排队，下一条普通任务会将整队图片作为同一 Turn 的初始上下文。`primary_direct` 会将每张图片交给主模型，`secondary_tool` 会为每张图片单独保留观察后再请求主模型。后续图片的准备失败、取消或耗尽本轮请求预算时，已保留的图片事实不会丢失，但该任务和队列中的图片不会提交给主模型。队列只存在于当前 Chat 进程；重新启动或 `/resume` 不会自动重放图片处理。
+上下文额度可在同一配置中按比例分配。`_bps` 使用基点：**100 = 1%，10000 = 100%**。
+未填写的字段采用默认策略。输出/工具预留按声明窗口计算，普通内容额度按扣除预留后的
+可用输入计算；显式输出要求仍优先。
+内容字节额度沿用当前估算换算，完整输入须通过实际序列化预检，不代表服务端精确分词。
+
+```toml
+[runtime.context_budget]
+output_reserve_bps = 1250       # 窗口的12.5%
+tool_loop_reserve_bps = 1250    # 窗口的12.5%
+pressure_bps = 8000            # 可用输入的80%时评估自动压缩
+target_bps = 5000              # 压缩后优先目标50%，保留必需数据
+summary_bps = 200              # main v5 摘要 Narrative JSON 额度2%
+tool_output_bps = 3200         # 每个内置工具的预览额度32%
+core_memory_bps = 1600         # Core上下文分配16%，与文件存储上限分开
+state_section_bps = 10         # 每个研究状态节0.1%的可用输入
+continuation_field_bps = 40
+continuation_goal_part_bps = 16
+readback_default_bps = 100     # 精确回读默认1%
+readback_max_bps = 400         # 精确回读最大4%
+compaction_reference_items = 64  # 每类引用数量上限，单位：项
+max_core_file_bytes = 524288     # Core存储上限，单位：字节，可显式调整
+# max_content_bytes = 1048576    # 可选的绝对内容上限；未设置时仅按比例
+```
+
+自动压缩仍由 `[runtime].auto_compact = true` 开启。百分比是分配策略；原任务、图片和
+当前完整工具批次不会为达到软目标被静默删掉。超预算的合法会话可在显式恢复后执行
+`/context`、`/compact` 或 `/exit`；恢复和压缩不会自动执行旧任务或重放工具。
+无工具的压缩采样只释放工具循环预留，仍保留输出/推理空间，并计入共享请求预算。
+main v5 的机器来源与保护引用单独验真，完整模型输入仍须通过硬预算预检；历史摘要的字节额度含义保持。
+`core_memory_bps` 限制自动加入上下文的 Core 片段；显式 `memory_read` 仍返回完整文件及真实哈希。
+文件存储上限不保证它能放入所有模型的请求，大文件在小窗口下仍可能超过硬预算。
+
+在 Chat 中用 `/image PATH` 选择本地图片；研究主线要求已有真实的当前 TargetSnapshot，否则明确拒绝。可重复输入该命令；图片按输入顺序排队，下一条普通任务会将整队图片作为同一 Turn 的初始上下文。`primary_direct` 会将每张图片交给主模型，`secondary_tool` 会为每张图片单独保留观察后再请求主模型。后续图片的准备失败、取消或耗尽本轮请求预算时，已保留的图片事实不会丢失，但该任务和队列中的图片不会提交给主模型。队列只存在于当前 Chat 进程；重新启动或 `/resume` 不会自动重放图片处理。
 
 ### 3. 建立研究项目
 
@@ -329,9 +410,6 @@ cd ../echidna-research
 "$ECHIDNA_BIN" --config "$HOME/.config/echidna/provider.toml" doctor
 "$ECHIDNA_BIN" --config "$HOME/.config/echidna/provider.toml" chat
 ```
-
-`init` 会在此目录创建 `.echidna/`，保存项目事件、Session、Artifact 和 Memory。
-已有完整的 `.cyber-agent/` 项目仍可原地读取，不会迁移或复制；同一项目根目录不要同时保留两个控制目录。
 
 `doctor` 在本地检查配置，不读取环境变量密钥、不发送模型请求，也不验证密钥有效性或远端服务可达性；
 进入 `chat` 提交任务后才使用所配置的模型。
@@ -355,16 +433,58 @@ cd ../echidna-research
 | `/stop` 或 Ctrl+C | 请求停止当前 Turn；已执行操作不会被撤销，后台任务需要单独处理。 |
 | `/paste` | 按提示输入多行任务或补充材料。 |
 | `/image PATH` | 将一张本地图片追加到下一轮队列；重复输入按顺序追加。 |
-| `/compact` | 在具备目标与研究记录等前提时压缩上下文；有待提交图片时不可用。 |
+| `/memory` | 查看实际项目记忆目录、Core文件状态和配置的记忆工具，不发送模型请求。 |
+| `/compact` | 请求当前主模型生成无工具的工作交接，再验证并压缩上下文；使用独立命令请求预算。有待提交图片时不可用。 |
 | `/resume` | 在可恢复停止后显式重建模型会话，再输入任务。 |
 | `/exit` | 离开交互界面。 |
+
+项目记忆位于当前项目的 `.echidna/memory/`，旧项目继续使用原 `.cyber-agent/memory/`。
+缺少 `core.md` 表示尚未写入；普通回复或压缩不会自动保存记忆，需要实际调用
+`memory_write`，并使用 `memory_read` 返回的当前哈希更新。详细笔记按需读取。
+
+可在模型配置中开启自动压缩，缺省关闭：
+
+```toml
+[runtime]
+auto_compact = true
+# 可选；不填写时继承主模型配置，仅影响独立压缩请求。
+# compaction_reasoning_effort = "high"
+```
+
+显式设置压缩推理强度时，压缩仍使用相同的主模型、端点和凭据；主任务和视觉请求不变。
+该设置需要服务端支持，服务端拒绝会直接显示，不会自动降级。
+
+每次任务正常完成后，或完整工具批次的结果已持久化、准备继续采样时，
+按真实当前上下文和已接受的模型续接检查压力。默认80%B触发评估，50%B是软目标；
+原任务、图片和当前完整工具批次优先于软目标，能放入硬预算的有效缩减仍可采用。
+工作集控制不改变模型支持的窗口。来源放得下时生成一次无工具交接；来源较大时先规划
+有限分段与合并请求，完整来源和有效root通过校验后才耐久替换。
+每次模型尝试（包括各分段、合并和连接重试）都计入原任务的共享请求预算。
+无工具压缩只释放工具循环预留，仍保留输出/推理空间；保留最近完整工具批次和精确未完成输入。
+Resume 遇到追加的 Research 记录时，离线更新引用并保留此前派生交接；此刷新不发模型请求。
+成功后下一次请求为 `CompactionReset Full`。研究身份、显式提示词、项目记忆及已发现 MCP
+目录保持原有契约。研究前提不足、无法缩减，或摘要无效、超限、取消、请求失败时会显示推迟原因，
+保留原上下文与模型续接，不静默换用旧助手正文。摘要仍需真实任务另行验证效果。
+现代摘要将机器保护引用保留在耐久事实与来源sidecar；精确未完成输入作为独立上下文保留给模型。
+来源信息、叙述及Research脉络继续校验；压缩不伪造完成或删除原始工具执行事实。
+摘要有损且不替代稳定规则。取消、失败和已停止的回合不自动恢复、重发或丢弃推理；
+当前任务或固定指令过大、缺少压缩前提时仍可能超出预算，这时继续使用显式 `/resume` 和 `/compact`。
+合法但超预算的会话可在显式恢复后进入容量恢复态，使用 `/context`、`/compact` 或 `/exit`。
+必需内容仍放不下时明确失败；完整性损坏、缺失执行结果和未知执行影响不会因此被放行。
+自动压缩采样失败后，同一Turn不再自动采样压缩，但仍进行本地容量评估。
+
+成功完整样本若返回用量，终端显示 Provider 的 input/output totals，以及可选 cached-input/
+reasoning-output 子集，并绑定实际请求审计保存。子集已经包含在 totals 中；缺失保持 unknown。
+本地 Context 估算与请求准入次数不是 Provider 用量。写文件的模型回显只保留实际路径、
+哈希和大小；完整 diff 仍保存在执行回执中，避免在后续每次请求里重复发送。
 
 模型连接建立失败或完整响应前发生传输中断时，默认对同一请求最多重试 2 次，
 分别等待 500ms 和 1000ms；`/stop` 和 Ctrl+C 可取消等待。每次尝试都占用原请求额度，
 并单独记录请求审计。请求内容、凭据和续接状态保持不变；重试会从头生成当前响应。
 已经显示的失败响应片段会被明确标记作废，只有完整成功的样本才写入会话并执行其工具。
 已完成的工具不会重跑。HTTP 拒绝、协议或凭据错误不自动重试；重试耗尽后保留检查点，
-按停止提示使用 `/resume` 再输入新任务。
+按停止提示使用 `/resume` 再输入新任务。工具参数JSON无效仍在整个样本执行前拒绝；每个连续失败链最多重新生成2次。
+完整样本耐久提交后才归零，取消、传输失败及无效兄弟调用不归零；不会重放已完成工具。
 
 导出指定会话，保留对过程和材料的引用：
 
@@ -374,8 +494,22 @@ cd ../echidna-research
 ```
 
 终端回复以 **`Echidna>`** 开头。`NO_COLOR=1` 关闭主题颜色；
-管道输出不会增加品牌欢迎或主题 ANSI。开发构建额外支持 `chat --debug`，
-用于查看请求内容；标准 release 不包含此选项。
+管道输出不会增加品牌欢迎或主题 ANSI。所有构建均支持显式 `chat --debug`，
+用于查看实际请求内容和失败详情；普通运行不额外输出调试内容。
+
+所有构建均支持显式保存失败请求的诊断快照，内容不脱敏：
+
+```sh
+"$ECHIDNA_BIN" --config "$HOME/.config/echidna/provider.toml" chat --debug-failures ../debug-failures
+```
+
+目录相对于 chat 的实际工作目录解析。默认不启用，成功或取消的
+请求不保存；每次失败的物理请求（包括后续重试成功前的失败）独立保存一个文件。
+每份文件独立创建且不覆盖；保存成功或失败均在终端报告，原请求错误和
+重试行为保持不变。快照保留实际编码的完整请求正文、服务地址和错误详情，不替换正文
+字段、账户值、opaque内容、图片data或URL参数。它是本地诊断，不是TLS网络抓包、
+RequestAudit或自动重放入口；不会额外保存认证请求头。模型返回的正文、推理摘要、
+工具参数及服务端失败消息也不会因内容被认为敏感而隐藏或替换。
 
 ## 设计取向
 
@@ -402,10 +536,13 @@ Echidna 将执行、预算、Session 和恢复留在一个内核中。模型、�
 
 | 入口 | 内容 |
 | --- | --- |
+| [配置模板索引](examples/README.md) | 六种Provider配置、比例/固定额度和压缩强度 |
 | [纯文本配置](examples/provider.toml) | 主模型、能力声明与环境变量密钥引用 |
 | [单模型多模态配置](examples/provider-multimodal.toml) | 主模型直接处理文本与图像 |
 | [文本 + 视觉配置](examples/provider-text-vision.toml) | 两个模型的独立服务、能力与密钥配置 |
 | [MCP 配置](examples/provider-mcp.toml) | HTTP 与本地 stdio 工具、专用凭据引用和显式子进程环境 |
+| [Codex 兼容订阅配置](examples/provider-codex-subscription.toml) | 自有授权、目录版本、能力导入与推理摘要参数 |
+| [ChatGPT 订阅预览配置](examples/provider-chatgpt-subscription.toml) | 独立HTTP订阅预览链路及私有授权存储 |
 | [原理图原图](assets/architecture-overview.svg) | 可放大的执行与持久化流程图 |
 | [更新记录](CHANGELOG.md) | 功能变化与兼容性说明 |
 

@@ -198,7 +198,7 @@ async fn audited_agent_loop_records_each_full_incremental_and_provider_rejected_
         RequestAuditDeliveryReason::Full(BaselineInvalidationReason::ProviderRejected)
     );
     for (manifest, request) in manifests.iter().zip(&requests) {
-        assert_eq!(manifest.schema_version(), 3);
+        assert_eq!(manifest.schema_version(), 4);
         assert_eq!(
             manifest.binding().session_stream_id().as_str(),
             "session:audit-loop"
@@ -207,7 +207,7 @@ async fn audited_agent_loop_records_each_full_incremental_and_provider_rejected_
         assert_eq!(&reconstructed, request.input());
         manifest
             .context_delivery_map()
-            .expect("RequestAudit v3 retains the actual delivered map")
+            .expect("RequestAudit v4 retains the actual delivered map")
             .validate_against(&reconstructed)
             .unwrap();
     }
@@ -264,7 +264,7 @@ async fn audited_agent_loop_commits_through_the_real_request_audit_service_befor
     assert_eq!(provider.requests().len(), 1);
     assert_eq!(projection.state().request_audits().len(), 1);
     let manifest = &projection.state().request_audits()[0];
-    assert_eq!(manifest.schema_version(), 3);
+    assert_eq!(manifest.schema_version(), 4);
     assert_eq!(manifest.prompt_renderer().unwrap().id(), "generic");
     assert_eq!(manifest.prompt_renderer().unwrap().version(), 1);
     assert_eq!(
@@ -285,8 +285,8 @@ async fn audited_agent_loop_commits_through_the_real_request_audit_service_befor
 }
 
 #[tokio::test]
-async fn request_audit_v3_reconstruction_rejects_delivery_map_tampering() {
-    let root = TemporaryDirectory::new("m4-request-audit-v3-tamper");
+async fn request_audit_v4_reconstruction_rejects_delivery_map_tampering() {
+    let root = TemporaryDirectory::new("m4-request-audit-v4-tamper");
     let tools = ToolRegistry::for_project(root.path());
     let provider = ScriptedProvider::new(
         incremental_capabilities(),
@@ -294,8 +294,8 @@ async fn request_audit_v3_reconstruction_rejects_delivery_map_tampering() {
     );
     let mut agent = AgentLoop::new(&provider, &tools);
     let binding = RequestAuditBinding::new(
-        ProjectId::new("project-audit-v3-tamper"),
-        StreamId::new("session:audit-v3-tamper"),
+        ProjectId::new("project-audit-v4-tamper"),
+        StreamId::new("session:audit-v4-tamper"),
     )
     .unwrap();
     let audit_context = RequestAuditRunContext::new(
@@ -311,7 +311,7 @@ async fn request_audit_v3_reconstruction_rejects_delivery_map_tampering() {
             service
                 .record(
                     attempt,
-                    EventId::new("audit-v3-tamper-request"),
+                    EventId::new("audit-v4-tamper-request"),
                     OccurredAt::new("2026-08-23T00:00:01Z"),
                     &mut projection,
                     &mut sink,
@@ -331,7 +331,7 @@ async fn request_audit_v3_reconstruction_rejects_delivery_map_tampering() {
     }
 
     let encoded = serde_json::to_value(&projection.state().request_audits()[0]).unwrap();
-    assert_eq!(encoded["schema_version"], serde_json::json!(3));
+    assert_eq!(encoded["schema_version"], serde_json::json!(4));
 
     let mut wrong_position = encoded.clone();
     wrong_position["context_delivery_map"]["content_items"][0]["final_position"] =

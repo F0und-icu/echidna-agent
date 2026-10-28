@@ -8,14 +8,20 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::time::Duration;
 
-pub(super) struct PresentationSink {
-    sender: Option<SyncSender<String>>,
-    dropped: Arc<AtomicU64>,
-    finished: Receiver<()>,
+pub(super) enum PresentationSink {
+    Terminal(crate::terminal_console::PreviewSender),
+    Worker {
+        sender: Option<SyncSender<String>>,
+        dropped: Arc<AtomicU64>,
+        finished: Receiver<()>,
+    },
 }
 
 impl Default for PresentationSink {
     fn default() -> Self {
+        if let Some(terminal) = crate::terminal_console::preview_sender() {
+            return Self::Terminal(terminal);
+        }
         let (sender, frames) = mpsc::sync_channel::<String>(8);
         let (finished, completion) = mpsc::channel();
         let dropped = Arc::new(AtomicU64::new(0));
@@ -42,7 +48,7 @@ impl Default for PresentationSink {
                     .ok()
                     .map(|_| sender)
             });
-        Self {
+        Self::Worker {
             sender,
             dropped,
             finished: completion,
@@ -52,19 +58,32 @@ impl Default for PresentationSink {
 
 impl PresentationSink {
     pub(super) fn send(&self, frame: String) {
-        if let Some(sender) = &self.sender
-            && sender.try_send(frame).is_err()
-        {
-            self.dropped.fetch_add(1, Ordering::Relaxed);
+        match self {
+            Self::Terminal(terminal) => terminal.send(frame),
+            Self::Worker {
+                sender, dropped, ..
+            } => {
+                if let Some(sender) = sender
+                    && sender.try_send(frame).is_err()
+                {
+                    dropped.fetch_add(1, Ordering::Relaxed);
+                }
+            }
         }
     }
 }
 
 impl Drop for PresentationSink {
     fn drop(&mut self) {
-        self.sender.take();
+        let Self::Worker {
+            sender, finished, ..
+        } = self
+        else {
+            return;
+        };
+        sender.take();
         // Normal output drains; an unread terminal never creates an unbounded
         // join. Exactly one worker exists per Chat, not one per Turn or Tool.
-        let _ = self.finished.recv_timeout(Duration::from_millis(100));
+        let _ = finished.recv_timeout(Duration::from_millis(100));
     }
 }

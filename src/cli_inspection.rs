@@ -23,7 +23,6 @@ use crate::app::request_audit::RequestAuditService;
 use crate::app::retrieval::{
     HistoricalSummaryCandidate, RetrievalMemoryDocument, RetrievalSources, project_shadow_report,
 };
-use crate::app::session::SessionProjection;
 use crate::domain::artifacts::ArtifactId;
 use crate::domain::events::StreamId;
 use crate::domain::guidance::{
@@ -496,7 +495,8 @@ fn read_current_observations(
         .take(MAX_RETRIEVAL_OBSERVATION_SESSIONS)
     {
         let events = read_existing_session_events(project, &session_id).map_err(retrieval_error)?;
-        let projection = SessionProjection::replay(events).map_err(retrieval_error)?;
+        let projection =
+            crate::cli_session::replay_project_session(project, events).map_err(retrieval_error)?;
         let state = projection.state();
         for observation in state.vision_observations() {
             if observations.len() == MAX_RETRIEVAL_OBSERVATIONS {
@@ -681,7 +681,7 @@ fn read_session_inspection(
         });
     };
     let (state, session_corrupt) = match read_existing_session_events(project, &session_id) {
-        Ok(events) => match SessionProjection::replay(events) {
+        Ok(events) => match crate::cli_session::replay_project_session(project, events) {
             Ok(projection) => (Some(projection.state().clone()), false),
             Err(_) => (None, true),
         },

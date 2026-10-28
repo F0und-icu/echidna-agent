@@ -49,7 +49,7 @@ impl<'project> LocalProjectMemory<'project> {
     ) -> Self {
         Self {
             project,
-            core_memory_byte_limit: policy.core_memory_bytes(),
+            core_memory_byte_limit: policy.core_file_bytes(),
         }
     }
 
@@ -201,7 +201,7 @@ impl<'project> LocalProjectMemory<'project> {
         })
     }
 
-    fn memory_root(&self) -> PathBuf {
+    pub(crate) fn memory_root(&self) -> PathBuf {
         self.project.control_directory().join(MEMORY_DIRECTORY)
     }
 

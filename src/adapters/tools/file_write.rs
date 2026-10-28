@@ -170,7 +170,6 @@ fn succeeded_mutation(
                 "before_size": mutation.before_size,
                 "after_hash": mutation.after_hash,
                 "after_size": mutation.after_size,
-                "actual_diff": mutation.actual_diff,
             })
         })
         .collect::<Vec<_>>();

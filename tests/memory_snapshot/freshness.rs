@@ -19,14 +19,14 @@ fn replace_same_metadata(path: &Path) {
     assert_eq!(before.modified().unwrap(), after.modified().unwrap());
 }
 
-async fn inspect(root: &Path, paths: Value, observed_at: &str) -> Value {
+async fn inspect(root: &Path, paths: Value) -> Value {
     // Recreate the Registry on every call: no prior in-memory state is required.
     let tools = ToolRegistry::for_project(root);
     let outcome = execute(
         &tools,
         "freshness",
         "inspect_project",
-        json!({"observed_at":observed_at, "hash_paths":paths}),
+        json!({"hash_paths":paths}),
     )
     .await;
     assert_eq!(outcome.result.status, ToolResultStatus::Succeeded);
@@ -67,14 +67,14 @@ async fn changed_case(case: &str) {
             fs::write(root.join(path), "alpha=10\n").unwrap();
         }
     }
-    let first = inspect(root, json!([path]), "cold").await;
+    let first = inspect(root, json!([path])).await;
     let old_hash = blake3::hash(b"alpha=10\n").to_hex().to_string();
     assert_eq!(entry(&first, path)["blake3"], old_hash);
     replace_same_metadata(&root.join(path));
     if case == "filesystem_rebuild" {
         fs::write(root.join("new.txt"), "unrelated metadata change\n").unwrap();
     }
-    let result = inspect(root, json!([path, format!("./{path}"), path]), "changed").await;
+    let result = inspect(root, json!([path, format!("./{path}"), path])).await;
     assert_eq!(
         entry(&result, path)["blake3"],
         blake3::hash(b"alpha=11\n").to_hex().to_string(),
@@ -98,7 +98,7 @@ async fn changed_case(case: &str) {
             .unwrap();
     assert_eq!(persisted, result["file_manifest"]);
     let bytes = cache_contents(root);
-    let warm = inspect(root, json!([path]), "later-warm").await;
+    let warm = inspect(root, json!([path])).await;
     assert_eq!(warm["status"], "hit");
     assert_eq!(warm["hashed_paths"], json!([path]));
     assert_eq!(entry(&warm, path), entry(&result, path));
@@ -125,15 +125,15 @@ async fn metadata_only_reuse_does_not_claim_explicit_hash_work() {
     let root = project.root();
     fs::write(root.join("source.txt"), "alpha=10\n").unwrap();
     fs::write(root.join("other.txt"), "unrequested\n").unwrap();
-    let first = inspect(root, json!(["source.txt"]), "cold").await;
+    let first = inspect(root, json!(["source.txt"])).await;
     assert!(entry(&first, "other.txt")["blake3"].is_null());
     let cache = cache_contents(root);
     replace_same_metadata(&root.join("source.txt"));
-    let cheap = inspect(root, json!([]), "cheap").await;
+    let cheap = inspect(root, json!([])).await;
     assert_eq!(cheap["status"], "hit");
     assert_eq!(cheap["hashed_paths"], json!([]));
     assert_eq!(cache_contents(root), cache);
-    let explicit = inspect(root, json!(["source.txt"]), "explicit").await;
+    let explicit = inspect(root, json!(["source.txt"])).await;
     assert_ne!(
         entry(&explicit, "source.txt")["blake3"],
         entry(&cheap, "source.txt")["blake3"]
@@ -149,7 +149,7 @@ async fn invalid_explicit_hashes_do_not_publish_partial_cache() {
     fs::create_dir(root.join("directory")).unwrap();
     #[cfg(unix)]
     std::os::unix::fs::symlink(root.join("source.txt"), root.join("link")).unwrap();
-    inspect(root, json!(["source.txt"]), "cold").await;
+    inspect(root, json!(["source.txt"])).await;
     let cache = cache_contents(root);
     replace_same_metadata(&root.join("source.txt"));
     let mut paths = vec!["missing.txt", "directory", "../source.txt"];
@@ -161,7 +161,7 @@ async fn invalid_explicit_hashes_do_not_publish_partial_cache() {
             &tools,
             "invalid",
             "inspect_project",
-            json!({"observed_at":"fixture", "hash_paths":["source.txt", path]}),
+            json!({"hash_paths":["source.txt", path]}),
         )
         .await;
         assert_eq!(outcome.result.status, ToolResultStatus::Failed);

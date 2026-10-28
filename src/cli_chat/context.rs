@@ -54,16 +54,7 @@ impl ChatContextCache {
             .inspect(&tools.specs(), &[], "context-refresh")
             .map_err(ChatContextRefreshError::ProjectSnapshot)?;
         let project_snapshot = ProjectSnapshotContext::new(snapshot.snapshot)?;
-        let core_memory = load_core_memory(
-            project,
-            ContextWindowPolicy::for_window(
-                composition
-                    .agent_profile()
-                    .primary()
-                    .capabilities()
-                    .context_window,
-            ),
-        )?;
+        let core_memory = load_core_memory(project, tools.window_policy())?;
         let (personal_prompt, project_prompt) = load_prompts(composition.prompt_sources())?;
         Ok(CurrentContextState::new(
             world_state,

@@ -11,10 +11,24 @@ use crate::domain::model::ContentItem;
 
 use super::{COMPACTION_CREATED_EVENT_TYPE, SessionError};
 
+mod captured_context;
 mod evidence;
+mod graph_validation;
+mod model_sample;
+mod source;
+mod source_plan;
 mod summary;
 
+pub(crate) use captured_context::CompactionContextCapture;
 pub use evidence::{CompactionValidationContext, EvidenceSpine, ResearchStreamIdentity};
+pub(crate) use graph_validation::VerifiedCompactionGraph;
+pub use model_sample::CompactionModelSample;
+pub(crate) use source::{ResearchSourceIdentity, SessionSourceIdentity, ValidatedResearchSource};
+pub(crate) use source_plan::{
+    CompactionSourceEntry, CompactionSourceNode, CompactionSourceNodeInput, CompactionSourcePlan,
+    CompactionSourceRange, compaction_instructions, node_template_hash,
+};
+pub(crate) use summary::MainV5ValidationFacts;
 pub use summary::{NarrativeSummary, SessionSummary, SessionSummaryDraft};
 
 pub(super) const CURRENT_SESSION_SUMMARY_SCHEMA_VERSION: u16 = 4;
@@ -75,7 +89,7 @@ impl SessionCompaction {
         if self.schema_version != self.summary.schema_version()
             || !matches!(
                 self.schema_version,
-                1 | 2 | CURRENT_SESSION_SUMMARY_SCHEMA_VERSION
+                1 | 2 | 5 | CURRENT_SESSION_SUMMARY_SCHEMA_VERSION
             )
         {
             return Err(SessionError::UnsupportedPayloadSchema {

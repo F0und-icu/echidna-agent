@@ -547,7 +547,9 @@ async fn resume_restores_the_compacted_view_with_session_resumed_and_rejects_ano
         item,
         ContentItem::Text { text, .. } if text == "post-compaction durable history"
     )));
-    assert!(!agent.history().items().iter().any(|item| matches!(
+    // This legacy fixture has no accepted-delivery evidence for its old
+    // operator input, so it remains protected after compaction.
+    assert!(agent.history().items().iter().any(|item| matches!(
         item,
         ContentItem::Text { text, .. } if text == "old durable history"
     )));
@@ -565,6 +567,24 @@ async fn resume_restores_the_compacted_view_with_session_resumed_and_rejects_ano
         &provider.requests()[0].input().content_items,
         session.latest_compaction().unwrap().summary()
     ));
+    for expected in [
+        "old durable history",
+        "recent durable history",
+        "post-compaction durable history",
+    ] {
+        assert_eq!(
+            provider.requests()[0]
+                .input()
+                .content_items
+                .iter()
+                .filter(|item| matches!(
+                    item, ContentItem::Text { text, .. } if text == expected
+                ))
+                .count(),
+            1,
+            "restored operator input must appear exactly once: {expected}"
+        );
+    }
 
     let another =
         compacted_session_state("session:another-compaction", "primary-resumed-runtime", 2);

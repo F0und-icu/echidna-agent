@@ -57,7 +57,6 @@ async fn measure(tools: &ToolRegistry, id: &str) -> (Value, u128) {
         id,
         "inspect_project",
         json!({
-            "observed_at": "2026-09-15T00:00:00Z",
             "hash_paths": [SOURCE, MEMORY]
         }),
     )

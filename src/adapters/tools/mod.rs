@@ -10,6 +10,7 @@ mod http_request;
 mod job;
 mod mcp;
 mod memory;
+mod operation_time;
 mod output;
 mod process_identity;
 mod pty;
@@ -30,7 +31,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::adapters::mcp_http::{McpCatalogTool, McpError};
+use crate::adapters::mcp::{McpCatalogTool, McpError};
 use crate::adapters::project_event_store::Project;
 use crate::domain::context::ContextWindowPolicy;
 use crate::domain::tools::{
@@ -184,9 +185,13 @@ impl ToolRegistry {
         self
     }
 
-    pub(crate) fn with_context_window(mut self, window_tokens: u32) -> Self {
-        self.window_policy = ContextWindowPolicy::for_window(window_tokens);
+    pub(crate) fn with_window_policy(mut self, policy: ContextWindowPolicy) -> Self {
+        self.window_policy = policy;
         self
+    }
+
+    pub(crate) fn window_policy(&self) -> ContextWindowPolicy {
+        self.window_policy
     }
 
     fn canonical_spec(&self, name: &ToolName, tool: &RegisteredTool) -> ToolSpec {
@@ -217,7 +222,7 @@ impl ToolRegistry {
             }
             BuiltinTool::MemoryWrite => {
                 builtin_spec.input_schema = with_execution_control(memory::write_input_schema(
-                    self.window_policy.core_memory_bytes(),
+                    self.window_policy.core_file_bytes(),
                 ));
             }
             _ => {}
@@ -248,7 +253,14 @@ impl ToolRegistry {
         ) {
             builtin_spec.version = "2".to_owned();
         }
-        if matches!(tool, BuiltinTool::ResearchGet | BuiltinTool::ResearchUpdate) {
+        if matches!(
+            tool,
+            BuiltinTool::ResearchGet
+                | BuiltinTool::ResearchUpdate
+                | BuiltinTool::MemoryRead
+                | BuiltinTool::MemoryWrite
+                | BuiltinTool::InspectProject
+        ) {
             builtin_spec.version = "2".to_owned();
         }
         debug_assert_eq!(&builtin_spec.name, name);
@@ -1023,7 +1035,7 @@ impl BuiltinTool {
             Self::MemoryWrite => spec(
                 "memory_write",
                 memory::write_input_schema(
-                    ContextWindowPolicy::for_window(32_768).core_memory_bytes(),
+                    ContextWindowPolicy::for_window(32_768).core_file_bytes(),
                 ),
                 memory::output_schema(),
                 ToolParallelism::ResourceLocked,
@@ -1548,13 +1560,7 @@ fn canonical_description(name: &str) -> String {
     };
     let time_guidance = if matches!(
         name,
-        "inspect_project"
-            | "research_update"
-            | "memory_read"
-            | "memory_write"
-            | "artifact_store"
-            | "http_request"
-            | "view_image"
+        "research_update" | "artifact_store" | "http_request" | "view_image"
     ) {
         " Use observed timestamps, never guessed dates. For current UTC time use run_command argv [\"date\",\"-u\",\"+%Y-%m-%dT%H:%M:%SZ\"] when needed; preserve source timestamps for historical facts."
     } else {
