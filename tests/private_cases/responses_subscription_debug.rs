@@ -10,7 +10,6 @@ fn assert_single_probe(output: &std::process::Output) {
     );
 }
 
-#[cfg(debug_assertions)]
 mod debug_regression {
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
@@ -86,21 +85,114 @@ mod debug_regression {
         );
         let stderr = String::from_utf8(output.stderr).unwrap();
         for required in [
-            "useful failure [redacted]",
-            "[truncated]",
-            "Responses error event `message` must be a string",
-        ] {
-            assert!(stderr.contains(required), "{stderr}");
-        }
-        for excluded in [
             BEARER_SECRET,
             "TAIL_ERROR_CANARY",
             "RAW_NESTED_ERROR_CANARY",
             "RAW_ENVELOPE_ERROR_CANARY",
+            "Responses error event `message` must be a string",
         ] {
-            assert!(!stderr.contains(excluded), "{stderr}");
+            assert!(stderr.contains(required), "{stderr}");
         }
-        assert!(!stderr.contains(&"x".repeat(1025)), "{stderr}");
+        assert!(stderr.contains(&"x".repeat(8000)), "{stderr}");
+    }
+
+    #[test]
+    fn http_capacity_detail_is_visible_for_all_profiles() {
+        const CHILD: &str = "ECHIDNA_HTTP_CAPACITY_DETAIL_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                for profile in ["standard", "siwc", "codex"] {
+                    for debug in [false, true] {
+                        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                        let base_url = format!("http://{}", listener.local_addr().unwrap());
+                        let marker = format!("HTTP_CAPACITY_{profile}_{debug}");
+                        let body = serde_json::json!({"error":{
+                            "code":"context_length_exceeded", "message":marker
+                        }})
+                        .to_string();
+                        let server = thread::spawn(move || {
+                            respond_failure(
+                                &listener,
+                                "400 Bad Request",
+                                "application/json",
+                                &body,
+                            );
+                        });
+                        let config = ResponsesHttpConfig::new(
+                            base_url,
+                            "fixture-model",
+                            if profile == "codex" {
+                                "codex:fixture"
+                            } else {
+                                "chatgpt_subscription:fixture"
+                            },
+                            subscription_capabilities(),
+                        );
+                        let config = match profile {
+                            "siwc" => config.with_chatgpt_subscription_profile(),
+                            "codex" => config.with_codex_subscription_profile(),
+                            _ => config,
+                        };
+                        let provider =
+                            ResponsesHttpAdapter::new(config, Arc::new(CapacityCredential))
+                                .with_observer(Some(crate::cli_model_output::observer(
+                                    "primary", debug,
+                                )));
+                        let input = ModelInputIR::current(
+                            "Fixture instruction.",
+                            vec![ContentItem::user_text("Fixture input.")],
+                            ModelRequestRequirements::default(),
+                        );
+                        let mut stream = provider.stream(ModelRequest::full(input)).unwrap();
+                        assert!(matches!(
+                            stream.next().await,
+                            Some(Err(ModelProviderError::ContextCapacityExceeded { .. }))
+                        ));
+                        assert!(stream.next().await.is_none());
+                        server.join().unwrap();
+                    }
+                }
+            });
+            return;
+        }
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "responses_subscription_debug::debug_regression::http_capacity_detail_is_visible_for_all_profiles", "--nocapture"])
+            .env(CHILD, "1")
+            .output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        for profile in ["standard", "siwc", "codex"] {
+            for debug in [false, true] {
+                let marker = format!("HTTP_CAPACITY_{profile}_{debug}");
+                assert_eq!(stderr.matches(&marker).count(), 1, "{stderr}");
+            }
+        }
+    }
+
+    struct CapacityCredential;
+    impl CredentialSource for CapacityCredential {
+        fn read(&self, _: &str) -> Result<Option<String>, CredentialSourceError> {
+            Ok(Some(BEARER_SECRET.to_owned()))
+        }
+
+        fn resolve(&self, reference: &str) -> crate::adapters::credentials::CredentialResolution {
+            if reference == "codex:fixture" {
+                crate::adapters::credentials::CredentialResolution::PendingAccountBound(Box::pin(
+                    async {
+                        Ok(crate::adapters::credentials::AccountBoundCredential::new(
+                            BEARER_SECRET.to_owned(),
+                            "fixture-account".to_owned(),
+                        ))
+                    },
+                ))
+            } else {
+                crate::adapters::credentials::CredentialResolution::Ready(self.read(reference))
+            }
+        }
     }
 
     struct FixtureCredentialSource;
@@ -143,12 +235,13 @@ mod debug_regression {
             stderr.contains(STANDARD_SECRET),
             "standard-profile debug output unexpectedly stopped showing its error body:\n{stderr}"
         );
-        for secret in [BEARER_SECRET, HTTP_SECRET, SSE_SECRET] {
+        for detail in [HTTP_SECRET, SSE_SECRET] {
             assert!(
-                !stderr.contains(secret),
-                "subscription debug stderr disclosed fixture secret `{secret}`:\n{stderr}"
+                stderr.contains(detail),
+                "subscription detail missing `{detail}`:\n{stderr}"
             );
         }
+        assert!(!stderr.contains(BEARER_SECRET));
     }
 
     fn run_child() {
@@ -205,7 +298,7 @@ mod debug_regression {
         let mut stream = provider.stream(ModelRequest::full(input)).unwrap();
         assert!(matches!(
             stream.next().await,
-            Some(Err(ModelProviderError::HttpFailure { status: 401 }))
+            Some(Err(ModelProviderError::HttpFailure { status: 401, .. }))
         ));
     }
 
@@ -352,15 +445,18 @@ mod debug_regression {
         server.join().unwrap();
         let observations = observed.lock().unwrap().join("\n");
         assert!(
-            observations.contains("[redacted] actual instruction"),
+            observations.contains(&format!("{BEARER_SECRET} actual instruction")),
             "{observations}"
         );
         assert!(
-            observations.contains("[redacted] selected reasoning"),
+            observations.contains(&format!("{BEARER_SECRET} selected reasoning")),
             "{observations}"
         );
         assert!(observations.contains("Rejected"), "{observations}");
-        assert!(!observations.contains(BEARER_SECRET), "{observations}");
+        assert!(
+            observations.contains(&format!("{BEARER_SECRET} failed")),
+            "{observations}"
+        );
         assert!(
             !observations.contains("credential_reference"),
             "{observations}"
@@ -464,15 +560,20 @@ mod release_regression {
             );
             assert!(stderr.contains(summary), "{case}: {stderr}");
             assert!(stderr.contains(marker), "{case}: {stderr}");
-            assert!(!stderr.contains(BEARER_SECRET), "{case}: {stderr}");
+            if case == "completed" {
+                assert!(stderr.contains(BEARER_SECRET), "{case}: {stderr}");
+            }
             assert!(!stdout.contains("reasoning summary"), "{case}: {stdout}");
             assert!(!stdout.contains(summary), "{case}: {stdout}");
             if case == "completed" {
                 assert!(stderr.contains("first\nsecond"), "{stderr}");
                 assert!(!stderr.contains("firstsecond"), "{stderr}");
-                assert!(stderr.contains("\\u{1b}[31m [redacted]"), "{stderr}");
+                assert!(
+                    stderr.contains(&format!("\\u{{1b}}[31m {BEARER_SECRET}")),
+                    "{stderr}"
+                );
                 assert_eq!(stderr.matches("first").count(), 1, "{stderr}");
-                assert_eq!(stderr.matches("[redacted]").count(), 1, "{stderr}");
+                assert_eq!(stderr.matches(BEARER_SECRET).count(), 1, "{stderr}");
             }
         }
     }
@@ -490,11 +591,7 @@ mod release_regression {
                 .with_codex_subscription_profile(),
                 Arc::new(FixtureCredentialSource),
             )
-            .with_observer(Some(crate::cli_model_output::observer(
-                "primary",
-                #[cfg(debug_assertions)]
-                false,
-            )));
+            .with_observer(Some(crate::cli_model_output::observer("primary", false)));
             let input = ModelInputIR::current(
                 "Fixture instruction.",
                 vec![ContentItem::user_text("Fixture input.")],
@@ -637,11 +734,7 @@ mod release_regression {
                 .with_timeouts(2_000, 2_000),
                 Arc::new(FixtureCredentialSource),
             )
-            .with_observer(Some(crate::cli_model_output::observer(
-                "primary",
-                #[cfg(debug_assertions)]
-                true,
-            )));
+            .with_observer(Some(crate::cli_model_output::observer("primary", true)));
             let input = ModelInputIR::current(
                 "Fixture instruction.",
                 vec![ContentItem::user_text("Fixture input.")],

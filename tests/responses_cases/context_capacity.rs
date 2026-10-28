@@ -88,7 +88,7 @@ async fn http_capacity_requires_a_valid_exact_code_and_keeps_other_failures_dist
         if !capacity {
             assert!(matches!(
                 error,
-                ModelStreamingError::Provider(ModelProviderError::HttpFailure { status: 400 })
+                ModelStreamingError::Provider(ModelProviderError::HttpFailure { status: 400, .. })
             ));
         }
         request.await.unwrap();
@@ -113,7 +113,7 @@ async fn unrelated_http_status_does_not_become_a_capacity_stop() {
         .unwrap_err();
     assert!(matches!(
         error,
-        ModelStreamingError::Provider(ModelProviderError::HttpFailure { status: 500 })
+        ModelStreamingError::Provider(ModelProviderError::HttpFailure { status: 500, .. })
     ));
     request.await.unwrap();
     server.await.unwrap();

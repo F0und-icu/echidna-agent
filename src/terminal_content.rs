@@ -17,7 +17,6 @@ impl ContentView {
         Self::render(value, 4096, 36)
     }
 
-    #[cfg(debug_assertions)]
     pub(crate) fn full(value: &Value) -> String {
         Self::render(value, usize::MAX, usize::MAX)
     }

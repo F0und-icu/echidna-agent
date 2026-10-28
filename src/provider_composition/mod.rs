@@ -38,7 +38,7 @@ pub struct ProviderComposition {
     agent_definition_path: Option<std::path::PathBuf>,
     runtime: RuntimeSettings,
     mcp: McpRuntime,
-    #[cfg(debug_assertions)]
+
     diagnostic_output: bool,
 }
 
@@ -67,7 +67,6 @@ impl ProviderComposition {
             credential_source,
             None,
             None,
-            #[cfg(debug_assertions)]
             false,
         )
     }
@@ -149,7 +148,6 @@ impl ProviderComposition {
                     credential_source,
                     None,
                     None,
-                    #[cfg(debug_assertions)]
                     false,
                 )?;
                 Ok(ConfiguredModelCatalog::ApiKey(adapter))
@@ -173,14 +171,13 @@ impl ProviderComposition {
         credential_source: Arc<dyn CredentialSource>,
         project: Project,
         debug_failures: Option<PathBuf>,
-        #[cfg(debug_assertions)] debug: bool,
+        debug: bool,
     ) -> Result<Self, ProviderCompositionError> {
         Self::compose(
             config,
             credential_source,
             Some(project),
             debug_failures,
-            #[cfg(debug_assertions)]
             debug,
         )
     }
@@ -227,14 +224,7 @@ impl ProviderComposition {
     }
 
     pub(crate) fn diagnostic_output_enabled(&self) -> bool {
-        #[cfg(debug_assertions)]
-        {
-            self.diagnostic_output
-        }
-        #[cfg(not(debug_assertions))]
-        {
-            false
-        }
+        self.diagnostic_output
     }
 
     pub(crate) fn runtime(&self) -> RuntimeSettings {
@@ -252,7 +242,7 @@ impl ProviderComposition {
         credential_source: Arc<dyn CredentialSource>,
         project: Option<Project>,
         debug_failures: Option<PathBuf>,
-        #[cfg(debug_assertions)] debug: bool,
+        debug: bool,
     ) -> Result<Self, ProviderCompositionError> {
         let config = config.0;
         let prompt_sources = config.prompts.clone();
@@ -269,7 +259,6 @@ impl ProviderComposition {
             Arc::clone(&credential_source),
             project.as_ref(),
             project.as_ref().map(|_| "primary"),
-            #[cfg(debug_assertions)]
             debug,
         )?;
         let primary = primary.with_failure_capture(debug_failures.as_deref());
@@ -285,7 +274,6 @@ impl ProviderComposition {
                     Arc::clone(&credential_source),
                     project.as_ref(),
                     project.as_ref().map(|_| "vision"),
-                    #[cfg(debug_assertions)]
                     debug,
                 )
                 .map(|(provider, version)| {
@@ -316,7 +304,6 @@ impl ProviderComposition {
                 Arc::clone(&credential_source),
                 project.as_ref(),
                 project.as_ref().map(|_| "compaction"),
-                #[cfg(debug_assertions)]
                 debug,
             )?;
             let primary_profile = agent_profile.primary();
@@ -352,7 +339,7 @@ impl ProviderComposition {
             agent_definition_path,
             runtime: config.runtime,
             mcp,
-            #[cfg(debug_assertions)]
+
             diagnostic_output: debug,
         })
     }
@@ -365,7 +352,7 @@ fn compose_provider(
     credential_source: Arc<dyn CredentialSource>,
     project: Option<&Project>,
     cli_role: Option<&'static str>,
-    #[cfg(debug_assertions)] debug: bool,
+    debug: bool,
 ) -> Result<(ResponsesHttpAdapter, RequestAdapterVersion), ProviderCompositionError> {
     let (credential_reference, credential_source) = match definition.credential() {
         ProviderCredential::Reference(reference) => (reference.to_owned(), credential_source),
@@ -425,13 +412,8 @@ fn compose_provider(
                 Some(project) => adapter.with_project_image_resolver(project.clone()),
                 None => adapter,
             };
-            let adapter = adapter.with_observer(cli_role.map(|role| {
-                crate::cli_model_output::observer(
-                    role,
-                    #[cfg(debug_assertions)]
-                    debug,
-                )
-            }));
+            let adapter = adapter
+                .with_observer(cli_role.map(|role| crate::cli_model_output::observer(role, debug)));
             Ok((adapter, request_adapter_version))
         }
     }

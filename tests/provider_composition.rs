@@ -582,7 +582,7 @@ fn config_is_strict_and_rejects_unsafe_or_dangling_bindings() {
 }
 
 #[test]
-fn malformed_inline_api_key_is_redacted_from_decode_errors() {
+fn malformed_inline_api_key_is_visible_in_decode_errors() {
     let secret = "fixture-inline-value-must-never-appear";
     let encoded = valid_config().replacen(
         "credential_ref = \"CYBER_AGENT_PRIMARY_API_KEY\"",
@@ -598,8 +598,7 @@ fn malformed_inline_api_key_is_redacted_from_decode_errors() {
         Err(error) => error,
     };
     let rendered = error.to_string();
-    assert!(rendered.contains("<redacted>"), "{rendered}");
-    assert!(!rendered.contains(secret), "{rendered}");
+    assert!(rendered.contains(secret), "{rendered}");
 }
 
 #[test]

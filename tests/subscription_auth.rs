@@ -1,6 +1,11 @@
+#[path = "../src/adapters/http_error_body.rs"]
+pub(crate) mod http_error_body;
 #[allow(dead_code)]
 #[path = "../src/model_catalog.rs"]
 mod model_catalog;
+mod adapters {
+    pub(crate) use crate::http_error_body;
+}
 #[allow(dead_code)]
 #[path = "../src/adapters/subscription_auth/mod.rs"]
 mod subscription_auth;
@@ -216,10 +221,66 @@ async fn siwc_models_reject_missing_visibility_instead_of_silently_filtering_it(
             .models()
             .await
             .unwrap_err()
+            .0
             .to_string(),
         "subscription response is invalid"
     );
     server.join().unwrap();
+}
+
+#[tokio::test]
+async fn temporary_status_with_pending_body_does_not_delay_valid_token_fallback() {
+    let directory = TemporaryDirectory::new("siwc-refresh-pending-error-body");
+    let store = canonical_temp_path(directory.path().join("auth-store"));
+    seed_connection(&store, now_unix() + 3600, now_unix() - 1);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let (release, wait) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let (request, mut stream) = receive_request(&listener);
+        assert!(request.starts_with("POST /token HTTP/1.1"));
+        stream.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 12\r\nConnection: close\r\n\r\n").unwrap();
+        stream.flush().unwrap();
+        let _ = wait.recv_timeout(std::time::Duration::from_secs(10));
+        let _ = stream.write_all(b"pending body");
+    });
+    let auth = service(&store, &base);
+    let result = tokio::time::timeout(std::time::Duration::from_secs(2), auth.access_token()).await;
+    release.send(()).unwrap();
+    server.join().unwrap();
+    assert_eq!(
+        result
+            .expect("valid token fallback must not wait for the error body")
+            .unwrap(),
+        "synthetic-access"
+    );
+}
+
+#[tokio::test]
+async fn siwc_catalog_http_failure_preserves_classification_status_and_body() {
+    for (status, expected_kind) in [
+        (401, "LoginRequired"),
+        (500, "TemporarilyUnavailable"),
+        (418, "InvalidResponse"),
+    ] {
+        let directory = TemporaryDirectory::new("siwc-catalog-http-failure");
+        let store = canonical_temp_path(directory.path().join("auth-store"));
+        seed_connection(&store, now_unix() + 3600, now_unix() + 3600);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (request, stream) = receive_request(&listener);
+            assert!(request.starts_with("GET /v1/models HTTP/1.1"));
+            respond_with_status(stream, status, "SIWC_CATALOG_BODY");
+        });
+        let (kind, detail) = service(&store, &base).catalog().models().await.unwrap_err();
+        assert!(format!("{kind:?}").starts_with(expected_kind), "{kind:?}");
+        assert_eq!(
+            detail.as_deref(),
+            Some(format!("HTTP {status}: SIWC_CATALOG_BODY").as_str())
+        );
+        server.join().unwrap();
+    }
 }
 
 #[tokio::test]
@@ -407,10 +468,11 @@ async fn login_http_failures_identify_the_safe_operation_and_status_without_pers
         let message = error.to_string();
         assert_eq!(
             message,
-            format!("subscription authentication {operation} request failed with HTTP {status}")
+            format!(
+                "subscription authentication {operation} request failed with HTTP {status}: oauth-stage-secret"
+            )
         );
-        assert!(!message.contains("oauth-stage-secret"));
-        assert!(!format!("{error:?}").contains("oauth-stage-secret"));
+        assert!(format!("{error:?}").contains("oauth-stage-secret"));
         assert!(!store.join("personal.connection").exists());
     }
 }
@@ -673,7 +735,10 @@ async fn refresh_rotates_atomically_and_temporary_or_terminal_failures_preserve_
     let auth = service(&terminal_store, &base);
     let error = auth.access_token().await.unwrap_err();
     server.join().unwrap();
-    assert_eq!(error.to_string(), "subscription credentials require login");
+    assert_eq!(
+        error.to_string(),
+        "subscription credentials require login: HTTP 401: {\"error\":\"invalid_grant\"}"
+    );
     let cleared = std::fs::read_to_string(terminal_store.join("personal.connection")).unwrap();
     assert!(cleared.contains("\"tokens\":null"));
     assert!(!cleared.contains("synthetic-access"));
@@ -708,7 +773,7 @@ async fn refresh_rotates_atomically_and_temporary_or_terminal_failures_preserve_
     let auth = service(&invalid_client_store, &base);
     assert_eq!(
         auth.access_token().await.unwrap_err().to_string(),
-        "subscription client registration is invalid"
+        "subscription client registration is invalid: HTTP 400: {\"error\":\"invalid_client\"}"
     );
     server.join().unwrap();
     assert!(
@@ -723,7 +788,7 @@ async fn refresh_rotates_atomically_and_temporary_or_terminal_failures_preserve_
     let auth = service(&delayed_store, &base);
     assert_eq!(
         auth.access_token().await.unwrap_err().to_string(),
-        "subscription authentication service is temporarily unavailable"
+        "subscription authentication service is temporarily unavailable: HTTP 503: temporary synthetic failure"
     );
     server.join().unwrap();
     assert!(

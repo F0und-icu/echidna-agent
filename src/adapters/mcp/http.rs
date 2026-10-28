@@ -13,7 +13,7 @@ use super::{McpError, McpProtocolVersion};
 use super::observation::{McpObservation, McpObserver};
 use super::rpc::{
     CompletedCall, MAX_MESSAGE_BYTES, decode_message, into_result, is_notification,
-    is_server_request, safe_error,
+    is_server_request,
 };
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const MCP_PROTOCOL_VERSION: HeaderName = HeaderName::from_static("mcp-protocol-version");
@@ -111,7 +111,7 @@ impl McpClient {
         {
             CompletedCall::Result(result) => Ok(result),
             CompletedCall::Error(error) => Err(McpError::Catalog {
-                message: format!("tools/list returned JSON-RPC error: {}", safe_error(&error)),
+                message: format!("tools/list returned JSON-RPC error: {error}"),
             }),
         }
     }

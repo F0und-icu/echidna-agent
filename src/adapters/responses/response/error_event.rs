@@ -2,39 +2,9 @@
 
 use serde_json::{Number, Value};
 
-use super::super::redaction::WireRedaction;
-use crate::diagnostic_text::escaped_text;
 use crate::ports::model::ModelProviderError;
 
 use super::{PREVIOUS_RESPONSE_NOT_FOUND_CODE, ResponsesWireProfile, protocol_error};
-
-pub(super) struct ErrorRedaction {
-    redaction: WireRedaction,
-}
-
-impl ErrorRedaction {
-    pub(super) fn new(bearer: &str, account_id: Option<&[u8]>) -> Self {
-        let account = account_id.map(|account_id| {
-            std::str::from_utf8(account_id)
-                .expect("account header was constructed from a UTF-8 credential")
-        });
-        Self {
-            redaction: WireRedaction::new(&[bearer, account.unwrap_or("")]),
-        }
-    }
-
-    fn project(&self, text: &str, limit: usize) -> String {
-        // Replace whole request values before selecting a bounded prefix, so a
-        // value straddling that prefix cannot leak its credential fragment.
-        let redacted = self.redaction.text(text);
-        let mut characters = redacted.chars();
-        let mut bounded: String = characters.by_ref().take(limit).collect();
-        if characters.next().is_some() {
-            bounded.push_str("... [truncated]");
-        }
-        escaped_text(&bounded)
-    }
-}
 
 struct ErrorFields<'a> {
     code: Option<&'a str>,
@@ -48,7 +18,6 @@ pub(super) fn decode(
     data: &str,
     profile: ResponsesWireProfile,
     continuation_requested: bool,
-    redaction: &ErrorRedaction,
 ) -> ModelProviderError {
     let value = match serde_json::from_str::<Value>(data) {
         Ok(value) => value,
@@ -71,19 +40,18 @@ pub(super) fn decode(
     }
     let message = match fields.message {
         None => "<missing>".to_owned(),
-        Some(message) if message.trim().is_empty() => "<empty>".to_owned(),
-        Some(message) => redaction.project(message, 1024),
+        Some(message) => message.to_owned(),
     };
     let param = fields
         .param
-        .map(|param| redaction.project(param, 256))
+        .map(str::to_owned)
         .unwrap_or_else(|| "<absent>".to_owned());
     let sequence_number = fields
         .sequence_number
         .map(ToString::to_string)
         .unwrap_or_else(|| "<absent>".to_owned());
     ModelProviderError::ProviderFailure {
-        code: fields.code.map(|code| redaction.project(code, 128)),
+        code: fields.code.map(str::to_owned),
         message: format!(
             "Responses SSE error (origin={}; param={param}; sequence_number={sequence_number}): message={message}",
             fields.origin,

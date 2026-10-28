@@ -5,6 +5,49 @@ changes remain available in Git history.
 
 ## Unreleased
 
+### Actual diagnostic content — 2026-10-28
+
+- Prioritize personal use, functionality and efficiency. Remove message and
+  debug redaction, safety-only omission of failure payloads, and masking of
+  explicitly requested failure snapshots. Preserve actual server errors and
+  configuration diagnostics through the existing presentation owners.
+- Make explicit `chat --debug` available in release builds through the same
+  diagnostic path as development builds.
+- Keep protocol decoding, real Tool outcomes, Session/source integrity and
+  concrete resource limits as functional contracts; no new safety workflow or
+  masked/unmasked configuration switch is added.
+
+### Long-context defaults — 2026-10-28
+
+- Set Provider templates and the ordinary development/acceptance baseline to
+  at least272000 context tokens. Use the actual declared1M window when the model
+  supports it. Capability metadata remains authoritative; runtime source and
+  personality/RSI behavior are unchanged by this configuration/documentation update.
+
+### Current configuration and context behavior — 2026-10-28
+
+- All six Provider templates document runtime admission, optional compaction
+  effort and the complete proportional `runtime.context_budget` settings, with
+  configurable byte/count caps. Output/tool-loop defaults are each 12.5% of the
+  declared window; pressure/soft target use 80%/50% of usable input. These replace
+  the historical fixed ceilings and eight-step content multiplier below.
+- Compaction uses a tool-free sample or a finite preplanned segment/merge graph,
+  preserving exact unfinished inputs, images and the latest complete tool batch.
+  Every attempt uses the existing shared budget; replacement requires a complete
+  source-verified root. Valid oversized Sessions remain available for explicit
+  `/context`, `/compact` and `/exit` after resume, without tool replay.
+- New handoffs use Summary v6, source-graph samples v2 and RequestAudit v4 with
+  accepted-delivery lineage and frozen common-context proof. Historical summary
+  units remain unchanged; older binaries cannot read the new Session events.
+- Codex examples explicitly show catalog compatibility, summary support and
+  optional advertised-capability import. MCP examples show independent startup
+  and tool-call deadlines. Chinese/English guides and the examples index match
+  current behavior. No setting guarantees all account models or complete
+  internal reasoning, and model semantic quality remains separately assessed.
+
+Entries tagged F/R/CTF below describe their original deliveries. Where later
+entries supersede defaults or behavior, use the current configuration reference.
+
 ### Changed
 
 - E0: continue development as Echidna in the new `echidna-agent` repository.
@@ -166,7 +209,7 @@ changes remain available in Git history.
 
 - Tool activity now shows bounded arguments, file/directory results and explicit
   partial failures, cache/deduplication and uncertain outcomes instead of long IDs.
-- The sole ContextPlanner caps default output/tool-loop reserves at 8192/16384
+- F5 historical default: the sole ContextPlanner capped output/tool-loop reserves at 8192/16384
   tokens respectively while preserving proportional reserves for small windows.
   An explicitly configured 1048576-token window permits 1024000 estimated input
   tokens; this is not a claim of verified server capacity.

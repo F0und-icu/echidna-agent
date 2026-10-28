@@ -28,7 +28,7 @@ pub(super) fn into_result(completed: CompletedCall) -> Result<Value, McpError> {
     match completed {
         CompletedCall::Result(result) => Ok(result),
         CompletedCall::Error(error) => Err(McpError::Catalog {
-            message: format!("initialize returned JSON-RPC error: {}", safe_error(&error)),
+            message: format!("initialize returned JSON-RPC error: {error}"),
         }),
     }
 }
@@ -39,12 +39,4 @@ pub(super) fn is_server_request(value: &Value) -> bool {
 
 pub(super) fn is_notification(value: &Value) -> bool {
     value.get("method").is_some() && value.get("id").is_none()
-}
-
-pub(super) fn safe_error(error: &Value) -> String {
-    error
-        .get("message")
-        .and_then(Value::as_str)
-        .map(|message| message.chars().take(160).collect())
-        .unwrap_or_else(|| "invalid JSON-RPC error".to_owned())
 }

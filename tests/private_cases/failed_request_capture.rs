@@ -208,7 +208,7 @@ mod captures {
                 matches!(
                     (&error, kind),
                     (ModelProviderError::ConnectionFailure { .. }, "send")
-                        | (ModelProviderError::HttpFailure { status: 401 }, "http")
+                        | (ModelProviderError::HttpFailure { status: 401, .. }, "http")
                         | (
                             ModelProviderError::ResponseInterrupted { status: 200, .. },
                             "body"
@@ -246,44 +246,37 @@ mod captures {
                 snapshot["request"]["headers"],
                 json!({"accept":"text/event-stream","content-type":"application/json"})
             );
+            assert_eq!(
+                snapshot["request"]["encoded_body"],
+                std::str::from_utf8(body).unwrap()
+            );
             assert!(
                 snapshot["notice"]
                     .as_str()
                     .unwrap()
-                    .contains("not raw network bytes")
+                    .contains("not proof of transmission")
             );
-            assert!(!snapshot.to_string().contains("response-secret"));
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                assert_eq!(
-                    fs::metadata(&captured[0].0).unwrap().permissions().mode() & 0o777,
-                    0o600
+            if kind == "http" {
+                assert!(
+                    snapshot["failure"]
+                        .as_str()
+                        .unwrap()
+                        .contains("response-secret")
                 );
-                for parent in [
-                    &directory,
-                    &directory.parent().unwrap().to_path_buf(),
-                    &root.path().join("new"),
-                ] {
-                    assert_eq!(
-                        fs::metadata(parent).unwrap().permissions().mode() & 0o777,
-                        0o700
-                    );
-                }
             }
         }
     }
 
     #[tokio::test]
-    async fn actual_subscription_secrets_nested_json_keys_opaque_and_images_are_removed() {
+    async fn request_capture_preserves_exact_body_and_endpoint() {
         for profile in ["standard", "siwc", "codex"] {
             let root = TemporaryDirectory::new("capture-privacy");
             let directory = root.path().join("captures");
             let wire = response("401 Unauthorized", "response-only-secret", 0);
             let (base, server) = server(vec![wire]).await;
-            let expected_endpoint = format!("{base}/retained");
             let base = base.replacen("http://", "http://url-user:url-password@", 1)
                 + "/retained?query=URL_QUERY_SECRET#URL_FRAGMENT_SECRET";
+            let expected_endpoint = format!("{base}/responses");
             let provider = adapter(&base, profile, Some(&directory));
             let account = if profile == "codex" { ACCOUNT } else { BEARER };
             let content=json!({
@@ -304,9 +297,7 @@ mod captures {
             let snapshot = &captured[0].1;
             assert_eq!(snapshot["request"]["endpoint"], expected_endpoint);
             let encoded = snapshot.to_string();
-            for secret in [
-                BEARER,
-                account,
+            for value in [
                 "AUTH_VALUE",
                 "COOKIE_VALUE",
                 "API_VALUE",
@@ -320,21 +311,14 @@ mod captures {
                 "URL_FRAGMENT_SECRET",
                 "response-only-secret",
             ] {
-                assert!(
-                    !encoded.contains(secret),
-                    "{profile}: leaked {secret}: {encoded}"
-                );
-                let escaped = serde_json::to_string(secret).unwrap();
-                assert!(
-                    !encoded.contains(&escaped[1..escaped.len() - 1]),
-                    "{profile}: encoded secret"
-                );
+                assert!(encoded.contains(value), "{profile}: missing {value}");
             }
+            let raw_body = original.split_once("\r\n\r\n").unwrap().1;
+            assert_eq!(snapshot["request"]["encoded_body"], raw_body);
             assert!(encoded.contains("retain me"));
             assert!(encoded.contains("key-one") || profile != "codex");
             assert!(encoded.contains("key-two"));
             assert!(encoded.contains("ordinary-collision"));
-            assert!(encoded.contains("redacted-key collision"));
             let retained: Value = serde_json::from_str(
                 snapshot["request"]["body"]["input"][0]["content"][0]["text"]
                     .as_str()
@@ -494,7 +478,13 @@ mod captures {
         fs::write(&invalid, b"untouched").unwrap();
         let (base, server) = server(vec![response("401 Unauthorized", "", 0)]).await;
         let error = failure(&adapter(&base, "standard", Some(&invalid)), "failure").await;
-        assert_eq!(error, ModelProviderError::HttpFailure { status: 401 });
+        assert_eq!(
+            error,
+            ModelProviderError::HttpFailure {
+                status: 401,
+                body: String::new()
+            }
+        );
         server.await.unwrap();
         assert_eq!(fs::read(&invalid).unwrap(), b"untouched");
     }

@@ -76,7 +76,10 @@ async fn non_argument_failures_never_enter_regeneration() {
         ModelProviderError::TransportFailure {
             message: "fixture disconnect".to_owned(),
         },
-        ModelProviderError::HttpFailure { status: 429 },
+        ModelProviderError::HttpFailure {
+            status: 429,
+            body: "fixture".to_owned(),
+        },
         ModelProviderError::ProviderFailure {
             code: Some("response_incomplete".to_owned()),
             message: "limit".to_owned(),

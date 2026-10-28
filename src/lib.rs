@@ -56,11 +56,11 @@ enum CliCommand {
         /// Select a local Agent definition directory or agent.toml for a new Session.
         #[arg(long, value_name = "PATH", conflicts_with = "session")]
         agent: Option<PathBuf>,
-        /// Show sanitized sent prompts and model content, without SSE envelopes (development builds only).
-        #[cfg(debug_assertions)]
+        /// Show sent prompts and model content, without SSE envelopes.
+
         #[arg(long)]
         debug: bool,
-        /// Save redacted snapshots of failed Provider requests to this private directory.
+        /// Save diagnostic snapshots of failed Provider requests to this directory.
         #[arg(long, value_name = "DIR")]
         debug_failures: Option<PathBuf>,
         /// Resume one durable Session ID, or `latest`; `--session` is kept as an alias.
@@ -401,7 +401,7 @@ fn run_chat(
     domain: Option<CliDomainProfile>,
     phase: Option<CliResearchPhase>,
     debug_failures: Option<PathBuf>,
-    #[cfg(debug_assertions)] debug: bool,
+    debug: bool,
 ) -> Result<(), CliError> {
     let config = config.ok_or(CliError::ChatConfigurationRequired)?;
     let config = ProviderComposition::load_config(config)?;
@@ -412,7 +412,6 @@ fn run_chat(
         Arc::new(adapters::credentials::ProcessEnvironmentCredentialSource),
         project.clone(),
         debug_failures,
-        #[cfg(debug_assertions)]
         debug,
     )?;
     let runtime = chat_runtime()?;
@@ -455,7 +454,7 @@ where
             domain,
             phase,
             debug_failures,
-            #[cfg(debug_assertions)]
+
             debug,
         }) => run_chat(
             cli.config.as_deref(),
@@ -464,7 +463,6 @@ where
             domain,
             phase,
             debug_failures,
-            #[cfg(debug_assertions)]
             debug,
         ),
         Some(CliCommand::Doctor) => {

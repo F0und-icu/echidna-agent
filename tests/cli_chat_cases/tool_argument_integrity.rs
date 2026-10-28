@@ -3,7 +3,11 @@ use super::*;
 
 #[test]
 fn malformed_arguments_reject_the_whole_sample_without_writes_or_payload_disclosure() {
-    for suffix in [r#"\q"}"#, r#"" "missing-comma"}"#, ""] {
+    for (suffix, debug) in [
+        (r#"\q"}"#, false),
+        (r#"" "missing-comma"}"#, true),
+        ("", true),
+    ] {
         let root = TemporaryDirectory::new("malformed-tool-arguments");
         initialize_project(root.path());
         let arguments = format!(
@@ -26,11 +30,7 @@ fn malformed_arguments_reject_the_whole_sample_without_writes_or_payload_disclos
             .collect();
         let server = spawn_responses_server(vec![(200, body); 3]);
         let config = write_config(root.path(), &server.base_url);
-        let extra = if cfg!(debug_assertions) {
-            vec!["--debug"]
-        } else {
-            vec![]
-        };
+        let extra = if debug { vec!["--debug"] } else { vec![] };
         let output = run_chat(
             root.path(),
             &config,
@@ -54,13 +54,16 @@ fn malformed_arguments_reject_the_whole_sample_without_writes_or_payload_disclos
         }
         for private in ["PRIVATE_CONTENT", "PRIVATE_CALL_ID", "PRIVATE_TOOL_NAME"] {
             assert!(
-                !stderr.contains(private),
-                "invalid JSON/identity must not bypass redaction"
+                stderr.contains(private),
+                "diagnostics should show the rejected payload"
             );
         }
-        if cfg!(debug_assertions) {
+        if debug {
             assert!(stderr.contains("protocol decoding failed: response not committed (does not imply network interruption)"));
             assert!(!stderr.contains("response interrupted: completion not observed"));
+        }
+        if !debug {
+            assert!(stderr.contains("[rejected response]"));
         }
         let project = Project::discover(root.path()).unwrap();
         let state = reduced_session(&project, &session_id(root.path()));

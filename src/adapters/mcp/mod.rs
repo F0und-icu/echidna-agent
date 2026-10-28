@@ -38,7 +38,7 @@ impl McpProtocolVersion {
     }
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct McpServerConfig {
     pub(crate) url: Option<String>,
@@ -51,16 +51,6 @@ pub(crate) struct McpServerConfig {
     #[serde(default = "default_timeout_ms")]
     pub(crate) timeout_ms: u64,
     pub(crate) startup_timeout_ms: Option<u64>,
-}
-
-impl std::fmt::Debug for McpServerConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("McpServerConfig")
-            .field("stdio", &self.command.is_some())
-            .field("protocol_version", &self.protocol_version)
-            .field("timeout_ms", &self.timeout_ms)
-            .finish_non_exhaustive()
-    }
 }
 
 impl McpServerConfig {

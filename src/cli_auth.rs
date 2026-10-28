@@ -150,7 +150,13 @@ async fn run_model_command(
                     "model selection requires an API-key or Codex subscription Provider",
                 ));
             }
-            service.models().await.map_err(auth_error)?
+            service
+                .models()
+                .await
+                .map_err(|(error, detail)| match detail {
+                    Some(detail) => auth_error(format!("{error}: {detail}")),
+                    None => auth_error(error),
+                })?
         }
     };
     let AuthCommand::SelectModel {

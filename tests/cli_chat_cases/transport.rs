@@ -28,9 +28,7 @@ fn failed_request_capture_normal_cli_tracks_physical_retries_and_uses_actual_cwd
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "{stdout}\n{stderr}");
     assert_eq!(
-        stderr
-            .matches("saved redacted, non-replayable request snapshot")
-            .count(),
+        stderr.matches("saved request diagnostic snapshot").count(),
         2,
         "{stderr}"
     );
@@ -54,7 +52,15 @@ fn failed_request_capture_normal_cli_tracks_physical_retries_and_uses_actual_cwd
             capture["request"]["original_encoded_body_bytes"],
             serde_json::to_vec(&requests[0]).unwrap().len()
         );
-        assert!(!capture.to_string().contains("loopback-primary-secret"));
+        assert_eq!(
+            capture["request"]["headers"],
+            json!({"accept":"text/event-stream", "content-type":"application/json"})
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(capture["request"]["encoded_body"].as_str().unwrap())
+                .unwrap(),
+            requests[0]
+        );
     }
     let state = reduced_session(&Project::discover(&project).unwrap(), &session_id(&project));
     assert_eq!(state.request_audits().len(), 3);
@@ -67,8 +73,10 @@ fn failed_request_capture_normal_cli_tracks_physical_retries_and_uses_actual_cwd
         .unwrap();
     let help = String::from_utf8(help.stdout).unwrap();
     assert!(help.contains("--debug-failures <DIR>"));
-    #[cfg(not(debug_assertions))]
-    assert!(!help.contains("--debug "));
+    assert!(
+        help.lines()
+            .any(|line| line.split_whitespace().next() == Some("--debug"))
+    );
 }
 
 #[test]
@@ -102,7 +110,7 @@ fn failed_request_capture_cli_io_error_is_visible_and_preserves_http_failure() {
         stderr.contains("model HTTP request failed with status 401"),
         "{stderr}"
     );
-    assert!(!stderr.contains("RESPONSE_BODY_CANARY"));
+    assert!(stderr.contains("RESPONSE_BODY_CANARY"));
     assert!(!stderr.contains("loopback-primary-secret"));
     assert_eq!(
         fs::read_to_string(root.path().join("ordinary-file")).unwrap(),
@@ -134,11 +142,7 @@ fn request_send_diagnostics_retry_only_header_closure_without_replaying_a_comple
         ),
     ] {
         let failed_attempts = if cause == "incomplete_message" { 3 } else { 1 };
-        for flags in [
-            &[][..],
-            #[cfg(debug_assertions)]
-            &["--debug"][..],
-        ] {
+        for flags in [&[][..], &["--debug"][..]] {
             let root = TemporaryDirectory::new("request-send-diagnostics-cli");
             initialize_project(root.path());
             fs::write(
@@ -283,21 +287,19 @@ fn error_event_details_reach_normal_cli_without_committing_tools_or_retrying() {
         "server_error",
         "Responses SSE error",
         "origin=top-level",
-        "backend overloaded [redacted]",
-        "param=input [redacted]",
+        "backend overloaded loopback-primary-secret",
+        "param=input loopback-primary-secret",
         "sequence_number=19",
-        "\\u{1b}[31m",
+        "\\u001b[31m",
+        "RAW_ERROR_EVENT_CANARY",
+        "[rejected response]",
     ] {
         assert!(stderr.contains(expected), "{stderr}");
     }
-    for excluded in [
-        "loopback-primary-secret",
-        "RAW_ERROR_EVENT_CANARY",
-        "\u{1b}",
-        "unsupported Responses event",
-    ] {
-        assert!(!stderr.contains(excluded), "{stderr:?}");
-    }
+    assert!(
+        !stderr.contains("unsupported Responses event"),
+        "{stderr:?}"
+    );
     assert!(stdout.contains("admitted=1 primary=1 vision=0"));
     assert!(stdout.contains("Durable checkpoint retained"));
     assert!(!stderr.contains("retry"));

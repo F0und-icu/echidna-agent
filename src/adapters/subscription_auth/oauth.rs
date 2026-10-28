@@ -120,17 +120,11 @@ impl EndpointSet {
 }
 
 /// The Composition Root converts this immediately into its public
-/// account-bound credential. It intentionally exposes no inspectable token
-/// fields or secret-derived debug output.
+/// account-bound credential.
+#[derive(Debug)]
 pub(crate) struct CodexSubscriptionCredential {
     bearer: String,
     account_id: String,
-}
-
-impl std::fmt::Debug for CodexSubscriptionCredential {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("CodexSubscriptionCredential(..)")
-    }
 }
 
 impl CodexSubscriptionCredential {
@@ -273,7 +267,11 @@ impl SubscriptionAuthService {
                 existing.client_id.clone()
             }
             (Some(existing), None) => existing.client_id.clone(),
-            (Some(_), Some(_)) => return Err(SubscriptionAuthError::InvalidRegistration),
+            (Some(_), Some(_)) => {
+                return Err(SubscriptionAuthError::InvalidRegistration {
+                    detail: String::new(),
+                });
+            }
             (None, Some(callback_client))
                 if callback_client != DYNAMIC_AGENT_CLIENT
                     && !callback_client.is_empty()
@@ -281,7 +279,11 @@ impl SubscriptionAuthService {
             {
                 callback_client
             }
-            (None, _) => return Err(SubscriptionAuthError::InvalidRegistration),
+            (None, _) => {
+                return Err(SubscriptionAuthError::InvalidRegistration {
+                    detail: String::new(),
+                });
+            }
         };
         let code = callback
             .code
@@ -414,21 +416,24 @@ impl SubscriptionAuthService {
                 self.replace_tokens(&refreshed)?;
                 Ok(refreshed.access_token)
             }
-            Err(RefreshFailure::Temporary) => {
+            Err(RefreshFailure::Temporary(detail, response)) => {
                 // The request may have consumed the remaining lifetime. Never
                 // return a bearer merely because it was valid before an
                 // awaited refresh attempt.
                 if now_unix()? < tokens.expires_at_unix {
                     Ok(tokens.access_token)
                 } else {
-                    Err(SubscriptionAuthError::TemporarilyUnavailable)
+                    let detail = refresh_temporary_detail(detail, response).await;
+                    Err(SubscriptionAuthError::TemporarilyUnavailable { detail })
                 }
             }
-            Err(RefreshFailure::Terminal) => {
+            Err(RefreshFailure::Terminal(detail)) => {
                 self.store.clear_tokens()?;
-                Err(SubscriptionAuthError::LoginRequired)
+                Err(SubscriptionAuthError::LoginRequired { detail })
             }
-            Err(RefreshFailure::InvalidClient) => Err(SubscriptionAuthError::InvalidRegistration),
+            Err(RefreshFailure::InvalidClient(detail)) => {
+                Err(SubscriptionAuthError::InvalidRegistration { detail })
+            }
             Err(RefreshFailure::Authentication(error)) => Err(error),
         }
     }
@@ -642,12 +647,17 @@ impl SubscriptionAuthService {
                 }
                 Ok(refreshed)
             }
-            Err(RefreshFailure::Temporary) => Err(SubscriptionAuthError::TemporarilyUnavailable),
-            Err(RefreshFailure::Terminal) => {
-                self.store.clear_codex_tokens()?;
-                Err(SubscriptionAuthError::LoginRequired)
+            Err(RefreshFailure::Temporary(detail, response)) => {
+                let detail = refresh_temporary_detail(detail, response).await;
+                Err(SubscriptionAuthError::TemporarilyUnavailable { detail })
             }
-            Err(RefreshFailure::InvalidClient) => Err(SubscriptionAuthError::InvalidRegistration),
+            Err(RefreshFailure::Terminal(detail)) => {
+                self.store.clear_codex_tokens()?;
+                Err(SubscriptionAuthError::LoginRequired { detail })
+            }
+            Err(RefreshFailure::InvalidClient(detail)) => {
+                Err(SubscriptionAuthError::InvalidRegistration { detail })
+            }
             Err(RefreshFailure::Authentication(error)) => Err(error),
         }
     }
@@ -687,20 +697,28 @@ impl SubscriptionAuthService {
     fn require_usable_tokens(&self) -> Result<TokenRecord, SubscriptionAuthError> {
         let connection = self
             .valid_connection()?
-            .ok_or(SubscriptionAuthError::LoginRequired)?;
+            .ok_or(SubscriptionAuthError::LoginRequired {
+                detail: String::new(),
+            })?;
         let tokens = connection
             .tokens
-            .ok_or(SubscriptionAuthError::LoginRequired)?;
+            .ok_or(SubscriptionAuthError::LoginRequired {
+                detail: String::new(),
+            })?;
         require_direct_scope(&tokens.scopes)?;
         Ok(tokens)
     }
 
     fn require_codex_connection(&self) -> Result<CodexConnectionRecord, SubscriptionAuthError> {
-        let connection = self
-            .valid_codex_connection()?
-            .ok_or(SubscriptionAuthError::LoginRequired)?;
+        let connection =
+            self.valid_codex_connection()?
+                .ok_or(SubscriptionAuthError::LoginRequired {
+                    detail: String::new(),
+                })?;
         if connection.tokens.is_none() {
-            return Err(SubscriptionAuthError::LoginRequired);
+            return Err(SubscriptionAuthError::LoginRequired {
+                detail: String::new(),
+            });
         }
         Ok(connection)
     }
@@ -772,9 +790,11 @@ impl SubscriptionAuthService {
     }
 
     fn replace_tokens(&self, tokens: &TokenRecord) -> Result<(), SubscriptionAuthError> {
-        let mut connection = self
-            .valid_connection()?
-            .ok_or(SubscriptionAuthError::LoginRequired)?;
+        let mut connection =
+            self.valid_connection()?
+                .ok_or(SubscriptionAuthError::LoginRequired {
+                    detail: String::new(),
+                })?;
         connection.tokens = Some(tokens.clone());
         self.store.write_connection(&connection)
     }
@@ -799,12 +819,13 @@ impl SubscriptionAuthService {
             ])
             .send()
             .await
-            .map_err(|_| SubscriptionAuthError::TemporarilyUnavailable)?;
+            .map_err(|_| SubscriptionAuthError::TemporarilyUnavailable {
+                detail: String::new(),
+            })?;
         if !response.status().is_success() {
-            return Err(auth_http_failure(
-                SubscriptionAuthHttpOperation::TokenExchange,
-                response.status(),
-            ));
+            return Err(
+                auth_http_failure(SubscriptionAuthHttpOperation::TokenExchange, response).await,
+            );
         }
         response
             .json()
@@ -830,12 +851,13 @@ impl SubscriptionAuthService {
             ])
             .send()
             .await
-            .map_err(|_| SubscriptionAuthError::TemporarilyUnavailable)?;
+            .map_err(|_| SubscriptionAuthError::TemporarilyUnavailable {
+                detail: String::new(),
+            })?;
         if !response.status().is_success() {
-            return Err(auth_http_failure(
-                SubscriptionAuthHttpOperation::TokenExchange,
-                response.status(),
-            ));
+            return Err(
+                auth_http_failure(SubscriptionAuthHttpOperation::TokenExchange, response).await,
+            );
         }
         let response: CodexInitialTokenResponse = response
             .json()
@@ -862,31 +884,32 @@ impl SubscriptionAuthService {
             ])
             .send()
             .await
-            .map_err(|_| RefreshFailure::Temporary)?;
+            .map_err(|_| RefreshFailure::Temporary(String::new(), None))?;
         if !response.status().is_success() {
             return Err(classify_refresh_response(response).await);
         }
         let response: TokenResponse = response
             .json()
             .await
-            .map_err(|_| RefreshFailure::Temporary)?;
+            .map_err(|_| RefreshFailure::Temporary(String::new(), None))?;
         let scopes = response
             .scope
             .as_deref()
             .map(parse_scopes)
             .transpose()
-            .map_err(|_| RefreshFailure::Temporary)?
+            .map_err(|_| RefreshFailure::Temporary(String::new(), None))?
             .unwrap_or_else(|| previous.scopes.clone());
         let refreshed = response
             .into_token_record(
-                now_unix().map_err(|_| RefreshFailure::Temporary)?,
+                now_unix().map_err(|_| RefreshFailure::Temporary(String::new(), None))?,
                 Some(scopes),
                 &previous.client_id,
                 &previous.subject,
                 &previous.issuer,
             )
-            .map_err(|_| RefreshFailure::Temporary)?;
-        require_direct_scope(&refreshed.scopes).map_err(|_| RefreshFailure::Terminal)?;
+            .map_err(|_| RefreshFailure::Temporary(String::new(), None))?;
+        require_direct_scope(&refreshed.scopes)
+            .map_err(|_| RefreshFailure::Terminal(String::new()))?;
         Ok(refreshed)
     }
 
@@ -908,19 +931,19 @@ impl SubscriptionAuthService {
             })
             .send()
             .await
-            .map_err(|_| RefreshFailure::Temporary)?;
+            .map_err(|_| RefreshFailure::Temporary(String::new(), None))?;
         if !response.status().is_success() {
             return Err(classify_codex_refresh_response(response).await);
         }
         let response: CodexRefreshResponse = response
             .json()
             .await
-            .map_err(|_| RefreshFailure::Temporary)?;
+            .map_err(|_| RefreshFailure::Temporary(String::new(), None))?;
         if response.access_token.as_deref().is_some_and(str::is_empty)
             || response.refresh_token.as_deref().is_some_and(str::is_empty)
             || response.id_token.as_deref().is_some_and(str::is_empty)
         {
-            return Err(RefreshFailure::Temporary);
+            return Err(RefreshFailure::Temporary(String::new(), None));
         }
         let identity = match response.id_token {
             Some(token) => {
@@ -973,12 +996,15 @@ impl SubscriptionAuthService {
             .get(self.endpoints.discovery_url())
             .send()
             .await
-            .map_err(|_| SubscriptionAuthError::TemporarilyUnavailable)?;
+            .map_err(|_| SubscriptionAuthError::TemporarilyUnavailable {
+                detail: String::new(),
+            })?;
         if !response.status().is_success() {
             return Err(auth_http_failure(
                 SubscriptionAuthHttpOperation::OpenIdDiscovery,
-                response.status(),
-            ));
+                response,
+            )
+            .await);
         }
         let discovery: OpenIdDiscovery = response
             .json()
@@ -999,12 +1025,13 @@ impl SubscriptionAuthService {
             .get(&discovery.jwks_uri)
             .send()
             .await
-            .map_err(|_| SubscriptionAuthError::TemporarilyUnavailable)?;
+            .map_err(|_| SubscriptionAuthError::TemporarilyUnavailable {
+                detail: String::new(),
+            })?;
         if !response.status().is_success() {
-            return Err(auth_http_failure(
-                SubscriptionAuthHttpOperation::JsonWebKeySet,
-                response.status(),
-            ));
+            return Err(
+                auth_http_failure(SubscriptionAuthHttpOperation::JsonWebKeySet, response).await,
+            );
         }
         let keys: JsonWebKeySet = response
             .json()
@@ -1138,9 +1165,9 @@ impl TokenResponse {
 }
 
 enum RefreshFailure {
-    Temporary,
-    Terminal,
-    InvalidClient,
+    Temporary(String, Option<reqwest::Response>),
+    Terminal(String),
+    InvalidClient(String),
     Authentication(SubscriptionAuthError),
 }
 
@@ -1150,20 +1177,26 @@ struct OAuthErrorResponse {
 }
 
 async fn classify_refresh_response(response: reqwest::Response) -> RefreshFailure {
-    if temporary_status(response.status()) {
-        return RefreshFailure::Temporary;
+    let status = response.status();
+    if temporary_status(status) {
+        return RefreshFailure::Temporary(String::new(), Some(response));
     }
-    let code = response
-        .json::<OAuthErrorResponse>()
-        .await
-        .ok()
-        .and_then(|body| body.error)
-        .filter(|code| {
-            code.len() <= 128
-                && code
-                    .bytes()
-                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
-        });
+    let body =
+        crate::adapters::http_error_body::read_bounded_http_error_body(response, usize::MAX).await;
+    let detail = format!(": HTTP {}: {body}", status.as_u16());
+    let code = match &body {
+        crate::adapters::http_error_body::HttpErrorBody::Complete(body) => {
+            serde_json::from_str::<OAuthErrorResponse>(body).ok()
+        }
+        _ => None,
+    }
+    .and_then(|body| body.error)
+    .filter(|code| {
+        code.len() <= 128
+            && code
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+    });
     match code.as_deref() {
         Some(
             "invalid_grant"
@@ -1172,41 +1205,57 @@ async fn classify_refresh_response(response: reqwest::Response) -> RefreshFailur
             | "refresh_token_expired"
             | "refresh_token_invalidated"
             | "refresh_token_reused",
-        ) => RefreshFailure::Terminal,
-        Some("invalid_client") => RefreshFailure::InvalidClient,
-        _ => RefreshFailure::Temporary,
+        ) => RefreshFailure::Terminal(detail),
+        Some("invalid_client") => RefreshFailure::InvalidClient(detail),
+        _ => RefreshFailure::Temporary(detail, None),
     }
 }
 
 async fn classify_codex_refresh_response(response: reqwest::Response) -> RefreshFailure {
     let status = response.status();
+    let body = crate::adapters::http_error_body::read_bounded_http_error_body(
+        response,
+        CODEX_REFRESH_ERROR_BODY_BYTES,
+    )
+    .await;
+    let detail = format!(": HTTP {}: {body}", status.as_u16());
     if status == StatusCode::UNAUTHORIZED {
-        return RefreshFailure::Terminal;
+        return RefreshFailure::Terminal(detail);
     }
-    let code = bounded_codex_refresh_error_code(response).await;
+    let code = match &body {
+        crate::adapters::http_error_body::HttpErrorBody::Complete(body) => {
+            codex_refresh_error_code(body)
+        }
+        _ => None,
+    };
     match code.as_deref() {
         Some("refresh_token_expired" | "refresh_token_invalidated" | "refresh_token_reused") => {
-            RefreshFailure::Terminal
+            RefreshFailure::Terminal(detail)
         }
-        Some("invalid_grant") if status == StatusCode::BAD_REQUEST => RefreshFailure::Terminal,
-        _ => RefreshFailure::Temporary,
+        Some("invalid_grant") if status == StatusCode::BAD_REQUEST => {
+            RefreshFailure::Terminal(detail)
+        }
+        _ => RefreshFailure::Temporary(detail, None),
     }
 }
 
-async fn bounded_codex_refresh_error_code(mut response: reqwest::Response) -> Option<String> {
-    let mut body = Vec::new();
-    loop {
-        let chunk = match response.chunk().await {
-            Ok(Some(chunk)) => chunk,
-            Ok(None) => break,
-            Err(_) => return None,
-        };
-        if chunk.len() > CODEX_REFRESH_ERROR_BODY_BYTES.saturating_sub(body.len()) {
-            return None;
+async fn refresh_temporary_detail(detail: String, response: Option<reqwest::Response>) -> String {
+    match response {
+        Some(response) => {
+            let status = response.status();
+            let body = crate::adapters::http_error_body::read_bounded_http_error_body(
+                response,
+                crate::adapters::http_error_body::MAX_HTTP_ERROR_BODY_BYTES,
+            )
+            .await;
+            format!(": HTTP {}: {body}", status.as_u16())
         }
-        body.extend_from_slice(&chunk);
+        None => detail,
     }
-    let value: serde_json::Value = serde_json::from_slice(&body).ok()?;
+}
+
+fn codex_refresh_error_code(body: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
     let code = value
         .get("error")
         .and_then(|error| match error {

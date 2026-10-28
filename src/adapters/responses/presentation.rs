@@ -1,12 +1,10 @@
-//! Selected, redacted observations for the explicitly installed CLI presenter.
+//! Selected observations for the explicitly installed CLI presenter.
 //! This vocabulary has no persistence or model-delivery authority.
 
 use std::sync::Arc;
 
-#[cfg(debug_assertions)]
 use serde_json::Value;
 
-use super::redaction::WireRedaction;
 use crate::domain::model::ModelEvent;
 use crate::ports::model::ModelProviderError;
 
@@ -14,7 +12,7 @@ pub(crate) trait ResponsesObserver: Send + Sync {
     fn role(&self) -> &'static str;
     fn begin(&self) -> Box<dyn RequestObserver>;
     fn notify(&self, notice: ResponseNotice);
-    #[cfg(debug_assertions)]
+
     fn full_debug(&self) -> bool;
 }
 
@@ -31,13 +29,12 @@ pub(crate) enum ResponseNotice {
 
 #[derive(Debug)]
 pub(crate) enum ResponsePresentation {
-    #[cfg(debug_assertions)]
     Request(Value),
-    #[cfg(debug_assertions)]
+
     Status(u16),
-    #[cfg(debug_assertions)]
+
     ErrorBody(Value),
-    #[cfg(debug_assertions)]
+
     Omitted(&'static str),
     ModelEvent {
         event: ModelEvent,
@@ -50,43 +47,36 @@ pub(crate) enum ResponsePresentation {
     Completed,
     Rejected {
         protocol_error: bool,
+        response: String,
     },
     Interrupted,
 }
 
 pub(super) struct RequestOutput {
     observer: Box<dyn RequestObserver>,
-    redaction: WireRedaction,
     completed: bool,
     pending_reasoning_deltas: String,
-    #[cfg(debug_assertions)]
+
     full_debug: bool,
 }
 
 impl RequestOutput {
-    pub(super) fn new(
-        observer: &Arc<dyn ResponsesObserver>,
-        bearer: &str,
-        account: Option<&str>,
-    ) -> Self {
+    pub(super) fn new(observer: &Arc<dyn ResponsesObserver>) -> Self {
         Self {
             observer: observer.begin(),
-            redaction: WireRedaction::new(&[bearer, account.unwrap_or("")]),
             completed: false,
             pending_reasoning_deltas: String::new(),
-            #[cfg(debug_assertions)]
+
             full_debug: observer.full_debug(),
         }
     }
 
-    #[cfg(debug_assertions)]
-    pub(super) fn request(&mut self, request: &impl serde::Serialize) {
+    pub(super) fn request(&mut self, request_body: &[u8]) {
         if !self.full_debug {
             return;
         }
-        match serde_json::to_value(request) {
+        match serde_json::from_slice::<Value>(request_body) {
             Ok(mut value) => {
-                self.redaction.sanitize(&mut value);
                 // Only content consumed by the CLI crosses the Adapter boundary.
                 let fields = ["instructions", "input", "text", "previous_response_id"];
                 value
@@ -99,7 +89,6 @@ impl RequestOutput {
         }
     }
 
-    #[cfg(debug_assertions)]
     pub(super) fn status(&mut self, status: u16) {
         if !self.full_debug {
             return;
@@ -107,54 +96,15 @@ impl RequestOutput {
         self.observer.observe(ResponsePresentation::Status(status));
     }
 
-    #[cfg(debug_assertions)]
-    pub(super) fn response(&mut self, data: &str) {
-        if !self.full_debug {
-            return;
-        }
-        match serde_json::from_str::<Value>(data) {
-            Ok(value) => {
-                if value.get("type").and_then(Value::as_str) == Some("error") {
-                    return;
-                }
-                if let Some(error) = value.get("error").or_else(|| {
-                    value
-                        .get("response")
-                        .and_then(|response| response.get("error"))
-                }) && !error.is_null()
-                {
-                    let mut error = error.clone();
-                    self.redaction.sanitize(&mut error);
-                    self.observer
-                        .observe(ResponsePresentation::ErrorBody(error));
-                }
-            }
-            Err(_) => self.response_omitted("non-JSON response cannot be structurally redacted"),
-        }
-    }
-
-    #[cfg(debug_assertions)]
     pub(super) fn http_error_body(&mut self, data: &str) {
         if !self.full_debug {
             return;
         }
-        if data.len() > super::MAX_HTTP_ERROR_BODY_BYTES {
-            self.response_omitted("HTTP error body omitted: exceeds 65536 bytes");
-        } else {
-            match serde_json::from_str(data) {
-                Ok(mut value) => {
-                    self.redaction.sanitize(&mut value);
-                    self.observer
-                        .observe(ResponsePresentation::ErrorBody(value));
-                }
-                Err(_) => {
-                    self.response_omitted("non-JSON response cannot be structurally redacted")
-                }
-            }
-        }
+        let value = serde_json::from_str(data).unwrap_or_else(|_| Value::String(data.to_owned()));
+        self.observer
+            .observe(ResponsePresentation::ErrorBody(value));
     }
 
-    #[cfg(debug_assertions)]
     pub(super) fn response_omitted(&mut self, reason: &'static str) {
         if !self.full_debug {
             return;
@@ -163,7 +113,6 @@ impl RequestOutput {
     }
 
     pub(super) fn model_event(&mut self, event: &ModelEvent) {
-        // Compare original observations before redaction can collapse distinct text.
         let reasoning_item_matches_deltas = match event {
             ModelEvent::ReasoningDelta { text } => {
                 self.pending_reasoning_deltas.push_str(text);
@@ -176,23 +125,8 @@ impl RequestOutput {
             }
             _ => false,
         };
-        let mut event = event.clone();
-        match &mut event {
-            ModelEvent::ReasoningDelta { text }
-            | ModelEvent::ReasoningItem { text }
-            | ModelEvent::TextDelta { text } => *text = self.redaction.text(text),
-            ModelEvent::ToolCall { call } => {
-                call.call_id = crate::domain::tools::ToolCallId::new(
-                    self.redaction.text(call.call_id.as_str()),
-                );
-                call.name =
-                    crate::domain::tools::ToolName::new(self.redaction.text(call.name.as_str()));
-                self.redaction.sanitize(&mut call.arguments);
-            }
-            _ => {}
-        }
         self.observer.observe(ResponsePresentation::ModelEvent {
-            event,
+            event: event.clone(),
             reasoning_item_matches_deltas,
         });
     }
@@ -200,7 +134,7 @@ impl RequestOutput {
     pub(super) fn reasoning_summary(&mut self, text: &str, starts_part: bool) {
         self.observer
             .observe(ResponsePresentation::ReasoningSummary {
-                text: self.redaction.text(text),
+                text: text.to_owned(),
                 starts_part,
             });
     }
@@ -210,7 +144,7 @@ impl RequestOutput {
         self.observer.observe(ResponsePresentation::Completed);
     }
 
-    pub(super) fn rejected(&mut self, error: &ModelProviderError) {
+    pub(super) fn rejected(&mut self, error: &ModelProviderError, data: &str) {
         self.completed = true;
         self.observer.observe(ResponsePresentation::Rejected {
             protocol_error: matches!(
@@ -218,6 +152,7 @@ impl RequestOutput {
                 ModelProviderError::ProtocolFailure { .. }
                     | ModelProviderError::InvalidToolArguments { .. }
             ),
+            response: data.to_owned(),
         });
     }
 }

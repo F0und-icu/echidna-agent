@@ -1,22 +1,31 @@
 # Codex-compatible ChatGPT subscription; this file contains no credentials.
-# Replace the absolute private store path, then use auth select-model --provider codex.
+# Replace the private store path, then run auth select-model --provider codex
+# with --apply-capabilities to import actually advertised window/input metadata.
 # Use a store distinct from SIWC; the store's parent directory must already exist
 # and no ancestor may be a symlink.
 schema_version = 1
 active_agent_profile = "codex_subscription"
+# Optional exported Agent definition; relative to this configuration file.
+# agent_definition = "./my-agent"
 
 [providers.codex]
 binding = "http_sse"
 wire_api = "responses"
 base_url = "https://chatgpt.com/backend-api/codex"
 model = "REPLACE_WITH_ACCOUNT_MODEL_SLUG"
-codex_subscription = { account = "personal", auth_store = "/REPLACE_WITH_PRIVATE_DIRECTORY/echidna-codex-auth" }
-# Optional explicit catalog compatibility declaration. It changes only the
-# catalog request's client_version query and version header; it does not
-# guarantee new model IDs, account access, or an installed Codex release.
-# codex_subscription = { account = "personal", auth_store = "/REPLACE_WITH_PRIVATE_DIRECTORY/echidna-codex-auth", catalog_client_version = "0.144.0" }
 capability_mapping = "codex-subscription-text-v1"
 generation = 1
+connect_timeout_ms = 30000
+read_timeout_ms = 300000  # Read-idle timeout, not the total task duration.
+
+[providers.codex.codex_subscription]
+account = "personal"
+auth_store = "/REPLACE_WITH_PRIVATE_DIRECTORY/echidna-codex-auth"
+# Explicit compatibility example used in the recorded new-ID comparison.
+# Omission still uses the runtime default 0.144.0. No account-access guarantee.
+catalog_client_version = "0.162.0"
+# Set false only if this route rejects the reasoning summary parameter.
+supports_reasoning_summary_parameter = true
 
 [capability_mappings.codex-subscription-text-v1]
 version = 1
@@ -27,8 +36,9 @@ tool_call = true
 structured_output = false
 incremental_input = false
 usage_reporting = true
-# Explicit conservative example, not an inferred account/model limit.
-context_window = 32768
+# Explicit placeholder: replace with the actual selected model window or import
+# advertised capabilities. Leaving 272000 limits local planning to 272K.
+context_window = 272000
 # Do not set max_output_tokens: this Codex subscription route does not support it.
 # Optional explicit effort; auth select-model validates it against the account catalog.
 # reasoning_effort = "xhigh"
@@ -39,15 +49,35 @@ vision_mode = "disabled"
 generation = 1
 
 [runtime]
+# Shared by primary, vision, compaction, RSI and model transport retries.
+# 0 disables the per-Turn request ceiling; the default is 32.
+model_request_limit_per_turn = 32
+# Opt in to compaction at durable settled-batch/completed-Turn boundaries.
 auto_compact = true
+# Optional: same primary model's isolated compaction scope only.
+# Omitted inherits primary; set only an effort supported by that service.
 # compaction_reasoning_effort = "high"
 
-# Optional: ratios scale with the actual declared window, not the model name.
-# 100 basis points = 1%. Other policy fields retain their defaults.
+# Ratios use basis points: 100 = 1%, 10000 = 100%.
+# Reserves use the declared window; other content shares use usable input.
 [runtime.context_budget]
+output_reserve_bps = 1250
+tool_loop_reserve_bps = 1250
 pressure_bps = 8000
 target_bps = 5000
 summary_bps = 200
-compaction_reference_items = 64
-max_core_file_bytes = 524288
+diagnostic_bps = 200
+# These two shares use the diagnostic pool, rather than the input window.
+diagnostic_task_bps = 313
+diagnostic_handoff_bps = 313
+tool_output_bps = 3200
+core_memory_bps = 1600
+state_section_bps = 10
+continuation_field_bps = 40
+continuation_goal_part_bps = 16
+readback_default_bps = 100
+readback_max_bps = 400
+compaction_reference_items = 64  # Per reference kind; unit: items.
+max_core_file_bytes = 524288     # Core storage cap; unit: bytes.
+# Optional absolute content cap in bytes; omitted keeps proportional growth.
 # max_content_bytes = 1048576

@@ -4,7 +4,6 @@
 mod catalog;
 mod failure_capture;
 pub(crate) mod presentation;
-mod redaction;
 mod request;
 mod response;
 
@@ -22,6 +21,9 @@ use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderName, HeaderVal
 
 use crate::adapters::credentials::{
     AccountBoundCredential, CredentialResolution, CredentialSource, CredentialSourceError,
+};
+use crate::adapters::http_error_body::{
+    HttpErrorBody, MAX_HTTP_ERROR_BODY_BYTES, read_bounded_http_error_body,
 };
 use crate::adapters::image::resolve_project_image_artifact;
 use crate::domain::artifacts::ArtifactId;
@@ -42,7 +44,9 @@ pub(crate) const DEFAULT_READ_TIMEOUT_MS: u64 = 300_000;
 pub(crate) const MAX_OPAQUE_CONTINUATION_ITEM_BYTES: usize = 4 * 1024 * 1024;
 const MAX_OPAQUE_CONTINUATION_ITEMS: usize = 512;
 const MAX_OPAQUE_CONTINUATION_STORE_BYTES: usize = 16 * 1024 * 1024;
-const MAX_HTTP_ERROR_BODY_BYTES: usize = 64 * 1024;
+// Standard incremental rejection classification accepts complete envelopes
+// larger than the presentation limit, but must not read an unbounded body.
+const MAX_CONTINUATION_HTTP_ERROR_BODY_BYTES: usize = 1024 * 1024;
 const MAX_CHATGPT_ACCOUNT_ID_BYTES: usize = 256;
 const CHATGPT_ACCOUNT_ID: HeaderName = HeaderName::from_static("chatgpt-account-id");
 
@@ -174,7 +178,7 @@ pub struct ResponsesHttpAdapter {
     observer: Option<Arc<dyn presentation::ResponsesObserver>>,
     failure_capture: Option<PathBuf>,
     opaque_continuations: Arc<OpaqueContinuationStore>,
-    #[cfg(debug_assertions)]
+
     debug: bool,
 }
 
@@ -205,7 +209,7 @@ impl ResponsesHttpAdapter {
             observer: None,
             failure_capture: None,
             opaque_continuations: Arc::new(OpaqueContinuationStore::default()),
-            #[cfg(debug_assertions)]
+
             debug: false,
         }
     }
@@ -224,7 +228,6 @@ impl ResponsesHttpAdapter {
         mut self,
         observer: Option<Arc<dyn presentation::ResponsesObserver>>,
     ) -> Self {
-        #[cfg(debug_assertions)]
         {
             self.debug = observer
                 .as_ref()
@@ -405,8 +408,7 @@ impl ModelProvider for ResponsesHttpAdapter {
         Ok(Box::new(PreparedResponsesRequest {
             client: self.client.clone(),
             endpoint: self.config.endpoint(),
-            #[cfg(debug_assertions)]
-            request,
+
             request_body,
             credential: Arc::new(Mutex::new(Some(credential))),
             credential_reference,
@@ -420,7 +422,7 @@ impl ModelProvider for ResponsesHttpAdapter {
             observer: self.observer.clone(),
             failure_capture: self.failure_capture.clone(),
             partial_text: Arc::new(AtomicBool::new(false)),
-            #[cfg(debug_assertions)]
+
             full_debug: self.debug,
         }))
     }
@@ -429,8 +431,7 @@ impl ModelProvider for ResponsesHttpAdapter {
 struct PreparedResponsesRequest {
     client: reqwest::Client,
     endpoint: String,
-    #[cfg(debug_assertions)]
-    request: serde_json::Value,
+
     request_body: Vec<u8>,
     credential: Arc<Mutex<Option<CredentialForStream>>>,
     credential_reference: String,
@@ -444,7 +445,7 @@ struct PreparedResponsesRequest {
     observer: Option<Arc<dyn presentation::ResponsesObserver>>,
     failure_capture: Option<PathBuf>,
     partial_text: Arc<AtomicBool>,
-    #[cfg(debug_assertions)]
+
     full_debug: bool,
 }
 
@@ -452,8 +453,7 @@ impl PreparedModelRequest for PreparedResponsesRequest {
     fn stream(&self) -> Result<ModelEventStream, ModelProviderError> {
         let client = self.client.clone();
         let endpoint = self.endpoint.clone();
-        #[cfg(debug_assertions)]
-        let request = self.request.clone();
+
         let request_body = self.request_body.clone();
         let credential = Arc::clone(&self.credential);
         let credential_reference = self.credential_reference.clone();
@@ -467,13 +467,12 @@ impl PreparedModelRequest for PreparedResponsesRequest {
         let observer = self.observer.clone();
         let failure_capture = self.failure_capture.clone();
         let partial_text = Arc::clone(&self.partial_text);
-        #[cfg(debug_assertions)]
+
         let full_debug = self.full_debug;
 
         let stream = try_stream! {
             let credential = prepared_credential(&credential, &credential_reference).await?;
             let StreamCredential {
-                bearer,
                 authorization,
                 account_id,
             } = credential;
@@ -482,23 +481,14 @@ impl PreparedModelRequest for PreparedResponsesRequest {
                 observer.as_ref().map(|observer| observer.role()),
                 endpoint.clone(),
                 request_body.clone(),
-                bearer.clone(),
-                account_id.as_ref().map(|value| std::str::from_utf8(value.as_bytes()).expect("account header originated from UTF-8").to_owned()),
             ));
             let request_observer = observer.clone();
             let attempt = try_stream! {
-            let mut decoder = response::ResponseDecoder::new(
-                profile,
-                opaque_scope,
-                &bearer,
-                account_id.as_ref().map(HeaderValue::as_bytes),
-            );
-            let mut diagnostics = request_observer.as_ref().map(|observer| presentation::RequestOutput::new(observer, &bearer,
-                account_id.as_ref().map(|value| std::str::from_utf8(value.as_bytes()).expect("account header originated from UTF-8")),
-            ));
-            #[cfg(debug_assertions)]
+            let mut decoder = response::ResponseDecoder::new(profile, opaque_scope);
+            let mut diagnostics = request_observer.as_ref().map(presentation::RequestOutput::new);
+
             if let Some(diagnostics) = &mut diagnostics {
-                diagnostics.request(&request);
+                diagnostics.request(&request_body);
             }
             let request_started = Instant::now();
             let request_body_bytes = request_body.len();
@@ -518,41 +508,35 @@ impl PreparedModelRequest for PreparedResponsesRequest {
                 .map_err(|error| request_send_failure(&error, request_started.elapsed(), request_body_bytes))?;
 
             let status = response.status();
-            #[cfg(debug_assertions)]
+
             if let Some(diagnostics) = &mut diagnostics {
                 diagnostics.status(status.as_u16());
             }
             let mut response_events = if status.is_success() {
                 response.bytes_stream().eventsource()
             } else {
-                let inspect_error = status.as_u16() == 400 || profile.is_subscription() || continuation_requested;
-                #[cfg(debug_assertions)]
-                let inspect_error = inspect_error || full_debug;
-                if !inspect_error {
-                    Err(ModelProviderError::HttpFailure { status: status.as_u16() })?;
-                }
-                // Standard continuation rejection already accepts a complete
-                // error envelope larger than the presentation limit. Keep that
-                // classification contract; subscription bodies stay bounded.
-                let body = if continuation_requested && !profile.is_subscription() {
-                    match response.text().await {
-                        Ok(body) => response::HttpErrorBody::Complete(body),
-                        Err(_) => response::HttpErrorBody::Unreadable,
-                    }
+                let limit = if continuation_requested && !profile.is_subscription() {
+                    MAX_CONTINUATION_HTTP_ERROR_BODY_BYTES
                 } else {
-                    read_bounded_http_error_body(response).await
+                    MAX_HTTP_ERROR_BODY_BYTES
                 };
-                #[cfg(debug_assertions)]
-                if !profile.is_subscription() && full_debug
+                let body = read_bounded_http_error_body(response, limit).await;
+                let error = response::http_failure(profile, status.as_u16(), continuation_requested, &body);
+                if matches!(error, ModelProviderError::ContextCapacityExceeded { .. } | ModelProviderError::ContinuationRejected { .. })
+                    && let Some(diagnostics) = &mut diagnostics
+                    && let HttpErrorBody::Complete(body) = &body
+                {
+                    diagnostics.rejected(&error, body);
+                } else if full_debug
                     && let Some(diagnostics) = &mut diagnostics
                 {
                     match &body {
-                        response::HttpErrorBody::Complete(body) => diagnostics.http_error_body(body),
-                        response::HttpErrorBody::Unreadable => diagnostics.response_omitted("HTTP error body unavailable"),
-                        response::HttpErrorBody::Oversized => diagnostics.response_omitted("HTTP error body omitted: exceeds 65536 bytes"),
+                        HttpErrorBody::Complete(body) => diagnostics.http_error_body(body),
+                        HttpErrorBody::Unreadable(_) => diagnostics.response_omitted("HTTP error body unavailable"),
+                        HttpErrorBody::Oversized => diagnostics.response_omitted("HTTP error body exceeds the configured read limit"),
                     }
                 }
-                Err(response::http_failure(profile, status.as_u16(), continuation_requested, &body))?;
+                Err(error)?;
                 unreachable!("an HTTP failure is returned through the stream")
             };
             let mut staged_opaque = BTreeMap::new();
@@ -578,13 +562,6 @@ impl PreparedModelRequest for PreparedResponsesRequest {
                     continue;
                 }
 
-                #[cfg(debug_assertions)]
-                if !profile.is_subscription()
-                    && let Some(diagnostics) = &mut diagnostics
-                {
-                    diagnostics.response(&event.data);
-                }
-
                 let decoded = decoder.decode_stream_event(
                     &event.data,
                     usage_required,
@@ -592,7 +569,7 @@ impl PreparedModelRequest for PreparedResponsesRequest {
                     continuation_requested,
                 ).inspect_err(|error| {
                     if let Some(diagnostics) = &mut diagnostics {
-                        diagnostics.rejected(error);
+                        diagnostics.rejected(error, &event.data);
                     }
                 })?;
                 let response::DecodedResponsesEvent {
@@ -674,7 +651,6 @@ enum CredentialForStream {
 
 #[derive(Clone)]
 struct StreamCredential {
-    bearer: String,
     authorization: HeaderValue,
     account_id: Option<HeaderValue>,
 }
@@ -733,15 +709,12 @@ fn validate_credential(
         .ok_or_else(|| ModelProviderError::CredentialUnavailable {
             credential_ref: credential_reference.to_owned(),
         })?;
-    let mut authorization =
-        HeaderValue::from_str(&format!("Bearer {credential}")).map_err(|_| {
-            ModelProviderError::CredentialInvalid {
-                credential_ref: credential_reference.to_owned(),
-            }
-        })?;
-    authorization.set_sensitive(true);
+    let authorization = HeaderValue::from_str(&format!("Bearer {credential}")).map_err(|_| {
+        ModelProviderError::CredentialInvalid {
+            credential_ref: credential_reference.to_owned(),
+        }
+    })?;
     Ok(StreamCredential {
-        bearer: credential,
         authorization,
         account_id: None,
     })
@@ -763,11 +736,10 @@ fn validate_account_bound_credential(
             credential_ref: credential_reference.to_owned(),
         });
     }
-    let mut account_id =
+    let account_id =
         HeaderValue::from_str(&account_id).map_err(|_| ModelProviderError::CredentialInvalid {
             credential_ref: credential_reference.to_owned(),
         })?;
-    account_id.set_sensitive(true);
     credential.account_id = Some(account_id);
     Ok(credential)
 }
@@ -899,26 +871,5 @@ impl OpaqueContinuationStore {
             });
         }
         Ok(next)
-    }
-}
-
-async fn read_bounded_http_error_body(mut response: reqwest::Response) -> response::HttpErrorBody {
-    let mut body = Vec::new();
-    loop {
-        let chunk = match response.chunk().await {
-            Ok(chunk) => chunk,
-            Err(_) => return response::HttpErrorBody::Unreadable,
-        };
-        let Some(chunk) = chunk else {
-            break;
-        };
-        if chunk.len() > MAX_HTTP_ERROR_BODY_BYTES.saturating_sub(body.len()) {
-            return response::HttpErrorBody::Oversized;
-        }
-        body.extend_from_slice(&chunk);
-    }
-    match String::from_utf8(body) {
-        Ok(body) => response::HttpErrorBody::Complete(body),
-        Err(_) => response::HttpErrorBody::Unreadable,
     }
 }

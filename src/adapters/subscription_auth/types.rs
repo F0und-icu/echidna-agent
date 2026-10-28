@@ -63,8 +63,7 @@ pub(crate) enum SubscriptionLogoutOutcome {
     RemoteUnconfirmedCleared,
 }
 
-/// Fixed subscription requests whose HTTP status may safely identify a failed
-/// operation without retaining a remote response body.
+/// Fixed subscription requests with identifiable HTTP failures.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SubscriptionAuthHttpOperation {
     TokenExchange,
@@ -114,23 +113,24 @@ pub(crate) enum SubscriptionAuthError {
     InvalidCallback,
     #[error("subscription login was denied")]
     AuthorizationDenied,
-    #[error("subscription client registration is invalid")]
-    InvalidRegistration,
+    #[error("subscription client registration is invalid{detail}")]
+    InvalidRegistration { detail: String },
     #[error("subscription identity token is invalid")]
     InvalidIdentityToken,
     #[error("subscription identity does not match the selected account")]
     AccountMismatch,
     #[error("subscription direct token permission was not granted")]
     DirectTokenScopeMissing,
-    #[error("subscription authentication {operation} request failed with HTTP {status}")]
+    #[error("subscription authentication {operation} request failed with HTTP {status}: {body}")]
     AuthHttpFailure {
         operation: SubscriptionAuthHttpOperation,
         status: u16,
+        body: String,
     },
-    #[error("subscription authentication service is temporarily unavailable")]
-    TemporarilyUnavailable,
-    #[error("subscription credentials require login")]
-    LoginRequired,
+    #[error("subscription authentication service is temporarily unavailable{detail}")]
+    TemporarilyUnavailable { detail: String },
+    #[error("subscription credentials require login{detail}")]
+    LoginRequired { detail: String },
     #[error("subscription credentials cannot yet be refreshed")]
     RefreshNotYetAllowed,
     #[error("subscription access token has expired")]
@@ -220,24 +220,36 @@ pub(super) fn account_path(root: &Path, account: &str, name: &str) -> PathBuf {
 
 pub(super) fn classify_http_status(status: StatusCode) -> SubscriptionAuthError {
     if temporary_status(status) {
-        SubscriptionAuthError::TemporarilyUnavailable
+        SubscriptionAuthError::TemporarilyUnavailable {
+            detail: String::new(),
+        }
     } else if matches!(
         status,
         StatusCode::BAD_REQUEST | StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
     ) {
-        SubscriptionAuthError::LoginRequired
+        SubscriptionAuthError::LoginRequired {
+            detail: String::new(),
+        }
     } else {
         SubscriptionAuthError::InvalidResponse
     }
 }
 
-pub(super) fn auth_http_failure(
+pub(super) async fn auth_http_failure(
     operation: SubscriptionAuthHttpOperation,
-    status: StatusCode,
+    response: reqwest::Response,
 ) -> SubscriptionAuthError {
+    let status = response.status().as_u16();
+    let body = crate::adapters::http_error_body::read_bounded_http_error_body(
+        response,
+        crate::adapters::http_error_body::MAX_HTTP_ERROR_BODY_BYTES,
+    )
+    .await
+    .to_string();
     SubscriptionAuthError::AuthHttpFailure {
         operation,
-        status: status.as_u16(),
+        status,
+        body,
     }
 }
 

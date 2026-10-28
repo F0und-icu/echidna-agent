@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -274,19 +273,13 @@ pub(super) struct CodexSubscription {
     pub(super) supports_reasoning_summary_parameter: Option<bool>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(transparent)]
 pub(super) struct InlineApiKey(String);
 
 impl InlineApiKey {
     pub(super) fn expose(&self) -> &str {
         &self.0
-    }
-}
-
-impl fmt::Debug for InlineApiKey {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("InlineApiKey(<redacted>)")
     }
 }
 
@@ -337,15 +330,5 @@ pub(super) struct AgentProfileDefinition {
 }
 
 fn configuration_decode_diagnostic(error: &toml::de::Error) -> String {
-    let category = ["unknown field", "missing field", "unknown variant"]
-        .into_iter()
-        .find(|category| error.message().starts_with(category))
-        .unwrap_or("invalid configuration");
-    match error.span() {
-        Some(span) => format!(
-            "{category} at bytes {}..{}; input details <redacted>",
-            span.start, span.end
-        ),
-        None => format!("{category}; input details <redacted> (position unavailable)"),
-    }
+    error.to_string()
 }

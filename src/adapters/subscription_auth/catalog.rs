@@ -38,11 +38,17 @@ impl SubscriptionCatalog {
     }
     /// Performs the explicit, account-scoped model discovery path after
     /// obtaining a usable subscription bearer.
-    pub(crate) async fn models(&self) -> Result<Vec<CatalogModel>, SubscriptionAuthError> {
+    pub(crate) async fn models(
+        &self,
+    ) -> Result<Vec<CatalogModel>, (SubscriptionAuthError, Option<String>)> {
         if self.protocol == SubscriptionAuthProtocol::Codex {
             return self.codex_models().await;
         }
-        let token = self.auth.access_token().await?;
+        let token = self
+            .auth
+            .access_token()
+            .await
+            .map_err(|error| (error, None))?;
         let response = self
             .http
             .get(format!(
@@ -52,14 +58,30 @@ impl SubscriptionCatalog {
             .bearer_auth(token)
             .send()
             .await
-            .map_err(|_| SubscriptionAuthError::TemporarilyUnavailable)?;
+            .map_err(|_| {
+                (
+                    SubscriptionAuthError::TemporarilyUnavailable {
+                        detail: String::new(),
+                    },
+                    None,
+                )
+            })?;
         if !response.status().is_success() {
-            return Err(classify_http_status(response.status()));
+            let status = response.status();
+            let body = crate::adapters::http_error_body::read_bounded_http_error_body(
+                response,
+                crate::adapters::http_error_body::MAX_HTTP_ERROR_BODY_BYTES,
+            )
+            .await;
+            return Err((
+                classify_http_status(status),
+                Some(format!("HTTP {}: {body}", status.as_u16())),
+            ));
         }
         let models: SiwcModelsResponse = response
             .json()
             .await
-            .map_err(|_| SubscriptionAuthError::InvalidResponse)?;
+            .map_err(|_| (SubscriptionAuthError::InvalidResponse, None))?;
         siwc_subscription_models(
             models
                 .models
@@ -67,10 +89,17 @@ impl SubscriptionCatalog {
                 .filter(|model| model.visibility == "list")
                 .collect(),
         )
+        .map_err(|error| (error, None))
     }
 
-    async fn codex_models(&self) -> Result<Vec<CatalogModel>, SubscriptionAuthError> {
-        let credential = self.auth.access_codex_credential().await?;
+    async fn codex_models(
+        &self,
+    ) -> Result<Vec<CatalogModel>, (SubscriptionAuthError, Option<String>)> {
+        let credential = self
+            .auth
+            .access_codex_credential()
+            .await
+            .map_err(|error| (error, None))?;
         let (bearer, account_id) = credential.into_parts();
         let response = self
             .http
@@ -85,18 +114,25 @@ impl SubscriptionCatalog {
             .header("User-Agent", ECHIDNA_USER_AGENT)
             .send()
             .await
-            .map_err(|_| SubscriptionAuthError::TemporarilyUnavailable)?;
+            .map_err(|_| {
+                (
+                    SubscriptionAuthError::TemporarilyUnavailable {
+                        detail: String::new(),
+                    },
+                    None,
+                )
+            })?;
         if !response.status().is_success() {
-            return Err(auth_http_failure(
-                SubscriptionAuthHttpOperation::ModelCatalog,
-                response.status(),
+            return Err((
+                auth_http_failure(SubscriptionAuthHttpOperation::ModelCatalog, response).await,
+                None,
             ));
         }
         let models: CodexModelsResponse = response
             .json()
             .await
-            .map_err(|_| SubscriptionAuthError::InvalidResponse)?;
-        codex_subscription_models(models.models)
+            .map_err(|_| (SubscriptionAuthError::InvalidResponse, None))?;
+        codex_subscription_models(models.models).map_err(|error| (error, None))
     }
 }
 

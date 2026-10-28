@@ -6,6 +6,7 @@ pub mod artifact_store;
 pub mod credentials;
 pub(crate) mod file_diff;
 pub mod fragment_cache;
+pub(crate) mod http_error_body;
 pub mod image;
 pub(crate) mod mcp;
 pub mod mock_model;

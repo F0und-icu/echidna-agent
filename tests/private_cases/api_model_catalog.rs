@@ -528,8 +528,8 @@ generation = 1
             assert!(!output.status.success());
             let error = String::from_utf8_lossy(&output.stderr);
             assert!(error.contains(&format!("HTTP {status}")), "{error}");
-            assert!(!error.contains(KEY));
-            assert!(!error.contains("private remote body"));
+            assert!(error.contains(KEY));
+            assert!(error.contains("private remote body"));
             assert!(!error.contains("/capture"));
             assert_eq!(fs::read(&path).unwrap(), before);
             assert_get(&server.finish()[0]);

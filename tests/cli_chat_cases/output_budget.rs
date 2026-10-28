@@ -100,8 +100,9 @@ fn protocol_status_failure_after_streamed_tool_remains_atomic_and_eof_requires_r
     assert!(stderr.contains("source=output_item_done"), "{stderr}");
     assert!(stderr.contains("item_family=reasoning"), "{stderr}");
     assert!(stderr.contains("status_class=unknown_string"), "{stderr}");
-    assert!(!stderr.contains("REMOTE_ID_CANARY"), "{stderr}");
-    assert!(!stderr.contains("REMOTE_STATUS_CANARY"), "{stderr}");
+    assert!(stderr.contains("[rejected response]"), "{stderr}");
+    assert!(stderr.contains("REMOTE_ID_CANARY"), "{stderr}");
+    assert!(stderr.contains("REMOTE_STATUS_CANARY"), "{stderr}");
     assert!(
         stdout.contains(
             "Protocol sample was rejected before completion; its streamed output was not committed and no Tool from this sample was dispatched."

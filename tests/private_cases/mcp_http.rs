@@ -942,6 +942,29 @@ protocol_version = "2026-07-28"
     }
 
     #[tokio::test]
+    async fn catalog_jsonrpc_error_keeps_complete_details() {
+        let detail = format!("{}TAIL_CANARY", "long-detail-".repeat(30));
+        let mut server = spawn_server(vec![Response::json(json!({
+            "jsonrpc":"2.0", "id":"1", "error":{"code":-32001, "message":detail}
+        }))])
+        .await;
+        let directory = TemporaryDirectory::new("mcp-catalog-error-details");
+        let servers = format!(
+            "[mcp_servers.remote]\nurl = \"{}\"\nprotocol_version = \"2026-07-28\"\n",
+            server.url
+        );
+        let composition =
+            load_composition(&directory, &servers, RecordingCredentials::with_values([]));
+        let error = match composition.discover_chat_tools(directory.path()).await {
+            Ok(_) => panic!("catalog error must fail discovery"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains(&detail), "{error}");
+        let _ = server.requests.recv().await.expect("list request");
+        server.task.await.expect("loopback completes");
+    }
+
+    #[tokio::test]
     async fn mcp_error_results_are_known_failures_and_sse_complete_results_succeed() {
         let definition = json!({
             "name": "remote.result",

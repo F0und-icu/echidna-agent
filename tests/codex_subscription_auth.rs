@@ -1,6 +1,11 @@
+#[path = "../src/adapters/http_error_body.rs"]
+pub(crate) mod http_error_body;
 #[allow(dead_code)]
 #[path = "../src/model_catalog.rs"]
 mod model_catalog;
+mod adapters {
+    pub(crate) use crate::http_error_body;
+}
 #[allow(dead_code)]
 #[path = "../src/adapters/subscription_auth/mod.rs"]
 mod subscription_auth;
@@ -334,6 +339,7 @@ async fn codex_models_reject_ambiguous_or_malformed_catalog_metadata() {
                 .models()
                 .await
                 .unwrap_err()
+                .0
                 .to_string(),
             "subscription response is invalid"
         );
@@ -437,15 +443,18 @@ async fn codex_model_catalog_http_failures_keep_credentials_and_redact_remote_da
             );
         });
 
-        let error = service(&store, &base).catalog().models().await.unwrap_err();
+        let (error, detail) = service(&store, &base).catalog().models().await.unwrap_err();
         assert_eq!(
             error.to_string(),
-            format!("subscription authentication model catalog request failed with HTTP {status}")
+            format!(
+                "subscription authentication model catalog request failed with HTTP {status}: {{\"error\":{{\"message\":\"catalog-response-secret\"}}}}"
+            )
         );
         let debug = format!("{error:?}");
-        assert!(!error.to_string().contains("catalog-response-secret"));
+        assert!(error.to_string().contains("catalog-response-secret"));
         assert!(!error.to_string().contains("catalog-header-secret"));
-        assert!(!debug.contains("catalog-response-secret"));
+        assert!(debug.contains("catalog-response-secret"));
+        assert!(detail.is_none());
         assert!(!debug.contains("catalog-header-secret"));
         server.join().unwrap();
         assert_eq!(
@@ -601,7 +610,7 @@ async fn explicit_codex_refresh_keeps_future_tokens_on_temporary_failure() {
             .await
             .unwrap_err()
             .to_string(),
-        "subscription authentication service is temporarily unavailable"
+        "subscription authentication service is temporarily unavailable: HTTP 500: {\"error\":\"temporary\"}"
     );
     server.join().unwrap();
     assert_eq!(
@@ -628,7 +637,7 @@ async fn explicit_codex_refresh_terminal_failure_clears_only_tokens() {
             .await
             .unwrap_err()
             .to_string(),
-        "subscription credentials require login"
+        "subscription credentials require login: HTTP 400: {\"error\":\"invalid_grant\"}"
     );
     server.join().unwrap();
     let stored = std::fs::read_to_string(store.join("personal.connection")).unwrap();
@@ -744,7 +753,7 @@ async fn codex_refresh_terminal_failure_clears_only_tokens() {
             .await
             .unwrap_err()
             .to_string(),
-        "subscription credentials require login"
+        "subscription credentials require login: HTTP 400: {\"error\":\"invalid_grant\"}"
     );
     server.join().unwrap();
     let stored = std::fs::read_to_string(store.join("personal.connection")).unwrap();
@@ -766,7 +775,7 @@ async fn codex_refresh_treats_pinned_unauthorized_and_error_code_forms_as_termin
     for (index, (status, body)) in cases.into_iter().enumerate() {
         let directory = TemporaryDirectory::new(&format!("codex-refresh-terminal-{index}"));
         let store = canonical_temp_path(directory.path().join("auth-store"));
-        let (base, server) = token_server(status, body);
+        let (base, server) = token_server(status, body.clone());
         seed_codex_connection(&store, &base, access_token(now_unix() - 1), now_unix() - 1);
 
         assert_eq!(
@@ -775,7 +784,7 @@ async fn codex_refresh_treats_pinned_unauthorized_and_error_code_forms_as_termin
                 .await
                 .unwrap_err()
                 .to_string(),
-            "subscription credentials require login"
+            format!("subscription credentials require login: HTTP {status}: {body}")
         );
         server.join().unwrap();
         assert!(
@@ -798,7 +807,7 @@ async fn codex_refresh_keeps_tokens_for_unknown_or_oversized_error_payloads() {
     for (index, body) in cases.into_iter().enumerate() {
         let directory = TemporaryDirectory::new(&format!("codex-refresh-nonterminal-{index}"));
         let store = canonical_temp_path(directory.path().join("auth-store"));
-        let (base, server) = token_server(500, body);
+        let (base, server) = token_server(500, body.clone());
         seed_codex_connection(&store, &base, access_token(now_unix() - 1), now_unix() - 1);
         let before = std::fs::read_to_string(store.join("personal.connection")).unwrap();
 
@@ -808,7 +817,14 @@ async fn codex_refresh_keeps_tokens_for_unknown_or_oversized_error_payloads() {
                 .await
                 .unwrap_err()
                 .to_string(),
-            "subscription authentication service is temporarily unavailable"
+            format!(
+                "subscription authentication service is temporarily unavailable: HTTP 500: {}",
+                if body.len() > 8 * 1024 {
+                    "error body exceeds the configured read limit"
+                } else {
+                    &body
+                }
+            )
         );
         server.join().unwrap();
         assert_eq!(

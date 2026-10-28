@@ -25,8 +25,8 @@ pub(crate) enum CatalogError {
         timeout: bool,
         io_kind: String,
     },
-    #[error("model catalog request failed with HTTP {status}")]
-    Http { status: u16 },
+    #[error("model catalog request failed with HTTP {status}: {body}")]
+    Http { status: u16, body: String },
     #[error("model catalog exceeds its byte or model-count limit")]
     TooLarge,
     #[error("model catalog response is malformed")]
@@ -57,10 +57,15 @@ impl ResponsesHttpAdapter {
             .await
             .map_err(|error| transport_error("request", &error))?;
         if !response.status().is_success() {
-            // Status is enough to distinguish authentication, authorization,
-            // rate limiting and unsupported endpoints without retaining a body.
+            let status = response.status().as_u16();
+            let body = crate::adapters::http_error_body::read_bounded_http_error_body(
+                response,
+                MAX_CATALOG_BYTES,
+            )
+            .await;
             return Err(CatalogError::Http {
-                status: response.status().as_u16(),
+                status,
+                body: body.to_string(),
             });
         }
         if response

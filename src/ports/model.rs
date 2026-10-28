@@ -254,14 +254,14 @@ pub enum ModelProviderError {
         timeout: bool,
         io_kind: String,
     },
-    #[error("model HTTP request failed with status {status}")]
-    HttpFailure { status: u16 },
+    #[error("model HTTP request failed with status {status}: {body}")]
+    HttpFailure { status: u16, body: String },
     #[error("model context capacity exceeded ({code})")]
     ContextCapacityExceeded { code: String },
     #[error("model stream protocol failed: {message}")]
     ProtocolFailure { message: String },
     #[error(
-        "model stream protocol failed: function call arguments are not valid JSON: {diagnostic}; rejected before dispatch; malformed payload omitted"
+        "model stream protocol failed: function call arguments are not valid JSON: {diagnostic}; rejected before dispatch"
     )]
     InvalidToolArguments {
         diagnostic: crate::domain::model::ToolArgumentDiagnostic,

@@ -159,6 +159,50 @@ New Sessions select `chat --agent`, then top-level config `agent_definition`, th
 research. Config paths resolve relative to that config file. Model and credential selection
 remain independent. Older binaries cannot read the new definition events.
 
+### Optional self-improvement
+
+The [self-improving Agent](examples/agents/self-improving) explicitly enables
+`[rsi] persona = true`, `methods = true`, and `improvement = true`, with an
+operator-owned `fixed_rules_file`. Omitted RSI stays disabled. Persona/method
+changes do not rewrite the work scope, fixed rules, memory scope, tools, or model
+configuration. Passive RSI applies at a completed Turn boundary.
+
+With `improvement = true`, bounded diagnosis can also run after 16 complete durable
+tool batches, using recent actual failures, verified repeated commands or explicit
+`[rsi-feedback]`. Diagnosis, old/new contrast and any same-Turn handoff share the
+original request budget. A locally improved candidate applies in the same Turn
+only after a validated durable handoff; the task, activations and executed results
+remain. No signal, insufficient budget, running jobs/PTYs, queued images or
+incomplete outcomes prevent that work. Local contrast does not prove general
+learning gains. Recovery never replays the probes.
+
+### Long-context capacity
+
+The explicit capability mapping's `context_window` determines local capacity;
+model IDs do not imply capabilities. By default, output and tool-loop reserves
+each use 12.5% of the declared window W. A larger explicit output requirement
+increases the output reserve. The remaining input allowance B must also fit
+instructions, tool schemas, history and provider continuation.
+
+| Declared W | Usable input B | Pressure / soft target | Narrative allowance (bytes) |
+| --- | --- | --- | --- |
+| 272000 | 204000 | 163200 / 102000 | 16320 |
+| 1000000 | 750000 | 600000 / 375000 | 60000 |
+| 4000000 | 3000000 | 2400000 / 1500000 | 240000 |
+
+These use default ratios without a larger output requirement. They are local
+estimates, not exact provider tokens or verified server capacities. The old
+64K/32K thresholds and eight-step content multiplier no longer apply. Tool
+previews, Core writes, narrative, state and readback use separate configurable
+shares. Allowances do not prefill requests; a per-tool preview is not a combined
+batch allowance. Core storage has a separately configurable 512KiB default cap.
+Raw capture, MCP and transport bounds remain independent.
+
+New v6 handoffs budget Narrative JSON separately from protected exact inputs,
+images and source references. The complete model projection still passes the
+hard input budget. Historical summary units remain unchanged. Smaller windows
+do not rewrite saved facts or silently remove required context.
+
 ## Quick start
 
 The current setup primarily targets macOS. Install Git and Rust/rustup; the repository pins
@@ -180,7 +224,14 @@ Run the remaining commands in the same terminal, continuing to use `ECHIDNA_BIN`
 
 ### 2. Configure a model
 
+Templates, ordinary development and acceptance tasks default to at least
+**272,000 context tokens**. Use the service's declared **1M** window when the
+model supports it, through explicit capability mapping or catalog import.
+
 Choose a complete template for your setup and save it outside the source repository:
+
+See the [configuration index](examples/README.md) for all six Provider templates,
+current fields, units, optional settings and Agent examples.
 
 | Setup | Complete template | Image handling |
 | --- | --- | --- |
@@ -199,8 +250,9 @@ chmod 600 "$HOME/.config/echidna/provider.toml"
 ```
 
 Edit the file to set the service URL and model. Check the context window and
-each declared capability against the service's actual support. The URL, model name, and 32K window
-in the template are examples; `cp -n` preserves an existing file. The commands pass this
+each declared capability against the service's actual support. The URL and model name
+are examples; the window defaults to 272K and must match the service's capacity.
+`cp -n` preserves an existing file. The commands pass this
 configuration path explicitly; the program does not discover it automatically.
 
 The current integration uses **HTTP/SSE + Responses**. Chat Completions endpoints are not
@@ -257,6 +309,26 @@ arguments are passed by value to the server; MCP output remains transport output
 until you verify it. A disconnected or incomplete remote call stops the turn
 without inventing a receipt or replaying the call.
 
+#### Local stdio MCP tools
+
+The same [MCP template](examples/provider-mcp.toml) supports Unix stdio servers.
+Choose exactly one `url` or `command` per server. Stdio uses protocol `2025-11-25`:
+
+```toml
+[mcp_servers.local]
+command = "python3"
+args = ["/absolute/path/to/server.py", "--transport", "stdio"]
+protocol_version = "2025-11-25"
+timeout_ms = 60000
+startup_timeout_ms = 60000
+```
+
+Bare commands use PATH; relative command paths and `cwd` resolve from the config
+directory, which is also the default cwd. Arguments and explicit `env` values
+are literal, without shell expansion. Only the documented base environment plus
+explicit `env` reaches the child; provider keys are not implicitly inherited.
+`credential_ref` is HTTP-only. Discovery runs when chat starts, not during doctor.
+
 #### ChatGPT subscription sign-in
 
 Use the [subscription template](examples/provider-chatgpt-subscription.toml) and save your
@@ -276,8 +348,9 @@ The browser must reach the loopback callback on the machine running Echidna; usi
 different machine requires forwarding the callback port.
 `status` checks local state only; `models` queries the server with the selected account.
 Put a returned model slug in `model`, verify its capabilities and context window, then use
-the same configuration for `doctor` and `chat`. The template's 32K window is an explicit
-example. Subscription HTTP requires `incremental_input = false` and does not accept
+the same configuration for `doctor` and `chat`. The template defaults to 272K;
+configure or import the actual 1M window when supported.
+Subscription HTTP requires `incremental_input = false` and does not accept
 `max_output_tokens`. Successful login and offline doctor do not prove model eligibility.
 
 ```sh
@@ -304,6 +377,9 @@ To declare a catalog compatibility version, set
 default remains `0.144.0`; an explicit value changes only the catalog request's
 `client_version` query and `version` header. It does not claim an installed Codex
 release or guarantee new model IDs or account access.
+The current template explicitly uses `0.162.0`, previously verified in the
+catalog comparison, and `supports_reasoning_summary_parameter = true`. This
+does not auto-detect a current upstream version or guarantee a complete catalog.
 
 Use the same `auth login/status/models/logout` commands above with the new config
 path and its provider ID. Echidna performs its own browser authorization and owns
@@ -331,6 +407,17 @@ the terminal picker:
 ```sh
 echidna --config /absolute/path/codex.toml auth select-model --provider codex
 ```
+
+When the catalog advertises capabilities, import its actual default window and
+input metadata while selecting:
+
+```sh
+echidna --config /absolute/path/codex.toml auth select-model --provider codex --apply-capabilities
+```
+
+Changing only the model ID does not update `context_window`. Leaving the
+template at 272000 keeps local planning at 272K. If the service does not provide an
+importable window, configure its documented capacity explicitly.
 
 For noninteractive selection, use a model returned by the catalog and an effort
 advertised for that model:
@@ -366,7 +453,7 @@ requires live verification. Failures do not switch models or paid APIs or replay
 tools automatically.
 
 The Codex path requests available reasoning summaries and labels them
-`推理摘要` on stderr in debug and release builds. These are provider summaries,
+`reasoning summary` on stderr in debug and release builds. These are provider summaries,
 not full internal reasoning. Empty summaries stay empty. They do not enter
 conversation text or replace encrypted continuation. Reasoning effort is
 independent of presentation; selecting `high` does not guarantee a summary.
@@ -421,6 +508,37 @@ by the primary and vision models. Set it explicitly to `0` for unlimited admissi
 `1..=10000` retains a finite limit. Attempts are still counted, and context capacity,
 cancellation, deadlines and the per-request retry limit remain unchanged.
 
+Configure proportional allowances under `[runtime.context_budget]`. Integer
+`_bps` fields use basis points: **100 = 1%, 10000 = 100%**. Output/tool reserves
+use W; ordinary content shares use B; diagnostic task/handoff excerpts use the
+diagnostic pool. Missing fields use defaults. Byte allowances follow the current
+estimator, and complete serialized inputs still undergo hard-budget checks.
+
+```toml
+[runtime.context_budget]
+output_reserve_bps = 1250
+tool_loop_reserve_bps = 1250
+pressure_bps = 8000
+target_bps = 5000
+summary_bps = 200
+diagnostic_bps = 200
+diagnostic_task_bps = 313
+diagnostic_handoff_bps = 313
+tool_output_bps = 3200
+core_memory_bps = 1600
+state_section_bps = 10
+continuation_field_bps = 40
+continuation_goal_part_bps = 16
+readback_default_bps = 100
+readback_max_bps = 400
+compaction_reference_items = 64  # Per reference kind; unit: items.
+max_core_file_bytes = 524288     # Core storage cap; unit: bytes.
+# max_content_bytes = 1048576   # Optional fixed content cap, absent by default.
+```
+
+These are purpose-specific limits, not disjoint shares to sum to 100%. Tool-free
+compaction releases only the tool-loop reserve; output/reasoning room remains.
+
 In Chat, use `/image PATH` to select a local image. You can repeat the command: images queue in input order and the next ordinary task submits the whole queue as that Turn's initial context. With `primary_direct`, each image reaches the primary; with `secondary_tool`, each image gets its own retained observation before the primary request. If a later image fails, is cancelled, or reaches the shared request limit, earlier durable image facts remain, but the task and queued images are not submitted to the primary. The queue exists only in the current Chat process; restart and `/resume` do not replay image processing.
 
 ### 3. Create a research project
@@ -463,17 +581,29 @@ Domain guidance does not install analysis tools automatically.
 | `/resume` | Explicitly rebuild the model session after a recoverable stop, then enter a task. |
 | `/exit` | Leave the interactive interface. |
 
-Automatic compaction remains opt-in with `[runtime] auto_compact = true`. A settled
-tool batch or completed turn can request one model handoff, sharing that task's
-request budget, including transport retries. The newest complete tool batch and
-recent receipt/history references survive compaction. Invalid, oversized,
+Automatic compaction remains opt-in with `[runtime] auto_compact = true`. After
+a complete durable tool batch or completed Turn, fresh current context and
+accepted continuation determine pressure. Defaults are 80% of B for evaluation
+and a 50% soft target; required inputs, images and the latest complete tool batch
+take priority over that target. A useful reduction that fits the hard budget can
+still be adopted. A fitting source uses one handoff; larger sources use a finite
+preplanned segment/merge graph. Every physical attempt, including segments,
+merges and transport retries, shares the task's original request budget.
+Only a complete validated root permits durable replacement. Invalid, oversized,
 cancelled or failed handoffs visibly defer replacement and retain the original
 context and provider continuation. Summaries remain lossy, derived material;
 offline fixtures do not establish real-task quality gains.
-Modern summaries omit machine reference lists from model delivery while retaining
-the complete durable facts, provenance, narrative and Research spine.
+Machine protection references remain in durable facts and the provenance sidecar;
+exact unfinished inputs reach the model as separate context. Provenance, narrative
+and the Research spine remain validated without inventing completion.
 On Resume after append-only Research updates, references refresh offline while
 the previous derived handoff is retained; this refresh sends no model request.
+
+A valid oversized Session can explicitly resume into a command-capable recovery
+state for `/context`, `/compact` or `/exit`. Required content that still cannot fit
+fails explicitly. Corrupt facts, missing outcomes and unknown execution effects
+remain integrity failures. A failed automatic compaction sample suppresses further
+automatic sampling that Turn, but local capacity evaluation continues.
 
 Optionally set `[runtime].compaction_reasoning_effort = "high"` for the isolated
 compaction request. Omit it to inherit the primary setting. Compaction uses the
@@ -514,25 +644,27 @@ Export a session while preserving references to its process and materials:
 ```
 
 Terminal replies start with **`Echidna>`**. `NO_COLOR=1` disables theme colors.
-Piped output does not add the branded welcome or theme ANSI sequences. Development builds
-also support `chat --debug` to inspect request content; standard release builds omit it.
+Piped output does not add the branded welcome or theme ANSI sequences. All builds
+support explicit `chat --debug` to inspect actual request content and failure details.
+Ordinary runs do not emit additional debug content.
 
-All builds support explicit redacted snapshots of failed requests:
+All builds support explicit snapshots of failed requests without content redaction:
 
 ```sh
 "$ECHIDNA_BIN" --config "$HOME/.config/echidna/provider.toml" chat --debug-failures ../debug-failures
 ```
 
-The directory is relative to chat's actual working directory; choose a location outside
-the project. The feature is off by default. Successful and cancelled attempts save
+The directory is relative to chat's actual working directory.
+The feature is off by default. Successful and cancelled attempts save
 nothing; each failed physical attempt gets a separate file, including failures before
-a successful retry. New directories use0700 and files0600 on Unix, without overwriting.
+a successful retry. Each file is created separately without overwriting.
 The terminal reports save success or failure while preserving the original request
-error and retry behavior. Snapshots retain prompts, input and tool definitions, while
-removing authentication fields, active credential/account values, opaque content,
-image data and URL authentication/query/fragment. These are redacted diagnostics,
-not raw network packets or automatically replayable requests. Other unknown secrets
-in business content can remain; review before sharing.
+error and retry behavior. Snapshots retain the complete encoded request body,
+endpoint and failure details without replacing fields, account values, opaque
+content, image data or URL parameters. These are local diagnostics, not TLS
+packet captures, RequestAudit or automatic replay inputs. Authentication headers
+are not additionally stored. Returned text, reasoning summaries, Tool arguments
+and server failure details are not masked or hidden as sensitive content.
 
 ## Design direction
 
@@ -563,10 +695,13 @@ from actual use. External orchestration evolves independently of the single-agen
 
 | Resource | Contents |
 | --- | --- |
+| [Configuration index](examples/README.md) | All Provider/Agent templates, proportional and fixed limits, and compaction effort |
 | [Text-only configuration](examples/provider.toml) | Primary model, capability declarations, and environment key reference |
 | [Single multimodal model](examples/provider-multimodal.toml) | One primary model for text and images |
 | [Text + vision configuration](examples/provider-text-vision.toml) | Independent services, capabilities, and keys for the two models |
-| [Remote MCP configuration](examples/provider-mcp.toml) | Explicit Streamable HTTP tools and dedicated MCP credential references |
+| [MCP configuration](examples/provider-mcp.toml) | HTTP and Unix stdio tools, dedicated credentials and independent startup deadlines |
+| [Codex-compatible subscription](examples/provider-codex-subscription.toml) | Own OAuth store, catalog version, capability import and summary support |
+| [ChatGPT subscription preview](examples/provider-chatgpt-subscription.toml) | Separate HTTP subscription preview and private authorization store |
 | [Original mechanism figure](assets/architecture-overview.svg) | Execution and persistence flow in scalable SVG form |
 | [Changelog](CHANGELOG.md) | Feature changes and compatibility notes |
 

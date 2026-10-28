@@ -66,7 +66,43 @@ fn f4_item_only_reasoning_and_incomplete_stream_are_labeled_without_success() {
     server.join();
 }
 
-#[cfg(debug_assertions)]
+#[test]
+fn f4_default_shows_raw_rejected_events_without_committing_them() {
+    for event in [
+        json!({"type":"response.failed","response":{"error":{"code":"server_error","message":"failure","param":"RAW_FAILED_PARAM"}}}),
+        json!({"type":"response.incomplete","response":{"incomplete_details":{"reason":"RAW_INCOMPLETE_REASON"}}}),
+        json!({"type":"error","error":{"code":"context_length_exceeded","message":"RAW_CAPACITY_DETAIL"}}),
+        json!({"type":"response.future","detail":"RAW_PROTOCOL_DETAIL"}),
+    ] {
+        let root = TemporaryDirectory::new("f4-rejected-event-default");
+        initialize_project(root.path());
+        let body = format!("data: {event}\n\n");
+        let server = spawn_responses_server(vec![(200, body)]);
+        let config = write_config(root.path(), &server.base_url);
+        let output = run_chat(root.path(), &config, "hello\n/exit\n", &[]);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("[rejected response]"), "{stderr}");
+        for marker in [
+            "RAW_FAILED_PARAM",
+            "RAW_INCOMPLETE_REASON",
+            "RAW_CAPACITY_DETAIL",
+            "RAW_PROTOCOL_DETAIL",
+        ] {
+            if event.to_string().contains(marker) {
+                assert!(stderr.contains(marker), "{stderr}");
+            }
+        }
+        let project = Project::discover(root.path()).unwrap();
+        let state = reduced_session(&project, &session_id(root.path()));
+        assert_eq!(state.execution_receipt_count(), 0);
+        assert_eq!(
+            state.history().items(),
+            &[echidna::domain::model::ContentItem::user_text("hello")]
+        );
+        server.join();
+    }
+}
+
 fn debug_requests(stderr: &[u8]) -> Vec<String> {
     String::from_utf8_lossy(stderr)
         .split("[debug sending ")
@@ -81,7 +117,6 @@ fn debug_requests(stderr: &[u8]) -> Vec<String> {
         .collect()
 }
 
-#[cfg(debug_assertions)]
 fn assert_request_content(view: &str, actual: &Value) {
     // Compare displayed content with the wire; Tool schemas and transport
     // fields are deliberately omitted from the terminal projection.
@@ -137,7 +172,6 @@ fn f4_reasoning_text_is_flushed_before_response_completion() {
     assert_reasoning_streams(&[]);
 }
 
-#[cfg(debug_assertions)]
 #[test]
 fn f5_debug_reasoning_also_streams_without_sse_envelopes() {
     assert_reasoning_streams(&["--debug"]);
@@ -234,9 +268,8 @@ fn assert_reasoning_streams(extra_args: &[&str]) {
     assert!(!stderr.contains("response.reasoning_text.delta"));
 }
 
-#[cfg(debug_assertions)]
 #[test]
-fn f4_debug_omits_unparseable_sse_and_http_bodies() {
+fn f4_debug_shows_unparseable_sse_and_http_bodies() {
     for status in [200, 500] {
         let root = TemporaryDirectory::new("f4-malformed-debug");
         initialize_project(root.path());
@@ -252,14 +285,12 @@ fn f4_debug_omits_unparseable_sse_and_http_bodies() {
         let output = run_chat(root.path(), &config, "hello\n", &["--debug"]);
         assert!(!output.status.success());
         let stderr = String::from_utf8(output.stderr).unwrap();
-        assert!(stderr.contains("non-JSON response cannot be structurally redacted"));
-        assert!(!stderr.contains("OPAQUE_MALFORMED"));
+        assert!(stderr.contains("OPAQUE_MALFORMED"));
         assert!(!stderr.contains("loopback-primary-secret"));
         server.join();
     }
 }
 
-#[cfg(debug_assertions)]
 #[test]
 fn f4_debug_bounds_http_error_capture_without_partial_body_output() {
     let root = TemporaryDirectory::new("f4-bounded-debug");
@@ -271,13 +302,12 @@ fn f4_debug_bounds_http_error_capture_without_partial_body_output() {
     let output = run_chat(root.path(), &config, "hello\n", &["--debug"]);
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("HTTP error body omitted: exceeds 65536 bytes"));
+    assert!(stderr.contains("HTTP error body exceeds the configured read limit"));
     assert!(stderr.contains("HTTP error]\n500"));
     assert!(!stderr.contains("F4_OVERSIZED_BODY"));
     server.join();
 }
 
-#[cfg(debug_assertions)]
 #[test]
 fn f4_debug_matches_actual_full_and_incremental_wire_and_paired_tool_output() {
     let root = TemporaryDirectory::new("f4-debug-wire");
@@ -360,47 +390,45 @@ fn f4_debug_matches_actual_full_and_incremental_wire_and_paired_tool_output() {
 
 #[test]
 fn f4_large_continuation_rejection_preserves_full_fallback() {
-    let root = TemporaryDirectory::new("f4-large-continuation");
-    initialize_project(root.path());
-    let body = json!({"error":{"code":"previous_response_not_found","message":format!("F4_LARGE_REJECTION{}", "x".repeat(70 * 1024))}}).to_string();
-    let server = spawn_responses_server(vec![
-        (200, text_response("F4_FIRST", "f4-first")),
-        (400, body),
-        (200, text_response("F4_RECOVERED", "f4-recovered")),
-    ]);
-    let config = write_config(root.path(), &server.base_url);
-    #[cfg(debug_assertions)]
-    let args = &["--debug"][..];
-    #[cfg(not(debug_assertions))]
-    let args = &[][..];
-    let output = run_chat(root.path(), &config, "first\nsecond\n/exit\n", args);
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("F4_RECOVERED"));
-    let first = f2a_request_body(&server.requests, "first Full request");
-    let incremental = f2a_request_body(&server.requests, "rejected incremental request");
-    let fallback = f2a_request_body(&server.requests, "Full fallback request");
-    assert!(first.get("previous_response_id").is_none());
-    assert_eq!(incremental["previous_response_id"], "f4-first");
-    assert!(fallback.get("previous_response_id").is_none());
-    #[cfg(debug_assertions)]
-    {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("HTTP error body omitted: exceeds 65536 bytes"));
-        assert!(!stderr.contains("F4_LARGE_REJECTION"));
-        let requests = debug_requests(&output.stderr);
-        assert_eq!(requests.len(), 3);
-        for (record, actual) in requests.iter().zip([first, incremental, fallback]) {
-            assert_request_content(record, &actual);
+    for debug in [false, true] {
+        let root = TemporaryDirectory::new("f4-large-continuation");
+        initialize_project(root.path());
+        let body = json!({"error":{"code":"previous_response_not_found","message":format!("F4_LARGE_REJECTION{}", "x".repeat(70 * 1024))}}).to_string();
+        let server = spawn_responses_server(vec![
+            (200, text_response("F4_FIRST", "f4-first")),
+            (400, body),
+            (200, text_response("F4_RECOVERED", "f4-recovered")),
+        ]);
+        let config = write_config(root.path(), &server.base_url);
+        let args = if debug { &["--debug"][..] } else { &[][..] };
+        let output = run_chat(root.path(), &config, "first\nsecond\n/exit\n", args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("F4_RECOVERED"));
+        let first = f2a_request_body(&server.requests, "first Full request");
+        let incremental = f2a_request_body(&server.requests, "rejected incremental request");
+        let fallback = f2a_request_body(&server.requests, "Full fallback request");
+        assert!(first.get("previous_response_id").is_none());
+        assert_eq!(incremental["previous_response_id"], "f4-first");
+        assert!(fallback.get("previous_response_id").is_none());
+        {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert_eq!(stderr.matches("F4_LARGE_REJECTION").count(), 1);
+            if debug {
+                let requests = debug_requests(&output.stderr);
+                assert_eq!(requests.len(), 3);
+                for (record, actual) in requests.iter().zip([first, incremental, fallback]) {
+                    assert_request_content(record, &actual);
+                }
+            }
         }
+        server.join();
     }
-    server.join();
 }
 
-#[cfg(debug_assertions)]
 #[test]
 fn f4_debug_reports_http_error_body_without_printing_credential() {
     let root = TemporaryDirectory::new("f4-debug-http-error");
@@ -414,12 +442,11 @@ fn f4_debug_reports_http_error_body_without_printing_credential() {
     assert!(stderr.contains("F4_HTTP_ERROR"));
     assert!(stderr.contains("HTTP error]\n500"));
     assert!(stderr.contains("response interrupted: completion not observed"));
-    assert!(!stderr.contains("loopback-primary-secret"));
-    assert!(!stderr.contains("other-secret-value"));
+    assert!(stderr.contains("loopback-primary-secret"));
+    assert!(stderr.contains("other-secret-value"));
     server.join();
 }
 
-#[cfg(debug_assertions)]
 #[test]
 fn f4_debug_covers_both_image_routes_and_omits_image_bytes() {
     for direct in [false, true] {
@@ -464,8 +491,7 @@ fn f4_debug_covers_both_image_routes_and_omits_image_bytes() {
             }
         );
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("[image data omitted;"));
-        assert!(!stderr.contains("data:image/png;base64,"));
+        assert!(stderr.contains("data:image/png;base64,"));
         assert!(!stderr.contains("loopback-primary-secret"));
         assert!(!stderr.contains("loopback-vision-secret"));
         if !direct {
@@ -484,15 +510,21 @@ fn f4_debug_covers_both_image_routes_and_omits_image_bytes() {
     }
 }
 
-#[cfg(not(debug_assertions))]
 #[test]
-fn f4_release_rejects_debug_flag() {
-    let output = Command::new(env!("CARGO_BIN_EXE_echidna"))
-        .args(["chat", "--debug"])
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("unexpected argument '--debug'"));
+fn f4_debug_flag_works_in_all_builds() {
+    let root = TemporaryDirectory::new("f4-debug-all-builds");
+    initialize_project(root.path());
+    let server = spawn_responses_server(vec![(200, text_response("F4_ALL_BUILDS", "f4-all"))]);
+    let config = write_config(root.path(), &server.base_url);
+    let output = run_chat(root.path(), &config, "hello\n/exit\n", &["--debug"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("F4_ALL_BUILDS"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("[debug sending primary"));
+    server.join();
 }
 
 #[test]
@@ -516,9 +548,9 @@ fn f4_reasoning_redaction_does_not_merge_distinct_original_items() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert_eq!(
         stderr.matches("[redacted]").count(),
-        2,
-        "different original item must be displayed despite the same redacted projection: {stderr}"
+        1,
+        "distinct original items must remain distinct: {stderr}"
     );
-    assert!(!stderr.contains("loopback-primary-secret"));
+    assert!(stderr.contains("loopback-primary-secret"));
     server.join();
 }

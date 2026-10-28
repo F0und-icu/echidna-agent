@@ -4,6 +4,8 @@
 # Save your real configuration outside the source repository.
 schema_version = 1
 active_agent_profile = "default"
+# Optional exported Agent definition; relative to this configuration file.
+# agent_definition = "./my-agent"
 
 [providers.primary]
 binding = "http_sse"
@@ -13,6 +15,8 @@ model = "replace-with-your-text-model"
 credential_ref = "CYBER_AGENT_PRIMARY_API_KEY"
 capability_mapping = "text-v1"
 generation = 1
+connect_timeout_ms = 30000
+read_timeout_ms = 300000  # Read-idle timeout, not the total task duration.
 
 [providers.vision]
 binding = "http_sse"
@@ -22,6 +26,8 @@ model = "replace-with-your-vision-model"
 credential_ref = "CYBER_AGENT_VISION_API_KEY"
 capability_mapping = "vision-v1"
 generation = 1
+connect_timeout_ms = 30000
+read_timeout_ms = 300000  # Read-idle timeout, not the total task duration.
 
 [capability_mappings.text-v1]
 version = 1
@@ -33,7 +39,7 @@ structured_output = true
 incremental_input = false
 usage_reporting = true
 # Example capacity, not a detected or guaranteed model capability.
-context_window = 32768
+context_window = 272000
 
 [capability_mappings.vision-v1]
 version = 1
@@ -45,7 +51,7 @@ structured_output = true
 incremental_input = false
 usage_reporting = true
 # Configure this model's own window, independently of the primary model.
-context_window = 32768
+context_window = 272000
 
 [agent_profiles.default]
 primary = "primary"
@@ -54,5 +60,35 @@ vision_mode = "secondary_tool"
 generation = 1
 
 [runtime]
-# Shared by primary and vision requests within one operator turn.
+# Shared by primary, vision, compaction, RSI and model transport retries.
+# 0 disables the per-Turn request ceiling; the default is 32.
 model_request_limit_per_turn = 32
+# Opt in to compaction at durable settled-batch/completed-Turn boundaries.
+auto_compact = false
+# Optional: same primary model's isolated compaction scope only.
+# Omitted inherits primary; set only an effort supported by that service.
+# compaction_reasoning_effort = "high"
+
+# Ratios use basis points: 100 = 1%, 10000 = 100%.
+# Reserves use the declared window; other content shares use usable input.
+[runtime.context_budget]
+output_reserve_bps = 1250
+tool_loop_reserve_bps = 1250
+pressure_bps = 8000
+target_bps = 5000
+summary_bps = 200
+diagnostic_bps = 200
+# These two shares use the diagnostic pool, rather than the input window.
+diagnostic_task_bps = 313
+diagnostic_handoff_bps = 313
+tool_output_bps = 3200
+core_memory_bps = 1600
+state_section_bps = 10
+continuation_field_bps = 40
+continuation_goal_part_bps = 16
+readback_default_bps = 100
+readback_max_bps = 400
+compaction_reference_items = 64  # Per reference kind; unit: items.
+max_core_file_bytes = 524288     # Core storage cap; unit: bytes.
+# Optional absolute content cap in bytes; omitted keeps proportional growth.
+# max_content_bytes = 1048576

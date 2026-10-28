@@ -1,4 +1,4 @@
-//! Terminal rendering of selected, Adapter-redacted Provider observations.
+//! Terminal rendering of selected Provider observations.
 
 use crate::adapters::responses::presentation::{
     RequestObserver, ResponseNotice, ResponsePresentation, ResponsesObserver,
@@ -8,11 +8,10 @@ use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-#[cfg(debug_assertions)]
 use serde_json::{Value, json};
 
 use crate::domain::model::ModelEvent;
-#[cfg(debug_assertions)]
+
 use crate::terminal_content::ContentView;
 use crate::terminal_content::escaped_text;
 
@@ -34,14 +33,14 @@ pub(crate) struct RequestOutput {
     reasoning_summary_line_open: bool,
     completed: bool,
     rejected: bool,
-    #[cfg(debug_assertions)]
+
     vision_text_open: bool,
-    #[cfg(debug_assertions)]
+
     full: bool,
 }
 
 impl RequestOutput {
-    pub(crate) fn new(role: &'static str, #[cfg(debug_assertions)] full: bool) -> Self {
+    pub(crate) fn new(role: &'static str, full: bool) -> Self {
         Self {
             role,
             request_id: NEXT_REQUEST.fetch_add(1, Ordering::Relaxed),
@@ -51,14 +50,13 @@ impl RequestOutput {
             reasoning_summary_line_open: false,
             completed: false,
             rejected: false,
-            #[cfg(debug_assertions)]
+
             vision_text_open: false,
-            #[cfg(debug_assertions)]
+
             full,
         }
     }
 
-    #[cfg(debug_assertions)]
     fn request(&self, value: &Value) {
         if !self.full {
             return;
@@ -76,7 +74,7 @@ impl RequestOutput {
         );
         let _ = writeln!(
             stderr,
-            "[content view: tool definitions and transport fields omitted; redacted, not a verbatim wire capture]"
+            "[content view: tool definitions and transport fields omitted; not a verbatim wire capture]"
         );
         for (key, label) in [
             ("instructions", "Instructions"),
@@ -113,7 +111,7 @@ impl RequestOutput {
             }
             ModelEvent::TextDelta { text } => {
                 self.end_reasoning_line();
-                #[cfg(debug_assertions)]
+
                 if self.full && self.role == "vision" {
                     let mut stderr = console::stderr();
                     if !self.vision_text_open {
@@ -123,20 +121,16 @@ impl RequestOutput {
                     let _ = write!(stderr, "{}", escaped_text(text));
                     let _ = stderr.flush();
                 }
-                #[cfg(not(debug_assertions))]
-                let _ = text;
             }
             ModelEvent::ToolCall { call } => {
                 self.end_reasoning_line();
-                #[cfg(debug_assertions)]
+
                 if self.full {
                     self.emit(
                         "model tool call (not executed)",
                         json!({"name":call.name, "arguments":call.arguments}),
                     );
                 }
-                #[cfg(not(debug_assertions))]
-                let _ = call;
             }
             _ => {}
         }
@@ -173,7 +167,6 @@ impl RequestOutput {
             let _ = writeln!(console::stderr(), "[reasoning summary completed]");
         }
         if self.full_debug() {
-            #[cfg(debug_assertions)]
             self.emit("response completed", Value::Null);
         } else if self.saw_reasoning {
             self.end_reasoning_line();
@@ -181,7 +174,7 @@ impl RequestOutput {
         }
     }
 
-    fn rejected(&mut self, protocol_error: bool) {
+    fn rejected(&mut self, protocol_error: bool, response: &str) {
         self.rejected = true;
         self.end_reasoning_line();
         self.end_reasoning_summary_line();
@@ -196,7 +189,7 @@ impl RequestOutput {
                 }
             );
         }
-        #[cfg(debug_assertions)]
+
         if self.full {
             self.emit(
                 if protocol_error {
@@ -204,10 +197,15 @@ impl RequestOutput {
                 } else {
                     "Provider returned a stop status: response not committed"
                 },
-                json!("Failure content omitted because structural redaction cannot be guaranteed. The Adapter does not repair or retry; AgentLoop owns regeneration."),
+                json!(response),
             );
             return;
         }
+        let _ = writeln!(
+            console::stderr(),
+            "[rejected response] {}",
+            escaped_text(response)
+        );
         if self.saw_reasoning {
             let _ = writeln!(
                 console::stderr(),
@@ -256,17 +254,9 @@ impl RequestOutput {
     }
 
     fn full_debug(&self) -> bool {
-        #[cfg(debug_assertions)]
-        {
-            self.full
-        }
-        #[cfg(not(debug_assertions))]
-        {
-            false
-        }
+        self.full
     }
 
-    #[cfg(debug_assertions)]
     fn emit(&self, kind: &str, payload: Value) {
         let _ = writeln!(
             console::stderr(),
@@ -296,7 +286,7 @@ impl Drop for RequestOutput {
         }
         if self.full_debug() {
             self.end_reasoning_line();
-            #[cfg(debug_assertions)]
+
             self.emit("response interrupted: completion not observed", Value::Null);
         } else if self.saw_reasoning {
             self.end_reasoning_line();
@@ -308,20 +298,13 @@ impl Drop for RequestOutput {
     }
 }
 
-pub(crate) fn observer(
-    role: &'static str,
-    #[cfg(debug_assertions)] full: bool,
-) -> Arc<dyn ResponsesObserver> {
-    Arc::new(CliModelOutput {
-        role,
-        #[cfg(debug_assertions)]
-        full,
-    })
+pub(crate) fn observer(role: &'static str, full: bool) -> Arc<dyn ResponsesObserver> {
+    Arc::new(CliModelOutput { role, full })
 }
 
 struct CliModelOutput {
     role: &'static str,
-    #[cfg(debug_assertions)]
+
     full: bool,
 }
 
@@ -330,13 +313,9 @@ impl ResponsesObserver for CliModelOutput {
         self.role
     }
     fn begin(&self) -> Box<dyn RequestObserver> {
-        Box::new(RequestOutput::new(
-            self.role,
-            #[cfg(debug_assertions)]
-            self.full,
-        ))
+        Box::new(RequestOutput::new(self.role, self.full))
     }
-    #[cfg(debug_assertions)]
+
     fn full_debug(&self) -> bool {
         self.full
     }
@@ -348,7 +327,7 @@ impl ResponsesObserver for CliModelOutput {
             ResponseNotice::CaptureSaved { path } => {
                 let _ = writeln!(
                     console::stderr(),
-                    "[debug-failures] saved redacted, non-replayable request snapshot: {}",
+                    "[debug-failures] saved request diagnostic snapshot: {}",
                     escaped_text(&path)
                 );
             }
@@ -365,21 +344,20 @@ impl ResponsesObserver for CliModelOutput {
 impl RequestObserver for RequestOutput {
     fn observe(&mut self, event: ResponsePresentation) {
         match event {
-            #[cfg(debug_assertions)]
             ResponsePresentation::Request(value) => self.request(&value),
-            #[cfg(debug_assertions)]
+
             ResponsePresentation::Status(status) => {
                 if self.full && status >= 400 {
                     self.emit("HTTP error", json!(status));
                 }
             }
-            #[cfg(debug_assertions)]
+
             ResponsePresentation::ErrorBody(value) => {
                 if self.full {
                     self.emit("Provider error", value);
                 }
             }
-            #[cfg(debug_assertions)]
+
             ResponsePresentation::Omitted(reason) => {
                 if self.full {
                     self.emit("response omitted", json!(reason));
@@ -393,7 +371,10 @@ impl RequestObserver for RequestOutput {
                 self.reasoning_summary(&text, starts_part)
             }
             ResponsePresentation::Completed => self.completed(),
-            ResponsePresentation::Rejected { protocol_error } => self.rejected(protocol_error),
+            ResponsePresentation::Rejected {
+                protocol_error,
+                response,
+            } => self.rejected(protocol_error, &response),
             ResponsePresentation::Interrupted => {}
         }
     }
