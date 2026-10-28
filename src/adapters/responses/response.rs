@@ -18,6 +18,7 @@ use super::request::{ECHIDNA_TOOL_NAMESPACE, SubscriptionOpaqueReasoning};
 
 const PREVIOUS_RESPONSE_NOT_FOUND_CODE: &str = "previous_response_not_found";
 const SUBSCRIPTION_QUOTA_CODE: &str = "insufficient_quota";
+const CONTEXT_CAPACITY_CODE: &str = "context_length_exceeded";
 
 #[derive(Debug)]
 pub(super) struct DecodedResponsesEvent {
@@ -700,6 +701,14 @@ fn decode_provider_failure(
     response: Option<Value>,
     continuation_requested: bool,
 ) -> ModelProviderError {
+    let error = response
+        .as_ref()
+        .and_then(|value| value.get("error"))
+        .cloned()
+        .and_then(|value| serde_json::from_value::<ProviderErrorBody>(value).ok());
+    if let Some(failure) = response.as_ref().and_then(validated_capacity_failure) {
+        return failure;
+    }
     if profile.is_subscription() {
         return ModelProviderError::ProviderFailure {
             code: subscription_error_code(response.as_ref()),
@@ -709,12 +718,6 @@ fn decode_provider_failure(
             ),
         };
     }
-    let error = response
-        .as_ref()
-        .and_then(|value| value.get("error"))
-        .cloned()
-        .and_then(|value| serde_json::from_value::<ProviderErrorBody>(value).ok());
-
     let code = error.as_ref().and_then(|error| error.code.clone());
     if continuation_requested && code.as_deref() == Some(PREVIOUS_RESPONSE_NOT_FOUND_CODE) {
         return ModelProviderError::ContinuationRejected {
@@ -771,10 +774,55 @@ fn decoded_summary(summary: Option<ReasoningSummary>) -> DecodedResponsesEvent {
     decoded
 }
 
-pub(super) enum BoundedHttpErrorBody {
+pub(super) enum HttpErrorBody {
     Complete(String),
     Unreadable,
     Oversized,
+}
+
+pub(super) fn capacity_failure(code: Option<&str>) -> Option<ModelProviderError> {
+    (code == Some(CONTEXT_CAPACITY_CODE)).then(|| ModelProviderError::ContextCapacityExceeded {
+        code: CONTEXT_CAPACITY_CODE.to_owned(),
+    })
+}
+
+fn validated_capacity_failure(value: &Value) -> Option<ModelProviderError> {
+    // HTTP errors and response.failed require their nested error envelope;
+    // only the standalone SSE error event permits top-level error fields.
+    value.get("error")?.as_object()?;
+    let code = error_event::validated_code(value).ok()?;
+    capacity_failure(code)
+}
+
+pub(super) fn http_failure(
+    profile: ResponsesWireProfile,
+    status: u16,
+    continuation_requested: bool,
+    body: &HttpErrorBody,
+) -> ModelProviderError {
+    if let HttpErrorBody::Complete(text) = body {
+        if status == 400
+            && let Some(failure) = serde_json::from_str::<Value>(text)
+                .ok()
+                .as_ref()
+                .and_then(validated_capacity_failure)
+        {
+            return failure;
+        }
+        if !profile.is_subscription()
+            && continuation_requested
+            && continuation_rejected_http_body(text)
+        {
+            return ModelProviderError::ContinuationRejected {
+                code: PREVIOUS_RESPONSE_NOT_FOUND_CODE.to_owned(),
+            };
+        }
+    }
+    if profile.is_subscription() {
+        subscription_http_failure(profile, status, body)
+    } else {
+        ModelProviderError::HttpFailure { status }
+    }
 }
 
 /// Subscription admission failures expose only a fixed local classification,
@@ -782,12 +830,12 @@ pub(super) enum BoundedHttpErrorBody {
 pub(super) fn subscription_http_failure(
     profile: ResponsesWireProfile,
     status: u16,
-    body: &BoundedHttpErrorBody,
+    body: &HttpErrorBody,
 ) -> ModelProviderError {
     let (code, suffix) = match body {
-        BoundedHttpErrorBody::Unreadable => (None, "error body unavailable"),
-        BoundedHttpErrorBody::Oversized => (None, "error body exceeds 65536 bytes"),
-        BoundedHttpErrorBody::Complete(body) => {
+        HttpErrorBody::Unreadable => (None, "error body unavailable"),
+        HttpErrorBody::Oversized => (None, "error body exceeds 65536 bytes"),
+        HttpErrorBody::Complete(body) => {
             match serde_json::from_str::<SubscriptionHttpErrorEnvelope>(body) {
                 Err(_) => (None, "malformed error body"),
                 Ok(envelope) => match envelope.error.and_then(|error| error.code) {

@@ -76,6 +76,7 @@ pub struct VisionSessionService<'blobs, Blobs: ?Sized> {
     blobs: &'blobs Blobs,
     binding: RequestAuditBinding,
     request_budget: Option<std::sync::Arc<crate::app::model_request_budget::ModelRequestBudget>>,
+    context_budget: crate::domain::context::ContextBudgetPolicy,
 }
 
 impl<'blobs, Blobs> VisionSessionService<'blobs, Blobs>
@@ -88,7 +89,16 @@ where
             blobs,
             binding,
             request_budget: None,
+            context_budget: Default::default(),
         }
+    }
+
+    pub(crate) fn with_context_budget_policy(
+        mut self,
+        policy: crate::domain::context::ContextBudgetPolicy,
+    ) -> Self {
+        self.context_budget = policy;
+        self
     }
 
     pub(crate) fn with_request_budget(
@@ -225,6 +235,7 @@ where
         RecordError: std::fmt::Display,
     {
         let analysis = VisionAnalysisService::new(provider, self.blobs)
+            .with_context_budget_policy(self.context_budget)
             .with_request_budget(self.request_budget.clone())
             .analyze_image(prepared.analysis, audit_context, cancellation, |attempt| {
                 record_audit(attempt).map_err(|error| error.to_string())

@@ -27,7 +27,8 @@ pub(super) fn status(
             "rsi": rsi,
         }));
     };
-    let memory = LocalProjectMemory::with_scope(project, scope.clone());
+    let memory = LocalProjectMemory::with_scope(project, scope.clone())
+        .with_core_byte_limit(tools.window_policy().core_file_bytes());
     let core = memory
         .read(&MemoryPath::parse("core.md").expect("fixed Memory path"))
         .map_err(ChatContextRefreshError::from)?;

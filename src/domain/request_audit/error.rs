@@ -91,4 +91,8 @@ pub enum RequestAuditError {
     ComponentHashMismatch { position: u32 },
     #[error("RequestAudit reconstructed delivered input does not match its recorded semantic hash")]
     DeliveredInputHashMismatch,
+    #[error(
+        "RequestAudit reconstructed full logical input does not match its recorded semantic hash"
+    )]
+    FullLogicalInputHashMismatch,
 }

@@ -36,6 +36,7 @@ pub(crate) struct RetrievalMemoryDocument {
 pub(crate) struct LocalProjectMemory<'project> {
     project: &'project Project,
     scope: MemoryScope,
+    core_byte_limit: usize,
 }
 
 impl<'project> LocalProjectMemory<'project> {
@@ -44,7 +45,16 @@ impl<'project> LocalProjectMemory<'project> {
     }
 
     pub(crate) fn with_scope(project: &'project Project, scope: MemoryScope) -> Self {
-        Self { project, scope }
+        Self {
+            project,
+            scope,
+            core_byte_limit: MAX_CORE_MEMORY_BYTES,
+        }
+    }
+
+    pub(crate) fn with_core_byte_limit(mut self, limit: usize) -> Self {
+        self.core_byte_limit = limit;
+        self
     }
 
     pub(crate) fn read(
@@ -305,11 +315,11 @@ impl<'project> LocalProjectMemory<'project> {
         path: &MemoryPath,
         size_bytes: u64,
     ) -> Result<(), LocalProjectMemoryError> {
-        if path.as_str() == "core.md" && size_bytes > MAX_CORE_MEMORY_BYTES as u64 {
+        if path.as_str() == "core.md" && size_bytes > self.core_byte_limit as u64 {
             Err(LocalProjectMemoryError::CoreTooLarge {
                 path: self.document_path(path),
                 size_bytes,
-                max_bytes: MAX_CORE_MEMORY_BYTES,
+                max_bytes: self.core_byte_limit,
             })
         } else {
             Ok(())

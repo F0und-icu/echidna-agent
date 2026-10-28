@@ -376,6 +376,8 @@ mod continuation_regression {
                     &[],
                 )
                 .unwrap();
+                let capture = agent.capture_compaction_context(&provider, 1).unwrap();
+                let plan = crate::legacy_v5_fixture::sample_plan(&source, 4000);
                 let result = agent
                     .sample_compaction(
                         CompactionSampleInput {
@@ -389,6 +391,13 @@ mod continuation_regression {
                             request_budget: &budget,
                             cancellation: cancellation.clone(),
                             audit_context: &audit_context,
+                            graph: crate::app::agent_loop::CompactionGraphSample {
+                                capture: &capture,
+                                plan: &plan,
+                                plan_blob_id: crate::domain::artifacts::BlobId::new("a".repeat(64))
+                                    .unwrap(),
+                                node_id: "root",
+                            },
                         },
                         &mut |_| Ok(EventId::new("compaction-audit")),
                     )
@@ -546,6 +555,10 @@ mod continuation_regression {
     impl crate::app::agent_loop::ToolBatchStage<ObservedProvider, ToolRegistry>
         for BorrowedDiagnosis<'_>
     {
+        fn needs_current_context(&self) -> bool {
+            false
+        }
+
         fn apply<'call, 'provider: 'call, 'tools: 'call>(
             &'call mut self,
             agent: &'call mut AgentLoop<'provider, 'tools, ObservedProvider, ToolRegistry>,

@@ -120,7 +120,7 @@ fn configured_reasoning_effort_is_resolved_before_context_capture_and_rejects_ov
 }
 
 #[test]
-fn large_windows_use_bounded_headroom_without_a_hidden_input_cap() {
+fn large_windows_use_proportional_headroom_without_a_hidden_input_cap() {
     for (window, output, tools) in [
         (128, 16, 16),
         (32768, 4096, 4096),
@@ -128,9 +128,9 @@ fn large_windows_use_bounded_headroom_without_a_hidden_input_cap() {
         (65537, 8192, 8192),
         (131072, 16384, 16384),
         (272000, 34000, 34000),
-        (1_048_576, 65536, 131072),
-        (2_097_152, 65536, 131072),
-        (u32::MAX, 65536, 131072),
+        (1_048_576, 131072, 131072),
+        (2_097_152, 262144, 262144),
+        (u32::MAX, 536870911, 536870911),
     ] {
         let mut caps = capabilities();
         caps.context_window = window;

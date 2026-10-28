@@ -16,9 +16,10 @@ pub use manifest::{
     RequestAuditDelivery, RequestAuditDeliveryMode, RequestAuditDeliveryReason,
     RequestAuditManifest, RequestAuditModelInput, RequestAuditRunContext,
 };
+pub(crate) use reconstruction::VerifiedRequestAuditInput;
 pub(crate) use render::PublishedAuditBlob;
 
-/// The current additive RequestAuditManifest schema. Schema v1 lacks verified
-/// renderer/Tool-plan binding and schema v2 lacks the ContextDeliveryMap;
-/// both remain readable without guessing provenance.
-pub const REQUEST_AUDIT_MANIFEST_SCHEMA_VERSION: u16 = 3;
+/// Schema v4 records full logical components and their provenance map. Schema
+/// v1 lacks renderer/Tool-plan binding, v2 lacks the delivery map, and v3 lacks
+/// independently reconstructible logical components. All remain readable.
+pub const REQUEST_AUDIT_MANIFEST_SCHEMA_VERSION: u16 = 4;

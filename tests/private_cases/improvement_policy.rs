@@ -330,10 +330,20 @@ fn long_rsi_diagnostic_source_bounds_hundreds_of_steps_and_keeps_latest_signals(
         &current,
         &friction,
         8192,
+        256,
+        256,
     )
     .unwrap();
     let encoded = serde_json::to_vec(&source).unwrap();
     assert!(encoded.len() <= 8192);
+    assert_eq!(
+        source["operator_task_original_bytes"],
+        ("neutral goal ".len() * 5000) as u64
+    );
+    assert_eq!(source["operator_task_excerpted"], true);
+    assert!(source["previous_derived_handoff_original_bytes"].is_null());
+    assert!(source["previous_derived_handoff_excerpted"].is_null());
+    assert!(source["previous_derived_handoff_source"].is_null());
     assert_eq!(source["friction"], json!(friction));
     assert!(source["omitted_history_items"].as_u64().unwrap() > 100);
     assert!(
@@ -431,6 +441,8 @@ fn diagnostic_source_retains_command_semantics_before_clipping_large_values() {
                 &current,
                 &friction,
                 limit,
+                limit / 32,
+                limit / 32,
             )
             .unwrap();
             let encoded = serde_json::to_vec(&source).unwrap();

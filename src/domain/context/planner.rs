@@ -10,6 +10,8 @@ mod manifest;
 mod render;
 mod selection;
 
+pub(crate) use estimator::ESTIMATED_BYTES_PER_TOKEN;
+
 /// Estimates audit component bytes with the same deterministic conservative
 /// rule used by Context budgeting. Audit inspection does not own a second
 /// token formula.
@@ -31,9 +33,74 @@ pub(crate) fn tool_schema_token_cost(specs: &[ToolSpec]) -> Result<u32, ContextP
 use serde::Serialize;
 
 use super::canonical::{RequestHash, canonical_tool_schemas};
-use super::window_policy::ContextWindowPolicy;
+use super::window_policy::ContextBudgetPolicy;
 use crate::domain::model::{ModelCapabilities, ModelInputIR, ModelRequestRequirements};
 use crate::domain::tools::ToolSpec;
+
+/// Bounded numerical summary of the exact fragments supplied to one failed
+/// compilation. These are planner estimates, not Provider token counts.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ContextCapacityBreakdown {
+    pub(crate) tool_schema_tokens: u32,
+    pub(crate) fragment_budget: Option<u32>,
+    pub(crate) instructions: u64,
+    pub(crate) memory: u64,
+    pub(crate) summary: u64,
+    pub(crate) input: u64,
+    pub(crate) history: u64,
+    pub(crate) turn_updates: u64,
+    pub(crate) project_facts: u64,
+    pub(crate) required_fragments: u64,
+    pub(crate) images: usize,
+    pub(crate) opaque_items: usize,
+}
+
+impl ContextCapacityBreakdown {
+    fn from_fragments(fragments: &[ContextFragment], budget: ContextBudget, tools: u32) -> Self {
+        let mut result = Self {
+            tool_schema_tokens: tools,
+            fragment_budget: budget.input_token_limit().checked_sub(tools),
+            ..Self::default()
+        };
+        for fragment in fragments {
+            let estimate = u64::from(fragment.token_estimate());
+            let bucket = match fragment.source() {
+                ContextFragmentSource::BasePrompt
+                | ContextFragmentSource::PersonalPreferences
+                | ContextFragmentSource::ProjectPrompt
+                | ContextFragmentSource::ModePrompt
+                | ContextFragmentSource::DomainPrompt
+                | ContextFragmentSource::PhasePrompt => &mut result.instructions,
+                ContextFragmentSource::ProjectMemoryCore
+                | ContextFragmentSource::RetrievedMemory => &mut result.memory,
+                ContextFragmentSource::SessionSummary => &mut result.summary,
+                ContextFragmentSource::UserInput => &mut result.input,
+                ContextFragmentSource::RecentHistory => &mut result.history,
+                ContextFragmentSource::TurnLocalUpdates => &mut result.turn_updates,
+                ContextFragmentSource::ResearchWorldState
+                | ContextFragmentSource::ProjectSnapshot => &mut result.project_facts,
+            };
+            *bucket = bucket.saturating_add(estimate);
+            if fragment.priority() == ContextFragmentPriority::Required {
+                result.required_fragments = result.required_fragments.saturating_add(estimate);
+            }
+            if let ContextFragmentContent::ContentItems { items } = fragment.content() {
+                for item in items {
+                    match item {
+                        crate::domain::model::ContentItem::ImageArtifact { .. } => {
+                            result.images += 1
+                        }
+                        crate::domain::model::ContentItem::OpaqueContinuation { .. } => {
+                            result.opaque_items += 1
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        result
+    }
+}
 
 pub use cache_key::{
     CONTEXT_FRAGMENT_CACHE_KEY_VERSION, ContextFragmentCacheKey, ContextSourceFingerprint,
@@ -69,6 +136,7 @@ use selection::{
 pub struct ContextPlanner {
     versions: ContextPlannerVersions,
     renderer: PromptRendererIdentity,
+    budget_policy: ContextBudgetPolicy,
 }
 
 impl ContextPlanner {
@@ -76,42 +144,58 @@ impl ContextPlanner {
         Self::new(ContextPlannerVersions::new(
             "context-planner:1",
             "utf8-rendered-channel-budget:2",
-            "capacity-derived-content-and-headroom:3",
+            "recoverable-capacity-scoped-handoff:5",
         ))
+        .with_budget_policy(ContextBudgetPolicy::default())
     }
 
     pub fn new(versions: ContextPlannerVersions) -> Self {
         Self {
             versions,
             renderer: PromptRendererIdentity::generic_v1(),
+            budget_policy: ContextBudgetPolicy::default(),
         }
+    }
+
+    pub(crate) fn with_budget_policy(mut self, policy: ContextBudgetPolicy) -> Self {
+        self.budget_policy = policy;
+        // Policy participates in every existing fingerprint/cache key through
+        // the planner version snapshot; there is still one fingerprint owner.
+        self.versions.budget_policy_version = format!(
+            "recoverable-capacity-configured:5:{}",
+            serde_json::to_string(&policy).expect("fixed policy is serializable")
+        );
+        self
     }
 
     pub fn renderer_identity(&self) -> &PromptRendererIdentity {
         &self.renderer
     }
 
+    pub(crate) fn budget_policy(&self) -> ContextBudgetPolicy {
+        self.budget_policy
+    }
+
+    pub(crate) fn window_policy(
+        &self,
+        capabilities: &ModelCapabilities,
+    ) -> Result<super::window_policy::ContextWindowPolicy, ContextPlannerError> {
+        self.budget_policy.for_capabilities(capabilities)
+    }
+
     pub fn default_budget(
         &self,
         capabilities: &ModelCapabilities,
     ) -> Result<ContextBudget, ContextPlannerError> {
-        let policy = ContextWindowPolicy::for_window(capabilities.context_window);
-        let output_limit = capabilities.resolve_output_token_limit(None)?.unwrap_or(0);
-        // Chat, Compaction and scoped Vision share explicit-window defaults.
-        // A reservation does not create Provider output-limit support.
-        let budget = ContextBudget::new(
-            capabilities.context_window,
-            policy.output_reserve_tokens().max(output_limit),
-            policy.tool_loop_reserve_tokens(),
-        )?;
-        if output_limit > 0 && budget.input_token_limit() == 0 {
-            return Err(ContextPlannerError::InvalidBudget {
-                context_window_tokens: budget.context_window_tokens(),
-                reserved_output_tokens: budget.reserved_output_tokens(),
-                reserved_tool_loop_tokens: budget.reserved_tool_loop_tokens(),
-            });
-        }
-        Ok(budget)
+        Ok(self.window_policy(capabilities)?.budget())
+    }
+
+    pub(crate) fn tool_free_compaction_budget(
+        &self,
+        capabilities: &ModelCapabilities,
+    ) -> Result<ContextBudget, ContextPlannerError> {
+        let ordinary = self.default_budget(capabilities)?;
+        ordinary.without_tool_reserve()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -141,12 +225,66 @@ impl ContextPlanner {
 
     pub fn compile(
         &self,
+        fragments: Vec<ContextFragment>,
+        budget: ContextBudget,
+        capabilities: &ModelCapabilities,
+        tool_specs: Vec<ToolSpec>,
+        requirements: ModelRequestRequirements,
+        prior_manifest: Option<&FullLogicalManifest>,
+    ) -> Result<ContextPlan, ContextPlannerError> {
+        self.compile_inner(
+            fragments,
+            budget,
+            capabilities,
+            tool_specs,
+            requirements,
+            prior_manifest,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn compile_with_capacity_breakdown(
+        &self,
+        fragments: Vec<ContextFragment>,
+        budget: ContextBudget,
+        capabilities: &ModelCapabilities,
+        tool_specs: Vec<ToolSpec>,
+        requirements: ModelRequestRequirements,
+        prior_manifest: Option<&FullLogicalManifest>,
+        breakdown: &mut Option<ContextCapacityBreakdown>,
+    ) -> Result<ContextPlan, ContextPlannerError> {
+        *breakdown = None;
+        let result = self.compile_inner(
+            fragments,
+            budget,
+            capabilities,
+            tool_specs,
+            requirements,
+            prior_manifest,
+            Some(&mut *breakdown),
+        );
+        if !matches!(
+            &result,
+            Err(ContextPlannerError::FixedInputExceedsBudget { .. }
+                | ContextPlannerError::RequiredFragmentsExceedBudget { .. }
+                | ContextPlannerError::RenderedInputExceedsBudget { .. })
+        ) {
+            *breakdown = None;
+        }
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn compile_inner(
+        &self,
         mut fragments: Vec<ContextFragment>,
         budget: ContextBudget,
         capabilities: &ModelCapabilities,
         tool_specs: Vec<ToolSpec>,
         requirements: ModelRequestRequirements,
         prior_manifest: Option<&FullLogicalManifest>,
+        breakdown: Option<&mut Option<ContextCapacityBreakdown>>,
     ) -> Result<ContextPlan, ContextPlannerError> {
         if budget.context_window_tokens() > capabilities.context_window {
             return Err(ContextPlannerError::BudgetExceedsModelContext {
@@ -176,6 +314,13 @@ impl ContextPlanner {
         }
         ensure_unique_ids(&fragments)?;
         sort_full_order(&mut fragments);
+        if let Some(breakdown) = breakdown {
+            *breakdown = Some(ContextCapacityBreakdown::from_fragments(
+                &fragments,
+                budget,
+                fixed_input_tokens,
+            ));
+        }
         let decisions = select_decisions(&fragments, budget, fixed_input_tokens)?;
         let full_logical_manifest = FullLogicalManifest {
             entries: fragments

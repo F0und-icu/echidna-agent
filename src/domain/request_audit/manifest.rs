@@ -203,6 +203,7 @@ impl RequestAuditDelivery {
 /// One supplied actual Provider attempt before any Blob or Event I/O.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RequestAuditAttempt {
+    pub(super) sampling_step_id: Option<String>,
     pub(super) improvement_scope: Option<crate::domain::context::ProviderSessionRef>,
     pub(super) provider_session: Option<crate::domain::context::ProviderSessionRef>,
     pub(super) binding: RequestAuditBinding,
@@ -216,6 +217,7 @@ pub struct RequestAuditAttempt {
     pub(super) prompt_renderer: Option<PromptRendererIdentity>,
     pub(super) resolved_tool_plan_fingerprint: Option<ResolvedToolPlanFingerprint>,
     pub(super) context_delivery_map: Option<ContextDeliveryMap>,
+    pub(super) full_context_delivery_map: Option<ContextDeliveryMap>,
 }
 
 impl RequestAuditAttempt {
@@ -241,6 +243,7 @@ impl RequestAuditAttempt {
         delivered_audit_input.validate("delivered_input", "delivered_input.semantic_hash")?;
         delivery.validate_attempt_input_relationship(&full_logical_input, &delivered_input)?;
         Ok(Self {
+            sampling_step_id: None,
             binding: context.binding.clone(),
             improvement_scope: None,
             provider_session: None,
@@ -254,11 +257,16 @@ impl RequestAuditAttempt {
             prompt_renderer: None,
             resolved_tool_plan_fingerprint: None,
             context_delivery_map: None,
+            full_context_delivery_map: None,
         })
     }
 
     pub fn binding(&self) -> &RequestAuditBinding {
         &self.binding
+    }
+
+    pub(crate) fn sampling_step_id(&self) -> Option<&str> {
+        self.sampling_step_id.as_deref()
     }
 
     pub(crate) fn bind_improvement_scope(
@@ -286,6 +294,7 @@ impl RequestAuditAttempt {
         step: &SamplingStepPlan,
         delivery_map: ContextDeliveryMap,
     ) -> Result<Self, RequestAuditError> {
+        self.sampling_step_id = Some(step.step_id().to_owned());
         if self.full_logical_input.tool_specs != step.resolved_tool_plan().advertised_specs()
             || self.delivered_input.tool_specs != step.resolved_tool_plan().advertised_specs()
         {
@@ -308,6 +317,7 @@ impl RequestAuditAttempt {
         self.prompt_renderer = Some(step.prompt_renderer().clone());
         self.resolved_tool_plan_fingerprint = Some(step.resolved_tool_plan().fingerprint().clone());
         self.context_delivery_map = Some(delivery_map);
+        self.full_context_delivery_map = Some(step.context_plan().delivery_map().clone());
         self.provider_session = Some(step.turn_configuration().turn().provider_session.clone());
         Ok(self)
     }
@@ -342,6 +352,7 @@ impl RequestAuditAttempt {
         self.prompt_renderer = Some(context_plan.prompt_renderer().clone());
         self.resolved_tool_plan_fingerprint = Some(no_tool_plan.fingerprint().clone());
         self.context_delivery_map = Some(context_plan.delivery_map().clone());
+        self.full_context_delivery_map = Some(context_plan.delivery_map().clone());
         Ok(self)
     }
 }
@@ -399,7 +410,7 @@ pub struct RequestAuditCapabilityMapping {
 }
 
 impl RequestAuditCapabilityMapping {
-    pub(super) fn from_capabilities(
+    pub(crate) fn from_capabilities(
         capabilities: &ModelCapabilities,
     ) -> Result<Self, RequestAuditError> {
         Ok(Self {
@@ -447,6 +458,10 @@ pub struct RequestAuditManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) context_delivery_map: Option<ContextDeliveryMap>,
     pub(super) components: Vec<RequestAuditComponentReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) full_context_delivery_map: Option<ContextDeliveryMap>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) full_logical_components: Option<Vec<RequestAuditComponentReference>>,
 }
 
 impl RequestAuditManifest {
@@ -518,6 +533,14 @@ impl RequestAuditManifest {
         self.context_delivery_map.as_ref()
     }
 
+    pub(crate) fn full_context_delivery_map(&self) -> Option<&ContextDeliveryMap> {
+        match &self.full_context_delivery_map {
+            Some(map) => Some(map),
+            None if self.full_logical_input == self.delivered_input => self.context_delivery_map(),
+            None => None,
+        }
+    }
+
     pub fn components(&self) -> &[RequestAuditComponentReference] {
         &self.components
     }
@@ -528,7 +551,7 @@ impl RequestAuditManifest {
     pub fn validate(&self) -> Result<(), RequestAuditError> {
         if !matches!(
             self.schema_version,
-            1 | 2 | REQUEST_AUDIT_MANIFEST_SCHEMA_VERSION
+            1 | 2 | 3 | REQUEST_AUDIT_MANIFEST_SCHEMA_VERSION
         ) {
             return Err(RequestAuditError::UnsupportedManifestSchema {
                 schema_version: self.schema_version,
@@ -542,13 +565,17 @@ impl RequestAuditManifest {
         ) {
             (1, None, None, None) => {}
             (2, Some(renderer), Some(fingerprint), None)
-            | (REQUEST_AUDIT_MANIFEST_SCHEMA_VERSION, Some(renderer), Some(fingerprint), Some(_))
-                if renderer.is_generic_v1()
-                    && fingerprint.as_str().len() == 64
-                    && fingerprint
-                        .as_str()
-                        .bytes()
-                        .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')) => {}
+            | (
+                3 | REQUEST_AUDIT_MANIFEST_SCHEMA_VERSION,
+                Some(renderer),
+                Some(fingerprint),
+                Some(_),
+            ) if renderer.is_generic_v1()
+                && fingerprint.as_str().len() == 64
+                && fingerprint
+                    .as_str()
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')) => {}
             _ => return Err(RequestAuditError::SamplingIdentityMismatch),
         }
         if self.audit_event_id.as_str().trim().is_empty() {
@@ -585,6 +612,25 @@ impl RequestAuditManifest {
             &self.delivered_input,
         )?;
         validate_component_layout(&self.components)?;
+        match (
+            self.schema_version,
+            &self.full_logical_components,
+            &self.full_context_delivery_map,
+        ) {
+            (REQUEST_AUDIT_MANIFEST_SCHEMA_VERSION, Some(components), Some(map)) => {
+                validate_component_layout(components)?;
+                map.validate_intrinsic().map_err(|error| {
+                    RequestAuditError::ContextDeliveryMap {
+                        message: error.to_string(),
+                    }
+                })?;
+                if !map.renderer().is_generic_v1() {
+                    return Err(RequestAuditError::SamplingIdentityMismatch);
+                }
+            }
+            (1..=3, None, None) => {}
+            _ => return Err(RequestAuditError::SamplingIdentityMismatch),
+        }
         if let Some(map) = &self.context_delivery_map {
             map.renderer()
                 .is_generic_v1()

@@ -4,9 +4,34 @@ use super::{ChatError, DurableChatSession, unresolved_receipted_tool_call};
 use crate::app::agent_loop::{AgentLoop, AgentLoopError};
 use crate::app::model_request_budget::ModelRequestBudget;
 use crate::app::model_streaming::ModelStreamingError;
-use crate::domain::session::{SessionError, SessionState};
+use crate::domain::session::SessionState;
 use crate::ports::model::{ModelProvider, ModelProviderError};
 use crate::ports::tool::ToolExecutor;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum RecoveryState {
+    Ready,
+    ResumeRequired { capacity: bool },
+    ContextChangeRequired,
+}
+
+pub(super) fn is_capacity_error(error: &AgentLoopError) -> bool {
+    use crate::app::context_compilation::ContextCompilationError;
+    use crate::domain::context::ContextPlannerError;
+    match error {
+        AgentLoopError::Model(ModelStreamingError::Provider(
+            ModelProviderError::ContextCapacityExceeded { .. },
+        )) => true,
+        AgentLoopError::ContextPlanner(error)
+        | AgentLoopError::ContextCompilation(ContextCompilationError::Planner(error)) => matches!(
+            error,
+            ContextPlannerError::FixedInputExceedsBudget { .. }
+                | ContextPlannerError::RequiredFragmentsExceedBudget { .. }
+                | ContextPlannerError::RenderedInputExceedsBudget { .. }
+        ),
+        _ => false,
+    }
+}
 
 pub(super) fn report_budget(budget: &ModelRequestBudget) {
     let counts = budget.counts();
@@ -41,8 +66,8 @@ pub(super) fn report_stop(error: &AgentLoopError, budget: &ModelRequestBudget) {
     );
 }
 
-pub(super) fn exit_status(stopped: bool) -> Result<(), ChatError> {
-    if stopped {
+pub(super) fn exit_status(state: RecoveryState) -> Result<(), ChatError> {
+    if state != RecoveryState::Ready {
         Err(ChatError::UnresolvedTurnStop)
     } else {
         Ok(())
@@ -58,9 +83,7 @@ where
     Tools: ToolExecutor + ?Sized,
 {
     state.ensure_no_unknown_improvement()?;
-    let history = state
-        .normalized_history_items()
-        .map_err(SessionError::from)?;
+    let history = state.compaction_source_history()?;
     if agent.history().items() != history {
         return Err(ChatError::RuntimeHistoryMismatch);
     }

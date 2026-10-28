@@ -272,7 +272,7 @@ fn generic_image_compacts_without_target_and_resumes_deleted_definition() {
     let session = session_id(root.path());
     let state = reduced_session(&project, &session);
     let summary = serde_json::to_value(state.latest_compaction().unwrap().summary()).unwrap();
-    assert_eq!(summary["schema_version"], 5);
+    assert_eq!(summary["schema_version"], 6);
     assert!(summary["evidence_spine"].is_null());
     assert_eq!(
         summary["task_references"]["definition"]["agent_id"],
@@ -351,7 +351,7 @@ fn generic_image_compacts_without_target_and_resumes_deleted_definition() {
     assert!(
         serde_json::to_string(&wire)
             .unwrap()
-            .contains("derived_session_summary_v5")
+            .contains("derived_session_summary_v6")
     );
     let resumed_state = reduced_session(&project, &session);
     assert_eq!(
@@ -575,22 +575,29 @@ fn immediate_reload_compaction_budgets_the_new_instruction_binding() {
     )
     .unwrap();
     fs::write(revision.join("persona.md"), "RELOADED WRITER. ".repeat(200)).unwrap();
+    let handoff = json!({
+        "concise_progress": "Completed the first two document sections.",
+        "unresolved_questions": [],
+        "next_step_notes": ["Continue under the revised instructions."]
+    });
     let server = spawn_responses_server(vec![
         (200, text_response(&"A".repeat(8_000), "before-reload-one")),
         (200, text_response(&"B".repeat(4_000), "before-reload-two")),
-        (
-            200,
-            compaction_summary_response(
-                "Completed the first two document sections.",
-                "reload-summary",
-            ),
-        ),
+        (200, text_response(&handoff.to_string(), "reload-summary")),
         (
             200,
             text_response("Continue with the new definition.", "after-reload"),
         ),
     ]);
     let config = write_context_window_config(root.path(), &server.base_url, 8192);
+    // This fixture tests retention under the revised definition rather than
+    // the default 50% soft target, which legitimately discards older prose.
+    let configured = fs::read_to_string(&config).unwrap();
+    fs::write(
+        &config,
+        format!("{configured}\n[runtime.context_budget]\ntarget_bps = 8000\n"),
+    )
+    .unwrap();
     let input = format!(
         "Draft the first part.\nDraft the second part.\n/agent reload {}\n/compact\nContinue.\n/exit\n",
         revision.join("agent.toml").display()
@@ -624,6 +631,17 @@ fn immediate_reload_compaction_budgets_the_new_instruction_binding() {
     let state = reduced_session(&project, &session_id(root.path()));
     let compaction = state.latest_compaction().unwrap();
     let summary = serde_json::to_value(compaction.summary()).unwrap();
+    assert_eq!(summary["schema_version"], 6);
+    assert_eq!(summary["byte_limit"], 492);
+    assert!(serde_json::to_vec(&summary["narrative"]).unwrap().len() <= 492);
+    assert_eq!(
+        summary["narrative"]["concise_progress"],
+        handoff["concise_progress"]
+    );
+    assert_eq!(
+        summary["narrative"]["next_step_notes"],
+        handoff["next_step_notes"]
+    );
     assert_eq!(
         summary["task_references"]["definition"]["definition_digest"],
         state

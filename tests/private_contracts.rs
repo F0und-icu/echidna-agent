@@ -40,6 +40,18 @@ mod tool_catalog;
 mod compaction_continuity;
 #[path = "private_cases/compaction_replay.rs"]
 mod compaction_replay;
+#[path = "private_cases/context2_budgets.rs"]
+mod context2_budgets;
+#[path = "private_cases/context2_domain.rs"]
+mod context2_domain;
+#[path = "private_cases/delivery_failure.rs"]
+mod delivery_failure;
+#[path = "private_cases/legacy_v5_fixture.rs"]
+mod legacy_v5_fixture;
+#[path = "private_cases/model_delivery.rs"]
+mod model_delivery;
+#[path = "private_cases/request_audit_full.rs"]
+mod request_audit_full;
 
 #[path = "private_cases/improvement_policy.rs"]
 mod improvement_policy;

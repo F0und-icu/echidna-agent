@@ -5,6 +5,7 @@ use serde::Serialize;
 use crate::domain::artifacts::BlobId;
 use crate::domain::canonical_json::canonical_json;
 use crate::domain::events::EventId;
+use crate::domain::model::ModelInputIR;
 
 use super::manifest::{
     RequestAuditAttempt, RequestAuditCapabilityMapping, RequestAuditManifest,
@@ -18,60 +19,75 @@ use super::{
 pub(crate) struct RenderedRequestAudit {
     attempt: RequestAuditAttempt,
     components: Vec<RenderedRequestAuditComponent>,
+    full_components: Vec<RenderedRequestAuditComponent>,
 }
 
 impl RequestAuditAttempt {
     pub(crate) fn render(&self) -> Result<RenderedRequestAudit, RequestAuditError> {
-        let mut components = vec![RenderedRequestAuditComponent::new(
-            0,
-            RequestAuditComponentIdentity::instructions(),
-            RequestAuditComponentSource::RenderedInstructions,
-            self.delivered_input.instructions.as_bytes().to_vec(),
-            &self.delivered_input.instructions,
-        )?];
-        let mut position = 1_u32;
-        for (index, item) in self.delivered_input.content_items.iter().enumerate() {
-            components.push(RenderedRequestAuditComponent::new(
-                position,
-                RequestAuditComponentIdentity::content_item(index)?,
-                RequestAuditComponentSource::RenderedContentItem,
-                canonical_bytes(item)?,
-                item,
-            )?);
-            position = position
-                .checked_add(1)
-                .ok_or(RequestAuditError::ComponentPositionOverflow)?;
-        }
-        for (index, spec) in self.delivered_input.tool_specs.iter().enumerate() {
-            components.push(RenderedRequestAuditComponent::new(
-                position,
-                RequestAuditComponentIdentity::tool_spec(index)?,
-                RequestAuditComponentSource::RenderedToolSpec,
-                canonical_bytes(spec)?,
-                spec,
-            )?);
-            position = position
-                .checked_add(1)
-                .ok_or(RequestAuditError::ComponentPositionOverflow)?;
-        }
-        components.push(RenderedRequestAuditComponent::new(
-            position,
-            RequestAuditComponentIdentity::requirements(),
-            RequestAuditComponentSource::RenderedRequestRequirements,
-            canonical_bytes(&self.delivered_input.requirements)?,
-            &self.delivered_input.requirements,
-        )?);
+        let components = render_input(&self.delivered_input)?;
+        let full_components = if self.full_context_delivery_map.is_some() {
+            render_input(&self.full_logical_input)?
+        } else {
+            Vec::new()
+        };
         Ok(RenderedRequestAudit {
             attempt: self.clone(),
             components,
+            full_components,
         })
     }
+}
+
+fn render_input(
+    input: &ModelInputIR,
+) -> Result<Vec<RenderedRequestAuditComponent>, RequestAuditError> {
+    let mut components = vec![RenderedRequestAuditComponent::new(
+        0,
+        RequestAuditComponentIdentity::instructions(),
+        RequestAuditComponentSource::RenderedInstructions,
+        input.instructions.as_bytes().to_vec(),
+        &input.instructions,
+    )?];
+    let mut position = 1_u32;
+    for (index, item) in input.content_items.iter().enumerate() {
+        components.push(RenderedRequestAuditComponent::new(
+            position,
+            RequestAuditComponentIdentity::content_item(index)?,
+            RequestAuditComponentSource::RenderedContentItem,
+            canonical_bytes(item)?,
+            item,
+        )?);
+        position = position
+            .checked_add(1)
+            .ok_or(RequestAuditError::ComponentPositionOverflow)?;
+    }
+    for (index, spec) in input.tool_specs.iter().enumerate() {
+        components.push(RenderedRequestAuditComponent::new(
+            position,
+            RequestAuditComponentIdentity::tool_spec(index)?,
+            RequestAuditComponentSource::RenderedToolSpec,
+            canonical_bytes(spec)?,
+            spec,
+        )?);
+        position = position
+            .checked_add(1)
+            .ok_or(RequestAuditError::ComponentPositionOverflow)?;
+    }
+    components.push(RenderedRequestAuditComponent::new(
+        position,
+        RequestAuditComponentIdentity::requirements(),
+        RequestAuditComponentSource::RenderedRequestRequirements,
+        canonical_bytes(&input.requirements)?,
+        &input.requirements,
+    )?);
+    Ok(components)
 }
 
 impl RenderedRequestAudit {
     pub(crate) fn component_bytes(&self) -> impl Iterator<Item = &[u8]> {
         self.components
             .iter()
+            .chain(&self.full_components)
             .map(|component| component.bytes.as_slice())
     }
 
@@ -81,25 +97,40 @@ impl RenderedRequestAudit {
         blobs: impl IntoIterator<Item = PublishedAuditBlob>,
     ) -> Result<RequestAuditManifest, RequestAuditError> {
         let blobs = blobs.into_iter().collect::<Vec<_>>();
-        if blobs.len() != self.components.len() {
+        let expected = self.components.len() + self.full_components.len();
+        if blobs.len() != expected {
             return Err(RequestAuditError::PublishedBlobCountMismatch {
-                expected: self.components.len(),
+                expected,
                 received: blobs.len(),
             });
         }
-        let components = self
-            .components
-            .into_iter()
-            .zip(blobs)
-            .map(|(rendered, blob)| RequestAuditComponentReference {
+        let mut blobs = blobs.into_iter();
+        let mut materialize = |rendered: RenderedRequestAuditComponent| {
+            let blob = blobs.next().expect("published Blob count checked");
+            RequestAuditComponentReference {
                 position: rendered.position,
                 identity: rendered.identity,
                 source: rendered.source,
                 blob_id: blob.blob_id,
                 size_bytes: blob.size_bytes,
                 semantic_hash: rendered.semantic_hash,
-            })
-            .collect();
+            }
+        };
+        let components = self
+            .components
+            .into_iter()
+            .map(&mut materialize)
+            .collect::<Vec<_>>();
+        let full_logical_components = if self.full_components.is_empty() {
+            None
+        } else {
+            Some(
+                self.full_components
+                    .into_iter()
+                    .map(&mut materialize)
+                    .collect(),
+            )
+        };
         let schema_version = if self.attempt.prompt_renderer.is_some()
             && self.attempt.resolved_tool_plan_fingerprint.is_some()
             && self.attempt.context_delivery_map.is_some()
@@ -133,12 +164,15 @@ impl RenderedRequestAudit {
             resolved_tool_plan_fingerprint: self.attempt.resolved_tool_plan_fingerprint,
             context_delivery_map: self.attempt.context_delivery_map,
             components,
+            full_context_delivery_map: self.attempt.full_context_delivery_map,
+            full_logical_components,
         };
         manifest.validate()?;
         Ok(manifest)
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct PublishedAuditBlob {
     pub(crate) blob_id: BlobId,
     pub(crate) size_bytes: u64,

@@ -86,6 +86,7 @@ async fn execute_read(
     scope: &MemoryScope,
     plan: ToolExecutionPlan,
     core_byte_limit: usize,
+    core_file_limit: usize,
 ) -> ToolExecutionOutcome {
     let arguments: MemoryReadArgs =
         match decode_arguments("memory_read", plan.call.arguments.clone()) {
@@ -123,7 +124,8 @@ async fn execute_read(
         Ok(states) => states,
         Err(error) => return memory_failure(plan, "memory_state_invalid", error),
     };
-    let memory = LocalProjectMemory::with_scope(&project, scope.clone());
+    let memory = LocalProjectMemory::with_scope(&project, scope.clone())
+        .with_core_byte_limit(core_file_limit);
     let document = match memory.read(&path) {
         Ok(document) => document,
         Err(error) => return memory_failure(plan, "memory_read_failed", error),
@@ -173,6 +175,7 @@ async fn execute_write(
     scope: &MemoryScope,
     plan: ToolExecutionPlan,
     core_byte_limit: usize,
+    core_file_limit: usize,
 ) -> ToolExecutionOutcome {
     let arguments: MemoryWriteArgs =
         match decode_arguments("memory_write", plan.call.arguments.clone()) {
@@ -219,7 +222,8 @@ async fn execute_write(
     if research_state.has_event_id(&event_id) {
         return duplicate_event(plan, event_id);
     }
-    let memory = LocalProjectMemory::with_scope(&project, scope.clone());
+    let memory = LocalProjectMemory::with_scope(&project, scope.clone())
+        .with_core_byte_limit(core_file_limit);
     if let Err(error) = memory.validate_content(&path, &arguments.content) {
         return memory_failure(plan, "memory_content_too_large", error);
     }
@@ -674,6 +678,7 @@ impl Tool {
                         .expect("Memory Tool is registered only with a scope"),
                     plan,
                     registry.window_policy.core_memory_bytes(),
+                    registry.window_policy.core_file_bytes(),
                 )
                 .await
             }
@@ -686,6 +691,7 @@ impl Tool {
                         .expect("Memory Tool is registered only with a scope"),
                     plan,
                     registry.window_policy.core_memory_bytes(),
+                    registry.window_policy.core_file_bytes(),
                 )
                 .await
             }

@@ -182,6 +182,7 @@ pub(super) async fn prepare_primary_context(
             .map(|vision| vision.capabilities().semantic_hash()),
     };
     let service = VisionSessionService::new(&session.artifacts, binding.clone())
+        .with_context_budget_policy(composition.runtime().context_budget)
         .with_request_budget(request_budget);
 
     match decision.route {

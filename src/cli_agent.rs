@@ -172,12 +172,12 @@ pub(crate) fn run(config: Option<&Path>, command: AgentCommand) -> Result<(), Cl
                 .rsi()
                 .is_some_and(|rsi| rsi.improvement),
         )
-        .with_context_window(
+        .with_window_policy(
             composition
-                .agent_profile()
-                .primary()
-                .capabilities()
-                .context_window,
+                .runtime()
+                .context_budget
+                .for_capabilities(composition.agent_profile().primary().capabilities())
+                .map_err(definition_error)?,
         );
     let preview = AgentLoop::with_primary_context(
         composition.primary_provider(),
@@ -190,7 +190,8 @@ pub(crate) fn run(config: Option<&Path>, command: AgentCommand) -> Result<(), Cl
             1,
         ),
     )
-    .map_err(definition_error)?;
+    .map_err(definition_error)?
+    .with_context_budget_policy(composition.runtime().context_budget);
     let plan = preview
         .preflight_definition(&prompt, &[], None)
         .map_err(definition_error)?;

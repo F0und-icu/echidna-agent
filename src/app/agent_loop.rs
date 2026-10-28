@@ -3,7 +3,10 @@
 mod argument_correction;
 mod compaction;
 mod compaction_sample;
-pub(crate) use compaction_sample::CompactionSampleInput;
+pub(crate) use compaction_sample::{
+    CompactionGraphSample, CompactionSampleInput, compile_captured_compaction_source,
+    minimum_compaction_handoff_bytes,
+};
 mod context_state;
 mod definition;
 mod execution;
@@ -15,10 +18,12 @@ mod output_capture;
 mod recovery;
 mod request_audit;
 
-pub(crate) use compaction::ToolBatchContext;
+pub(crate) use compaction::{CompactionFit, ToolBatchContext};
 pub(crate) use context_state::CurrentContextState;
 
 pub(crate) trait ToolBatchStage<Provider: ModelProvider + ?Sized, Tools: ToolExecutor + ?Sized> {
+    fn needs_current_context(&self) -> bool;
+
     fn apply<'call, 'provider: 'call, 'tools: 'call>(
         &'call mut self,
         agent: &'call mut AgentLoop<'provider, 'tools, Provider, Tools>,
@@ -101,19 +106,10 @@ impl InitialImagePrimaryContext {
         primary_profile: ModelProfile,
         primary_capability_hash: String,
     ) -> Result<Self, AgentLoopError> {
-        let mut artifact_refs = vec![source_artifact_id];
-        if !artifact_refs.contains(&delivery_artifact_id) {
-            artifact_refs.push(delivery_artifact_id.clone());
-        }
-        let provenance = ContextProvenance::new(
-            ContextSlot::TurnUpdates,
-            ContextOrigin::ArtifactProjection,
-            SemanticClass::AuthoritativeReference,
-            AuthorityLevel::FactReference,
-            RetentionClass::Recent,
-            FreshnessIdentity::new(delivery_artifact_id.as_str())?
-                .with_producer_version("vision-route:1"),
-            ContextReferences::new(Vec::new(), artifact_refs, Vec::new(), vec![route_event_id])?,
+        let provenance = crate::domain::vision::VisionRouteRecord::primary_direct_provenance(
+            source_artifact_id,
+            delivery_artifact_id.clone(),
+            route_event_id,
         )?;
         Ok(Self {
             content_item: ContentItem::ImageArtifact {
@@ -137,27 +133,7 @@ impl InitialImagePrimaryContext {
                 message: error.to_string(),
             }
         })?;
-        let mut artifact_refs = vec![observation.source_artifact_id.clone()];
-        artifact_refs.extend(observation.derived_artifact_ids.iter().cloned());
-        let provenance = ContextProvenance::new(
-            ContextSlot::TurnUpdates,
-            ContextOrigin::ModelOutput,
-            SemanticClass::ModelObservation,
-            AuthorityLevel::ModelObservation,
-            RetentionClass::Recent,
-            FreshnessIdentity::new(&observation.task_hash)?
-                .with_producer_version("vision-observation:1"),
-            ContextReferences::new(
-                Vec::new(),
-                artifact_refs,
-                Vec::new(),
-                vec![
-                    observation.route_event_id.clone(),
-                    observation.request_audit_event_id.clone(),
-                    observation_event_id,
-                ],
-            )?,
-        )?;
+        let provenance = observation.primary_context_provenance(observation_event_id)?;
         Ok(Self {
             content_item: ContentItem::Text {
                 role: MessageRole::User,
@@ -222,6 +198,16 @@ pub(crate) enum ChatDurabilityCheckpoint<'a> {
     },
     ArgumentCorrectionReset,
     History(&'a [ContentItem]),
+    OperatorInputAccepted {
+        items: &'a [ContentItem],
+        provenance: &'a mut BTreeMap<usize, ContextProvenance>,
+    },
+    OperatorTurnCompleted,
+    ModelDeliveryCommitted {
+        step_id: &'a str,
+        previous_step_id: Option<&'a str>,
+        provider_session: &'a crate::domain::context::ProviderSessionRef,
+    },
     ExecutionReceipt(&'a ToolExecutionOutcome),
     Subcommand(&'a crate::domain::tools::SubcommandCheckpoint),
 }
@@ -298,6 +284,7 @@ impl StreamingStages<'_> {
 
 /// One accepted Provider delivery; its required provenance travels atomically.
 struct CommittedPrimaryDelivery {
+    step_id: String,
     continuation: Option<CommittedContinuation>,
     context_manifest: FullLogicalManifest,
     input: ModelInputIR,
@@ -338,6 +325,7 @@ pub struct AgentLoop<'provider, 'tools, Provider: ?Sized, Tools: ?Sized> {
     active_tool_exposure_plan: ToolExposurePlan,
     committed_delivery: Option<CommittedPrimaryDelivery>,
     history_provenance: BTreeMap<usize, ContextProvenance>,
+    protected_input: crate::domain::session::ProtectedOperatorContext,
     bound_session_stream: Option<StreamId>,
     applied_compaction: Option<AppliedCompaction>,
 }
@@ -429,6 +417,7 @@ where
             active_tool_exposure_plan,
             committed_delivery: None,
             history_provenance: BTreeMap::new(),
+            protected_input: Default::default(),
             bound_session_stream: None,
             applied_compaction: None,
         })
@@ -436,6 +425,22 @@ where
 
     pub fn history(&self) -> &ConversationHistory {
         &self.history
+    }
+
+    pub(crate) fn with_context_budget_policy(
+        mut self,
+        policy: crate::domain::context::ContextBudgetPolicy,
+    ) -> Self {
+        self.context_planner = ContextPlanner::current().with_budget_policy(policy);
+        self
+    }
+
+    pub(crate) fn set_protected_context(
+        &mut self,
+        protected: crate::domain::session::ProtectedOperatorContext,
+    ) {
+        self.history_provenance = protected.retained_provenance.clone();
+        self.protected_input = protected;
     }
 
     /// Replaces volatile runtime History from a strictly replayed Session
@@ -474,7 +479,7 @@ where
                 .ok_or(AgentLoopConfigurationError::CompactionValidationContextRequired)?;
             compaction.validate_references(validation)?;
         }
-        let normalized_items = session.normalized_history_items()?;
+        let normalized_items = session.compaction_source_history()?;
         let history = ConversationHistory::from_complete_content_items(&normalized_items)?;
         let applied_compaction = session
             .latest_compaction()
@@ -482,7 +487,8 @@ where
             .transpose()?;
         provider_session.reset(BaselineInvalidationReason::SessionResumed);
         self.history = history;
-        self.history_provenance.clear();
+        self.protected_input = session.current_protected_operator_context()?;
+        self.history_provenance = self.protected_input.retained_provenance.clone();
         self.provider_session = provider_session;
         self.consecutive_argument_corrections = 0;
         self.bound_session_stream = Some(stream_id);
@@ -843,11 +849,22 @@ where
             ))?;
         }
         let original_input = self.history.items()[turn_history_start..].to_vec();
-        let input_provenance: BTreeMap<_, _> = self
+        let mut input_provenance: BTreeMap<_, _> = self
             .history_provenance
             .range(turn_history_start..)
             .map(|(index, provenance)| (index - turn_history_start, provenance.clone()))
             .collect();
+        if let Some(stage) = durability.as_deref_mut() {
+            stage(ChatDurabilityCheckpoint::OperatorInputAccepted {
+                items: &original_input,
+                provenance: &mut input_provenance,
+            })?;
+            self.history_provenance.extend(
+                input_provenance
+                    .iter()
+                    .map(|(index, provenance)| (turn_history_start + index, provenance.clone())),
+            );
+        }
         let mut detached_input = false;
         let capabilities = self.provider.capabilities();
         let context_budget = self.context_planner.default_budget(&capabilities)?;
@@ -903,6 +920,7 @@ where
                 capabilities.context_window,
                 tool_specs,
             )?;
+            let protected = self.protected_without_active(&input_provenance);
             let (plan, cache_summary) =
                 context_state::compile_context(context_state::ContextCompilationInput {
                     prompt_composition: &self.prompt_composition,
@@ -912,6 +930,7 @@ where
                     session_summary: self.session_summary.as_ref(),
                     history: self.history.items(),
                     history_provenance: &self.history_provenance,
+                    protected_input: Some((&protected.0, &protected.1)),
                     turn_history_start,
                     detached_input: detached_input
                         .then_some((original_input.as_slice(), &input_provenance)),
@@ -925,6 +944,7 @@ where
                         .as_ref()
                         .map(|state| &state.context_manifest),
                     correction_feedback: &correction_feedback,
+                    capacity_breakdown: None,
                 })?;
             let sampling_step = SamplingStepPlan::new(
                 format!("{}:step:{request_index}", turn_id),
@@ -1248,7 +1268,12 @@ where
             delivery_map
                 .append_model_output_items(sampling_step.step_id(), &server_output_items)?;
             delivery_map.validate_against(&delivery_input)?;
+            let previous_step_id = self
+                .committed_delivery
+                .as_ref()
+                .map(|delivery| delivery.step_id.clone());
             self.committed_delivery = Some(CommittedPrimaryDelivery {
+                step_id: sampling_step.step_id().to_owned(),
                 continuation: completion.response_id().cloned().map(|response_id| {
                     CommittedContinuation {
                         session: self.provider_session.reference().clone(),
@@ -1280,8 +1305,19 @@ where
                     usage,
                 })?;
             }
+            if let Some(stage) = durability.as_deref_mut() {
+                stage(ChatDurabilityCheckpoint::ModelDeliveryCommitted {
+                    step_id: sampling_step.step_id(),
+                    previous_step_id: previous_step_id.as_deref(),
+                    provider_session: self.provider_session.reference(),
+                })?;
+            }
 
             if tool_calls.is_empty() {
+                self.history.ensure_all_tool_calls_paired()?;
+                if let Some(stage) = durability.as_deref_mut() {
+                    stage(ChatDurabilityCheckpoint::OperatorTurnCompleted)?;
+                }
                 return Ok(AgentTurnOutcome::Completed {
                     assistant_text,
                     model_requests: request_budget.counts().primary,
@@ -1334,12 +1370,9 @@ where
                 });
             }
             if !cancellation.is_cancelled()
-                && request_budget
-                    .remaining()
-                    .is_none_or(|remaining| remaining > 0)
                 && let Some(stage) = tool_batch.as_deref_mut()
             {
-                if self.delivery_needs_compaction()?
+                if (stage.needs_current_context() || self.delivery_needs_compaction()?)
                     && let Some(refresh) = context_refresh.as_deref_mut()
                 {
                     self.refresh_current_context(refresh()?)?;

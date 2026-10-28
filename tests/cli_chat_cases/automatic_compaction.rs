@@ -17,6 +17,11 @@ fn config(root: &std::path::Path, url: &str, enabled: Option<bool>) -> std::path
     path
 }
 
+fn pressure_policy(path: &std::path::Path, pressure_bps: u16, target_bps: u16) {
+    let original = fs::read_to_string(path).unwrap();
+    fs::write(path, format!("{original}\n[runtime.context_budget]\npressure_bps = {pressure_bps}\ntarget_bps = {target_bps}\n")).unwrap();
+}
+
 fn definition(
     root: &std::path::Path,
     passive_rsi: bool,
@@ -78,7 +83,7 @@ fn reasoning_answer(text: &str) -> String {
     ].iter().map(|event|format!("data: {event}\n\n")).collect()
 }
 
-fn assert_handoff_request(request: &Value) {
+fn assert_handoff_request(request: &Value) -> Value {
     assert!(
         request.get("tools").is_none(),
         "summary cannot advertise tools"
@@ -90,10 +95,27 @@ fn assert_handoff_request(request: &Value) {
             .unwrap()
             .contains("continuation handoff")
     );
-    assert!(json_contains_text(
-        &request["input"],
-        "active_normalized_history"
-    ));
+    fn source(value: &Value) -> Option<Value> {
+        match value {
+            Value::String(text) => serde_json::from_str::<Value>(text)
+                .ok()
+                .filter(|parsed| parsed.get("source_plan_hash").is_some()),
+            Value::Array(values) => values.iter().find_map(source),
+            Value::Object(values) => values.values().find_map(source),
+            _ => None,
+        }
+    }
+    let source = source(&request["input"]).expect("handoff contains a source-plan node");
+    assert_eq!(source["schema_version"], 1);
+    assert_eq!(source["source_plan_hash"].as_str().unwrap().len(), 64);
+    assert!(!source["node_id"].as_str().unwrap().is_empty());
+    assert!(source["protected_exact"].is_array());
+    match source["input"]["kind"].as_str() {
+        Some("source") => assert!(!source["input"]["excerpts"].as_array().unwrap().is_empty()),
+        Some("merge") => assert!(source["input"]["children"].as_array().unwrap().len() >= 2),
+        _ => panic!("unknown compaction source node"),
+    }
+    source
 }
 
 #[test]
@@ -157,6 +179,9 @@ fn generic_auto_compaction_keeps_scoped_memory_persona_rsi_and_one_mcp_catalog()
             ),
         )
         .unwrap();
+        // Explicitly make this finite fixture cross pressure in a 1M window;
+        // default 80% remains covered by the capacity-policy tests.
+        pressure_policy(&config, 1000, 500);
         let output = run_chat(
             root.path(),
             &config,
@@ -247,7 +272,7 @@ fn generic_auto_compaction_keeps_scoped_memory_persona_rsi_and_one_mcp_catalog()
             "only the actual local memory operation ran"
         );
         let summary = serde_json::to_value(state.latest_compaction().unwrap().summary()).unwrap();
-        assert_eq!(summary["schema_version"], 5);
+        assert_eq!(summary["schema_version"], 6);
         assert_eq!(
             summary["narrative"]["concise_progress"],
             "The scoped memory was saved and clerk notes completed."
@@ -374,7 +399,7 @@ fn long_tool_loop_compacts_settled_batches_without_replaying_or_losing_task() {
                 "data: {}\n\n",
                 json!({
                 "type":"response.output_item.done", "output_index":0,
-                "item":{"type":"reasoning", "content":[{"type":"reasoning_text", "text":format!("batch-{index}-reasoning ").repeat(20_000)}]} })
+                "item":{"type":"reasoning", "content":[{"type":"reasoning_text", "text":format!("batch-{index}-reasoning ").repeat(if index == 0 { 12_000 } else { 20_000 })}]} })
             );
             response.push_str(&m4_long_flow_tool_response(
                 &format!("batch-{index}"),
@@ -383,7 +408,9 @@ fn long_tool_loop_compacts_settled_batches_without_replaying_or_losing_task() {
                 &format!("batch-response-{index}"),
             ));
             responses.push((200, response));
-            if enabled {
+            // First batch stays below this fixture's pressure threshold;
+            // later batches cross it with older work available for reduction.
+            if enabled && index > 0 {
                 handoff_indices.push(responses.len());
                 responses.push((200, compaction_summary_response(
                     &format!("Neutral command batches zero through {index} completed; continue without replaying them."),
@@ -412,6 +439,7 @@ fn long_tool_loop_compacts_settled_batches_without_replaying_or_losing_task() {
                 ),
         )
         .unwrap();
+        pressure_policy(&config, 1000, 500);
         let task = "ORIGINAL-ACTIVE-TASK: retain this constraint through every batch";
         let output = run_chat(
             root.path(),
@@ -425,7 +453,13 @@ fn long_tool_loop_compacts_settled_batches_without_replaying_or_losing_task() {
             String::from_utf8_lossy(&output.stderr)
         );
         let requests: Vec<_> = (0..request_count)
-            .map(|_| request_body(&server.requests.recv_timeout(F2A_WAIT).unwrap()))
+            .map(|index| request_body(&server.requests.recv_timeout(F2A_WAIT).unwrap_or_else(|error| {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let tail = stdout.char_indices().rev().nth(2000).map_or(stdout.as_ref(), |(index, _)| &stdout[index..]);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let stderr_tail = stderr.char_indices().rev().nth(1500).map_or(stderr.as_ref(), |(index, _)| &stderr[index..]);
+                panic!("request {index}/{request_count} missing (enabled={enabled}, incremental={incremental}): {error}; stdout tail: {tail}; stderr tail: {stderr_tail}")
+            })))
             .collect();
         assert!(server.requests.try_recv().is_err());
         server.join();
@@ -435,10 +469,17 @@ fn long_tool_loop_compacts_settled_batches_without_replaying_or_losing_task() {
             assert!(!json_contains_type(&requests[*index]["input"], "reasoning"));
         }
         for index in handoff_indices.iter().skip(1) {
-            let source = requests[*index]["input"].to_string();
-            assert!(source.contains("previous_derived_summary"));
-            assert!(source.contains("projection_version"));
-            assert!(!source.contains("task_references"));
+            let source = assert_handoff_request(&requests[*index]);
+            let previous = source["input"]["excerpts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["source"]["kind"] == "summary")
+                .expect("later handoff retains the previous summary source");
+            let projection: Value =
+                serde_json::from_str(previous["excerpt"].as_str().unwrap()).unwrap();
+            assert_eq!(projection["projection_version"], 1);
+            assert!(projection.get("task_references").is_none());
         }
         for (index, request) in requests.iter().enumerate() {
             if handoff_indices.contains(&index) {
@@ -520,8 +561,12 @@ fn long_tool_loop_compacts_settled_batches_without_replaying_or_losing_task() {
                 "tool-batch pressure must trigger before completion"
             );
             assert!(resets.iter().all(|index| *index > 0));
-            assert_eq!(resets.len(), 3);
-            assert_eq!(compactions(root.path()).len(), 3);
+            assert_eq!(
+                handoff_indices,
+                if incremental { vec![3, 5] } else { vec![2, 4] }
+            );
+            assert_eq!(resets.len(), 2);
+            assert_eq!(compactions(root.path()).len(), 2);
             for index in resets {
                 assert!(!json_contains_type(&requests[index]["input"], "reasoning"));
                 assert!(handoff_indices.contains(&(index - 1)));
@@ -557,22 +602,33 @@ fn long_tool_loop_compacts_settled_batches_without_replaying_or_losing_task() {
 }
 
 #[test]
-fn tool_batch_compaction_defers_when_original_task_alone_exceeds_working_target() {
-    let root = TemporaryDirectory::new("auto-large-active-task");
+#[cfg(debug_assertions)]
+fn failed_tool_handoff_still_assesses_later_settled_batches_without_resampling() {
+    let root = TemporaryDirectory::new("auto-tool-deferred-assessment");
     initialize_project(root.path());
     let definition = definition(root.path(), false, None);
-    let server = spawn_responses_server(vec![
-        (
-            200,
-            m4_long_flow_tool_response(
-                "once-large-task",
-                "run_command",
-                json!({"argv":["/usr/bin/printf", "%s", "neutral-output ".repeat(7_000)]}),
-                "large-task-tool",
-            ),
-        ),
-        (200, text_response("LARGE-TASK-DONE", "large-task-final")),
-    ]);
+    let mut responses = Vec::new();
+    for index in 0..3 {
+        let mut response = format!(
+            "data: {}\n\n",
+            json!({
+                "type":"response.output_item.done", "output_index":0,
+                "item":{"type":"reasoning", "content":[{"type":"reasoning_text", "text":format!("batch-{index}-reasoning ").repeat(if index == 0 { 12_000 } else { 20_000 })}]}
+            })
+        );
+        response.push_str(&m4_long_flow_tool_response(
+            &format!("batch-{index}"),
+            "run_command",
+            json!({"argv":["/usr/bin/printf", "%s", "neutral-output ".repeat(2_000)]}),
+            &format!("batch-response-{index}"),
+        ));
+        responses.push((200, response));
+        if index == 1 {
+            responses.push((200, text_response("invalid handoff", "bad-handoff")));
+        }
+    }
+    responses.push((200, text_response("WORKING-SET-DONE", "final")));
+    let server = spawn_responses_server(responses);
     let config = config(root.path(), &server.base_url, Some(true));
     fs::write(
         &config,
@@ -581,32 +637,135 @@ fn tool_batch_compaction_defers_when_original_task_alone_exceeds_working_target(
             .replace("context_window = 32768", "context_window = 1048576"),
     )
     .unwrap();
-    let task = format!(
-        "Keep this entire operator input: {}",
-        "constraint ".repeat(20_000)
-    );
+    pressure_policy(&config, 1000, 500);
     let output = run_chat(
         root.path(),
         &config,
-        &format!("{task}\n/exit\n"),
-        &["--agent", definition.to_str().unwrap()],
+        "Continue the task.\n/exit\n",
+        &["--agent", definition.to_str().unwrap(), "--debug"],
     );
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    server.requests.recv_timeout(F2A_WAIT).unwrap();
-    let second = request_body(&server.requests.recv_timeout(F2A_WAIT).unwrap());
-    assert_eq!(second["previous_response_id"], "large-task-tool");
+    let requests = (0..5)
+        .map(|_| request_body(&server.requests.recv_timeout(F2A_WAIT).unwrap()))
+        .collect::<Vec<_>>();
+    assert_handoff_request(&requests[2]);
+    assert!(requests[3].get("tools").is_some());
+    assert!(server.requests.try_recv().is_err());
     server.join();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("[debug context pressure] settled batch evaluated; threshold_reached=true; automatic handoff deferred for this Turn"), "{stderr}");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("Compaction did not yield a smaller usable next-Turn Context"),
+        stdout.contains("Automatic tool-batch compaction deferred"),
         "{stdout}"
     );
-    assert!(stdout.contains("LARGE-TASK-DONE"));
-    assert!(!stdout.contains("Automatic tool-batch compaction applied"));
+    let project = Project::discover(root.path()).unwrap();
+    let state = reduced_session(&project, &session_id(root.path()));
+    assert_eq!(state.execution_receipt_count(), 3);
+    assert!(compactions(root.path()).is_empty());
+}
+
+#[test]
+fn large_protected_task_allows_useful_reduction_but_defers_without_old_work() {
+    for earlier_work in [false, true] {
+        let root = TemporaryDirectory::new("auto-large-active-task");
+        initialize_project(root.path());
+        let definition = definition(root.path(), false, None);
+        let mut responses = vec![(
+            200,
+            m4_long_flow_tool_response(
+                "first-large-task",
+                "run_command",
+                json!({"argv":["/usr/bin/printf", "%s", "neutral-output ".repeat(7_000)]}),
+                "large-task-first",
+            ),
+        )];
+        if earlier_work {
+            responses.push((
+                200,
+                m4_long_flow_tool_response(
+                    "second-large-task",
+                    "run_command",
+                    json!({"argv":["/usr/bin/printf", "%s", "later-output ".repeat(7_000)]}),
+                    "large-task-second",
+                ),
+            ));
+            responses.push((
+                200,
+                compaction_summary_response(
+                    "The earlier command finished; keep the current task and latest output.",
+                    "large-task-handoff",
+                ),
+            ));
+        }
+        responses.push((200, text_response("LARGE-TASK-DONE", "large-task-final")));
+        let request_count = responses.len();
+        let server = spawn_responses_server(responses);
+        let config = config(root.path(), &server.base_url, Some(true));
+        fs::write(
+            &config,
+            fs::read_to_string(&config)
+                .unwrap()
+                .replace("context_window = 32768", "context_window = 1048576"),
+        )
+        .unwrap();
+        // The protected input exceeds the soft target but fits the hard budget.
+        pressure_policy(&config, 500, 200);
+        let task = format!(
+            "Keep this entire operator input: {}",
+            "constraint ".repeat(20_000)
+        );
+        let usable_input = 1_048_576 - 2 * (1_048_576 / 8);
+        assert!(task.len() / 4 > usable_input * 2 / 100);
+        assert!(task.len() / 4 < usable_input);
+        let output = run_chat(
+            root.path(),
+            &config,
+            &format!("{task}\n/exit\n"),
+            &["--agent", definition.to_str().unwrap()],
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let requests = (0..request_count)
+            .map(|_| request_body(&server.requests.recv_timeout(F2A_WAIT).unwrap()))
+            .collect::<Vec<_>>();
+        assert!(json_contains_text(&requests[0]["input"], &task));
+        assert_eq!(requests[1]["previous_response_id"], "large-task-first");
+        server.join();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("Compaction did not yield a smaller usable next-Turn Context"),
+            "{stdout}"
+        );
+        assert!(stdout.contains("LARGE-TASK-DONE"));
+        if earlier_work {
+            assert_handoff_request(&requests[2]);
+            assert!(requests[3]["previous_response_id"].is_null());
+            assert!(json_contains_text(&requests[3]["input"], &task));
+            assert!(stdout.contains("Automatic tool-batch compaction applied"));
+            assert_eq!(compactions(root.path()).len(), 1);
+        } else {
+            assert!(!stdout.contains("Automatic tool-batch compaction applied"));
+            assert!(compactions(root.path()).is_empty());
+        }
+        let project = Project::discover(root.path()).unwrap();
+        let state = reduced_session(&project, &session_id(root.path()));
+        assert_eq!(state.execution_receipt_count(), 1 + u64::from(earlier_work));
+        assert_eq!(
+            serde_json::to_string(state.history().items())
+                .unwrap()
+                .matches(&task)
+                .count(),
+            1
+        );
+    }
 }
 
 #[test]
@@ -638,6 +797,7 @@ fn completed_reasoning_delivery_alone_can_trigger_opted_in_compaction() {
             .replace("context_window = 32768", "context_window = 1048576"),
     )
     .unwrap();
+    pressure_policy(&config, 1000, 500);
     let output = run_chat(
         root.path(),
         &config,
@@ -663,6 +823,94 @@ fn completed_reasoning_delivery_alone_can_trigger_opted_in_compaction() {
 }
 
 #[test]
+#[cfg(debug_assertions)]
+fn settled_batch_pressure_uses_core_written_by_short_command() {
+    // The 204k-token usable input has a 20.4k trigger; 156k Core
+    // bytes add about 39k tokens while the short delivery stays below it.
+    for large_core in [false, true] {
+        let root = TemporaryDirectory::new("auto-current-core-pressure");
+        initialize_project(root.path());
+        let definition = definition(root.path(), false, None);
+        let project = Project::discover(root.path()).unwrap();
+        let core = root
+            .path()
+            .join(".echidna/memory/agents/order-clerk/core.md");
+        fs::create_dir_all(core.parent().unwrap()).unwrap();
+        fs::write(
+            root.path().join("core-seed"),
+            if large_core {
+                "current-core ".repeat(12_000)
+            } else {
+                String::new()
+            },
+        )
+        .unwrap();
+        let core_relative = core.strip_prefix(root.path()).unwrap().to_str().unwrap();
+        let server = spawn_responses_server(vec![
+            (
+                200,
+                m4_long_flow_tool_response(
+                    "prior",
+                    "run_command",
+                    json!({"argv":["/usr/bin/printf","small"]}),
+                    "prior-response",
+                ),
+            ),
+            (
+                200,
+                m4_long_flow_tool_response(
+                    "write-core",
+                    "run_command",
+                    json!({"argv":["/bin/cp","core-seed",core_relative]}),
+                    "write-core-response",
+                ),
+            ),
+        ]);
+        let config = config(root.path(), &server.base_url, Some(true));
+        fs::write(
+            &config,
+            format!(
+                "{}\nmodel_request_limit_per_turn = 2\n",
+                fs::read_to_string(&config)
+                    .unwrap()
+                    .replace("context_window = 32768", "context_window = 272000")
+            ),
+        )
+        .unwrap();
+        pressure_policy(&config, 1000, 500);
+        let output = run_chat(
+            root.path(),
+            &config,
+            "Complete the task.\n/exit\n",
+            &["--agent", definition.to_str().unwrap(), "--debug"],
+        );
+        for _ in 0..2 {
+            server.requests.recv_timeout(F2A_WAIT).unwrap();
+        }
+        assert!(server.requests.try_recv().is_err());
+        server.join();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{stderr}");
+        assert!(
+            stderr.contains("per-Turn model-request limit of 2"),
+            "{stderr}"
+        );
+        let expected = format!(
+            "settled batch evaluated; threshold_reached={large_core}; automatic handoff deferred for this Turn"
+        );
+        assert!(stderr.contains(&expected), "{stderr}");
+        assert_eq!(
+            fs::read_to_string(&core).unwrap().len(),
+            if large_core { 156_000 } else { 0 }
+        );
+        let state = reduced_session(&project, &session_id(root.path()));
+        assert_eq!(state.execution_receipt_count(), 2);
+        assert!(compactions(root.path()).is_empty());
+    }
+}
+
+#[test]
+#[cfg(debug_assertions)]
 fn tool_batch_does_not_compact_when_initial_vision_consumed_the_final_admission() {
     let root = TemporaryDirectory::new("auto-shared-budget-boundary");
     initialize_project(root.path());
@@ -694,11 +942,12 @@ fn tool_batch_does_not_compact_when_initial_vision_consumed_the_final_admission(
         ),
     )
     .unwrap();
+    pressure_policy(&config, 200, 100);
     let output = run_chat(
         root.path(),
         &config,
         "/image screen.png\nComplete this task under the shared budget.\n/exit\n",
-        &["--agent", definition.to_str().unwrap()],
+        &["--agent", definition.to_str().unwrap(), "--debug"],
     );
     primary.requests.recv_timeout(F2A_WAIT).unwrap();
     assert!(primary.requests.try_recv().is_err());
@@ -707,6 +956,8 @@ fn tool_batch_does_not_compact_when_initial_vision_consumed_the_final_admission(
     assert!(vision.requests.try_recv().is_err());
     vision.join();
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("[debug context pressure] settled batch evaluated; threshold_reached=true; automatic handoff deferred for this Turn"), "{stderr}");
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("per-Turn model-request limit of 2"),
         "{}",
@@ -765,6 +1016,7 @@ fn automatic_compaction_samples_handoff_after_completed_rsi_diagnosis() {
         (200, text_response("NEXT-AFTER-RSI", "auto-after-rsi")),
     ]);
     let config = config(root.path(), &server.base_url, Some(true));
+    pressure_policy(&config, 5000, 3000);
     let output = run_chat(
         root.path(),
         &config,

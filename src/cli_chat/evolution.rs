@@ -8,6 +8,11 @@ use crate::provider_composition::ProviderComposition;
 
 use super::{ChatError, DurableChatSession, definition};
 
+pub(super) enum CheckpointOutcome {
+    Applied(Box<crate::domain::agent_definition::AgentDefinitionBinding>),
+    Deferred { failed_handoff: bool },
+}
+
 /// Applies only the exact candidate returned by this checkpoint's accepted
 /// contrast. A pre-existing passive pending file never enters this path.
 #[allow(clippy::too_many_arguments)]
@@ -19,7 +24,7 @@ pub(super) async fn apply_checkpoint<Provider: crate::ports::model::ModelProvide
     active: &crate::app::agent_loop::ToolBatchContext<'_>,
     window_tokens: u32,
     request: super::compaction::CompactionRequestContext<'_>,
-) -> Result<Option<crate::domain::agent_definition::AgentDefinitionBinding>, ChatError> {
+) -> Result<CheckpointOutcome, ChatError> {
     let store = EvolutionStore::new(&session.project, current);
     let state = session.durable_state()?;
     state.improvement_evidence(&accepted.attempt_id, current.definition().digest().as_str())?;
@@ -39,6 +44,8 @@ pub(super) async fn apply_checkpoint<Provider: crate::ports::model::ModelProvide
         session.session_id.as_str(),
     )?;
     let cancellation = request.cancellation.clone();
+    let admitted_before = request.budget.counts().primary;
+    let budget = request.budget;
     if let Err(error) = session
         .compact_for_definition(agent, window_tokens, active, &prompt, request)
         .await
@@ -47,12 +54,16 @@ pub(super) async fn apply_checkpoint<Provider: crate::ports::model::ModelProvide
             console_eprintln!(
                 "[RSI checkpoint deferred] {error}; candidate remains pending and old instructions remain active."
             );
-            return Ok(None);
+            return Ok(CheckpointOutcome::Deferred {
+                failed_handoff: super::compaction::failed_handoff(&error, admitted_before, budget),
+            });
         }
         return Err(error);
     }
     if cancellation.is_cancelled() {
-        return Ok(None);
+        return Ok(CheckpointOutcome::Deferred {
+            failed_handoff: false,
+        });
     }
     let state = session.durable_state()?;
     if store
@@ -115,7 +126,7 @@ pub(super) async fn apply_checkpoint<Provider: crate::ports::model::ModelProvide
         "[RSI checkpoint applied] revision {}; next request in this Turn uses the new instructions; task and budget retained.",
         accepted.binding.definition().digest().as_str()
     );
-    Ok(Some(accepted.binding))
+    Ok(CheckpointOutcome::Applied(Box::new(accepted.binding)))
 }
 
 pub(super) fn apply_completed<Provider: crate::ports::model::ModelProvider + ?Sized>(
@@ -170,8 +181,11 @@ pub(super) fn apply_completed<Provider: crate::ports::model::ModelProvider + ?Si
     // These stores cannot form one transaction: immutable revision first,
     // durable Session transition second, publication pointer third. A later
     // failure is fatal and keeps the pending file for explicit reconciliation.
-    let (state, provider_session, _, facts) =
+    let (state, provider_session, _, facts, capacity_required) =
         preview.start_or_resume(true, composition, true, discovered_mcp)?;
+    if capacity_required {
+        return Err(ChatError::CompactionNotUseful);
+    }
     store.finish(&preview.binding, &session.session_id)?;
     let validation = facts.as_ref().map(|facts| facts.context());
     agent.queue_prompt_composition(definition::prompt_for_state(

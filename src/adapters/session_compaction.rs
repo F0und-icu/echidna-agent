@@ -9,7 +9,6 @@ use crate::adapters::research_projection::{
     load_compaction_validation_facts_with_references, load_reference_catalog_with_session,
 };
 use crate::domain::context::ContextWindowPolicy;
-use crate::domain::events::EventId;
 use crate::domain::events::StreamId;
 use crate::domain::model::ContentItem;
 use crate::domain::project::ProjectId;
@@ -22,17 +21,28 @@ pub(crate) struct SessionCompactionFacts {
     project_id: ProjectId,
     research: Option<CompactionValidationFacts>,
     task: Option<TaskCompactionValidationFacts>,
-    model_sample: Option<(crate::domain::events::EventId, NarrativeSummary)>,
+    graph: Option<crate::domain::session::VerifiedCompactionGraph>,
 }
 
 impl SessionCompactionFacts {
-    pub(crate) fn with_model_sample(
+    pub(crate) fn verified_graph(
+        &self,
+    ) -> Option<&crate::domain::session::VerifiedCompactionGraph> {
+        self.graph.as_ref()
+    }
+    pub(crate) fn with_verified_graph(
         mut self,
-        id: crate::domain::events::EventId,
-        narrative: NarrativeSummary,
-    ) -> Self {
-        self.model_sample = Some((id, narrative));
-        self
+        graph: crate::domain::session::VerifiedCompactionGraph,
+    ) -> Result<Self, SessionError> {
+        let task = self
+            .task
+            .take()
+            .ok_or_else(|| SessionError::CompactionContextProvenance {
+                message: "verified graph requires task facts".to_owned(),
+            })?;
+        self.task = Some(task.with_verified_graph(graph.clone()));
+        self.graph = Some(graph);
+        Ok(self)
     }
     pub(crate) fn task_source(&self) -> Result<&SessionSourceIdentity, SessionError> {
         self.task
@@ -89,12 +99,10 @@ impl SessionCompactionFacts {
             spine,
             narrative,
         )?;
-        Ok(match self.model_sample.as_ref() {
-            Some((event_id, narrative)) => {
-                draft.with_model_sample(event_id.clone(), narrative.clone())
-            }
-            None => draft,
-        })
+        if let Some(graph) = &self.graph {
+            return Ok(draft.with_verified_graph(graph.clone()));
+        }
+        Ok(draft)
     }
 }
 
@@ -107,7 +115,7 @@ pub(crate) fn load_session_compaction_facts(
             project_id: project.project_id().clone(),
             research: Some(load_compaction_validation_facts(project)?),
             task: None,
-            model_sample: None,
+            graph: None,
         });
     };
     let source_stream = state
@@ -142,7 +150,7 @@ pub(crate) fn load_session_compaction_facts(
             .map(|_| load_compaction_validation_facts_with_references(project, references))
             .transpose()?,
         task: Some(task),
-        model_sample: None,
+        graph: None,
     })
 }
 
@@ -162,7 +170,7 @@ pub(crate) fn load_session_compaction_facts_from_read(
             project_id: project.project_id().clone(),
             research: Some(read.compaction_facts(project.project_id(), None)?),
             task: None,
-            model_sample: None,
+            graph: None,
         });
     };
     if source.project_id() != project.project_id()
@@ -203,7 +211,7 @@ pub(crate) fn load_session_compaction_facts_from_read(
             .map(|_| read.compaction_facts(project.project_id(), None))
             .transpose()?,
         task: Some(task),
-        model_sample: None,
+        graph: None,
     })
 }
 
@@ -279,11 +287,24 @@ fn load_summary_facts(
     if research.is_none() && task.is_none() {
         return Err("Summary has no typed references to validate".to_owned());
     }
+    let graph = if summary.graph_reference().is_some() {
+        let graph = task
+            .as_ref()
+            .and_then(TaskCompactionValidationFacts::verified_graph)
+            .ok_or("v6 Summary requires project-aware verified Session replay")?
+            .clone();
+        summary
+            .validate_graph_reference(&graph)
+            .map_err(|error| error.to_string())?;
+        Some(graph)
+    } else {
+        None
+    };
     Ok(SessionCompactionFacts {
         project_id: project.project_id().clone(),
         research,
         task,
-        model_sample: None,
+        graph,
     })
 }
 
@@ -310,25 +331,4 @@ fn session_id(stream: &StreamId) -> Result<StreamId, String> {
         .filter(|id| !id.is_empty())
         .map(StreamId::new)
         .ok_or_else(|| format!("invalid Session source stream `{stream}`"))
-}
-
-/// A network sample runs without a writer lease. Before publishing its
-/// replacement, prove that only its own audited attempts/sample/usage followed
-/// the exact frozen Session and project prefixes.
-pub(crate) fn validate_compaction_source_suffix(
-    project: &Project,
-    source: &SessionSourceIdentity,
-    attempts: &[EventId],
-    sample_event: Option<&EventId>,
-) -> Result<(), String> {
-    let events = read_existing_session_events(project, &session_id(source.stream_id())?)
-        .map_err(|error| error.to_string())?;
-    let project_events =
-        read_existing_research_events(project).map_err(|error| error.to_string())?;
-    if source.project_id() != project.project_id() {
-        return Err("Compaction source belongs to a different Project".to_owned());
-    }
-    source
-        .validate_sampling_suffix(&events, &project_events, attempts, sample_event)
-        .map_err(|error| error.to_string())
 }

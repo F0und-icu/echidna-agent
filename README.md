@@ -490,6 +490,38 @@ generation = 1
 `1..=10000` 保持有限额度。不限请求仍记录真实尝试次数，且不改变上下文容量、取消、
 超时和单次请求的重试上限。
 
+上下文额度可在同一配置中按比例分配。`_bps` 使用基点：**100 = 1%，10000 = 100%**。
+未填写的字段采用默认策略。输出/工具预留按声明窗口计算，其他内容额度按扣除预留后的
+可用输入计算；显式输出要求仍优先。额度按最终编码预检，不代表服务端精确分词。
+
+```toml
+[runtime.context_budget]
+output_reserve_bps = 1250       # 窗口的12.5%
+tool_loop_reserve_bps = 1250    # 窗口的12.5%
+pressure_bps = 8000            # 可用输入的80%时评估自动压缩
+target_bps = 5000              # 压缩后优先目标50%，保留必需数据
+summary_bps = 200              # v6 摘要 Narrative JSON 额度2%
+diagnostic_bps = 200           # RSI诊断独立额度2%，不与摘要调参联动
+diagnostic_task_bps = 313      # 任务摘录占诊断额度3.13%，可按任务调整
+diagnostic_handoff_bps = 313   # 上一交接摘录占诊断额度3.13%
+tool_output_bps = 3200         # 每个内置工具的预览额度32%
+core_memory_bps = 1600         # Core工具内容额度16%
+state_section_bps = 10         # 每个状态节0.1%
+continuation_field_bps = 40
+continuation_goal_part_bps = 16
+readback_default_bps = 100     # 精确回读默认1%
+readback_max_bps = 400         # 精确回读最大4%
+compaction_reference_items = 64  # 每类引用数量上限，单位：项
+max_core_file_bytes = 524288     # Core存储上限，单位：字节，可显式调整
+# max_content_bytes = 1048576    # 可选的绝对内容上限；未设置时仅按比例
+```
+
+自动压缩仍由 `[runtime].auto_compact = true` 开启。百分比是分配策略；原任务、图片和
+当前完整工具批次不会为达到软目标被静默删掉。超预算的合法会话可在显式恢复后执行
+`/context`、`/compact` 或 `/exit`；恢复和压缩不会自动执行旧任务或重放工具。
+无工具的压缩采样只释放工具循环预留，仍保留输出/推理空间，并计入共享请求预算。
+v6 的机器来源与保护引用单独验真，完整模型输入仍须通过硬预算预检；历史摘要的字节额度含义保持。
+
 在 Chat 中用 `/image PATH` 选择本地图片。可重复输入该命令；图片按输入顺序排队，下一条普通任务会将整队图片作为同一 Turn 的初始上下文。`primary_direct` 会将每张图片交给主模型，`secondary_tool` 会为每张图片单独保留观察后再请求主模型。后续图片的准备失败、取消或耗尽本轮请求预算时，已保留的图片事实不会丢失，但该任务和队列中的图片不会提交给主模型。队列只存在于当前 Chat 进程；重新启动或 `/resume` 不会自动重放图片处理。
 
 ### 3. 建立研究项目

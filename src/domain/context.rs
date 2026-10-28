@@ -23,5 +23,7 @@ pub use planner::{
     PromptRendererIdentity, RetentionClass, SemanticClass,
 };
 
-pub(crate) use planner::{estimate_audit_component_tokens, tool_schema_token_cost};
-pub(crate) use window_policy::ContextWindowPolicy;
+pub(crate) use planner::{
+    ContextCapacityBreakdown, estimate_audit_component_tokens, tool_schema_token_cost,
+};
+pub(crate) use window_policy::{ContextBudgetPolicy, ContextWindowPolicy};

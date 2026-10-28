@@ -3,6 +3,7 @@ use super::*;
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use echidna::app::agent_loop::AgentLoopError;
 use echidna::app::request_audit::{RequestAuditService, RequestAuditServiceError};
@@ -28,6 +29,7 @@ enum AuditBlobFailure {
 #[derive(Default)]
 struct AuditBlobStore {
     blobs: Mutex<BTreeMap<BlobId, Vec<u8>>>,
+    publish_calls: AtomicUsize,
 }
 
 impl AuditBlobStore {
@@ -44,6 +46,7 @@ impl ArtifactStore for AuditBlobStore {
     }
 
     fn publish_bytes(&self, bytes: &[u8]) -> Result<StoredBlob, Self::Error> {
+        self.publish_calls.fetch_add(1, Ordering::Relaxed);
         let blob_id = BlobId::new(format!("{:x}", Sha256::digest(bytes))).unwrap();
         let mut blobs = self.blobs.lock().unwrap();
         let already_present = blobs.contains_key(&blob_id);
@@ -198,7 +201,7 @@ async fn audited_agent_loop_records_each_full_incremental_and_provider_rejected_
         RequestAuditDeliveryReason::Full(BaselineInvalidationReason::ProviderRejected)
     );
     for (manifest, request) in manifests.iter().zip(&requests) {
-        assert_eq!(manifest.schema_version(), 3);
+        assert_eq!(manifest.schema_version(), 4);
         assert_eq!(
             manifest.binding().session_stream_id().as_str(),
             "session:audit-loop"
@@ -264,7 +267,7 @@ async fn audited_agent_loop_commits_through_the_real_request_audit_service_befor
     assert_eq!(provider.requests().len(), 1);
     assert_eq!(projection.state().request_audits().len(), 1);
     let manifest = &projection.state().request_audits()[0];
-    assert_eq!(manifest.schema_version(), 3);
+    assert_eq!(manifest.schema_version(), 4);
     assert_eq!(manifest.prompt_renderer().unwrap().id(), "generic");
     assert_eq!(manifest.prompt_renderer().unwrap().version(), 1);
     assert_eq!(
@@ -282,6 +285,10 @@ async fn audited_agent_loop_commits_through_the_real_request_audit_service_befor
     assert_eq!(&reconstructed, provider.requests()[0].input());
     assert_eq!(sink.events.len(), 1);
     assert!(blobs.blob_count() > 0);
+    assert_eq!(
+        blobs.publish_calls.load(Ordering::Relaxed),
+        blobs.blob_count()
+    );
 }
 
 #[tokio::test]
@@ -331,7 +338,7 @@ async fn request_audit_v3_reconstruction_rejects_delivery_map_tampering() {
     }
 
     let encoded = serde_json::to_value(&projection.state().request_audits()[0]).unwrap();
-    assert_eq!(encoded["schema_version"], serde_json::json!(3));
+    assert_eq!(encoded["schema_version"], serde_json::json!(4));
 
     let mut wrong_position = encoded.clone();
     wrong_position["context_delivery_map"]["content_items"][0]["final_position"] =

@@ -195,6 +195,7 @@ fn modern_summary_projects_narrative_without_machine_reference_dump() {
         &CompactionValidationContext::for_task(&project, &facts),
     )
     .unwrap();
+    assert_eq!(summary.historical_byte_limit(), Some(65536));
     let durable = serde_json::to_string(&summary).unwrap();
     let fingerprint = summary.fingerprint().to_owned();
     let provenance = serde_json::to_value(summary.context_provenance().unwrap().unwrap()).unwrap();
@@ -318,8 +319,10 @@ async fn model_handoff_is_tool_free_isolated_bounded_and_does_not_replace_operat
         let agent = AgentLoop::with_primary_context(&provider, &tools, ModelIdentity::new("fixture", "fixture"), ModelProfile::new("fixture", 0), ProviderSession::new(ProviderSessionId::new("parent"), ProviderSessionRole::Primary, 0)).unwrap();
         let budget = ModelRequestBudget::new(2);
         let audit = RequestAuditRunContext::new(RequestAuditBinding::new(ProjectId::new("continuity"), StreamId::new("session:continuity")).unwrap(), RequestAdapterVersion::new("fixture").unwrap());
+        let capture = agent.capture_compaction_context(&provider, 1).unwrap();
+        let plan = crate::legacy_v5_fixture::sample_plan(&source, 4000);
         let mut audit_count = 0;
-        let output = agent.sample_compaction(CompactionSampleInput { provider: &provider, agent_model_profile: None, source:&source, source_data:"recent actual source items".to_owned(), current_goal:"ORIGINAL-OPERATOR-GOAL".to_owned(), references:vec![EventId::new("event-1")], byte_limit:8192, request_budget:&budget, cancellation:AgentCancellation::new(), audit_context:&audit }, &mut |_attempt| { audit_count +=1; Ok(EventId::new("summary-audit")) }).await;
+        let output = agent.sample_compaction(CompactionSampleInput { provider: &provider, agent_model_profile: None, source:&source, source_data:"recent actual source items".to_owned(), current_goal:"ORIGINAL-OPERATOR-GOAL".to_owned(), references:vec![EventId::new("event-1")], byte_limit:8192, request_budget:&budget, cancellation:AgentCancellation::new(), audit_context:&audit, graph: crate::app::agent_loop::CompactionGraphSample { capture: &capture, plan: &plan, plan_blob_id: crate::domain::artifacts::BlobId::new("a".repeat(64)).unwrap(), node_id: "root" } }, &mut |_attempt| { audit_count +=1; Ok(EventId::new("summary-audit")) }).await;
         assert_eq!(output.is_ok(), accepted);
         if let Ok(output) = output { assert_eq!(output.sample.narrative().current_goal(), "ORIGINAL-OPERATOR-GOAL"); }
         assert_eq!(audit_count, 1);
@@ -330,6 +333,85 @@ async fn model_handoff_is_tool_free_isolated_bounded_and_does_not_replace_operat
         assert!(!requests[0].is_incremental());
         assert_eq!(requests[0].continuation_retention(),ContinuationRetention::SingleSample);
         assert_eq!(agent.history().items(), &[]);
+    }
+}
+
+#[tokio::test]
+async fn handoff_minimum_output_is_checked_before_admission_and_audit() {
+    let handoff = json!({"concise_progress":"a", "unresolved_questions":[], "next_step_notes":[]})
+        .to_string();
+    let minimum = handoff.len();
+    for (available, accepted) in [(minimum - 1, false), (minimum, true)] {
+        let (source, _, _) = source();
+        let provider = ObservedProvider {
+            inner: MockModelProvider::new(MockModelFixture {
+                capabilities: capabilities(),
+                events: vec![ModelEvent::TextDelta {
+                    text: handoff.clone(),
+                }],
+                completion: ModelResponseCompletion::without_response_id(),
+            }),
+            requests: Mutex::new(Vec::new()),
+        };
+        let tools = ToolRegistry::for_project(".");
+        let agent = AgentLoop::with_primary_context(
+            &provider,
+            &tools,
+            ModelIdentity::new("fixture", "fixture"),
+            ModelProfile::new("fixture", 0),
+            ProviderSession::new(
+                ProviderSessionId::new("parent"),
+                ProviderSessionRole::Primary,
+                0,
+            ),
+        )
+        .unwrap();
+        let budget = ModelRequestBudget::new(2);
+        let audit = RequestAuditRunContext::new(
+            RequestAuditBinding::new(
+                ProjectId::new("continuity"),
+                StreamId::new("session:continuity"),
+            )
+            .unwrap(),
+            RequestAdapterVersion::new("fixture").unwrap(),
+        );
+        let capture = agent.capture_compaction_context(&provider, 1).unwrap();
+        let plan = crate::legacy_v5_fixture::sample_plan(&source, available);
+        let mut audit_count = 0;
+        let result = agent
+            .sample_compaction(
+                CompactionSampleInput {
+                    provider: &provider,
+                    agent_model_profile: None,
+                    source: &source,
+                    source_data: "source".to_owned(),
+                    current_goal: "goal".to_owned(),
+                    references: vec![EventId::new("event-1")],
+                    byte_limit: 8192,
+                    request_budget: &budget,
+                    cancellation: AgentCancellation::new(),
+                    audit_context: &audit,
+                    graph: crate::app::agent_loop::CompactionGraphSample {
+                        capture: &capture,
+                        plan: &plan,
+                        plan_blob_id: crate::domain::artifacts::BlobId::new("a".repeat(64))
+                            .unwrap(),
+                        node_id: "root",
+                    },
+                },
+                &mut |_attempt| {
+                    audit_count += 1;
+                    Ok(EventId::new("summary-audit"))
+                },
+            )
+            .await;
+        assert_eq!(result.is_ok(), accepted);
+        assert_eq!(audit_count, usize::from(accepted));
+        assert_eq!(budget.counts().primary, usize::from(accepted));
+        assert_eq!(
+            provider.requests.lock().unwrap().len(),
+            usize::from(accepted)
+        );
     }
 }
 
@@ -406,6 +488,8 @@ async fn cancelled_or_exhausted_summary_never_audits_or_dispatches() {
             .unwrap(),
             RequestAdapterVersion::new("fixture").unwrap(),
         );
+        let capture = agent.capture_compaction_context(&provider, 1).unwrap();
+        let plan = crate::legacy_v5_fixture::sample_plan(&source, 4000);
         let result = agent
             .sample_compaction(
                 CompactionSampleInput {
@@ -419,6 +503,13 @@ async fn cancelled_or_exhausted_summary_never_audits_or_dispatches() {
                     request_budget: &budget,
                     cancellation,
                     audit_context: &audit,
+                    graph: crate::app::agent_loop::CompactionGraphSample {
+                        capture: &capture,
+                        plan: &plan,
+                        plan_blob_id: crate::domain::artifacts::BlobId::new("a".repeat(64))
+                            .unwrap(),
+                        node_id: "root",
+                    },
                 },
                 &mut |_| panic!("no summary audit allowed"),
             )
@@ -439,8 +530,8 @@ async fn cancelled_or_exhausted_summary_never_audits_or_dispatches() {
     }
 }
 
-#[tokio::test]
-async fn json_expanded_valid_operator_goal_is_rejected_before_audit_or_request() {
+#[test]
+fn historical_sample_rejects_json_expanded_valid_operator_goal() {
     let (_, mut events, _) = source();
     let raw_goal = format!("x{}", "\u{1}".repeat(1535));
     for (index, event) in [
@@ -479,81 +570,33 @@ async fn json_expanded_valid_operator_goal_is_rejected_before_audit_or_request()
     }
     let (source, state) =
         SessionSourceIdentity::from_events(ProjectId::new("continuity"), &events, &[]).unwrap();
+    let policy = crate::domain::context::ContextWindowPolicy::for_window(272000);
     let (goal, _) = crate::adapters::research_projection::continuation_text(
         &state.full_normalized_history().unwrap(),
         None,
-        crate::domain::context::ContextWindowPolicy::for_window(32768),
+        policy,
     )
     .unwrap();
     assert_eq!(goal, raw_goal);
     assert_eq!(goal.len(), 1536);
+    assert!(goal.len() <= policy.continuation_field_bytes());
     assert!(serde_json::to_vec(&goal).unwrap().len() > 4096);
-    let provider = ObservedProvider {
-        inner: MockModelProvider::new(MockModelFixture {
-            capabilities: capabilities(),
-            events: vec![],
-            completion: ModelResponseCompletion::without_response_id(),
-        }),
-        requests: Mutex::new(Vec::new()),
-    };
-    let tools = ToolRegistry::for_project(".");
-    let mut agent = AgentLoop::with_primary_context(
-        &provider,
-        &tools,
-        ModelIdentity::new("fixture", "fixture"),
-        ModelProfile::new("fixture", 0),
-        ProviderSession::new(
-            ProviderSessionId::new("parent"),
-            ProviderSessionRole::Primary,
-            0,
-        ),
-    )
-    .unwrap();
-    agent
-        .resume_from_session(
-            &state,
-            ProviderSession::new(
-                ProviderSessionId::new("parent-resumed"),
-                ProviderSessionRole::Primary,
-                1,
-            ),
-            None,
-        )
-        .unwrap();
-    let before = agent.history().items().to_vec();
-    let budget = ModelRequestBudget::new(2);
-    let audit = RequestAuditRunContext::new(
-        RequestAuditBinding::new(
-            ProjectId::new("continuity"),
-            StreamId::new("session:continuity"),
-        )
-        .unwrap(),
-        RequestAdapterVersion::new("fixture").unwrap(),
+    let narrative =
+        crate::domain::session::NarrativeSummary::new(goal, "progress", vec![], vec![]).unwrap();
+    let sample =
+        crate::legacy_v5_fixture::historical_sample(&source, EventId::new("audit"), narrative);
+    let error = sample.validate().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("invalid bounded Compaction model sample")
     );
-    let output = agent
-        .sample_compaction(
-            CompactionSampleInput {
-                provider: &provider,
-                agent_model_profile: None,
-                source: &source,
-                source_data: "actual valid control-character source".to_owned(),
-                current_goal: goal,
-                references: vec![EventId::new("valid-goal-0")],
-                byte_limit: 8192,
-                request_budget: &budget,
-                cancellation: AgentCancellation::new(),
-                audit_context: &audit,
-            },
-            &mut |_| panic!("oversized encoded goal must not audit"),
-        )
-        .await;
-    assert!(matches!(
-        output,
-        Err(crate::app::agent_loop::AgentLoopError::CompactionSummaryRejected { .. })
-    ));
-    assert_eq!(budget.counts().primary, 0);
-    assert!(provider.requests.lock().unwrap().is_empty());
-    assert_eq!(agent.history().items(), before);
+    let valid = crate::legacy_v5_fixture::historical_sample(
+        &source,
+        EventId::new("audit"),
+        crate::domain::session::NarrativeSummary::new("goal", "progress", vec![], vec![]).unwrap(),
+    );
+    valid.validate().unwrap();
 }
 
 #[tokio::test]
@@ -589,6 +632,8 @@ async fn audit_append_failure_stops_summary_before_dispatch_without_replacing_pa
         .unwrap(),
         RequestAdapterVersion::new("fixture").unwrap(),
     );
+    let capture = agent.capture_compaction_context(&provider, 1).unwrap();
+    let plan = crate::legacy_v5_fixture::sample_plan(&source, 4000);
     let result = agent
         .sample_compaction(
             CompactionSampleInput {
@@ -602,6 +647,12 @@ async fn audit_append_failure_stops_summary_before_dispatch_without_replacing_pa
                 request_budget: &budget,
                 cancellation: AgentCancellation::new(),
                 audit_context: &audit,
+                graph: crate::app::agent_loop::CompactionGraphSample {
+                    capture: &capture,
+                    plan: &plan,
+                    plan_blob_id: crate::domain::artifacts::BlobId::new("a".repeat(64)).unwrap(),
+                    node_id: "root",
+                },
             },
             &mut |_| {
                 Err(crate::app::agent_loop::AgentLoopError::RequestAuditCommit {
@@ -625,12 +676,43 @@ async fn historical_v5_is_valid_after_later_history_but_cannot_authorize_a_fresh
     use crate::adapters::session_compaction::{
         load_resume_compaction_facts, load_session_compaction_facts,
     };
-    use crate::domain::artifacts::BlobId;
     use crate::domain::context::ContextWindowPolicy;
-    use crate::domain::request_audit::PublishedAuditBlob;
     use crate::domain::session::SessionReducer;
     use crate::ports::EventSink;
-    use sha2::{Digest, Sha256};
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    fn research_snapshot(project: &Project, label: &str) {
+        use crate::adapters::project_event_store::ProjectEventStream;
+        use crate::domain::research::{
+            ResearchEvent, TargetKind, TargetSnapshotDraft, TargetSnapshotId, TargetSnapshotRecord,
+        };
+        let snapshot = TargetSnapshotRecord::from_draft(TargetSnapshotDraft {
+            id: TargetSnapshotId::new(format!("snapshot-{label}")),
+            target_id: "fixture".into(),
+            kind: TargetKind::Source,
+            locator: format!("src/{label}"),
+            version: "1".into(),
+            build_id: format!("build-{label}"),
+            target_artifact_ids: vec![],
+            environment_fingerprint: "environment".into(),
+            device_fingerprint: "device".into(),
+            captured_at: "2026-10-26T00:00:00Z".into(),
+            notes: String::new(),
+        })
+        .unwrap();
+        let mut writer = project.open_writer().unwrap();
+        let mut store = writer.open_research(None).unwrap();
+        let event = ResearchEvent::TargetSnapshotRecorded(snapshot);
+        let envelope = EventEnvelope::current(
+            EventId::new(format!("research-{label}")),
+            ProjectEventStream::Research.stream_id(),
+            store.next_sequence().unwrap(),
+            OccurredAt::new("2026-10-26T00:00:00Z"),
+            crate::domain::events::EventType::new(event.event_type().as_str()),
+            event.encode_payload().unwrap(),
+        );
+        store.append_event(&envelope).unwrap();
+    }
     fn push(events: &mut Vec<EventEnvelope<Value>>, event: SessionEvent) {
         let index = events.len() + 1;
         events.push(
@@ -646,30 +728,47 @@ async fn historical_v5_is_valid_after_later_history_but_cannot_authorize_a_fresh
     }
     let root = crate::support::TemporaryDirectory::new("compaction-sample-expiry");
     let project = Project::initialize(root.path()).unwrap();
+    research_snapshot(&project, "before");
     let (_, mut events, _) = source();
+    let tools = ToolRegistry::for_project(root.path());
+    let binding = bind_definition(
+        builtin_definition(
+            BuiltinAgentTemplate::Research,
+            &crate::ports::tool::ToolExecutor::catalog(&tools),
+        )
+        .unwrap(),
+        None,
+        None,
+    )
+    .unwrap();
+    events[0] = SessionEvent::StartedWithAgent {
+        primary_provider_session: ProviderSession::new(
+            ProviderSessionId::new("parent"),
+            ProviderSessionRole::Primary,
+            0,
+        )
+        .reference()
+        .clone(),
+        binding,
+    }
+    .into_envelope(
+        EventId::new("event-0"),
+        StreamId::new("session:continuity"),
+        EventSequence::new(1),
+        OccurredAt::new("2026-10-26T00:00:00Z"),
+    )
+    .unwrap();
     push(
         &mut events,
         SessionEvent::HistoryItemRecorded {
             item: ContentItem::assistant_text("Actual earlier neutral observation. ".repeat(400)),
         },
     );
+    let research =
+        crate::adapters::project_event_store::read_existing_research_events(&project).unwrap();
     let (source, _) =
-        SessionSourceIdentity::from_events(project.project_id().clone(), &events, &[]).unwrap();
-    let provider = MockModelProvider::new(MockModelFixture { capabilities:capabilities(), events:vec![ModelEvent::TextDelta { text:json!({"concise_progress":"Actual neutral observation completed.","unresolved_questions":[],"next_step_notes":["Continue without repeating completed work."]}).to_string() }], completion:ModelResponseCompletion::without_response_id() });
-    let tools = ToolRegistry::for_project(root.path());
-    let agent = AgentLoop::with_primary_context(
-        &provider,
-        &tools,
-        ModelIdentity::new("fixture", "fixture"),
-        ModelProfile::new("fixture", 0),
-        ProviderSession::new(
-            ProviderSessionId::new("parent"),
-            ProviderSessionRole::Primary,
-            0,
-        ),
-    )
-    .unwrap();
-    let budget = ModelRequestBudget::new(2);
+        SessionSourceIdentity::from_events(project.project_id().clone(), &events, &research)
+            .unwrap();
     let audit = RequestAuditRunContext::new(
         RequestAuditBinding::new(
             project.project_id().clone(),
@@ -678,42 +777,25 @@ async fn historical_v5_is_valid_after_later_history_but_cannot_authorize_a_fresh
         .unwrap(),
         RequestAdapterVersion::new("fixture").unwrap(),
     );
-    let output = agent
-        .sample_compaction(
-            CompactionSampleInput {
-                provider: &provider,
-                agent_model_profile: None,
-                source: &source,
-                source_data: "neutral source".to_owned(),
-                current_goal: "ORIGINAL-OPERATOR-GOAL".to_owned(),
-                references: vec![EventId::new("event-1")],
-                byte_limit: 8192,
-                request_budget: &budget,
-                cancellation: AgentCancellation::new(),
-                audit_context: &audit,
-            },
-            &mut |attempt| {
-                let rendered = attempt.render().unwrap();
-                let blobs = rendered
-                    .component_bytes()
-                    .map(|bytes| PublishedAuditBlob {
-                        blob_id: BlobId::new(format!("{:x}", Sha256::digest(bytes))).unwrap(),
-                        size_bytes: bytes.len() as u64,
-                    })
-                    .collect::<Vec<_>>();
-                let id = EventId::new(format!("event-{}", events.len() + 1));
-                let manifest = rendered.materialize(id.clone(), blobs).unwrap();
-                push(&mut events, SessionEvent::RequestAuditRecorded { manifest });
-                Ok(id)
-            },
-        )
-        .await
-        .unwrap();
+    let audit_id = EventId::new(format!("event-{}", events.len() + 1));
+    let manifest = crate::legacy_v5_fixture::historical_audit(
+        &source,
+        audit_id.clone(),
+        &audit,
+        capabilities(),
+    );
+    push(&mut events, SessionEvent::RequestAuditRecorded { manifest });
+    let narrative = crate::domain::session::NarrativeSummary::new(
+        "ORIGINAL-OPERATOR-GOAL",
+        "Actual neutral observation completed.",
+        vec![],
+        vec!["Continue without repeating completed work.".into()],
+    )
+    .unwrap();
+    let sample = crate::legacy_v5_fixture::historical_sample(&source, audit_id, narrative.clone());
     push(
         &mut events,
-        SessionEvent::CompactionSampleRecorded {
-            sample: output.sample.clone(),
-        },
+        SessionEvent::CompactionSampleRecorded { sample },
     );
     let sample_id = events.last().unwrap().event_id.clone();
     let session_id = StreamId::new("continuity");
@@ -725,9 +807,7 @@ async fn historical_v5_is_valid_after_later_history_but_cannot_authorize_a_fresh
         }
     }
     let state = SessionReducer.reduce(events.clone()).unwrap();
-    let facts = load_session_compaction_facts(&project, &state)
-        .unwrap()
-        .with_model_sample(sample_id.clone(), output.sample.narrative().clone());
+    let facts = load_session_compaction_facts(&project, &state).unwrap();
     let draft = facts
         .compose_session_summary_draft(
             state.history().items(),
@@ -736,7 +816,14 @@ async fn historical_v5_is_valid_after_later_history_but_cannot_authorize_a_fresh
             ContextWindowPolicy::for_window(32768),
         )
         .unwrap();
-    let compaction = state.next_compaction(draft, 0, &facts.context()).unwrap();
+    let compaction = crate::legacy_v5_fixture::legacy_v5_candidate(
+        &state,
+        draft,
+        &facts.context(),
+        sample_id.clone(),
+        narrative.clone(),
+    );
+    compaction.validate_references(&facts.context()).unwrap();
     let historical = compaction.summary().clone();
     let previous_len = events.len();
     push(&mut events, SessionEvent::CompactionCreated { compaction });
@@ -773,9 +860,7 @@ async fn historical_v5_is_valid_after_later_history_but_cannot_authorize_a_fresh
         )
         .unwrap();
     let state = SessionReducer.reduce(events).unwrap();
-    let facts = load_session_compaction_facts(&project, &state)
-        .unwrap()
-        .with_model_sample(sample_id, output.sample.narrative().clone());
+    let facts = load_session_compaction_facts(&project, &state).unwrap();
     let stale = facts
         .compose_session_summary_draft(
             state.history().items(),
@@ -784,11 +869,98 @@ async fn historical_v5_is_valid_after_later_history_but_cannot_authorize_a_fresh
             ContextWindowPolicy::for_window(32768),
         )
         .unwrap();
-    let error = state
-        .next_compaction(stale, 0, &facts.context())
-        .unwrap_err();
+    let stale = crate::legacy_v5_fixture::legacy_v5_candidate(
+        &state,
+        stale,
+        &facts.context(),
+        sample_id,
+        narrative,
+    );
+    let error = stale.validate_references(&facts.context()).unwrap_err();
     assert!(
         error.to_string().contains("recorded model handoff"),
         "{error}"
     );
+    let config = root.path().join("provider.toml");
+    std::fs::write(&config, crate::provider_config::fixture()).unwrap();
+    let chat = |input: &str| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_echidna"))
+            .current_dir(root.path())
+            .args([
+                "chat",
+                "--config",
+                config.to_str().unwrap(),
+                "--resume",
+                "continuity",
+            ])
+            .env("CYBER_AGENT_PRIMARY_API_KEY", "fake")
+            .env("CYBER_AGENT_VISION_API_KEY", "fake")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    };
+    let stopped = chat(&format!("{}\n/exit\n", "PROTECTED-OVERSIZED-".repeat(6000)));
+    assert!(
+        !stopped.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stopped.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&stopped.stderr).contains("required Context fragments"),
+        "{}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    let before = crate::adapters::project_event_store::read_existing_session_events(
+        &project,
+        &StreamId::new("continuity"),
+    )
+    .unwrap();
+    let before = SessionReducer.reduce(before).unwrap();
+    assert_eq!(
+        before
+            .latest_compaction()
+            .unwrap()
+            .summary()
+            .schema_version(),
+        5
+    );
+    research_snapshot(&project, "after");
+    let resumed = chat("/context\n/compact\nFORBIDDEN-NEW-TASK\n/exit\n");
+    let stdout = String::from_utf8_lossy(&resumed.stdout);
+    assert!(!resumed.status.success());
+    assert!(
+        stdout.contains("[current refreshed candidate]"),
+        "{stdout}; stderr={}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    assert!(
+        stdout.contains("Compaction could not find a smaller admissible Context"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("Task input not accepted or saved"),
+        "{stdout}"
+    );
+    let after = crate::adapters::project_event_store::read_existing_session_events(
+        &project,
+        &StreamId::new("continuity"),
+    )
+    .unwrap();
+    let after = SessionReducer.reduce(after).unwrap();
+    assert_eq!(after.history(), before.history());
+    assert_eq!(after.request_audits(), before.request_audits());
+    assert_eq!(
+        after.execution_receipt_count(),
+        before.execution_receipt_count()
+    );
+    assert_eq!(after.latest_compaction().unwrap().summary().revision(), 2);
 }

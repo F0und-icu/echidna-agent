@@ -37,3 +37,12 @@ generation = 1
 model_request_limit_per_turn = 32
 # Optional, for the isolated compaction sample only; omitted inherits primary.
 # compaction_reasoning_effort = "high"
+
+# Optional budget policy. 100 basis points = 1%; omitted fields use defaults.
+[runtime.context_budget]
+pressure_bps = 8000
+target_bps = 5000
+summary_bps = 200
+compaction_reference_items = 64
+max_core_file_bytes = 524288
+# max_content_bytes = 1048576

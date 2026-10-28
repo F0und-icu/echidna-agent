@@ -53,6 +53,8 @@ mod support;
 
 const FIXTURE_SECRET: &str = "fixture-secret";
 
+#[path = "responses_cases/context_capacity.rs"]
+mod context_capacity;
 #[path = "responses_cases/text_finalization.rs"]
 mod text_finalization;
 #[path = "responses_cases/transport.rs"]

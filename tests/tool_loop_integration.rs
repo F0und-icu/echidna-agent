@@ -405,9 +405,16 @@ async fn builtin_tools_cover_files_search_argv_failures_and_bounded_output() {
         .expect("builtin Tool completes");
     assert_eq!(large.result.status, ToolResultStatus::Succeeded);
     assert_eq!(large.result.output["truncated"], true);
+    let advertised = tools
+        .catalog()
+        .into_iter()
+        .find(|spec| spec.name.as_str() == "read_file")
+        .unwrap()
+        .output_policy
+        .max_bytes;
     assert_eq!(
         large.result.output["content"].as_str().unwrap().len(),
-        128 * 1024
+        advertised
     );
 
     assert!(matches!(

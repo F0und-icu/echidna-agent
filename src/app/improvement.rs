@@ -136,6 +136,8 @@ pub(crate) fn diagnostic_source(
     current: &[(&EventId, &ContentItem)],
     friction: &[EventId],
     byte_limit: usize,
+    task_byte_limit: usize,
+    handoff_byte_limit: usize,
 ) -> Result<Value, String> {
     let excerpt = |text: &str, limit: usize| {
         let end = text
@@ -152,9 +154,16 @@ pub(crate) fn diagnostic_source(
         .and_then(|value| value.summary().narrative())
         .map(|value| serde_json::to_string(value).expect("validated narrative serializes"));
     let mut package = json!({
-        "operator_task_excerpt": excerpt(task, byte_limit / 32),
-        "operator_task_excerpted": task.len() > byte_limit / 32,
-        "previous_derived_handoff_excerpt": previous.as_deref().map(|text| excerpt(text, byte_limit / 32)),
+        "operator_task_excerpt": excerpt(task, task_byte_limit),
+        "operator_task_excerpted": task.len() > task_byte_limit,
+        "operator_task_original_bytes": task.len(),
+        "previous_derived_handoff_excerpt": previous.as_deref().map(|text| excerpt(text, handoff_byte_limit)),
+        "previous_derived_handoff_original_bytes": previous.as_deref().map(str::len),
+        "previous_derived_handoff_excerpted": previous.as_deref().map(|text| text.len() > handoff_byte_limit),
+        "previous_derived_handoff_source": state.latest_compaction().map(|value| json!({
+            "revision": value.summary().revision(),
+            "fingerprint": value.summary().fingerprint(),
+        })),
         "friction": friction,
         "observations": [],
         "omitted_history_items": current.len(),

@@ -435,50 +435,63 @@ async fn truncated_world_state_plan_never_injects_an_unplanned_diff() {
 
 #[tokio::test]
 async fn changed_project_snapshot_uses_a_causal_incremental_diff() {
-    let root = TemporaryDirectory::new("m3-project-snapshot-diff");
-    let tools = ToolRegistry::for_project(root.path());
-    let provider = ScriptedProvider::new(
-        incremental_capabilities(),
-        [
-            completed_response("first", "response-one"),
-            completed_response("second", "response-two"),
-        ],
-    );
-    let mut agent = AgentLoop::new(&provider, &tools).with_project_snapshot(
-        project_snapshot_context(1, "2026-08-23T00:00:00Z", "initial"),
-    );
-    agent
-        .run_turn("first user", AgentCancellation::new())
-        .await
-        .unwrap();
-    agent.set_project_snapshot(project_snapshot_context(
-        2,
-        "2026-08-23T01:00:00Z",
-        "filesystem changed",
-    ));
-    agent
-        .run_turn("second user", AgentCancellation::new())
-        .await
-        .unwrap();
+    for window in [32_768, 131_072] {
+        let root = TemporaryDirectory::new("m3-project-snapshot-diff");
+        let tools = ToolRegistry::for_project(root.path());
+        let provider = ScriptedProvider::new(
+            ModelCapabilities {
+                context_window: window,
+                ..incremental_capabilities()
+            },
+            [
+                completed_response("first", "response-one"),
+                completed_response("second", "response-two"),
+            ],
+        );
+        let previous = project_snapshot_context(1, "2026-08-23T00:00:00Z", "initial");
+        let current = project_snapshot_context(2, "2026-08-23T01:00:00Z", "filesystem changed");
+        let previous_hash = previous.snapshot_hash().to_owned();
+        let current_hash = current.snapshot_hash().to_owned();
+        let mut agent = AgentLoop::new(&provider, &tools).with_project_snapshot(previous);
+        agent
+            .run_turn("first user", AgentCancellation::new())
+            .await
+            .unwrap();
+        agent.set_project_snapshot(current);
+        agent
+            .run_turn("second user", AgentCancellation::new())
+            .await
+            .unwrap();
 
-    let requests = provider.requests();
-    assert_eq!(requests.len(), 2);
-    assert!(requests[1].is_incremental());
-    assert!(
-        requests[1]
+        let requests = provider.requests();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1].is_incremental());
+        let diff = requests[1]
             .input()
             .content_items
             .iter()
-            .any(|item| matches!(
-                item,
-                ContentItem::Text { text, .. }
-                    if text.contains("project_snapshot_diff") && text.contains("\"file_count\":2")
-            ))
-    );
-    assert_eq!(
-        requests[1].input().content_items.last(),
-        Some(&ContentItem::user_text("second user"))
-    );
+            .find_map(|item| {
+                let ContentItem::Text { text, .. } = item else {
+                    return None;
+                };
+                let value: serde_json::Value = serde_json::from_str(text).ok()?;
+                (value["kind"] == "project_snapshot_diff").then_some(value)
+            })
+            .unwrap();
+        assert_eq!(diff["previous_hash"], previous_hash);
+        assert_eq!(diff["current_hash"], current_hash);
+        // The 32k window now has a proportional state allowance; both the
+        // truncated and full projections must retain the same causal hashes.
+        if window == 32_768 {
+            assert_eq!(diff["snapshot"]["truncated"], true);
+        } else {
+            assert_eq!(diff["snapshot"]["file_count"], 2);
+        }
+        assert_eq!(
+            requests[1].input().content_items.last(),
+            Some(&ContentItem::user_text("second user"))
+        );
+    }
 }
 
 #[tokio::test]

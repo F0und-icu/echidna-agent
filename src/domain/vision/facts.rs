@@ -53,6 +53,34 @@ pub struct VisionRouteRecord {
 }
 
 impl VisionRouteRecord {
+    pub(crate) fn primary_direct_provenance(
+        source_artifact_id: ArtifactId,
+        delivery_artifact_id: ArtifactId,
+        route_event_id: EventId,
+    ) -> Result<
+        crate::domain::context::ContextProvenance,
+        crate::domain::context::ContextPlannerError,
+    > {
+        use crate::domain::context::{
+            AuthorityLevel, ContextOrigin, ContextProvenance, ContextReferences, ContextSlot,
+            FreshnessIdentity, RetentionClass, SemanticClass,
+        };
+        let mut artifact_refs = vec![source_artifact_id];
+        if !artifact_refs.contains(&delivery_artifact_id) {
+            artifact_refs.push(delivery_artifact_id.clone());
+        }
+        ContextProvenance::new(
+            ContextSlot::TurnUpdates,
+            ContextOrigin::ArtifactProjection,
+            SemanticClass::AuthoritativeReference,
+            AuthorityLevel::FactReference,
+            RetentionClass::Recent,
+            FreshnessIdentity::new(delivery_artifact_id.as_str())?
+                .with_producer_version("vision-route:1"),
+            ContextReferences::new(Vec::new(), artifact_refs, Vec::new(), vec![route_event_id])?,
+        )
+    }
+
     pub fn validate(&self) -> Result<(), VisionFactError> {
         if self.schema_version != VISION_FACT_SCHEMA_VERSION {
             return Err(VisionFactError::UnsupportedSchemaVersion {
@@ -209,6 +237,39 @@ where
 }
 
 impl VisionObservation {
+    pub(crate) fn primary_context_provenance(
+        &self,
+        observation_event_id: EventId,
+    ) -> Result<
+        crate::domain::context::ContextProvenance,
+        crate::domain::context::ContextPlannerError,
+    > {
+        use crate::domain::context::{
+            AuthorityLevel, ContextOrigin, ContextProvenance, ContextReferences, ContextSlot,
+            FreshnessIdentity, RetentionClass, SemanticClass,
+        };
+        let mut artifact_refs = vec![self.source_artifact_id.clone()];
+        artifact_refs.extend(self.derived_artifact_ids.iter().cloned());
+        ContextProvenance::new(
+            ContextSlot::TurnUpdates,
+            ContextOrigin::ModelOutput,
+            SemanticClass::ModelObservation,
+            AuthorityLevel::ModelObservation,
+            RetentionClass::Recent,
+            FreshnessIdentity::new(&self.task_hash)?.with_producer_version("vision-observation:1"),
+            ContextReferences::new(
+                Vec::new(),
+                artifact_refs,
+                Vec::new(),
+                vec![
+                    self.route_event_id.clone(),
+                    self.request_audit_event_id.clone(),
+                    observation_event_id,
+                ],
+            )?,
+        )
+    }
+
     pub fn validate(&self) -> Result<(), VisionFactError> {
         if !matches!(
             self.schema_version,

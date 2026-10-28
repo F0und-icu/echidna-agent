@@ -38,6 +38,10 @@ impl ProviderConfigV1 {
         {
             return Err(ProviderCompositionError::InvalidModelRequestLimit);
         }
+        self.runtime
+            .context_budget
+            .validate()
+            .map_err(|message| ProviderCompositionError::InvalidContextBudgetPolicy { message })?;
 
         for (name, mapping) in &self.capability_mappings {
             validate_identifier("capability_mapping", name)?;
@@ -53,6 +57,7 @@ impl ProviderConfigV1 {
                 });
             }
             crate::domain::context::ContextPlanner::current()
+                .with_budget_policy(self.runtime.context_budget)
                 .default_budget(&mapping.to_domain())
                 .map_err(|source| ProviderCompositionError::InvalidContextBudget {
                     mapping: name.clone(),
@@ -375,6 +380,8 @@ fn validate_credential_reference(
 
 #[derive(Debug, Error)]
 pub enum ProviderCompositionError {
+    #[error("invalid runtime.context_budget: {message}")]
+    InvalidContextBudgetPolicy { message: &'static str },
     #[error("MCP server `{server}` is invalid: {message}")]
     InvalidMcpServer { server: String, message: String },
     #[error("capability mapping `{mapping}` has an invalid Context/output budget: {source}")]

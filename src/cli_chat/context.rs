@@ -49,7 +49,8 @@ impl ChatContextCache {
             .inspect(&tools.specs(), &[], "context-refresh")
             .map_err(ChatContextRefreshError::ProjectSnapshot)?;
         let project_snapshot = ProjectSnapshotContext::new(snapshot.snapshot)?;
-        let core_memory = load_core_memory(project, binding)?;
+        let core_memory =
+            load_core_memory(project, binding, tools.window_policy().core_file_bytes())?;
         Ok(CurrentContextState::new(
             world_state,
             project_snapshot,
@@ -99,6 +100,7 @@ struct ResearchProjectionRevision {
 fn load_core_memory(
     project: &Project,
     binding: &AgentDefinitionBinding,
+    core_file_bytes: usize,
 ) -> Result<Option<ContextFragment>, ChatContextRefreshError> {
     let scope = match binding.definition().context().memory() {
         AgentMemoryScope::None => return Ok(None),
@@ -112,7 +114,9 @@ fn load_core_memory(
         MemoryScope::Project => "project".to_owned(),
         MemoryScope::Agent { agent_id } => format!("agent:{}", agent_id.as_str()),
     };
-    let document = LocalProjectMemory::with_scope(project, scope).read(&path)?;
+    let document = LocalProjectMemory::with_scope(project, scope)
+        .with_core_byte_limit(core_file_bytes)
+        .read(&path)?;
     match document.content {
         None => Ok(None),
         Some(content) if content.is_empty() => {

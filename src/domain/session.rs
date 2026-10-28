@@ -14,6 +14,8 @@ use thiserror::Error;
 
 mod argument_correction;
 mod checkpoint_binding;
+mod model_delivery;
+mod operator_boundary;
 
 use super::agent_definition::AgentDefinitionBinding;
 use super::context::{ProviderSessionId, ProviderSessionRef, ProviderSessionRole};
@@ -62,16 +64,32 @@ const RESEARCH_PHASE_SELECTED_EVENT_TYPE: &str = "session.research_phase_selecte
 const DOMAIN_PROFILE_SELECTED_EVENT_TYPE: &str = "session.domain_profile_selected";
 pub(super) const CURRENT_SESSION_PAYLOAD_SCHEMA_VERSION: u16 = 1;
 
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompactionContextCapturedPayload {
+    schema_version: u16,
+    blob_id: crate::domain::artifacts::BlobId,
+}
+
 mod compaction;
 mod improvement;
 pub use improvement::ImprovementActivity;
 pub(crate) use improvement::{ImprovementFact, ImprovementStage, scoped_call_id};
+pub use model_delivery::ModelDeliveryCommitted;
+pub(crate) use operator_boundary::ProtectedOperatorContext;
+pub use operator_boundary::{OperatorInputRef, OperatorTurnBoundary};
 
+pub(crate) use compaction::VerifiedCompactionGraph;
+pub(crate) use compaction::{
+    CompactionContextCapture, CompactionSourceEntry, CompactionSourceNode,
+    CompactionSourceNodeInput, CompactionSourcePlan, CompactionSourceRange,
+};
 pub use compaction::{
     CompactionModelSample, CompactionValidationContext, EvidenceSpine, NarrativeSummary,
     ResearchStreamIdentity, SessionCompaction, SessionSummary, SessionSummaryDraft,
 };
 pub(crate) use compaction::{SessionSourceIdentity, TaskCompactionValidationFacts};
+pub(crate) use compaction::{compaction_instructions, node_template_hash};
 
 /// A read-only projection of one existing Receipt fact. It deliberately
 /// retains the original Event identity instead of introducing another Receipt
@@ -79,6 +97,7 @@ pub(crate) use compaction::{SessionSourceIdentity, TaskCompactionValidationFacts
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SessionExecutionReceiptRecord {
     pub(crate) event_id: EventId,
+    pub(crate) sequence: EventSequence,
     pub(crate) receipt: ExecutionReceipt,
     pub(crate) result: Option<ToolResult>,
 }
@@ -95,6 +114,15 @@ pub enum SessionLifecycle {
 /// the Tool domain's `ExecutionReceipt` rather than defining a Session copy.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionEvent {
+    CompactionContextCaptured {
+        blob_id: crate::domain::artifacts::BlobId,
+    },
+    ModelDeliveryCommitted {
+        delivery: ModelDeliveryCommitted,
+    },
+    OperatorTurnBoundaryRecorded {
+        boundary: OperatorTurnBoundary,
+    },
     CompactionSampleRecorded {
         sample: CompactionModelSample,
     },
@@ -213,6 +241,15 @@ impl SessionEvent {
 
     fn event_type(&self) -> EventType {
         match self {
+            Self::CompactionContextCaptured { .. } => {
+                EventType::new("session.compaction_context_captured")
+            }
+            Self::ModelDeliveryCommitted { .. } => {
+                EventType::new("session.model_delivery_committed")
+            }
+            Self::OperatorTurnBoundaryRecorded { .. } => {
+                EventType::new("session.operator_turn_boundary_recorded")
+            }
             Self::CompactionSampleRecorded { .. } => {
                 EventType::new("session.compaction_sample_recorded")
             }
@@ -263,6 +300,14 @@ impl SessionEvent {
 
     fn encode_payload(&self, event_type: &EventType) -> Result<Value, SessionError> {
         let payload = match self {
+            Self::CompactionContextCaptured { blob_id } => {
+                serde_json::to_value(CompactionContextCapturedPayload {
+                    schema_version: 1,
+                    blob_id: blob_id.clone(),
+                })
+            }
+            Self::ModelDeliveryCommitted { delivery } => serde_json::to_value(delivery),
+            Self::OperatorTurnBoundaryRecorded { boundary } => serde_json::to_value(boundary),
             Self::CompactionSampleRecorded { sample } => serde_json::to_value(sample),
             Self::ModelUsageRecorded {
                 request_audit_event_id,
@@ -387,6 +432,14 @@ impl SessionEvent {
 
     pub(crate) fn decode(event_type: &EventType, payload: Value) -> Result<Self, SessionError> {
         match event_type.as_str() {
+            "session.model_delivery_committed" => {
+                let delivery: ModelDeliveryCommitted = decode_strict_payload(event_type, payload)?;
+                Ok(Self::ModelDeliveryCommitted { delivery })
+            }
+            "session.operator_turn_boundary_recorded" => {
+                let boundary: OperatorTurnBoundary = decode_strict_payload(event_type, payload)?;
+                Ok(Self::OperatorTurnBoundaryRecorded { boundary })
+            }
             MODEL_USAGE_RECORDED_EVENT_TYPE => {
                 let payload: ModelUsagePayload = decode_strict_payload(event_type, payload)?;
                 require_current_payload_schema(event_type, payload.schema_version)?;
@@ -534,6 +587,20 @@ impl SessionEvent {
                     resumed_after_sequence: payload.resumed_after_sequence,
                 })
             }
+            "session.compaction_context_captured" => {
+                let captured: CompactionContextCapturedPayload =
+                    decode_strict_payload(event_type, payload)?;
+                require_current_payload_schema(event_type, captured.schema_version)?;
+                crate::domain::artifacts::BlobId::new(captured.blob_id.as_str()).map_err(
+                    |error| SessionError::MalformedPayload {
+                        event_type: event_type.clone(),
+                        message: error.to_string(),
+                    },
+                )?;
+                Ok(Self::CompactionContextCaptured {
+                    blob_id: captured.blob_id,
+                })
+            }
             "session.compaction_sample_recorded" => {
                 let sample: CompactionModelSample = decode_strict_payload(event_type, payload)?;
                 sample.validate()?;
@@ -623,7 +690,11 @@ pub struct SessionState {
     used_primary_provider_session_ids: BTreeSet<ProviderSessionId>,
     history: ConversationHistory,
     history_event_ids: Vec<EventId>,
+    history_event_sequences: Vec<EventSequence>,
+    operator_boundaries: Vec<OperatorTurnBoundary>,
+    model_deliveries: Vec<ModelDeliveryCommitted>,
     recovered_history_item_count: usize,
+    recovered_history_start: Option<usize>,
     resume_count: u64,
     execution_receipt_count: u64,
     execution_receipts: Vec<SessionExecutionReceiptRecord>,
@@ -631,15 +702,18 @@ pub struct SessionState {
     cache_hit_count: u64,
     recovery_count: u64,
     latest_compaction: Option<SessionCompaction>,
-    compaction_samples: Vec<(EventId, CompactionModelSample)>,
+    compaction_samples: Vec<(EventId, EventSequence, CompactionModelSample)>,
     request_audits: Vec<RequestAuditManifest>,
+    request_audit_sequences: Vec<EventSequence>,
     latest_audit_history_len: usize,
     model_usage: BTreeMap<EventId, ModelUsage>,
     rejected_requests: BTreeSet<EventId>,
     consecutive_rejection: Option<argument_correction::ConsecutiveRejection>,
     correction_reset_anchor: Option<EventId>,
     vision_routes: Vec<VisionRouteRecord>,
+    vision_route_sequences: Vec<EventSequence>,
     vision_observations: Vec<VisionObservation>,
+    vision_observation_event_ids: Vec<(EventId, EventSequence)>,
     vision_failures: Vec<VisionAnalysisFailure>,
     research_phase_selection: Option<ResearchPhaseSelection>,
     domain_profile_selection: Option<DomainProfileSelection>,
@@ -657,7 +731,11 @@ impl Default for SessionState {
             used_primary_provider_session_ids: BTreeSet::new(),
             history: ConversationHistory::default(),
             history_event_ids: Vec::new(),
+            history_event_sequences: Vec::new(),
+            operator_boundaries: Vec::new(),
+            model_deliveries: Vec::new(),
             recovered_history_item_count: 0,
+            recovered_history_start: None,
             resume_count: 0,
             execution_receipt_count: 0,
             execution_receipts: Vec::new(),
@@ -667,13 +745,16 @@ impl Default for SessionState {
             latest_compaction: None,
             compaction_samples: Vec::new(),
             request_audits: Vec::new(),
+            request_audit_sequences: Vec::new(),
             latest_audit_history_len: 0,
             model_usage: BTreeMap::new(),
             rejected_requests: BTreeSet::new(),
             consecutive_rejection: None,
             correction_reset_anchor: None,
             vision_routes: Vec::new(),
+            vision_route_sequences: Vec::new(),
             vision_observations: Vec::new(),
+            vision_observation_event_ids: Vec::new(),
             vision_failures: Vec::new(),
             research_phase_selection: None,
             domain_profile_selection: None,
@@ -682,7 +763,7 @@ impl Default for SessionState {
 }
 
 impl SessionState {
-    pub(crate) fn compaction_samples(&self) -> &[(EventId, CompactionModelSample)] {
+    pub(crate) fn compaction_samples(&self) -> &[(EventId, EventSequence, CompactionModelSample)] {
         &self.compaction_samples
     }
     pub fn agent_definition_binding(&self) -> Option<&AgentDefinitionBinding> {
@@ -1087,6 +1168,30 @@ fn apply_session_event(
     event_id: &EventId,
 ) -> Result<(), SessionError> {
     match event {
+        SessionEvent::CompactionContextCaptured { .. } => {
+            require_transition(
+                state.lifecycle,
+                "session.compaction_context_captured",
+                SessionLifecycle::Active,
+            )?;
+            state.ensure_completed_history()?;
+        }
+        SessionEvent::ModelDeliveryCommitted { delivery } => {
+            require_transition(
+                state.lifecycle,
+                "session.model_delivery_committed",
+                SessionLifecycle::Active,
+            )?;
+            model_delivery::apply(state, delivery)?;
+        }
+        SessionEvent::OperatorTurnBoundaryRecorded { boundary } => {
+            require_transition(
+                state.lifecycle,
+                "session.operator_turn_boundary_recorded",
+                SessionLifecycle::Active,
+            )?;
+            operator_boundary::apply(state, boundary, source_event_sequence)?;
+        }
         SessionEvent::CompactionSampleRecorded { sample } => {
             require_transition(
                 state.lifecycle,
@@ -1113,13 +1218,22 @@ fn apply_session_event(
                 || state
                     .compaction_samples
                     .iter()
-                    .any(|(_, previous)| previous.provider_session() == sample.provider_session())
+                    .any(|(_, _, previous)| previous.provider_session() == sample.provider_session())
             {
                 return Err(SessionError::CompactionContextProvenance {
                     message: "Compaction sample source/audit/scope mismatch".to_owned(),
                 });
             }
-            state.compaction_samples.push((event_id.clone(), sample));
+            let sequence = EventSequence::new(
+                source_event_sequence
+                    .and_then(|sequence| sequence.get().checked_add(1))
+                    .ok_or(SessionError::StateOverflow {
+                        field: "Compaction sample sequence",
+                    })?,
+            );
+            state
+                .compaction_samples
+                .push((event_id.clone(), sequence, sample));
         }
         SessionEvent::ModelUsageRecorded {
             request_audit_event_id,
@@ -1163,7 +1277,7 @@ fn apply_session_event(
                 }
                 (ProviderSessionRole::Primary, None) => {
                     state.primary_provider_session.as_ref() == Some(&provider_session)
-                        || state.compaction_samples.iter().any(|(_, sample)| {
+                        || state.compaction_samples.iter().any(|(_, _, sample)| {
                             sample.audit_event_id() == &request_audit_event_id
                                 && sample.provider_session() == &provider_session
                         })
@@ -1245,6 +1359,7 @@ fn apply_session_event(
                 });
             }
             record_fresh_primary_provider_session_id(state, &primary_provider_session)?;
+            state.capture_recovered_history_start()?;
             state.resume_count = increment("resume count", state.resume_count)?;
             state.primary_provider_session = Some(primary_provider_session);
             state.agent_definition_binding = Some(binding);
@@ -1317,6 +1432,7 @@ fn apply_session_event(
             require_primary_provider_session(&primary_provider_session)?;
             require_transition(state.lifecycle, "session.resumed", SessionLifecycle::Active)?;
             record_fresh_primary_provider_session_id(state, &primary_provider_session)?;
+            state.capture_recovered_history_start()?;
             state.resume_count = increment("resume count", state.resume_count)?;
             state.primary_provider_session = Some(primary_provider_session);
             state.recovered_history_item_count = state.history.items().len();
@@ -1396,6 +1512,9 @@ fn apply_session_event(
                 .execution_receipts
                 .push(SessionExecutionReceiptRecord {
                     event_id: event_id.clone(),
+                    sequence: EventSequence::new(
+                        source_event_sequence.map_or(1, |sequence| sequence.get() + 1),
+                    ),
                     receipt,
                     result: None,
                 });
@@ -1407,6 +1526,9 @@ fn apply_session_event(
                 .execution_receipts
                 .push(SessionExecutionReceiptRecord {
                     event_id: event_id.clone(),
+                    sequence: EventSequence::new(
+                        source_event_sequence.map_or(1, |sequence| sequence.get() + 1),
+                    ),
                     receipt,
                     result: None,
                 });
@@ -1454,6 +1576,9 @@ fn apply_session_event(
             }
             state.history.append_content_item(item)?;
             state.history_event_ids.push(event_id.clone());
+            state.history_event_sequences.push(EventSequence::new(
+                source_event_sequence.map_or(1, |sequence| sequence.get() + 1),
+            ));
             if state.latest_compaction.is_some() {
                 state.normalized_history_items()?;
             }
@@ -1485,6 +1610,9 @@ fn apply_session_event(
                 || compaction.retained_from_normalized_history_index() > normalized_history.len()
                 || compaction.retained_history()
                     != &normalized_history[compaction.retained_from_normalized_history_index()..]
+                || (compaction.summary().schema_version() == 6
+                    && compaction.retained_history().len()
+                        < state.latest_uncompleted_batch_items()?)
             {
                 return Err(SessionError::CompactionRetentionMismatch);
             }
@@ -1498,6 +1626,7 @@ fn apply_session_event(
                 });
             }
             state.latest_compaction = Some(compaction);
+            state.recovered_history_start = None;
         }
         SessionEvent::ConsecutiveModelSampleRejected {
             request_audit_event_id,
@@ -1575,6 +1704,9 @@ fn apply_session_event(
                 });
             }
             state.request_audits.push(manifest);
+            state.request_audit_sequences.push(EventSequence::new(
+                source_event_sequence.map_or(1, |sequence| sequence.get() + 1),
+            ));
             state.latest_audit_history_len = state.history.items().len();
         }
         SessionEvent::VisionRouteDecided { route } => {
@@ -1600,6 +1732,13 @@ fn apply_session_event(
                 });
             }
             state.vision_routes.push(route);
+            state.vision_route_sequences.push(EventSequence::new(
+                source_event_sequence
+                    .and_then(|sequence| sequence.get().checked_add(1))
+                    .ok_or(SessionError::StateOverflow {
+                        field: "Vision route sequence",
+                    })?,
+            ));
         }
         SessionEvent::VisionObservationRecorded { observation } => {
             require_transition(
@@ -1632,6 +1771,16 @@ fn apply_session_event(
                 });
             }
             state.vision_observations.push(observation);
+            state.vision_observation_event_ids.push((
+                event_id.clone(),
+                EventSequence::new(
+                    source_event_sequence
+                        .and_then(|sequence| sequence.get().checked_add(1))
+                        .ok_or(SessionError::StateOverflow {
+                            field: "Vision observation sequence",
+                        })?,
+                ),
+            ));
         }
         SessionEvent::VisionAnalysisFailed { failure } => {
             require_transition(

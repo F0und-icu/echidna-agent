@@ -11,6 +11,7 @@ use crate::domain::context::{
 use crate::domain::session::{
     SessionCompaction, SessionError, SessionEvent, SessionState, SessionSummaryDraft,
 };
+use crate::ports::artifact::ArtifactStore;
 use crate::ports::model::ModelProvider;
 
 use super::{ChatError, DurableChatSession, event_id, occurred_at};
@@ -42,6 +43,10 @@ impl<Provider: ModelProvider + ?Sized>
     crate::app::agent_loop::ToolBatchStage<Provider, ToolRegistry>
     for AutomaticToolBatchCompaction<'_>
 {
+    fn needs_current_context(&self) -> bool {
+        self.composition.runtime().auto_compact
+    }
+
     fn apply<'call, 'provider: 'call, 'tools: 'call>(
         &'call mut self,
         agent: &'call mut AgentLoop<'provider, 'tools, Provider, ToolRegistry>,
@@ -54,6 +59,27 @@ impl<Provider: ModelProvider + ?Sized>
     > {
         Box::pin(async move {
             self.batches += 1;
+            // Every enabled, settled batch receives a local assessment, even
+            // when a failed handoff or the shared admission limit prevents sampling.
+            let needs_compaction = if self.composition.runtime().auto_compact
+                && !self.request.cancellation.is_cancelled()
+            {
+                Some(agent.batch_needs_compaction(active)?)
+            } else {
+                None
+            };
+            let no_admissions = self.request.budget.remaining() == Some(0);
+            if let Some(needs_compaction) = needs_compaction
+                && (self.deferred || no_admissions)
+                && self.composition.diagnostic_output_enabled()
+            {
+                console_eprintln!(
+                    "[debug context pressure] settled batch evaluated; threshold_reached={needs_compaction}; automatic handoff deferred for this Turn"
+                );
+            }
+            if no_admissions {
+                return Ok(());
+            }
             if self.batches.is_multiple_of(16)
                 && crate::app::improvement::policy(self.binding.definition()).is_some()
             {
@@ -81,6 +107,12 @@ impl<Provider: ModelProvider + ?Sized>
                     }
                 })?;
                 if let Some(accepted) = accepted {
+                    if self.deferred {
+                        console_eprintln!(
+                            "[RSI checkpoint deferred] Automatic handoff already failed this Turn; candidate remains pending and old instructions remain active."
+                        );
+                        return Ok(());
+                    }
                     let updated = super::evolution::apply_checkpoint(
                         self.session,
                         &self.binding,
@@ -101,19 +133,25 @@ impl<Provider: ModelProvider + ?Sized>
                             message: error.to_string(),
                         }
                     })?;
-                    if let Some(binding) = updated {
-                        self.binding = binding;
+                    match updated {
+                        super::evolution::CheckpointOutcome::Applied(binding) => {
+                            self.binding = *binding
+                        }
+                        super::evolution::CheckpointOutcome::Deferred { failed_handoff } => {
+                            self.deferred |= failed_handoff;
+                        }
                     }
                     return Ok(());
                 }
             }
-            if self.deferred
-                || self.request.cancellation.is_cancelled()
-                || !agent.delivery_needs_compaction()?
-            {
+            let Some(needs_compaction) = needs_compaction else {
+                return Ok(());
+            };
+            if self.deferred || !needs_compaction {
                 return Ok(());
             }
             (self.end_answer)();
+            let admitted_before = self.request.budget.counts().primary;
             match self
                 .session
                 .compact_tool_batch(
@@ -137,7 +175,12 @@ impl<Provider: ModelProvider + ?Sized>
                     console_println!(
                         "Automatic tool-batch compaction deferred: {error}; Provider delivery retained."
                     );
-                    self.deferred = true;
+                    // Only a failed model handoff suppresses a new automatic
+                    // sample for this Turn. A later settled batch changes the
+                    // actual source and must still receive a local evaluation.
+                    if failed_handoff(&error, admitted_before, self.request.budget) {
+                        self.deferred = true;
+                    }
                 }
                 Err(error) => {
                     return Err(
@@ -152,11 +195,27 @@ impl<Provider: ModelProvider + ?Sized>
     }
 }
 
+pub(super) fn failed_handoff(
+    error: &ChatError,
+    admitted_before: usize,
+    budget: &crate::app::model_request_budget::ModelRequestBudget,
+) -> bool {
+    budget.counts().primary > admitted_before
+        && matches!(
+            error,
+            ChatError::Agent(
+                crate::app::agent_loop::AgentLoopError::CompactionSummaryRejected { .. }
+                    | crate::app::agent_loop::AgentLoopError::Model(_)
+            )
+        )
+}
+
 pub(super) fn automatically_deferred(error: &ChatError) -> bool {
     matches!(error,
         ChatError::CompactionNotUseful
         | ChatError::CompactionFacts(crate::adapters::research_projection::CompactionValidationFactsError::ResearchStreamEmpty)
         | ChatError::Session(SessionError::CompactionCurrentTargetRequired)
+        | ChatError::Session(SessionError::CompactionSummaryTooLarge { .. })
         | ChatError::Agent(crate::app::agent_loop::AgentLoopError::CompactionSummaryRejected { .. }
             | crate::app::agent_loop::AgentLoopError::CompactionCancelled
             | crate::app::agent_loop::AgentLoopError::Model(_)
@@ -167,19 +226,25 @@ pub(super) fn automatically_deferred(error: &ChatError) -> bool {
 }
 
 pub(super) fn explicitly_deferred(error: &ChatError) -> bool {
-    matches!(error, ChatError::Agent(_)) && automatically_deferred(error)
+    automatically_deferred(error)
 }
 
 pub(super) struct AppliedCompactionSummary {
     revision: u64,
     source_history_items: usize,
     retained_history_items: usize,
+    reached_soft_target: bool,
 }
 
 impl AppliedCompactionSummary {
     pub(super) fn message(&self) -> String {
+        let target = if self.reached_soft_target {
+            "Preferred input target reached."
+        } else {
+            "Preferred input target not reached; the smaller candidate fits the local hard input budget."
+        };
         format!(
-            "Compaction revision {} applied: retained {} of {} source History items; the next Primary request will be CompactionReset Full. Historical outputs/constraints may be omitted; use prompts.project_file for stable rules, not a lossy Summary.",
+            "Compaction revision {} applied: retained {} of {} source History items; the next Primary request will be CompactionReset Full. {target} Historical outputs may be omitted; Summary is lossy.",
             self.revision, self.retained_history_items, self.source_history_items
         )
     }
@@ -198,53 +263,24 @@ impl DurableChatSession {
         state: &SessionState,
         facts: &SessionCompactionFacts,
         composition: &crate::provider_composition::ProviderComposition,
-        provider_session: crate::domain::context::ProviderSession,
-        discovered_mcp: &[crate::adapters::mcp::McpCatalogTool],
-        read: &crate::adapters::research_projection::ProjectReadContext,
     ) -> Result<SessionCompaction, ChatError> {
-        // A context-only preflight uses the same configured Provider and Tool
-        // catalog, never `stream` or a second executing AgentLoop.
-        let window_tokens = composition
-            .agent_profile()
-            .primary()
-            .capabilities()
-            .context_window;
-        let tools = self.bound_tools(discovered_mcp, window_tokens)?;
-        let mut preview = AgentLoop::with_primary_context(
-            composition.primary_provider(),
-            &tools,
-            composition.agent_profile().primary().model().clone(),
-            composition.agent_profile().primary().profile().clone(),
-            provider_session,
-        )?
-        .with_prompt_composition(super::definition::prompt_for_state(
-            &self.project,
-            self.agent_binding(),
-            state,
-            self.session_id.as_str(),
-        )?);
-        preview.queue_agent_model_profile(composition.agent_profile().clone())?;
-        preview.refresh_current_context(
-            super::context::ChatContextCache::default().refresh_from_read_context(
-                &self.project,
-                &tools,
-                self.agent_binding(),
-                read,
-            )?,
-        )?;
-        let (_, candidate) = select_compaction(
+        // Refresh durable references independently of admission to a model
+        // request. The caller performs the normal capacity preflight afterward.
+        let (_, candidate, _) = select_compaction(
             state,
             facts,
-            ContextWindowPolicy::for_window(window_tokens),
+            composition
+                .runtime()
+                .context_budget
+                .for_capabilities(composition.agent_profile().primary().capabilities())
+                .map_err(crate::app::agent_loop::AgentLoopError::from)?,
             state
                 .latest_compaction()
                 .and_then(|compaction| compaction.summary().narrative()),
-            |candidate| {
-                preview
-                    .preflight_compaction(candidate, false)
-                    .map_err(ChatError::from)
-            },
+            CompactionSelection::SourceRefresh,
+            |_| Ok(None),
         )?;
+        state.protected_operator_context_for(&candidate)?;
         Ok(candidate)
     }
 
@@ -294,7 +330,7 @@ impl DurableChatSession {
     async fn compact_with_boundary<Provider>(
         &self,
         agent: &mut AgentLoop<'_, '_, Provider, ToolRegistry>,
-        window_tokens: u32,
+        _window_tokens: u32,
         active: Option<&crate::app::agent_loop::ToolBatchContext<'_>>,
         replacement: Option<&crate::domain::research_control::PromptComposition>,
         request: CompactionRequestContext<'_>,
@@ -302,10 +338,24 @@ impl DurableChatSession {
     where
         Provider: ModelProvider + ?Sized,
     {
-        let policy = ContextWindowPolicy::for_window(window_tokens);
-        let (source, goal, source_data, references) =
-            self.with_projection(|projection, _, _| {
+        let policy = request
+            .composition
+            .runtime()
+            .context_budget
+            .for_capabilities(request.composition.agent_profile().primary().capabilities())
+            .map_err(crate::app::agent_loop::AgentLoopError::from)?;
+        let capture = agent.capture_compaction_context(
+            request.composition.compaction_provider().0,
+            policy.compaction_reference_items(),
+        )?;
+        let capture_bytes =
+            serde_json::to_vec(&capture).map_err(|error| ChatError::CompactionSummarySource {
+                message: error.to_string(),
+            })?;
+        let (source, goal, references, entries, contents, output_limit, capture_blob) =
+            self.with_projection(|projection, store, stream_id| {
                 let state = projection.state();
+                self.validate_protected_sources(state)?;
                 agent.validate_compaction_session(state)?;
                 state
                     .ensure_completed_history()
@@ -315,123 +365,107 @@ impl DurableChatSession {
                     .map_err(ChatError::CompactionFacts)?;
                 // Do not spend a model request when even the original local
                 // capacity/retention preflight proves no useful replacement fits.
-                select_compaction(state, &facts, policy, None, |candidate| {
+                select_compaction(state, &facts, policy, None, CompactionSelection::Preview, |candidate| {
+                    let protected = state.protected_operator_context_for(candidate)?;
                     match (active, replacement) {
-                        (Some(active), Some(prompt)) => {
-                            agent.preflight_checkpoint_definition(candidate, active, prompt)
-                        }
+                        (Some(active), Some(prompt)) => agent
+                            .preflight_checkpoint_definition(candidate, active, prompt, &protected),
                         (Some(active), None) => {
-                            agent.preflight_tool_batch_compaction(candidate, active)
+                            agent.preflight_tool_batch_compaction(candidate, active, &protected)
                         }
-                        (None, _) => agent.preflight_compaction(candidate, true),
+                        (None, _) => agent.preflight_compaction(candidate, true, &protected),
                     }
                     .map_err(ChatError::from)
                 })?;
-                let history = state
-                    .normalized_history_items()
-                    .map_err(SessionError::from)?;
                 let previous = state.latest_compaction().map(|value| value.summary());
-                let (goal, _) = crate::adapters::research_projection::continuation_text(
+                let (mut goal, _) = crate::adapters::research_projection::continuation_text(
                     &state
                         .full_normalized_history()
                         .map_err(SessionError::from)?,
                     previous,
                     policy,
                 )?;
+                if !state.protected_operator_inputs()?.is_empty() {
+                    goal = "The earlier operator request and constraints are retained verbatim in this context.".to_owned();
+                }
                 let references = state
                     .history_items_with_event_ids()
                     .map(|(id, _)| id.clone())
                     .rev()
                     .take(policy.compaction_reference_items())
                     .collect::<Vec<_>>();
-                let previous = previous
-                    .map(|summary| summary.model_projection())
-                    .transpose()?;
-                let data = serde_json::to_string(&serde_json::json!({
-                    "source": facts.task_source()?,
-                    "operator_goal": goal,
-                    "active_operator_input": active.map(|active| active.original_input()),
-                    "previous_derived_summary": previous,
-                    "active_normalized_history": history,
-                    "recent_history_event_refs": references,
-                }))
-                .map_err(|error| ChatError::CompactionSummarySource {
-                    message: error.to_string(),
-                })?;
-                Ok((facts.task_source()?.clone(), goal, data, references))
+                let output_limit = crate::domain::session::SessionSummaryDraft::v6_handoff_byte_limit(
+                    &goal,
+                    policy.summary_bytes(),
+                    crate::app::agent_loop::minimum_compaction_handoff_bytes(),
+                )?;
+                let blob_id = self.artifacts.publish_bytes(&capture_bytes).map_err(|error| ChatError::CompactionSummarySource { message: format!("Compaction context publication failed: {error}") })?.blob_id;
+                let sequence = store.next_sequence()?;
+                let event = SessionEvent::CompactionContextCaptured { blob_id: blob_id.clone() }.into_envelope(
+                    event_id(self.project.project_id(), &self.session_id, sequence.get(), "compaction-context"), stream_id, sequence, occurred_at(),
+                )?;
+                projection.append(store, event).map_err(ChatError::from_session_append)?;
+                let facts = load_session_compaction_facts(&self.project, projection.state()).map_err(ChatError::CompactionFacts)?;
+                let source = facts.task_source()?.clone();
+                let events = crate::adapters::project_event_store::read_existing_session_events(
+                    &self.project,
+                    &self.session_id,
+                )?;
+                let project_events =
+                    crate::adapters::project_event_store::read_existing_research_events(
+                        &self.project,
+                    )?;
+                let (entries, contents) =
+                    crate::domain::session::CompactionSourcePlan::source_entries(
+                        &source,
+                        &events,
+                        &project_events,
+                    )?;
+                Ok((source, goal, references, entries, contents, output_limit, blob_id))
             })?;
+        let verify_capture = || -> Result<(), ChatError> {
+            self.artifacts.read_blob(&capture_blob).map_err(|error| {
+                ChatError::CompactionSummarySource {
+                    message: format!("Compaction context Blob read failed: {error}"),
+                }
+            })?;
+            Ok(())
+        };
+        verify_capture()?;
         console_eprintln!(
             "[compaction] Requesting a tool-free model handoff; original Context remains active until validation and durable append."
         );
-        let mut attempts = Vec::new();
-        let mut record_attempt = |attempt| {
-            self.record_request_audit_manifest(attempt, None)
-                .map(|manifest| {
-                    let id = manifest.audit_event_id().clone();
-                    attempts.push(id.clone());
-                    id
-                })
-                .map_err(ChatError::into_request_audit_agent_loop_error)
-        };
-        let output = agent
-            .sample_compaction(
-                crate::app::agent_loop::CompactionSampleInput {
-                    provider: request.composition.compaction_provider().0,
-                    agent_model_profile: Some(request.composition.compaction_provider().1),
-                    source: &source,
-                    source_data,
-                    current_goal: goal,
-                    references,
-                    byte_limit: policy.summary_bytes(),
-                    request_budget: request.budget,
-                    cancellation: request.cancellation.clone(),
-                    audit_context: request.audit,
-                },
-                &mut record_attempt,
+        let graph = self
+            .sample_compaction_graph(
+                agent,
+                &request,
+                &capture,
+                &source,
+                &goal,
+                &references,
+                &entries,
+                &contents,
+                policy.summary_bytes(),
+                output_limit,
             )
             .await?;
         if request.cancellation.is_cancelled() {
             return Err(crate::app::agent_loop::AgentLoopError::CompactionCancelled.into());
         }
-        let sample_id = self.with_projection(|projection, store, stream_id| {
-            crate::adapters::session_compaction::validate_compaction_source_suffix(
-                &self.project,
-                &source,
-                &attempts,
-                None,
-            )
-            .map_err(|message| ChatError::CompactionSummarySource { message })?;
-            let sequence = store.next_sequence()?;
-            let id = event_id(
-                self.project.project_id(),
-                &self.session_id,
-                sequence.get(),
-                "compaction-sample",
-            );
-            let event = SessionEvent::CompactionSampleRecorded {
-                sample: output.sample.clone(),
-            }
-            .into_envelope(id.clone(), stream_id, sequence, occurred_at())?;
-            projection
-                .append(store, event)
-                .map_err(ChatError::from_session_append)?;
-            Ok(id)
-        })?;
-        if let Some(usage) = output.usage {
-            self.record_model_usage(
-                output.sample.audit_event_id(),
-                output.sample.provider_session(),
-                usage,
-            )?;
-        }
         self.with_projection(|projection, store, stream_id| {
-            crate::adapters::session_compaction::validate_compaction_source_suffix(
+            verify_capture()?;
+            let events = crate::adapters::project_event_store::read_existing_session_events(
                 &self.project,
-                &source,
-                &attempts,
-                Some(&sample_id),
-            )
-            .map_err(|message| ChatError::CompactionSummarySource { message })?;
+                &self.session_id,
+            )?;
+            let project_events =
+                crate::adapters::project_event_store::read_existing_research_events(&self.project)?;
+            source.validate_graph_sampling_suffix(
+                &events,
+                &project_events,
+                &graph.root_event_id,
+            )?;
+            crate::app::session::verify_compaction_source_blobs(&graph, &self.artifacts)?;
             agent.validate_compaction_session(projection.state())?;
             projection
                 .state()
@@ -443,21 +477,24 @@ impl DurableChatSession {
             // these read-only facts and the new Compaction Event are composed.
             let facts = load_session_compaction_facts(&self.project, projection.state())
                 .map_err(ChatError::CompactionFacts)?
-                .with_model_sample(sample_id, output.sample.narrative().clone());
-            let (draft, compaction) = select_compaction(
+                .with_verified_graph(graph)?;
+            let (draft, compaction, reached_soft_target) = select_compaction(
                 projection.state(),
                 &facts,
-                ContextWindowPolicy::for_window(window_tokens),
+                policy,
                 None,
+                CompactionSelection::ModelAdoption,
                 |candidate| {
+                    let protected = projection
+                        .state()
+                        .protected_operator_context_for(candidate)?;
                     match (active, replacement) {
-                        (Some(active), Some(prompt)) => {
-                            agent.preflight_checkpoint_definition(candidate, active, prompt)
-                        }
+                        (Some(active), Some(prompt)) => agent
+                            .preflight_checkpoint_definition(candidate, active, prompt, &protected),
                         (Some(active), None) => {
-                            agent.preflight_tool_batch_compaction(candidate, active)
+                            agent.preflight_tool_batch_compaction(candidate, active, &protected)
                         }
-                        (None, _) => agent.preflight_compaction(candidate, true),
+                        (None, _) => agent.preflight_compaction(candidate, true, &protected),
                     }
                     .map_err(ChatError::from)
                 },
@@ -467,6 +504,7 @@ impl DurableChatSession {
                 revision: compaction.summary().revision(),
                 source_history_items: compaction.source_history_item_count(),
                 retained_history_items: compaction.retained_history().len(),
+                reached_soft_target,
             };
 
             // Candidate state cannot affect active Context. It exists only to
@@ -498,43 +536,85 @@ impl DurableChatSession {
 
 /// One candidate/reduction owner shared by explicit compact and stale-source
 /// reconstruction. Complete suffix selection remains Session/History-owned.
-pub(super) fn select_compaction(
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum CompactionSelection {
+    Preview,
+    ModelAdoption,
+    SourceRefresh,
+}
+
+fn select_compaction(
     state: &SessionState,
     facts: &SessionCompactionFacts,
     policy: ContextWindowPolicy,
     historical_narrative: Option<&crate::domain::session::NarrativeSummary>,
-    mut fits: impl FnMut(&SessionCompaction) -> Result<bool, ChatError>,
-) -> Result<(SessionSummaryDraft, SessionCompaction), ChatError> {
+    selection: CompactionSelection,
+    mut fits: impl FnMut(
+        &SessionCompaction,
+    ) -> Result<Option<crate::app::agent_loop::CompactionFit>, ChatError>,
+) -> Result<(SessionSummaryDraft, SessionCompaction, bool), ChatError> {
     let history = state
         .full_normalized_history()
         .map_err(SessionError::from)?;
-    let minimum_recent = crate::domain::history::latest_complete_tool_batch_items(&history)
-        .map_err(SessionError::from)?;
+    let minimum_recent = state.latest_uncompleted_batch_items()?;
     let mut references = policy.compaction_reference_items();
+    let mut smallest: Option<(u64, SessionSummaryDraft, SessionCompaction)> = None;
+    let mut summary_too_large = None;
+    let mut valid_candidate_seen = false;
     loop {
-        let mut draft = facts
-            .compose_session_summary_draft(
-                &history,
+        let draft = facts.compose_session_summary_draft(
+            &history,
+            state
+                .latest_compaction()
+                .map(|compaction| compaction.summary()),
+            references,
+            policy,
+        )?;
+        let mut draft = if selection == CompactionSelection::Preview {
+            draft.with_preview_byte_limit(policy.summary_bytes())?
+        } else {
+            let limit = if selection == CompactionSelection::ModelAdoption
+                && facts.verified_graph().is_some()
+            {
+                policy.summary_bytes()
+            } else {
                 state
                     .latest_compaction()
-                    .map(|compaction| compaction.summary()),
-                references,
-                policy,
-            )?
-            .with_byte_limit(policy.summary_bytes())?;
+                    .and_then(|compaction| compaction.summary().historical_byte_limit())
+                    .ok_or_else(|| ChatError::CompactionSummarySource {
+                        message: "historical refresh requires an existing Summary".to_owned(),
+                    })?
+            };
+            draft.with_byte_limit(limit)?
+        };
         if let Some(narrative) = historical_narrative {
             draft = draft.with_historical_narrative(narrative.clone());
         }
-        let mut retained = state
-            .normalized_history_items()
-            .map_err(SessionError::from)?
-            .len()
-            .max(minimum_recent);
+        let mut retained = state.compaction_source_history()?.len();
         loop {
             match state.next_compaction(draft.clone(), retained, &facts.context()) {
-                Ok(candidate) if fits(&candidate)? => return Ok((draft, candidate)),
-                Ok(_) => {}
-                Err(SessionError::CompactionSummaryTooLarge { .. }) => break,
+                Ok(candidate) => {
+                    valid_candidate_seen = true;
+                    if selection == CompactionSelection::SourceRefresh {
+                        return Ok((draft, candidate, false));
+                    }
+                    if let Some(fit) = fits(&candidate)? {
+                        if fit.demand <= u64::from(fit.target) {
+                            return Ok((draft, candidate, true));
+                        }
+                        if smallest
+                            .as_ref()
+                            .is_none_or(|(demand, _, _)| fit.demand < *demand)
+                        {
+                            smallest = Some((fit.demand, draft.clone(), candidate));
+                        }
+                    }
+                }
+                Err(SessionError::CompactionSummaryTooLarge { actual, maximum }) => {
+                    summary_too_large =
+                        Some(SessionError::CompactionSummaryTooLarge { actual, maximum });
+                    break;
+                }
                 Err(error) => return Err(error.into()),
             }
             if retained <= minimum_recent {
@@ -543,7 +623,17 @@ pub(super) fn select_compaction(
             retained = (retained / 2).max(minimum_recent);
         }
         if references == 0 {
-            return Err(ChatError::CompactionNotUseful);
+            return smallest
+                .map(|(_, draft, candidate)| (draft, candidate, false))
+                .ok_or_else(|| {
+                    if valid_candidate_seen {
+                        ChatError::CompactionNotUseful
+                    } else {
+                        summary_too_large
+                            .map(ChatError::Session)
+                            .unwrap_or(ChatError::CompactionNotUseful)
+                    }
+                });
         }
         references /= 2;
     }
@@ -569,7 +659,11 @@ impl ContextPressureLevel {
 pub(super) struct ContextPressure {
     level: ContextPressureLevel,
     estimated_demand: u64,
+    window: u32,
     input_limit: u32,
+    fixed_input: u32,
+    reserved_output: u32,
+    reserved_tool_loop: u32,
     artifact_references: usize,
     truncations: usize,
     exclusions: usize,
@@ -612,7 +706,11 @@ impl ContextPressure {
         Self {
             level,
             estimated_demand,
+            window: manifest.budget().context_window_tokens(),
             input_limit,
+            fixed_input: manifest.fixed_input_tokens(),
+            reserved_output: manifest.budget().reserved_output_tokens(),
+            reserved_tool_loop: manifest.budget().reserved_tool_loop_tokens(),
             artifact_references,
             truncations,
             exclusions,
@@ -630,10 +728,14 @@ impl ContextPressure {
             " No Compaction is suggested."
         };
         format!(
-            "[context pressure: {}] planner demand estimate={}/{} input tokens; artifact_refs={}, truncations={}, exclusions={}. Provider usage is not inferred.{guidance}",
+            "[context pressure: {}] planner demand estimate={}/{} input tokens; window={}, output reserve={}, tool-loop reserve={}, fixed input={}; artifact_refs={}, truncations={}, exclusions={}. Provider usage is not inferred. Image token cost is unknown.{guidance}",
             self.level.as_str(),
             self.estimated_demand,
             self.input_limit,
+            self.window,
+            self.reserved_output,
+            self.reserved_tool_loop,
+            self.fixed_input,
             self.artifact_references,
             self.truncations,
             self.exclusions,

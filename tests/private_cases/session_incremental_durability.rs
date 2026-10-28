@@ -99,7 +99,12 @@ mod durability {
             .open_session_projection(id.clone(), Some(&cursor))
             .unwrap();
         assert_eq!(suffix.len(), 1);
-        projection.ingest_durable(suffix).unwrap();
+        projection
+            .ingest_durable_verified(
+                suffix,
+                &crate::adapters::artifact_store::LocalArtifactStore::for_project(&project),
+            )
+            .unwrap();
         assert_eq!(projection.state().execution_receipt_count(), 1);
         assert_eq!(store.next_sequence().unwrap().get(), 3);
         projection
@@ -357,6 +362,8 @@ mod durability {
 
     #[test]
     fn invalid_durable_suffix_does_not_partially_mutate_projection() {
+        let root = TemporaryDirectory::new("invalid-durable-suffix");
+        let project = Project::initialize(root.path()).unwrap();
         let mut projection = SessionProjection::replay(vec![started()]).unwrap();
         let before = projection.state().clone();
         let good = envelope(
@@ -373,7 +380,14 @@ mod durability {
             },
             3,
         );
-        assert!(projection.ingest_durable(vec![good, bad]).is_err());
+        assert!(
+            projection
+                .ingest_durable_verified(
+                    vec![good, bad],
+                    &crate::adapters::artifact_store::LocalArtifactStore::for_project(&project)
+                )
+                .is_err()
+        );
         assert_eq!(projection.state(), &before);
     }
 
@@ -484,7 +498,10 @@ mod durability {
         let (_, suffix) = writer.open_session_projection(id, Some(&cursor)).unwrap();
         assert_eq!(suffix.len(), 1);
         assert!(matches!(
-            projection.ingest_durable(suffix),
+            projection.ingest_durable_verified(
+                suffix,
+                &crate::adapters::artifact_store::LocalArtifactStore::for_project(&project)
+            ),
             Err(crate::domain::session::SessionError::UnknownEventType { .. })
         ));
         assert_eq!(projection.state(), &before);

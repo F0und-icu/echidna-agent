@@ -112,6 +112,31 @@ fn complete_catalog_preserves_baseline_outside_explicit_file_contract_additions(
 
 fn historical_input_schema(name: &str, schema: &Value) -> Value {
     let mut baseline = schema.clone();
+    // Check the default 32k percentage-policy limits before restoring only
+    // these admitted deltas for the immutable pre-sharing Schema oracle.
+    let capacity_delta = match name {
+        "http_request" => Some(("/properties/preview_bytes/maximum", 3933, 16384)),
+        "read_output" => Some(("/properties/max_bytes/maximum", 3933, 16384)),
+        "memory_write" => Some(("/allOf/0/then/properties/content/maxLength", 15729, 65536)),
+        _ => None,
+    };
+    if let Some((path, current, historical)) = capacity_delta {
+        let field = baseline.pointer_mut(path).unwrap();
+        assert_eq!(field, &json!(current), "{name} capacity contract");
+        *field = json!(historical);
+        if name == "memory_write" {
+            let description = baseline
+                .pointer_mut("/allOf/0/then/properties/content/description")
+                .unwrap();
+            let text = |limit| {
+                format!(
+                    "core.md is limited to {limit} UTF-8 bytes; non-ASCII content may reach the byte limit before this character limit"
+                )
+            };
+            assert_eq!(description, &json!(text(current)));
+            *description = json!(text(historical));
+        }
+    }
     if matches!(name, "memory_read" | "memory_write" | "inspect_project") {
         let field = if name == "inspect_project" {
             "observed_at"

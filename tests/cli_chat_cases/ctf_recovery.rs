@@ -401,6 +401,127 @@ fn ctf_r2b_partial_image_followups_checkpoint_before_later_budget_stop() {
     assert_eq!(state.vision_observations().len(), 1);
     assert_eq!(state.history().ensure_all_tool_calls_paired(), Ok(()));
     assert_audits_reconstruct(root.path(), &state);
+
+    // A corrupted observation must never be reclassified as a new operator
+    // instruction merely because its original provenance no longer matches.
+    let session = session_id(root.path());
+    let mut events = session_events(root.path(), &session);
+    let observation = events
+        .iter_mut()
+        .find(|event| {
+            event["event_type"] == "session.history_item_recorded"
+                && event["payload"]["item"]["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("checkpointed first observation"))
+        })
+        .expect("the real observation was checkpointed");
+    let mut text: Value =
+        serde_json::from_str(observation["payload"]["item"]["text"].as_str().unwrap()).unwrap();
+    text["summary"] = json!("forged observation");
+    observation["payload"]["item"]["text"] = json!(serde_json::to_string(&text).unwrap());
+    let path = root
+        .path()
+        .join(".echidna/sessions")
+        .join(&session)
+        .join("events.jsonl");
+    let altered = events
+        .iter()
+        .map(|event| serde_json::to_string(event).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    fs::write(&path, &altered).unwrap();
+    let rejected = run_chat(
+        root.path(),
+        &config,
+        "/exit\n",
+        &["--domain", "mobile", "--resume", "latest"],
+    );
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("no matching durable observation"));
+    assert_eq!(fs::read_to_string(path).unwrap(), altered);
+}
+
+#[test]
+fn ctf_r2b_direct_image_followup_survives_budget_stop_before_primary_delivery() {
+    let root = TemporaryDirectory::new("ctf-r2b-direct-followup");
+    let harness = TemporaryDirectory::new("ctf-r2b-direct-harness");
+    initialize_project(root.path());
+    let project = Project::discover(root.path()).unwrap();
+    append_research_snapshot(&project, "r2b-direct-followup");
+    fs::write(root.path().join("screen.png"), png_bytes(8, 8)).unwrap();
+    let args = json!({"event_id":"direct-image-event", "occurred_at":"2026-09-12T00:00:00Z",
+        "artifact_id":"artifact-direct-followup", "source_path":"screen.png",
+        "target_snapshot_id":"snapshot-r2b-direct-followup", "toolchain_fingerprint":"r2b-fixture"});
+    let primary = spawn_responses_server(vec![
+        (
+            200,
+            tool_calls_response(
+                &[("direct-image-call", "view_image", args)],
+                "direct-tool-response",
+            ),
+        ),
+        (
+            200,
+            text_response("direct image recovered", "direct-resumed"),
+        ),
+    ]);
+    let config = write_direct_config(harness.path(), &primary.base_url);
+    limit_config(&config, Some(1), false);
+    let output = f2a_wait_child(
+        spawn_f2a_chat(
+            root.path(),
+            &config,
+            "inspect the image\n/resume\ncontinue without rerunning the tool\n/exit\n",
+            &["--domain", "mobile"],
+        ),
+        "R2b direct follow-up",
+    );
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = f2a_request_body(&primary.requests, "direct image call");
+    let resumed = f2a_request_body(&primary.requests, "direct image resume");
+    assert_eq!(
+        resumed["input"]
+            .to_string()
+            .matches("data:image/png;base64,")
+            .count(),
+        1
+    );
+    assert!(resumed.get("previous_response_id").is_none());
+    f2a_join_server(primary, "direct image Primary");
+    let state = reduced_session(&project, &session_id(root.path()));
+    assert_eq!(state.execution_receipt_count(), 1);
+    assert_eq!(
+        state
+            .history()
+            .items()
+            .iter()
+            .filter(|item| matches!(
+                item,
+                echidna::domain::model::ContentItem::ImageArtifact { .. }
+            ))
+            .count(),
+        1
+    );
+    let events = session_events(root.path(), &session_id(root.path()));
+    let first_input = events
+        .iter()
+        .find(|event| {
+            event["event_type"] == "session.operator_turn_boundary_recorded"
+                && event["payload"]["kind"] == "accepted"
+        })
+        .unwrap();
+    assert_eq!(
+        first_input["payload"]["inputs"].as_array().unwrap().len(),
+        1,
+        "the Tool follow-up is not a new operator input"
+    );
+    assert_audits_reconstruct(root.path(), &state);
 }
 
 #[test]

@@ -35,7 +35,7 @@ pub(super) fn apply(
         || !state.improvement_records.iter().any(|record| record.activity.attempt_id == payload.attempt_id
             && matches!(&record.activity.fact, ImprovementFact::CandidateBound { definition_digest }
                 if definition_digest == payload.binding.definition().digest().as_str()))
-        || compaction.summary().schema_version() != 5
+        || !is_fresh_model_handoff(state, compaction)
         || compaction.summary().revision() != payload.compaction_revision
         || compaction.fingerprint()? != payload.compaction_fingerprint
         || previous_sequence.map(EventSequence::get) != compaction.source_event_sequence().get().checked_add(1)
@@ -86,4 +86,31 @@ pub(super) fn apply(
     state.consecutive_rejection = None;
     state.correction_reset_anchor = None;
     Ok(())
+}
+
+/// A v6 reference refresh may reuse an older valid narrative, but only a
+/// newly recorded root sample at this exact checkpoint authorizes evolution.
+fn is_fresh_model_handoff(state: &SessionState, compaction: &SessionCompaction) -> bool {
+    if compaction.summary().schema_version() == 5 {
+        return true;
+    }
+    let Some((root_id, source, blob, hash)) = compaction.summary().graph_reference() else {
+        return false;
+    };
+    let Some((sample_id, sample_sequence, sample)) = state.compaction_samples.last() else {
+        return false;
+    };
+    let Some((sample_blob, sample_hash, node, _)) = sample.graph_node() else {
+        return false;
+    };
+    let source_sequence = compaction.source_event_sequence().get();
+    let sample_sequence = sample_sequence.get();
+    sample_id == root_id
+        && sample.source() == source
+        && sample_blob == blob
+        && sample_hash == hash
+        && node.is_root
+        && (sample_sequence == source_sequence
+            || sample_sequence.checked_add(1) == Some(source_sequence)
+                && state.model_usage.contains_key(sample.audit_event_id()))
 }

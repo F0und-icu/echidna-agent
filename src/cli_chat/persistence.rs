@@ -20,10 +20,11 @@ impl CachedSessionProjection {
         let project_events =
             crate::adapters::project_event_store::read_existing_research_events(project)?;
         Ok(Self {
-            projection: SessionProjection::replay_with_compaction_source(
+            projection: SessionProjection::replay_project_verified(
                 project.project_id().clone(),
                 &events,
                 &project_events,
+                &crate::adapters::artifact_store::LocalArtifactStore::for_project(project),
             )?,
             cursor: store.projection_cursor(),
         })
@@ -87,18 +88,51 @@ impl DurableChatSession {
         )?;
         let mut projection = match previous.take() {
             Some(mut cached) => {
-                cached.projection.ingest_durable(events)?;
-                cached.projection
+                let mut requires_project_replay = false;
+                for event in &events {
+                    if let crate::domain::session::SessionEvent::CompactionCreated { compaction } =
+                        crate::domain::session::SessionEvent::decode(
+                            &event.event_type,
+                            event.payload.clone(),
+                        )?
+                        && compaction.summary().graph_reference().is_some()
+                    {
+                        requires_project_replay = true;
+                    }
+                }
+                if requires_project_replay {
+                    let all_events =
+                        crate::adapters::project_event_store::read_existing_session_events(
+                            &self.project,
+                            &self.session_id,
+                        )?;
+                    let project_events =
+                        crate::adapters::project_event_store::read_existing_research_events(
+                            &self.project,
+                        )?;
+                    SessionProjection::replay_project_verified(
+                        self.project.project_id().clone(),
+                        &all_events,
+                        &project_events,
+                        &self.artifacts,
+                    )?
+                } else {
+                    cached
+                        .projection
+                        .ingest_durable_verified(events, &self.artifacts)?;
+                    cached.projection
+                }
             }
             None => {
                 let project_events =
                     crate::adapters::project_event_store::read_existing_research_events(
                         &self.project,
                     )?;
-                SessionProjection::replay_with_compaction_source(
+                SessionProjection::replay_project_verified(
                     self.project.project_id().clone(),
                     &events,
                     &project_events,
+                    &self.artifacts,
                 )?
             }
         };

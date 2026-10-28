@@ -58,6 +58,9 @@ pub(super) fn decode(
         Ok(fields) => fields,
         Err(error) => return error,
     };
+    if let Some(error) = super::capacity_failure(fields.code) {
+        return error;
+    }
     if !profile.is_subscription()
         && continuation_requested
         && fields.code == Some(PREVIOUS_RESPONSE_NOT_FOUND_CODE)
@@ -123,6 +126,12 @@ fn fields(value: &Value) -> Result<ErrorFields<'_>, ModelProviderError> {
         sequence_number,
         origin,
     })
+}
+
+/// Capacity classification shares the terminal error field validator. Other
+/// wire paths retain their original failure category when validation fails.
+pub(super) fn validated_code(value: &Value) -> Result<Option<&str>, ModelProviderError> {
+    fields(value).map(|fields| fields.code)
 }
 
 fn nullable_string<'a>(

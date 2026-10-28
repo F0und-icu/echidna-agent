@@ -3,10 +3,8 @@
 use std::fs;
 
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 
 use crate::adapters::agent_definition::{bind_definition, builtin_definition};
-use crate::adapters::mock_model::{MockModelFixture, MockModelProvider};
 use crate::adapters::project_event_store::{Project, ProjectEventStream};
 use crate::adapters::research_projection::{
     ProjectReadContext, SessionReceiptCatalogCache, load_reference_catalog,
@@ -16,24 +14,19 @@ use crate::adapters::session_compaction::{
     load_session_compaction_facts, load_session_compaction_facts_from_read,
 };
 use crate::adapters::tools::ToolRegistry;
-use crate::app::agent_loop::{AgentLoop, CompactionSampleInput};
-use crate::app::cancellation::AgentCancellation;
-use crate::app::model_request_budget::ModelRequestBudget;
 use crate::app::session::SessionProjection;
 use crate::domain::agent_definition::BuiltinAgentTemplate;
-use crate::domain::artifacts::BlobId;
 use crate::domain::context::{
     ContextWindowPolicy, ProviderSessionId, ProviderSessionRef, ProviderSessionRole,
 };
 use crate::domain::events::{EventEnvelope, EventId, EventSequence, OccurredAt, StreamId};
-use crate::domain::model::{CapabilityMappingVersion, ContentItem, ModelCapabilities, ModelEvent};
+use crate::domain::model::{CapabilityMappingVersion, ContentItem, ModelCapabilities};
 use crate::domain::request_audit::{
-    PublishedAuditBlob, RequestAdapterVersion, RequestAuditBinding, RequestAuditRunContext,
+    RequestAdapterVersion, RequestAuditBinding, RequestAuditRunContext,
 };
 use crate::domain::session::{SessionEvent, SessionReducer, SessionSourceIdentity, SessionSummary};
 use crate::domain::tools::{ExecutionId, ExecutionReceipt, ToolResultStatus};
 use crate::ports::EventSink;
-use crate::ports::model::ModelResponseCompletion;
 use crate::ports::tool::ToolExecutor;
 use crate::support::TemporaryDirectory;
 
@@ -211,18 +204,19 @@ async fn append_compaction(
 ) -> SessionSummary {
     let (source, _) =
         SessionSourceIdentity::from_events(project.project_id().clone(), events, &[]).unwrap();
-    let provider = MockModelProvider::new(MockModelFixture {
-        capabilities: ModelCapabilities {
-            text_input: true, image_input: false, streaming: true, tool_call: true, structured_output: false,
-            incremental_input: false, usage_reporting: false, max_output_tokens: None, reasoning_effort: None,
-            context_window: 32768, capability_mapping_version: CapabilityMappingVersion::new(1),
-        },
-        events: vec![ModelEvent::TextDelta { text: json!({"concise_progress":"The ordinary note was inspected.","unresolved_questions":[],"next_step_notes":["Continue from the preserved observations."]}).to_string() }],
-        completion: ModelResponseCompletion::without_response_id(),
-    });
-    let tools = ToolRegistry::for_project(project.root());
-    let agent = AgentLoop::new(&provider, &tools);
-    let budget = ModelRequestBudget::new(1);
+    let capabilities = ModelCapabilities {
+        text_input: true,
+        image_input: false,
+        streaming: true,
+        tool_call: true,
+        structured_output: false,
+        incremental_input: false,
+        usage_reporting: false,
+        max_output_tokens: None,
+        reasoning_effort: None,
+        context_window: 32768,
+        capability_mapping_version: CapabilityMappingVersion::new(1),
+    };
     let context = RequestAuditRunContext::new(
         RequestAuditBinding::new(
             project.project_id().clone(),
@@ -232,54 +226,35 @@ async fn append_compaction(
         RequestAdapterVersion::new("fixture-read-reuse:1").unwrap(),
     );
     let previous_len = events.len();
-    let output = agent
-        .sample_compaction(
-            CompactionSampleInput {
-                provider: &provider,
-                agent_model_profile: None,
-                source: &source,
-                source_data: "A recorded neutral observation.".to_owned(),
-                current_goal: "Inspect ordinary notes".to_owned(),
-                references: vec![events[1].event_id.clone()],
-                byte_limit: 8192,
-                request_budget: &budget,
-                cancellation: AgentCancellation::new(),
-                audit_context: &context,
-            },
-            &mut |attempt| {
-                let rendered = attempt.render().unwrap();
-                let blobs = rendered
-                    .component_bytes()
-                    .map(|bytes| PublishedAuditBlob {
-                        blob_id: BlobId::new(format!("{:x}", Sha256::digest(bytes))).unwrap(),
-                        size_bytes: bytes.len() as u64,
-                    })
-                    .collect::<Vec<_>>();
-                let id = EventId::new(format!("current-{}", events.len() + 1));
-                let manifest = rendered.materialize(id.clone(), blobs).unwrap();
-                push(
-                    events,
-                    "current",
-                    SessionEvent::RequestAuditRecorded { manifest },
-                );
-                Ok(id)
-            },
-        )
-        .await
-        .unwrap();
+    let audit_id = EventId::new(format!("current-{}", events.len() + 1));
+    let manifest = crate::legacy_v5_fixture::historical_audit(
+        &source,
+        audit_id.clone(),
+        &context,
+        capabilities,
+    );
     push(
         events,
         "current",
-        SessionEvent::CompactionSampleRecorded {
-            sample: output.sample.clone(),
-        },
+        SessionEvent::RequestAuditRecorded { manifest },
+    );
+    let narrative = crate::domain::session::NarrativeSummary::new(
+        "Inspect ordinary notes",
+        "The ordinary note was inspected.",
+        vec![],
+        vec!["Continue from the preserved observations.".into()],
+    )
+    .unwrap();
+    let sample = crate::legacy_v5_fixture::historical_sample(&source, audit_id, narrative.clone());
+    push(
+        events,
+        "current",
+        SessionEvent::CompactionSampleRecorded { sample },
     );
     let sample_id = events.last().unwrap().event_id.clone();
     persist(project, "current", &events[previous_len..]);
     let state = SessionReducer.reduce(events.clone()).unwrap();
-    let facts = load_session_compaction_facts(project, &state)
-        .unwrap()
-        .with_model_sample(sample_id, output.sample.narrative().clone());
+    let facts = load_session_compaction_facts(project, &state).unwrap();
     let draft = facts
         .compose_session_summary_draft(
             state.history().items(),
@@ -288,7 +263,14 @@ async fn append_compaction(
             ContextWindowPolicy::for_window(32768),
         )
         .unwrap();
-    let compaction = state.next_compaction(draft, 0, &facts.context()).unwrap();
+    let compaction = crate::legacy_v5_fixture::legacy_v5_candidate(
+        &state,
+        draft,
+        &facts.context(),
+        sample_id,
+        narrative,
+    );
+    compaction.validate_references(&facts.context()).unwrap();
     let summary = compaction.summary().clone();
     push(
         events,
@@ -346,10 +328,11 @@ async fn strict_replay_captures_only_latest_v5_prefix_and_reuses_exact_validatio
     let latest = append_compaction(&project, &mut events).await;
     assert_eq!(earlier.schema_version(), 5);
     assert_eq!(latest.schema_version(), 5);
-    let mut projection = SessionProjection::replay_with_compaction_source(
+    let mut projection = SessionProjection::replay_project_verified(
         project.project_id().clone(),
         &events,
         &[],
+        &crate::adapters::artifact_store::LocalArtifactStore::for_project(&project),
     )
     .unwrap();
     let (current_source, strict) =
@@ -427,10 +410,11 @@ async fn strict_replay_captures_only_latest_v5_prefix_and_reuses_exact_validatio
             changed[1].event_type = crate::domain::events::EventType::new("unknown.session.fact");
         }
         assert!(
-            SessionProjection::replay_with_compaction_source(
+            SessionProjection::replay_project_verified(
                 project.project_id().clone(),
                 &changed,
-                &[]
+                &[],
+                &crate::adapters::artifact_store::LocalArtifactStore::for_project(&project),
             )
             .is_err(),
             "{change}"
@@ -445,7 +429,12 @@ async fn strict_replay_captures_only_latest_v5_prefix_and_reuses_exact_validatio
     );
     let suffix = events.last().unwrap().clone();
     persist(&project, "current", std::slice::from_ref(&suffix));
-    projection.ingest_durable(vec![suffix]).unwrap();
+    projection
+        .ingest_durable_verified(
+            vec![suffix],
+            &crate::adapters::artifact_store::LocalArtifactStore::for_project(&project),
+        )
+        .unwrap();
     assert!(projection.current_source().is_none());
     assert!(projection.compaction_source_for(&latest).is_some());
     assert_eq!(projection.state(), &SessionReducer.reduce(events).unwrap());

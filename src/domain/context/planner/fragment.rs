@@ -378,7 +378,7 @@ impl ContextFragment {
         Ok(self)
     }
 
-    pub(super) fn content_item_provenance(&self, ordinal: u32) -> Option<&ContextProvenance> {
+    pub(crate) fn content_item_provenance(&self, ordinal: u32) -> Option<&ContextProvenance> {
         self.content_item_provenance.get(&ordinal)
     }
 

@@ -1,0 +1,54 @@
+{
+  "agent-research-false-memory-false": {
+    "count": 24,
+    "sha256": "3a30e5fd7a4e1bda6c051f2b8e3ea4ed0a8b4c3a793f6756ee3946d748e4423e"
+  },
+  "agent-research-false-memory-true": {
+    "count": 26,
+    "sha256": "f8755df4417b810f5f60d63c05bff58ec4b37ffb355a39fc0d684c1255147df4"
+  },
+  "agent-research-true-memory-false": {
+    "count": 26,
+    "sha256": "a18bd4edb3733f84e1fa6b5e7f6f30e31f6825db9c741ec72058083b767884cc"
+  },
+  "agent-research-true-memory-true": {
+    "count": 28,
+    "sha256": "e58d5ed20847e6d33463710eeccf42534335288f86156938492cdda6c15ef730"
+  },
+  "project-window-1048576-verified-false-automatic-false": {
+    "count": 28,
+    "sha256": "2f3fc89cf1d30dd46570be5b6648eebf7bbde3937f745844651f944c547e7762"
+  },
+  "project-window-1048576-verified-true-automatic-false": {
+    "count": 28,
+    "sha256": "0930e6b326212296c400df0d1b4def9f81d41c49f933b9837f65ebf628b0c9a8"
+  },
+  "project-window-1048576-verified-true-automatic-true": {
+    "count": 28,
+    "sha256": "183700ffd45d9f50757ad807b5ce92fb6fe50d9971fc1855e154cccd618d3a36"
+  },
+  "project-window-272000-verified-false-automatic-false": {
+    "count": 28,
+    "sha256": "b99d709c2debb047740629123e01dcf61eb3957ca1809fd493687c5871596e87"
+  },
+  "project-window-272000-verified-true-automatic-false": {
+    "count": 28,
+    "sha256": "51c56cefc04e5aae24310f8fcf74786f9a50caf1a092bf7d5969a85fb12322bc"
+  },
+  "project-window-272000-verified-true-automatic-true": {
+    "count": 28,
+    "sha256": "a3a4386a5a7471c0fcb85d8e5cdf0cb63f855c8592130f24e64ac2db418365df"
+  },
+  "project-window-32768-verified-false-automatic-false": {
+    "count": 28,
+    "sha256": "e58d5ed20847e6d33463710eeccf42534335288f86156938492cdda6c15ef730"
+  },
+  "project-window-32768-verified-true-automatic-false": {
+    "count": 28,
+    "sha256": "fcfdd4cd6328e9e09fd14d350bea92f103e4adb5f48eeca390672dbaa45fc7b9"
+  },
+  "project-window-32768-verified-true-automatic-true": {
+    "count": 28,
+    "sha256": "d94ab5a57be00134b10c4491619531be9244792b8e90f5370e5d3ccdd5c78d90"
+  }
+}

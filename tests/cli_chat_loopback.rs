@@ -8,6 +8,16 @@ mod argument_regeneration;
 mod automatic_compaction;
 #[path = "cli_chat_cases/command_diagnostics.rs"]
 mod command_diagnostics;
+#[path = "cli_chat_cases/context2_clerk.rs"]
+mod context2_clerk;
+#[path = "cli_chat_cases/context2_recovery_audit.rs"]
+mod context2_recovery_audit;
+#[path = "cli_chat_cases/context2_runtime.rs"]
+mod context2_runtime;
+#[path = "cli_chat_cases/context2_source_blobs.rs"]
+mod context2_source_blobs;
+#[path = "cli_chat_cases/context2_vision_proof.rs"]
+mod context2_vision_proof;
 #[path = "cli_chat_cases/core_memory_continuation.rs"]
 mod core_memory_continuation;
 #[path = "cli_chat_cases/ctf_child_checkpoint.rs"]
@@ -24,6 +34,8 @@ mod ctf_recovery;
 mod ctf_resume;
 #[path = "cli_chat_cases/current_fact_guidance.rs"]
 mod current_fact_guidance;
+#[path = "cli_chat_cases/delivery_lineage.rs"]
+mod delivery_lineage;
 #[path = "cli_chat_cases/delivery_measurement.rs"]
 mod delivery_measurement;
 #[path = "cli_chat_cases/environment_guidance.rs"]
@@ -3354,6 +3366,16 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
     ]);
     let compacted_config =
         write_context_window_config(root.path(), &compacted_server.base_url, 65_536);
+    // This fixture inspects the full bounded evidence-navigation spine. The
+    // configured target must leave room above this domain's fixed Tool schema.
+    fs::write(
+        &compacted_config,
+        format!(
+            "{}\n[runtime.context_budget]\ntarget_bps = 8000\n",
+            fs::read_to_string(&compacted_config).unwrap()
+        ),
+    )
+    .unwrap();
     let compacted = run_chat(
         root.path(),
         &compacted_config,
@@ -3366,9 +3388,8 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
         String::from_utf8_lossy(&compacted.stderr)
     );
     let compacted_output = String::from_utf8(compacted.stdout).unwrap();
-    assert!(
-        compacted_output.contains("Context pressure is unavailable before the first model request")
-    );
+    assert!(compacted_output.contains("[current refreshed candidate]"));
+    assert!(compacted_output.contains("No successful model plan is available"));
     assert!(compacted_output.contains("Compaction revision 1 applied"));
     assert!(compacted_output.contains("next Primary request will be CompactionReset Full"));
     let summary_request = request_body(&compacted_server.requests.recv().unwrap());
@@ -3382,7 +3403,7 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
     assert!(compacted_request["previous_response_id"].is_null());
     let compacted_wire = serde_json::to_string(&compacted_request).unwrap();
     for expected in [
-        "derived_session_summary_v5",
+        "derived_session_summary_v6",
         "snapshot-m5-compact",
         "hypothesis-m5-compact",
         "experiment-m5-compact",
@@ -3415,7 +3436,7 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
     );
     let summary =
         serde_json::to_value(compacted_state.latest_compaction().unwrap().summary()).unwrap();
-    assert_eq!(summary["schema_version"], 5);
+    assert_eq!(summary["schema_version"], 6);
     assert_eq!(summary["revision"], 1);
     assert_eq!(
         summary["evidence_spine"]["target_snapshot_refs"],
@@ -3517,7 +3538,7 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
             .contains("execute the smallest decisive experiment")
     );
     let resumed_wire = serde_json::to_string(&resumed_request).unwrap();
-    assert!(resumed_wire.contains("derived_session_summary_v5"));
+    assert!(resumed_wire.contains("derived_session_summary_v6"));
     assert!(resumed_wire.contains("continue after explicit compaction"));
     assert!(resumed_wire.contains("resume the compacted boundary"));
 }
@@ -3569,12 +3590,24 @@ fn m5_compaction_preconditions_never_append_a_partial_fact() {
     let rejected = run_chat(
         missing_research.path(),
         &offline_config,
-        "/compact\n",
+        "/compact\n/exit\n",
         &["--resume", "latest"],
     );
-    assert!(!rejected.status.success());
     assert!(
-        String::from_utf8_lossy(&rejected.stderr).contains("requires a current TargetSnapshot")
+        rejected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&rejected.stdout).contains("requires a current TargetSnapshot")
+    );
+    assert!(String::from_utf8_lossy(&rejected.stdout).contains("Compaction deferred"));
+    assert_eq!(
+        session_events(missing_research.path(), &session)
+            .iter()
+            .filter(|event| event["event_type"] == "session.request_audit_recorded")
+            .count(),
+        1
     );
     assert!(
         session_events(missing_research.path(), &session)
@@ -3665,15 +3698,20 @@ fn m5_compaction_preconditions_never_append_a_partial_fact() {
     let rejected = run_chat(
         incomplete_pair.path(),
         &offline_config,
-        "/compact\n",
+        "/compact\n/exit\n",
         &["--session", session_id.as_str()],
     );
-    assert!(!rejected.status.success());
+    assert!(
+        rejected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rejected.stderr)
+    );
     // Opening this interrupted legacy Session establishes a real recovery
     // boundary. Its old unknown Call is allowed, but these few items do not
     // produce a useful compaction. Raw History remains unchanged.
-    assert!(String::from_utf8_lossy(&rejected.stderr).contains("smaller usable next-Turn Context"));
+    assert!(String::from_utf8_lossy(&rejected.stdout).contains("smaller usable next-Turn Context"));
     let state = reduced_session(&project, session_id.as_str());
+    assert!(state.request_audits().is_empty());
     assert_eq!(state.history().items().len(), 2);
     assert_eq!(
         echidna::domain::history::normalize_content_items(state.history().items())
@@ -3734,9 +3772,33 @@ fn f3_compaction_rejects_negative_reduction_without_appending() {
     );
     server.join();
     let session = session_id(root.path());
-    let output = run_chat(root.path(), &config, "/compact\n", &["--session", &session]);
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("smaller usable next-Turn Context"));
+    let before = session_events(root.path(), &session);
+    let output = run_chat(
+        root.path(),
+        &config,
+        "/compact\n/exit\n",
+        &["--session", &session],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Compaction deferred")
+            && stdout.contains("smaller usable next-Turn Context")
+    );
+    assert_eq!(
+        session_events(root.path(), &session)
+            .iter()
+            .filter(|event| event["event_type"] == "session.request_audit_recorded")
+            .count(),
+        before
+            .iter()
+            .filter(|event| event["event_type"] == "session.request_audit_recorded")
+            .count()
+    );
     assert!(
         session_events(root.path(), &session)
             .iter()
@@ -3761,6 +3823,14 @@ fn f3_large_compaction_bounds_reference_subset_and_drops_oversized_recent_histor
         ),
     ]);
     let config = write_config(root.path(), &server.base_url);
+    fs::write(
+        &config,
+        format!(
+            "{}\n[runtime.context_budget]\ncompaction_reference_items = 32\ntarget_bps = 8000\n",
+            fs::read_to_string(&config).unwrap()
+        ),
+    )
+    .unwrap();
     let initial = run_chat(
         root.path(),
         &config,
@@ -3818,11 +3888,22 @@ fn f3_large_compaction_bounds_reference_subset_and_drops_oversized_recent_histor
         .iter()
         .find(|event| event["event_type"] == "session.compaction_created")
         .unwrap()["payload"];
-    assert!(serde_json::to_vec(&compaction["summary"]).unwrap().len() <= 8192);
+    assert_eq!(compaction["summary"]["schema_version"], 6);
+    assert!(
+        serde_json::to_vec(&compaction["summary"]["narrative"])
+            .unwrap()
+            .len()
+            <= compaction["summary"]["byte_limit"].as_u64().unwrap() as usize
+    );
     let references = compaction["summary"]["evidence_spine"]["active_hypothesis_refs"]
         .as_array()
         .unwrap();
-    assert!(!references.is_empty() && references.len() <= 32);
+    assert!(
+        !references.is_empty() && references.len() <= 32,
+        "configured reference count={}, summary={}",
+        references.len(),
+        compaction["summary"]["schema_version"]
+    );
     assert!(
         compaction["retained_history"]
             .as_array()
@@ -4960,6 +5041,9 @@ mod f3_context {
         content.push_str(
             "\n[prompts]\npersonal_file = \"prompts/personal.md\"\nproject_file = \"prompts/project.md\"\n",
         );
+        // This fixture verifies selected fact identity and freshness; allocate
+        // enough of the small window to retain those fields before truncation.
+        content.push_str("\n[runtime.context_budget]\nstate_section_bps = 30\n");
         fs::write(&config, content).unwrap();
         config
     }

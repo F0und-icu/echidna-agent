@@ -3,78 +3,131 @@ use super::*;
 use echidna::domain::model::ContentItem;
 
 #[test]
-fn legacy_zero_history_compaction_cannot_bypass_latest_tool_batch_floor() {
-    let root = TemporaryDirectory::new("legacy-empty-compaction-floor");
-    initialize_project(root.path());
-    fs::write(
-        root.path().join("current.txt"),
-        "RETAIN-CURRENT-RESULT ".repeat(900),
-    )
-    .unwrap();
-    let project = Project::discover(root.path()).unwrap();
-    let target = append_research_snapshot(&project, "legacy-zero-floor");
-    let server = spawn_responses_server(vec![
-        (
-            200,
-            m4_long_flow_tool_response(
-                "latest-read",
-                "read_file",
-                json!({"path":"current.txt"}),
-                "legacy-read",
+fn legacy_zero_history_compaction_restores_latest_tool_batch_on_resume() {
+    for stale in [false, true] {
+        let root = TemporaryDirectory::new("legacy-empty-compaction-floor");
+        initialize_project(root.path());
+        fs::write(
+            root.path().join("current.txt"),
+            "RETAIN-CURRENT-RESULT ".repeat(900),
+        )
+        .unwrap();
+        let project = Project::discover(root.path()).unwrap();
+        let target = append_research_snapshot(&project, "legacy-zero-floor");
+        let server = spawn_responses_server(vec![
+            (
+                200,
+                m4_long_flow_tool_response(
+                    "latest-read",
+                    "read_file",
+                    json!({"path":"current.txt"}),
+                    "legacy-read",
+                ),
             ),
-        ),
-        (200, text_response("Current read complete.", "legacy-final")),
-    ]);
-    let config = write_config(root.path(), &server.base_url);
-    let initial = run_chat(root.path(), &config, "Read the current file.\n/exit\n", &[]);
-    assert!(
-        initial.status.success(),
-        "{}",
-        String::from_utf8_lossy(&initial.stderr)
-    );
-    for _ in 0..2 {
-        server.requests.recv_timeout(F2A_WAIT).unwrap();
-    }
-    server.join();
-    let id = session_id(root.path());
-    append_v2_compaction_with_progress(&project, &id, target, &"legacy lossy handoff ".repeat(250));
-    let before = reduced_session(&project, &id);
-    assert!(
-        before
-            .latest_compaction()
+            (200, text_response("Current read complete.", "legacy-final")),
+        ]);
+        let config = write_config(root.path(), &server.base_url);
+        let initial = run_chat(root.path(), &config, "Read the current file.\n/exit\n", &[]);
+        assert!(
+            initial.status.success(),
+            "{}",
+            String::from_utf8_lossy(&initial.stderr)
+        );
+        for _ in 0..2 {
+            server.requests.recv_timeout(F2A_WAIT).unwrap();
+        }
+        server.join();
+        let id = session_id(root.path());
+        // Exercise a genuinely legacy stream with no durable completion facts.
+        // Keep the actual History, audits, receipts and results byte-for-byte.
+        let mut legacy = session_events(root.path(), &id);
+        legacy.retain(|event| {
+            !matches!(
+                event["event_type"].as_str(),
+                Some(
+                    "session.operator_turn_boundary_recorded" | "session.model_delivery_committed"
+                )
+            )
+        });
+        for (index, event) in legacy.iter_mut().enumerate() {
+            event["sequence"] = json!(index + 1);
+        }
+        fs::write(
+            root.path()
+                .join(".echidna/sessions")
+                .join(&id)
+                .join("events.jsonl"),
+            legacy
+                .iter()
+                .map(|event| format!("{event}\n"))
+                .collect::<String>(),
+        )
+        .unwrap();
+        reduced_session(&project, &id);
+        append_v2_compaction_with_progress(
+            &project,
+            &id,
+            target,
+            &"legacy lossy handoff ".repeat(250),
+        );
+        let before = reduced_session(&project, &id);
+        assert!(
+            before
+                .latest_compaction()
+                .unwrap()
+                .retained_history()
+                .is_empty()
+        );
+        if stale {
+            append_research_snapshot(&project, "legacy-refreshed");
+        }
+        let resumed_server = spawn_responses_server(vec![
+            (200, text_response("first recovery done", "recovered-first")),
+            (
+                200,
+                text_response("second recovery done", "recovered-second"),
+            ),
+        ]);
+        let config = write_config(root.path(), &resumed_server.base_url);
+        let text = fs::read_to_string(&config)
             .unwrap()
-            .retained_history()
-            .is_empty()
-    );
-    let resumed = run_chat(
-        root.path(),
-        &config,
-        "/compact\n/exit\n",
-        &["--resume", &id],
-    );
-    let stderr = String::from_utf8_lossy(&resumed.stderr);
-    assert!(
-        !resumed.status.success(),
-        "unsafe empty suffix accepted: {}",
-        String::from_utf8_lossy(&resumed.stdout)
-    );
-    assert!(
-        stderr.contains("smaller usable next-Turn Context"),
-        "{stderr}"
-    );
-    assert!(!stderr.contains("runtime Context state"), "{stderr}");
-    let after = reduced_session(&project, &id);
-    assert_eq!(
-        after.request_audits(),
-        before.request_audits(),
-        "no model request when the required latest batch cannot shrink Context"
-    );
-    assert_eq!(after.history(), before.history());
-    assert_eq!(after.latest_compaction(), before.latest_compaction());
+            .replace("incremental_input = true", "incremental_input = false");
+        fs::write(&config, text).unwrap();
+        let resumed = run_chat(
+            root.path(),
+            &config,
+            "Continue the original task.\nContinue again.\n/exit\n",
+            &["--resume", &id],
+        );
+        assert!(
+            resumed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&resumed.stderr)
+        );
+        for _ in 0..2 {
+            let wire = f2a_request_body(&resumed_server.requests, "legacy restored batch");
+            assert!(wire.get("previous_response_id").is_none());
+            assert!(json_contains_type(&wire["input"], "function_call_output"));
+            assert!(wire.to_string().contains("RETAIN-CURRENT-RESULT"));
+        }
+        f2a_join_server(resumed_server, "legacy restored batch");
+        let after = reduced_session(&project, &id);
+        assert_eq!(
+            after.execution_receipt_count(),
+            before.execution_receipt_count()
+        );
+        assert_eq!(
+            &after.history().items()[..before.history().items().len()],
+            before.history().items()
+        );
+        if !stale {
+            assert_eq!(after.latest_compaction(), before.latest_compaction());
+        }
+    }
 }
 
 #[test]
-fn append_only_research_refresh_keeps_v5_handoff_without_hidden_sampling() {
+fn append_only_research_refresh_keeps_v6_handoff_without_hidden_sampling() {
     let root = TemporaryDirectory::new("v5-research-refresh");
     initialize_project(root.path());
     let project = Project::discover(root.path()).unwrap();
@@ -118,7 +171,7 @@ fn append_only_research_refresh_keeps_v5_handoff_without_hidden_sampling() {
     let before = session_events(root.path(), &id);
     let original = reduced_session(&project, &id);
     let old_summary = original.latest_compaction().unwrap().summary();
-    assert_eq!(old_summary.schema_version(), 5);
+    assert_eq!(old_summary.schema_version(), 6);
     let original_narrative = old_summary.narrative().unwrap().clone();
     let current = append_research_snapshot(&project, "after-model-handoff");
     let resumed = run_chat(
@@ -442,7 +495,9 @@ fn repeated_compaction_then_process_resume_refreshes_facts_without_reexecuting_c
     ] {
         let before_events = session_events(root.path(), &id);
         let before = reduced_session(&project, &id);
-        let compact = f2a_wait_child(
+        // This functional fixture now includes frozen-source publication and
+        // independent graph replay in debug builds; it is not a 15s latency test.
+        let compact = wait_child_before_deadline(
             spawn_f2a_chat(
                 root.path(),
                 &config,
@@ -450,6 +505,7 @@ fn repeated_compaction_then_process_resume_refreshes_facts_without_reexecuting_c
                 &["--resume", &id],
             ),
             "engineering explicit compaction",
+            Duration::from_secs(60),
         );
         assert!(
             compact.status.success(),
@@ -503,7 +559,7 @@ fn repeated_compaction_then_process_resume_refreshes_facts_without_reexecuting_c
         fs::write(&memory, format!("report.currency={currency}\n")).unwrap();
         let question =
             "Read current settings; report only current currency. Do not rerun the marker.";
-        let resumed = f2a_wait_child(
+        let resumed = wait_child_before_deadline(
             spawn_f2a_chat(
                 root.path(),
                 &config,
@@ -511,6 +567,7 @@ fn repeated_compaction_then_process_resume_refreshes_facts_without_reexecuting_c
                 &["--resume", &id],
             ),
             "engineering compacted resume",
+            Duration::from_secs(60),
         );
         assert!(
             resumed.status.success(),
@@ -539,7 +596,7 @@ fn repeated_compaction_then_process_resume_refreshes_facts_without_reexecuting_c
             assert!(
                 wire["input"]
                     .to_string()
-                    .contains("derived_session_summary_v5")
+                    .contains("derived_session_summary_v6")
             );
             assert!(wire["input"].to_string().contains(snapshot.as_str()));
             assert!(

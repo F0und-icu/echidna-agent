@@ -16,8 +16,8 @@ use crate::domain::session::{
 };
 
 use super::{
-    CURRENT_SESSION_SUMMARY_SCHEMA_VERSION, CompactionValidationContext, EvidenceSpine,
-    SessionTaskReferences, fingerprint_value, require_text, validate_unique_ids,
+    CompactionValidationContext, EvidenceSpine, SessionTaskReferences, fingerprint_value,
+    require_text, validate_unique_ids,
 };
 
 const MAX_SESSION_SUMMARY_BYTES: usize = 8 * 1024;
@@ -82,10 +82,32 @@ pub struct SessionSummaryDraft {
     task_references: Option<SessionTaskReferences>,
     narrative: NarrativeSummary,
     byte_limit: usize,
-    model_sample_event_ref: Option<crate::domain::events::EventId>,
+    graph: Option<super::VerifiedCompactionGraph>,
+    preview: bool,
 }
 
 impl SessionSummaryDraft {
+    pub(crate) fn v6_handoff_byte_limit(
+        goal: &str,
+        byte_limit: usize,
+        minimum_handoff_bytes: usize,
+    ) -> Result<usize, SessionError> {
+        let narrative = NarrativeSummary::new(goal, "a", Vec::new(), Vec::new())?;
+        let minimum_narrative_bytes = serde_json::to_vec(&narrative)
+            .map_err(|error| super::task::invalid_task(error.to_string()))?
+            .len();
+        let remaining = byte_limit.checked_sub(minimum_narrative_bytes).ok_or(
+            SessionError::CompactionSummaryTooLarge {
+                actual: minimum_narrative_bytes,
+                maximum: byte_limit,
+            },
+        )?;
+        remaining
+            .checked_add(minimum_handoff_bytes)
+            .ok_or(SessionError::StateOverflow {
+                field: "v6 handoff byte limit",
+            })
+    }
     pub fn new(
         evidence_spine: EvidenceSpine,
         narrative: NarrativeSummary,
@@ -95,7 +117,8 @@ impl SessionSummaryDraft {
             task_references: None,
             narrative,
             byte_limit: MAX_SESSION_SUMMARY_BYTES,
-            model_sample_event_ref: None,
+            graph: None,
+            preview: false,
         };
         draft.validate_intrinsic()?;
         Ok(draft)
@@ -115,7 +138,8 @@ impl SessionSummaryDraft {
             task_references: Some(task_references),
             narrative,
             byte_limit: MAX_SESSION_SUMMARY_BYTES,
-            model_sample_event_ref: None,
+            graph: None,
+            preview: false,
         };
         draft.validate_intrinsic()?;
         Ok(draft)
@@ -125,14 +149,27 @@ impl SessionSummaryDraft {
         &self.narrative
     }
 
-    pub(crate) fn with_model_sample(
-        mut self,
-        event_id: crate::domain::events::EventId,
-        narrative: NarrativeSummary,
-    ) -> Self {
-        self.model_sample_event_ref = Some(event_id);
-        self.narrative = narrative;
+    pub(crate) fn with_verified_graph(mut self, graph: super::VerifiedCompactionGraph) -> Self {
+        self.narrative = graph.narrative.clone();
+        self.graph = Some(graph);
+        self.preview = false;
         self
+    }
+
+    /// A local capacity probe has no model sample and can never be serialized
+    /// as a durable Summary. The real v6 candidate is checked after sampling.
+    pub(crate) fn with_preview_byte_limit(
+        mut self,
+        byte_limit: usize,
+    ) -> Result<Self, SessionError> {
+        if byte_limit == 0 {
+            return Err(super::task::invalid_task(
+                "preview Summary byte limit must be positive",
+            ));
+        }
+        self.byte_limit = byte_limit;
+        self.preview = true;
+        Ok(self)
     }
 
     pub(crate) fn with_historical_narrative(mut self, narrative: NarrativeSummary) -> Self {
@@ -141,7 +178,15 @@ impl SessionSummaryDraft {
     }
 
     pub(crate) fn with_byte_limit(mut self, byte_limit: usize) -> Result<Self, SessionError> {
-        validate_byte_limit(byte_limit)?;
+        if self.graph.is_some() {
+            if byte_limit == 0 {
+                return Err(super::task::invalid_task(
+                    "v6 Summary byte limit must be positive",
+                ));
+            }
+        } else {
+            validate_byte_limit(byte_limit)?;
+        }
         self.byte_limit = byte_limit;
         Ok(self)
     }
@@ -173,11 +218,23 @@ impl SessionSummaryDraft {
                 super::task::invalid_task("task Summary requires exact Session validation facts")
             })?)?;
         }
-        validate_model_sample(
-            self.model_sample_event_ref.as_ref(),
-            &self.narrative,
-            context,
-        )?;
+        if let Some(graph) = &self.graph {
+            let recorded = context
+                .task
+                .and_then(|facts| facts.verified_graph.as_ref())
+                .ok_or_else(|| {
+                    super::task::invalid_task("v6 Summary requires a verified Compaction graph")
+                })?;
+            if graph.root_event_id != recorded.root_event_id
+                || graph.plan_hash != recorded.plan_hash
+                || graph.plan_blob_id != recorded.plan_blob_id
+                || graph.source != recorded.source
+                || graph.narrative != recorded.narrative
+                || self.narrative != graph.narrative
+            {
+                return Err(super::task::invalid_task("v6 Summary graph proof mismatch"));
+            }
+        }
         Ok(())
     }
 }
@@ -230,6 +287,54 @@ struct SessionSummaryV5 {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
+struct ProtectedInputReference {
+    anchor: crate::domain::events::EventId,
+    event_id: crate::domain::events::EventId,
+    content_hash: String,
+    provenance: ContextProvenance,
+}
+
+fn protected_references(
+    graph: &super::VerifiedCompactionGraph,
+) -> Result<Vec<ProtectedInputReference>, SessionError> {
+    protected_references_from_inputs(&graph.protected_inputs)
+}
+
+fn protected_references_from_inputs(
+    inputs: &[super::super::operator_boundary::ProtectedOperatorInput],
+) -> Result<Vec<ProtectedInputReference>, SessionError> {
+    inputs
+        .iter()
+        .map(|input| {
+            Ok(ProtectedInputReference {
+                anchor: input.anchor.clone(),
+                event_id: input.event_id.clone(),
+                content_hash: fingerprint_value(&input.item)?,
+                provenance: input.provenance.clone(),
+            })
+        })
+        .collect()
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SessionSummaryV6 {
+    schema_version: u16,
+    revision: u64,
+    fingerprint: String,
+    byte_limit: usize,
+    task_references: SessionTaskReferences,
+    evidence_spine: Option<EvidenceSpine>,
+    narrative: NarrativeSummary,
+    narrative_source: super::SessionSourceIdentity,
+    model_sample_event_ref: crate::domain::events::EventId,
+    source_plan_blob_id: crate::domain::artifacts::BlobId,
+    source_plan_hash: String,
+    protected_inputs: Vec<ProtectedInputReference>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 struct LegacySessionSummaryV1 {
     schema_version: u16,
     revision: u64,
@@ -263,6 +368,8 @@ enum SessionSummaryVersion {
     CurrentV3(Box<SessionSummaryV3>),
     CurrentV4(Box<SessionSummaryV4>),
     CurrentV5(Box<SessionSummaryV5>),
+    CurrentV6(Box<SessionSummaryV6>),
+    Preview(Box<SessionSummaryV4>),
 }
 
 /// Deletable derived Summary carried by one Compaction fact.
@@ -282,6 +389,10 @@ impl Serialize for SessionSummary {
             SessionSummaryVersion::CurrentV3(summary) => summary.serialize(serializer),
             SessionSummaryVersion::CurrentV4(summary) => summary.serialize(serializer),
             SessionSummaryVersion::CurrentV5(summary) => summary.serialize(serializer),
+            SessionSummaryVersion::CurrentV6(summary) => summary.serialize(serializer),
+            SessionSummaryVersion::Preview(_) => Err(serde::ser::Error::custom(
+                "a compaction preview cannot be persisted",
+            )),
         }
     }
 }
@@ -317,6 +428,10 @@ impl<'de> Deserialize<'de> for SessionSummary {
                 .map(Box::new)
                 .map(SessionSummaryVersion::CurrentV5)
                 .map_err(serde::de::Error::custom)?,
+            6 => serde_json::from_value::<SessionSummaryV6>(value)
+                .map(Box::new)
+                .map(SessionSummaryVersion::CurrentV6)
+                .map_err(serde::de::Error::custom)?,
             _ => {
                 return Err(serde::de::Error::custom(format!(
                     "unsupported Session Summary schema version {schema_version}"
@@ -328,27 +443,57 @@ impl<'de> Deserialize<'de> for SessionSummary {
 }
 
 impl SessionSummary {
+    /// Historical refresh preserves the byte contract recorded by the old
+    /// Summary; versions without a recorded limit use their historical default.
+    pub(crate) fn historical_byte_limit(&self) -> Option<usize> {
+        match &self.version {
+            SessionSummaryVersion::LegacyV1(_)
+            | SessionSummaryVersion::CurrentV2(_)
+            | SessionSummaryVersion::CurrentV3(_) => Some(MAX_SESSION_SUMMARY_BYTES),
+            SessionSummaryVersion::CurrentV4(summary) => Some(summary.byte_limit),
+            SessionSummaryVersion::CurrentV5(summary) => Some(summary.byte_limit),
+            SessionSummaryVersion::CurrentV6(summary) => Some(summary.byte_limit),
+            SessionSummaryVersion::Preview(_) => None,
+        }
+    }
+
     pub(crate) fn from_draft(
         draft: SessionSummaryDraft,
         revision: u64,
         context: &CompactionValidationContext<'_>,
     ) -> Result<Self, SessionError> {
         draft.validate_against(context)?;
-        let version = if let Some(model_sample_event_ref) = draft.model_sample_event_ref {
-            let mut summary = SessionSummaryV5 {
-                schema_version: CURRENT_SESSION_SUMMARY_SCHEMA_VERSION,
+        let version = if draft.preview {
+            let mut summary = SessionSummaryV4 {
+                schema_version: 4,
+                revision,
+                fingerprint: String::new(),
+                byte_limit: draft.byte_limit,
+                task_references: draft.task_references,
+                evidence_spine: draft.evidence_spine,
+                narrative: draft.narrative,
+            };
+            summary.fingerprint = expected_v4_fingerprint(&summary)?;
+            SessionSummaryVersion::Preview(Box::new(summary))
+        } else if let Some(graph) = &draft.graph {
+            let mut summary = SessionSummaryV6 {
+                schema_version: 6,
                 revision,
                 fingerprint: String::new(),
                 byte_limit: draft.byte_limit,
                 task_references: draft.task_references.ok_or_else(|| {
-                    super::task::invalid_task("model Summary requires task provenance")
+                    super::task::invalid_task("v6 Summary requires task provenance")
                 })?,
                 evidence_spine: draft.evidence_spine,
                 narrative: draft.narrative,
-                model_sample_event_ref,
+                narrative_source: graph.source.clone(),
+                model_sample_event_ref: graph.root_event_id.clone(),
+                source_plan_blob_id: graph.plan_blob_id.clone(),
+                source_plan_hash: graph.plan_hash.clone(),
+                protected_inputs: protected_references(graph)?,
             };
-            summary.fingerprint = expected_v5_fingerprint(&summary)?;
-            SessionSummaryVersion::CurrentV5(Box::new(summary))
+            summary.fingerprint = expected_v6_fingerprint(&summary)?;
+            SessionSummaryVersion::CurrentV6(Box::new(summary))
         } else if draft.byte_limit > MAX_SESSION_SUMMARY_BYTES {
             let mut summary = SessionSummaryV4 {
                 schema_version: 4,
@@ -444,7 +589,7 @@ impl SessionSummary {
                 }
             }
             SessionSummaryVersion::CurrentV5(summary) => {
-                if summary.schema_version != CURRENT_SESSION_SUMMARY_SCHEMA_VERSION {
+                if summary.schema_version != 5 {
                     return Err(unsupported_summary_schema(summary.schema_version));
                 }
                 validate_byte_limit(summary.byte_limit)?;
@@ -461,6 +606,46 @@ impl SessionSummary {
                     return Err(SessionError::CompactionFingerprintMismatch);
                 }
             }
+            SessionSummaryVersion::CurrentV6(summary) => {
+                if summary.schema_version != 6 || summary.byte_limit == 0 {
+                    return Err(unsupported_summary_schema(summary.schema_version));
+                }
+                summary.task_references.validate_intrinsic()?;
+                summary.narrative_source.validate()?;
+                if let Some(spine) = &summary.evidence_spine {
+                    spine.validate_intrinsic()?;
+                }
+                summary.narrative.validate()?;
+                require_text(
+                    "summary.model_sample_event_ref",
+                    summary.model_sample_event_ref.as_str(),
+                )?;
+                validate_unique_ids(
+                    "summary.protected_inputs",
+                    summary
+                        .protected_inputs
+                        .iter()
+                        .map(|input| input.event_id.as_str()),
+                )?;
+                if summary.fingerprint != expected_v6_fingerprint(summary)? {
+                    return Err(SessionError::CompactionFingerprintMismatch);
+                }
+            }
+            SessionSummaryVersion::Preview(summary) => {
+                if summary.byte_limit == 0 {
+                    return Err(unsupported_summary_schema(summary.schema_version));
+                }
+                if let Some(task) = &summary.task_references {
+                    task.validate_intrinsic()?;
+                }
+                if let Some(spine) = &summary.evidence_spine {
+                    spine.validate_intrinsic()?;
+                }
+                summary.narrative.validate()?;
+                if summary.fingerprint != expected_v4_fingerprint(summary)? {
+                    return Err(SessionError::CompactionFingerprintMismatch);
+                }
+            }
         }
         self.validate_encoded_size()
     }
@@ -472,6 +657,8 @@ impl SessionSummary {
             SessionSummaryVersion::CurrentV3(_) => 3,
             SessionSummaryVersion::CurrentV4(_) => 4,
             SessionSummaryVersion::CurrentV5(_) => 5,
+            SessionSummaryVersion::CurrentV6(_) => 6,
+            SessionSummaryVersion::Preview(_) => 4,
         }
     }
 
@@ -482,6 +669,8 @@ impl SessionSummary {
             SessionSummaryVersion::CurrentV3(summary) => summary.revision,
             SessionSummaryVersion::CurrentV4(summary) => summary.revision,
             SessionSummaryVersion::CurrentV5(summary) => summary.revision,
+            SessionSummaryVersion::CurrentV6(summary) => summary.revision,
+            SessionSummaryVersion::Preview(summary) => summary.revision,
         }
     }
 
@@ -492,6 +681,8 @@ impl SessionSummary {
             SessionSummaryVersion::CurrentV3(summary) => &summary.fingerprint,
             SessionSummaryVersion::CurrentV4(summary) => &summary.fingerprint,
             SessionSummaryVersion::CurrentV5(summary) => &summary.fingerprint,
+            SessionSummaryVersion::CurrentV6(summary) => &summary.fingerprint,
+            SessionSummaryVersion::Preview(summary) => &summary.fingerprint,
         }
     }
 
@@ -502,6 +693,8 @@ impl SessionSummary {
             SessionSummaryVersion::CurrentV3(summary) => summary.evidence_spine.as_ref(),
             SessionSummaryVersion::CurrentV4(summary) => summary.evidence_spine.as_ref(),
             SessionSummaryVersion::CurrentV5(summary) => summary.evidence_spine.as_ref(),
+            SessionSummaryVersion::CurrentV6(summary) => summary.evidence_spine.as_ref(),
+            SessionSummaryVersion::Preview(summary) => summary.evidence_spine.as_ref(),
         }
     }
 
@@ -512,6 +705,8 @@ impl SessionSummary {
             SessionSummaryVersion::CurrentV3(summary) => Some(&summary.narrative),
             SessionSummaryVersion::CurrentV4(summary) => Some(&summary.narrative),
             SessionSummaryVersion::CurrentV5(summary) => Some(&summary.narrative),
+            SessionSummaryVersion::CurrentV6(summary) => Some(&summary.narrative),
+            SessionSummaryVersion::Preview(summary) => Some(&summary.narrative),
         }
     }
 
@@ -520,6 +715,8 @@ impl SessionSummary {
             SessionSummaryVersion::CurrentV3(summary) => Some(&summary.task_references),
             SessionSummaryVersion::CurrentV4(summary) => summary.task_references.as_ref(),
             SessionSummaryVersion::CurrentV5(summary) => Some(&summary.task_references),
+            SessionSummaryVersion::CurrentV6(summary) => Some(&summary.task_references),
+            SessionSummaryVersion::Preview(summary) => summary.task_references.as_ref(),
             _ => None,
         }
     }
@@ -542,6 +739,65 @@ impl SessionSummary {
                 &summary.narrative,
                 context,
             )?;
+        }
+        if let SessionSummaryVersion::CurrentV6(summary) = &self.version {
+            let graph = context
+                .task
+                .and_then(|facts| facts.verified_graph.as_ref())
+                .ok_or_else(|| {
+                    super::task::invalid_task("v6 Summary requires verified graph source")
+                })?;
+            if summary.model_sample_event_ref != graph.root_event_id
+                || summary.narrative_source != graph.source
+                || summary.source_plan_blob_id != graph.plan_blob_id
+                || summary.source_plan_hash != graph.plan_hash
+                || summary.narrative != graph.narrative
+                || summary.protected_inputs != protected_references(graph)?
+            {
+                return Err(super::task::invalid_task(
+                    "v6 Summary source or protected inputs do not match verified graph",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn graph_reference(
+        &self,
+    ) -> Option<(
+        &crate::domain::events::EventId,
+        &super::SessionSourceIdentity,
+        &crate::domain::artifacts::BlobId,
+        &str,
+    )> {
+        match &self.version {
+            SessionSummaryVersion::CurrentV6(summary) => Some((
+                &summary.model_sample_event_ref,
+                &summary.narrative_source,
+                &summary.source_plan_blob_id,
+                &summary.source_plan_hash,
+            )),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn validate_graph_reference(
+        &self,
+        graph: &super::VerifiedCompactionGraph,
+    ) -> Result<(), SessionError> {
+        let SessionSummaryVersion::CurrentV6(summary) = &self.version else {
+            return Err(super::task::invalid_task("Summary has no v6 graph"));
+        };
+        if summary.model_sample_event_ref != graph.root_event_id
+            || summary.narrative_source != graph.source
+            || summary.source_plan_blob_id != graph.plan_blob_id
+            || summary.source_plan_hash != graph.plan_hash
+            || summary.narrative != graph.narrative
+            || summary.protected_inputs != protected_references(graph)?
+        {
+            return Err(super::task::invalid_task(
+                "v6 Summary source or protected inputs do not match verified graph",
+            ));
         }
         Ok(())
     }
@@ -603,6 +859,9 @@ impl SessionSummary {
                     SessionSummaryVersion::CurrentV5(summary) => {
                         Some(&summary.model_sample_event_ref)
                     }
+                    SessionSummaryVersion::CurrentV6(summary) => {
+                        Some(&summary.model_sample_event_ref)
+                    }
                     _ => None,
                 },
             )?;
@@ -650,6 +909,9 @@ impl SessionSummary {
     }
 
     fn validate_encoded_size(&self) -> Result<(), SessionError> {
+        if matches!(self.version, SessionSummaryVersion::Preview(_)) {
+            return Ok(());
+        }
         let actual = serde_json::to_vec(self)
             .map_err(|error| SessionError::PayloadEncode {
                 event_type: EventType::new(COMPACTION_CREATED_EVENT_TYPE),
@@ -659,6 +921,20 @@ impl SessionSummary {
         let maximum = match &self.version {
             SessionSummaryVersion::CurrentV4(summary) => summary.byte_limit,
             SessionSummaryVersion::CurrentV5(summary) => summary.byte_limit,
+            SessionSummaryVersion::CurrentV6(summary) => {
+                let narrative_bytes = serde_json::to_vec(&summary.narrative)
+                    .map_err(|error| SessionError::PayloadEncode {
+                        event_type: EventType::new(COMPACTION_CREATED_EVENT_TYPE),
+                        message: error.to_string(),
+                    })?
+                    .len();
+                actual
+                    .checked_sub(narrative_bytes)
+                    .and_then(|metadata| metadata.checked_add(summary.byte_limit))
+                    .ok_or(SessionError::StateOverflow {
+                        field: "v6 Summary byte allowance",
+                    })?
+            }
             _ => MAX_SESSION_SUMMARY_BYTES,
         };
         if actual > maximum {
@@ -739,6 +1015,12 @@ pub(super) fn validate_byte_limit(byte_limit: usize) -> Result<(), SessionError>
 }
 
 fn expected_v5_fingerprint(value: &SessionSummaryV5) -> Result<String, SessionError> {
+    let mut value = value.clone();
+    value.fingerprint.clear();
+    fingerprint_value(&value)
+}
+
+fn expected_v6_fingerprint(value: &SessionSummaryV6) -> Result<String, SessionError> {
     let mut value = value.clone();
     value.fingerprint.clear();
     fingerprint_value(&value)

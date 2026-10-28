@@ -206,9 +206,13 @@ impl ToolRegistry {
         self
     }
 
-    pub(crate) fn with_context_window(mut self, window_tokens: u32) -> Self {
-        self.window_policy = ContextWindowPolicy::for_window(window_tokens);
+    pub(crate) fn with_window_policy(mut self, policy: ContextWindowPolicy) -> Self {
+        self.window_policy = policy;
         self
+    }
+
+    pub(crate) fn window_policy(&self) -> ContextWindowPolicy {
+        self.window_policy
     }
 
     fn register_mcp(&mut self, discovered: &[McpCatalogTool]) -> Result<(), McpError> {

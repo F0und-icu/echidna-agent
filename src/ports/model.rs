@@ -256,6 +256,8 @@ pub enum ModelProviderError {
     },
     #[error("model HTTP request failed with status {status}")]
     HttpFailure { status: u16 },
+    #[error("model context capacity exceeded ({code})")]
+    ContextCapacityExceeded { code: String },
     #[error("model stream protocol failed: {message}")]
     ProtocolFailure { message: String },
     #[error(

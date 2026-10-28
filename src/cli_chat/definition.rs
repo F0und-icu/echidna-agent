@@ -41,12 +41,12 @@ pub(super) fn initial_binding(
 > {
     let tools = ToolRegistry::for_project_with_mcp(project.root(), discovered_mcp)?
         .with_project(project)
-        .with_context_window(
+        .with_window_policy(
             composition
-                .agent_profile()
-                .primary()
-                .capabilities()
-                .context_window,
+                .runtime()
+                .context_budget
+                .for_capabilities(composition.agent_profile().primary().capabilities())
+                .map_err(crate::app::agent_loop::AgentLoopError::from)?,
         );
     if resume {
         if !project
@@ -162,8 +162,13 @@ impl DurableChatSession {
     pub(super) fn bound_tools(
         &self,
         discovered_mcp: &[McpCatalogTool],
-        window_tokens: u32,
+        composition: &ProviderComposition,
     ) -> Result<ToolRegistry, ChatError> {
+        let window_policy = composition
+            .runtime()
+            .context_budget
+            .for_capabilities(composition.agent_profile().primary().capabilities())
+            .map_err(crate::app::agent_loop::AgentLoopError::from)?;
         ToolRegistry::for_agent_with_mcp(
             self.project.root(),
             self.session_id.clone(),
@@ -181,7 +186,7 @@ impl DurableChatSession {
                         .rsi()
                         .is_some_and(|rsi| rsi.improvement),
                 )
-                .with_context_window(window_tokens)
+                .with_window_policy(window_policy)
         })
         .map_err(ChatError::from)
     }
@@ -215,14 +220,7 @@ impl DurableChatSession {
         discovered_mcp: &[McpCatalogTool],
         read: &crate::adapters::research_projection::ProjectReadContext,
     ) -> Result<(), ChatError> {
-        let tools = self.bound_tools(
-            discovered_mcp,
-            composition
-                .agent_profile()
-                .primary()
-                .capabilities()
-                .context_window,
-        )?;
+        let tools = self.bound_tools(discovered_mcp, composition)?;
         let prompt = prompt_for_state(
             &self.project,
             &self.binding,
@@ -240,6 +238,7 @@ impl DurableChatSession {
                 1,
             ),
         )?
+        .with_context_budget_policy(composition.runtime().context_budget)
         .with_prompt_composition(prompt.clone());
         preview.refresh_current_context(
             context::ChatContextCache::default().refresh_from_read_context(
@@ -249,9 +248,8 @@ impl DurableChatSession {
                 read,
             )?,
         )?;
-        let history = state
-            .normalized_history_items()
-            .map_err(crate::domain::session::SessionError::from)?;
+        let history = state.compaction_source_history()?;
+        preview.set_protected_context(state.current_protected_operator_context()?);
         preview.preflight_definition(
             &prompt,
             &history,

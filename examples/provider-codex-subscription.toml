@@ -37,3 +37,17 @@ context_window = 32768
 primary = "codex"
 vision_mode = "disabled"
 generation = 1
+
+[runtime]
+auto_compact = true
+# compaction_reasoning_effort = "high"
+
+# Optional: ratios scale with the actual declared window, not the model name.
+# 100 basis points = 1%. Other policy fields retain their defaults.
+[runtime.context_budget]
+pressure_bps = 8000
+target_bps = 5000
+summary_bps = 200
+compaction_reference_items = 64
+max_core_file_bytes = 524288
+# max_content_bytes = 1048576

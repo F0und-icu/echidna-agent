@@ -92,7 +92,10 @@ fn contains_input_text(request: &Value, text: &str) -> bool {
 
 #[test]
 fn capacity_window_scales_actual_file_and_command_results_with_the_advertised_catalog() {
-    for (window, limit) in [(131072, 131072usize), (272000, 262144usize)] {
+    for (window, limit, readback, state_bytes) in [
+        (131072, 125830usize, 15729usize, 394usize),
+        (272000, 261120usize, 32640usize, 816usize),
+    ] {
         let root = TemporaryDirectory::new("window-tool-results");
         initialize_project(root.path());
         let definition = definition(root.path());
@@ -141,11 +144,11 @@ fn capacity_window_scales_actual_file_and_command_results_with_the_advertised_ca
         server.join();
         assert_eq!(
             parameters(&first, "read_output")["properties"]["max_bytes"]["maximum"],
-            limit / 8
+            readback
         );
         assert_eq!(
             parameters(&first, "http_request")["properties"]["preview_bytes"]["maximum"],
-            limit / 8
+            readback
         );
         assert_eq!(
             parameters(&first, "memory_write")["allOf"][0]["then"]["properties"]["content"]["maxLength"],
@@ -159,7 +162,7 @@ fn capacity_window_scales_actual_file_and_command_results_with_the_advertised_ca
                     .as_str()
                     .unwrap()
                     .len(),
-                384
+                state_bytes
             );
         } else {
             assert!(snapshot["snapshot"]["file_count"].as_u64().unwrap() >= 2);
@@ -272,7 +275,7 @@ fn capacity_core_memory_stays_valid_when_a_smaller_active_tool_budget_rejects_de
     assert!(
         result(&second, "core-read")
             .to_string()
-            .contains("active Tool limit is 65536")
+            .contains("active Tool limit is 62915")
     );
     assert_eq!(blake3::hash(&fs::read(&path).unwrap()), original_hash);
     let state = reduced_session(&Project::discover(root.path()).unwrap(), &session);
@@ -281,8 +284,69 @@ fn capacity_core_memory_stays_valid_when_a_smaller_active_tool_budget_rejects_de
 }
 
 #[test]
+fn configured_core_storage_limit_is_shared_by_schema_write_and_context_loading() {
+    let root = TemporaryDirectory::new("configured-core-storage");
+    initialize_project(root.path());
+    let definition = definition(root.path());
+    let content = "C".repeat(530_000);
+    let server = spawn_responses_server(vec![
+        (
+            200,
+            calls(&[(
+                "configured-core-write",
+                "memory_write",
+                json!({
+                    "path":"core.md", "content":content, "expected_hash":null,
+                    "event_id":"configured-core",
+                }),
+            )]),
+        ),
+        (200, text_response("CORE_SAVED", "configured-core-done")),
+    ]);
+    let config = write_context_window_config(root.path(), &server.base_url, 2_000_000);
+    let mut configuration = fs::read_to_string(&config).unwrap();
+    configuration.push_str("\n[runtime.context_budget]\nmax_core_file_bytes = 1048576\n");
+    fs::write(&config, configuration).unwrap();
+    let output = run_chat(
+        root.path(),
+        &config,
+        "Save the core.\n/memory\n/exit\n",
+        &["--agent", definition.to_str().unwrap()],
+    );
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let first = request_body(
+        &server
+            .requests
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap(),
+    );
+    let second = request_body(
+        &server
+            .requests
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap(),
+    );
+    server.join();
+    assert_eq!(
+        parameters(&first, "memory_write")["allOf"][0]["then"]["properties"]["content"]["maxLength"],
+        960_000
+    );
+    assert!(contains_input_text(&second, &content));
+    assert_eq!(
+        fs::read_to_string(root.path().join(".echidna/memory/core.md")).unwrap(),
+        content
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("530000"));
+}
+
+#[test]
 fn capacity_readback_admits_the_active_limit_and_uses_the_scaled_default() {
-    for (window, default_bytes, extended) in [(131072, 4096, false), (272000, 8192, true)] {
+    for (window, default_bytes, extended) in [(131072, 3933, false), (272000, 8160, true)] {
         let root = TemporaryDirectory::new("window-readback");
         initialize_project(root.path());
         let definition = definition(root.path());
@@ -335,7 +399,7 @@ fn capacity_readback_admits_the_active_limit_and_uses_the_scaled_default() {
             assert_eq!(exact["text"].as_str().unwrap().len(), 24000);
             assert_eq!(exact["next_offset"], 24000);
         } else {
-            assert!(exact.to_string().contains("16384"));
+            assert!(exact.to_string().contains("15729"));
         }
         let default = result(&requests[2], "read-default");
         assert_eq!(default["text"].as_str().unwrap().len(), default_bytes);
@@ -353,7 +417,7 @@ fn capacity_readback_admits_the_active_limit_and_uses_the_scaled_default() {
 }
 
 #[test]
-fn capacity_compaction_keeps_more_real_references_and_v4_resumes_under_a_smaller_window() {
+fn capacity_compaction_keeps_configured_references_and_v6_resumes_under_a_smaller_window() {
     for window in [131072, 272000] {
         let root = TemporaryDirectory::new("window-compaction");
         initialize_project(root.path());
@@ -398,13 +462,13 @@ fn capacity_compaction_keeps_more_real_references_and_v4_resumes_under_a_smaller
         let state = reduced_session(&Project::discover(root.path()).unwrap(), &session);
         let summary = serde_json::to_value(state.latest_compaction().unwrap().summary()).unwrap();
         let large = window == 272000;
-        assert_eq!(summary["schema_version"], 5);
+        assert_eq!(summary["schema_version"], 6);
         assert_eq!(
             summary["task_references"]["history_event_refs"]
                 .as_array()
                 .unwrap()
                 .len(),
-            if large { 40 } else { 32 }
+            40
         );
         assert_eq!(
             summary["narrative"]["concise_progress"]
@@ -414,7 +478,7 @@ fn capacity_compaction_keeps_more_real_references_and_v4_resumes_under_a_smaller
             if large { 3072 } else { 1536 }
         );
         if large {
-            assert_eq!(summary["byte_limit"], 16384);
+            assert_eq!(summary["byte_limit"], 16320);
             let server =
                 spawn_responses_server(vec![(200, text_response("RESUMED_V4", "small-resume"))]);
             let config = write_context_window_config(root.path(), &server.base_url, 131072);

@@ -557,7 +557,10 @@ mod mcp_stdio_regression {
             "startup_timeout",
         ] {
             let directory = TemporaryDirectory::new(&format!("stdio-startup-{mode}"));
-            let runtime = runtime(&directory, mode, 350);
+            // The peer must launch before this fixture can verify descendant
+            // cleanup. Use the existing 3s startup allowance under test load;
+            // startup_timeout still stalls initialize for 60s and must be killed.
+            let runtime = runtime(&directory, mode, 3000);
             assert!(runtime.discover().await.is_err(), "{mode}");
             assert_reaped_and_group_stopped(&directory);
         }

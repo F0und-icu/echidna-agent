@@ -522,55 +522,38 @@ impl PreparedModelRequest for PreparedResponsesRequest {
             if let Some(diagnostics) = &mut diagnostics {
                 diagnostics.status(status.as_u16());
             }
-            let mut response_events = match (status.is_success(), profile, continuation_requested) {
-                (true, _, _) => response.bytes_stream().eventsource(),
-                (false, profile, _) if profile.is_subscription() => {
-                    let body = read_bounded_http_error_body(response).await;
-                    Err(response::subscription_http_failure(profile, status.as_u16(), &body))?;
-                    unreachable!("an HTTP failure is returned through the stream")
+            let mut response_events = if status.is_success() {
+                response.bytes_stream().eventsource()
+            } else {
+                let inspect_error = status.as_u16() == 400 || profile.is_subscription() || continuation_requested;
+                #[cfg(debug_assertions)]
+                let inspect_error = inspect_error || full_debug;
+                if !inspect_error {
+                    Err(ModelProviderError::HttpFailure { status: status.as_u16() })?;
                 }
-                (false, _, true) => {
-                    let body = response.text().await.unwrap_or_default();
-                    #[cfg(debug_assertions)]
-                    if let Some(diagnostics) = &mut diagnostics {
-                        diagnostics.http_error_body(&body);
+                // Standard continuation rejection already accepts a complete
+                // error envelope larger than the presentation limit. Keep that
+                // classification contract; subscription bodies stay bounded.
+                let body = if continuation_requested && !profile.is_subscription() {
+                    match response.text().await {
+                        Ok(body) => response::HttpErrorBody::Complete(body),
+                        Err(_) => response::HttpErrorBody::Unreadable,
                     }
-                    if response::continuation_rejected_http_body(&body) {
-                        Err(ModelProviderError::ContinuationRejected {
-                            code: "previous_response_not_found".to_owned(),
-                        })?;
+                } else {
+                    read_bounded_http_error_body(response).await
+                };
+                #[cfg(debug_assertions)]
+                if !profile.is_subscription() && full_debug
+                    && let Some(diagnostics) = &mut diagnostics
+                {
+                    match &body {
+                        response::HttpErrorBody::Complete(body) => diagnostics.http_error_body(body),
+                        response::HttpErrorBody::Unreadable => diagnostics.response_omitted("HTTP error body unavailable"),
+                        response::HttpErrorBody::Oversized => diagnostics.response_omitted("HTTP error body omitted: exceeds 65536 bytes"),
                     }
-                    Err(ModelProviderError::HttpFailure {
-                        status: status.as_u16(),
-                    })?;
-                    unreachable!("an HTTP failure is returned through the stream")
                 }
-                (false, _, false) => {
-                    #[cfg(debug_assertions)]
-                    if full_debug {
-                        let body = read_bounded_http_error_body(response).await;
-                        if let Some(diagnostics) = &mut diagnostics {
-                            match body {
-                                response::BoundedHttpErrorBody::Complete(body) => {
-                                    diagnostics.http_error_body(&body)
-                                }
-                                response::BoundedHttpErrorBody::Unreadable => {
-                                    diagnostics.response_omitted("HTTP error body unavailable")
-                                }
-                                response::BoundedHttpErrorBody::Oversized => diagnostics
-                                    .response_omitted("HTTP error body omitted: exceeds 65536 bytes"),
-                            }
-                        }
-                        Err(ModelProviderError::HttpFailure {
-                            status: status.as_u16(),
-                        })?;
-                        unreachable!("an HTTP failure is returned through the stream")
-                    }
-                    Err(ModelProviderError::HttpFailure {
-                        status: status.as_u16(),
-                    })?;
-                    unreachable!("an HTTP failure is returned through the stream")
-                }
+                Err(response::http_failure(profile, status.as_u16(), continuation_requested, &body))?;
+                unreachable!("an HTTP failure is returned through the stream")
             };
             let mut staged_opaque = BTreeMap::new();
             loop {
@@ -919,25 +902,23 @@ impl OpaqueContinuationStore {
     }
 }
 
-async fn read_bounded_http_error_body(
-    mut response: reqwest::Response,
-) -> response::BoundedHttpErrorBody {
+async fn read_bounded_http_error_body(mut response: reqwest::Response) -> response::HttpErrorBody {
     let mut body = Vec::new();
     loop {
         let chunk = match response.chunk().await {
             Ok(chunk) => chunk,
-            Err(_) => return response::BoundedHttpErrorBody::Unreadable,
+            Err(_) => return response::HttpErrorBody::Unreadable,
         };
         let Some(chunk) = chunk else {
             break;
         };
         if chunk.len() > MAX_HTTP_ERROR_BODY_BYTES.saturating_sub(body.len()) {
-            return response::BoundedHttpErrorBody::Oversized;
+            return response::HttpErrorBody::Oversized;
         }
         body.extend_from_slice(&chunk);
     }
     match String::from_utf8(body) {
-        Ok(body) => response::BoundedHttpErrorBody::Complete(body),
-        Err(_) => response::BoundedHttpErrorBody::Unreadable,
+        Ok(body) => response::HttpErrorBody::Complete(body),
+        Err(_) => response::HttpErrorBody::Unreadable,
     }
 }

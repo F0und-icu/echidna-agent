@@ -17,6 +17,8 @@ pub struct ContextBudget {
     context_window_tokens: u32,
     reserved_output_tokens: u32,
     reserved_tool_loop_tokens: u32,
+    pressure_bps: u16,
+    target_bps: u16,
 }
 
 impl ContextBudget {
@@ -24,6 +26,22 @@ impl ContextBudget {
         context_window_tokens: u32,
         reserved_output_tokens: u32,
         reserved_tool_loop_tokens: u32,
+    ) -> Result<Self, ContextPlannerError> {
+        Self::with_policy(
+            context_window_tokens,
+            reserved_output_tokens,
+            reserved_tool_loop_tokens,
+            8000,
+            5000,
+        )
+    }
+
+    pub(crate) fn with_policy(
+        context_window_tokens: u32,
+        reserved_output_tokens: u32,
+        reserved_tool_loop_tokens: u32,
+        pressure_bps: u16,
+        target_bps: u16,
     ) -> Result<Self, ContextPlannerError> {
         context_window_tokens
             .checked_sub(reserved_output_tokens)
@@ -37,6 +55,8 @@ impl ContextBudget {
             context_window_tokens,
             reserved_output_tokens,
             reserved_tool_loop_tokens,
+            pressure_bps,
+            target_bps,
         })
     }
 
@@ -56,10 +76,24 @@ impl ContextBudget {
         self.context_window_tokens - self.reserved_output_tokens - self.reserved_tool_loop_tokens
     }
 
-    /// Repeated input cost is bounded independently of supported capacity,
-    /// using this budget's actual reservations (including explicit output).
+    /// Pressure follows usable input capacity after the actual reservations.
     pub(crate) fn working_set_input_tokens(self) -> u32 {
-        ((u64::from(self.input_token_limit()) * 4 / 5).min(65_536)) as u32
+        (u64::from(self.input_token_limit()) * u64::from(self.pressure_bps) / 10_000) as u32
+    }
+
+    /// A preferred total input size, never permission to discard required data.
+    pub(crate) fn compaction_target_input_tokens(self) -> u32 {
+        (u64::from(self.input_token_limit()) * u64::from(self.target_bps) / 10_000) as u32
+    }
+
+    pub(crate) fn without_tool_reserve(self) -> Result<Self, ContextPlannerError> {
+        Self::with_policy(
+            self.context_window_tokens,
+            self.reserved_output_tokens,
+            0,
+            self.pressure_bps,
+            self.target_bps,
+        )
     }
 }
 

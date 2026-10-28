@@ -177,19 +177,19 @@ pub(super) async fn assess<Provider: ModelProvider + ?Sized>(
         &state,
         session.session_id.as_str(),
     )?;
+    let diagnostic_policy = composition
+        .runtime()
+        .context_budget
+        .for_capabilities(composition.agent_profile().primary().capabilities())
+        .map_err(crate::app::agent_loop::AgentLoopError::from)?;
     let observations = match improvement_policy::diagnostic_source(
         &state,
         task,
         &current,
         &friction,
-        crate::domain::context::ContextWindowPolicy::for_window(
-            composition
-                .agent_profile()
-                .primary()
-                .capabilities()
-                .context_window,
-        )
-        .summary_bytes(),
+        diagnostic_policy.diagnostic_bytes(),
+        diagnostic_policy.diagnostic_task_bytes(),
+        diagnostic_policy.diagnostic_handoff_bytes(),
     ) {
         Ok(source) => source,
         Err(reason) => {
@@ -405,12 +405,12 @@ pub(super) async fn assess<Provider: ModelProvider + ?Sized>(
         let probe_tools = ToolRegistry::for_project(root)
             .with_input_verification(true)
             .with_automatic_verification(true)
-            .with_context_window(
+            .with_window_policy(
                 composition
-                    .agent_profile()
-                    .primary()
-                    .capabilities()
-                    .context_window,
+                    .runtime()
+                    .context_budget
+                    .for_capabilities(composition.agent_profile().primary().capabilities())
+                    .map_err(crate::app::agent_loop::AgentLoopError::from)?,
             );
         let probe_task = format!("RSI2 reference_match probe. Perform this same bounded task in the supplied copied working directory. Return exactly one new run_command, using relative paths and cwd '.'. Do not read or change the original project; do not launch background jobs. No further sample follows. The host retains a hidden successful reference; do not invent expected data. Arm={stage:?}. Task={}\nFrozen input identities={}\nInput contents={}",probe.task,serde_json::to_string(&inputs.iter().map(|input| &input.file).collect::<Vec<_>>()).expect("file identities serialize"),serde_json::to_string(&inputs.iter().map(|input| json!({"path":input.file.path,"utf8":String::from_utf8_lossy(&input.bytes)})).collect::<Vec<_>>()).expect("input observations serialize"));
         let output = match session

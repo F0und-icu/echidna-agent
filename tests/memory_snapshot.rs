@@ -992,7 +992,9 @@ fn memory_and_snapshot_tool_specs_are_fixed_and_non_cacheable() {
         .unwrap();
     assert_eq!(
         memory_write.input_schema["allOf"][0]["then"]["properties"]["content"]["maxLength"],
-        64 * 1024
+        // Default 32k registry: usable 24,576 tokens, four bytes/token,
+        // 16% Core share, rounded up to a whole byte.
+        15_729
     );
     assert!(memory_write.input_schema["properties"]["occurred_at"].is_null());
     assert_eq!(

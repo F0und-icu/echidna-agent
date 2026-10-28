@@ -1,8 +1,9 @@
-//! Complete serialized ToolSpecs captured from a9cfcbd before M06 refactoring.
-//! These hashes cover names, descriptions, schemas, versions, effects and limits.
+//! Complete serialized ToolSpecs; the pre-refactor catalog remains historical.
+//! EC-CONTEXT2 intentionally changes capacity policy limits, not tool membership.
 
 use crate::adapters::tools::ToolRegistry;
 use crate::domain::agent_definition::AgentId;
+use crate::domain::context::ContextWindowPolicy;
 use crate::domain::events::StreamId;
 use crate::domain::memory::MemoryScope;
 use crate::domain::tools::{ExecutionId, ToolCall, ToolCallId};
@@ -12,14 +13,14 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 #[test]
-fn complete_catalogs_preserve_pre_refactor_contracts() {
+fn complete_catalogs_preserve_tool_membership_and_current_policy_contracts() {
     let mut cases = Vec::new();
     for window in [32768, 272000, 1048576] {
         for (verified, automatic) in [(false, false), (true, false), (true, true)] {
             cases.push((
                 format!("project-window-{window}-verified-{verified}-automatic-{automatic}"),
                 ToolRegistry::for_project("/fixture/catalog")
-                    .with_context_window(window)
+                    .with_window_policy(ContextWindowPolicy::for_window(window))
                     .with_input_verification(verified)
                     .with_automatic_verification(automatic),
             ));
@@ -41,8 +42,10 @@ fn complete_catalogs_preserve_pre_refactor_contracts() {
             ));
         }
     }
-    let expected: BTreeMap<String, Value> =
+    let historical: BTreeMap<String, Value> =
         serde_json::from_str(include_str!("../fixtures/tools/catalog-baseline.json")).unwrap();
+    let expected: BTreeMap<String, Value> =
+        serde_json::from_str(include_str!("../fixtures/tools/catalog-context2.json")).unwrap();
     let actual: BTreeMap<String, Value> = cases
         .into_iter()
         .map(|(label, registry)| {
@@ -54,7 +57,22 @@ fn complete_catalogs_preserve_pre_refactor_contracts() {
             )
         })
         .collect();
-    assert_eq!(actual, expected);
+    assert_eq!(
+        actual.keys().collect::<Vec<_>>(),
+        historical.keys().collect::<Vec<_>>()
+    );
+    for (name, entry) in &actual {
+        assert_eq!(
+            entry["count"], historical[name]["count"],
+            "tool membership {name}"
+        );
+    }
+    assert_eq!(
+        actual,
+        expected,
+        "CURRENT_CATALOG_JSON={}",
+        serde_json::to_string(&actual).unwrap()
+    );
 }
 
 #[test]

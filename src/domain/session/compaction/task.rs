@@ -56,7 +56,7 @@ impl SessionSourceIdentity {
             .collect::<BTreeMap<_, _>>();
         let mut session_lengths = BTreeSet::from([events.len()]);
         let mut project_lengths = BTreeSet::from([project_events.len()]);
-        for (_, sample) in state.compaction_samples() {
+        for (_, _, sample) in state.compaction_samples() {
             session_lengths.insert(
                 events.partition_point(|event| event.sequence <= sample.source().watermark()),
             );
@@ -76,7 +76,7 @@ impl SessionSourceIdentity {
             &project_lengths,
         )
         .map_err(encoding_error)?;
-        for (sample_id, sample) in state.compaction_samples() {
+        for (sample_id, _, sample) in state.compaction_samples() {
             let end = event_positions[sample_id];
             let start =
                 events.partition_point(|event| event.sequence <= sample.source().watermark());
@@ -92,14 +92,22 @@ impl SessionSourceIdentity {
                     "Compaction sample belongs to a different Project",
                 ));
             }
-            sample.source().validate_sampling_suffix_with_hashes(
-                &events[..=end],
-                &project_events[..project_end],
-                &attempts,
-                Some(sample_id),
-                &session_hashes[&start],
-                &project_hashes[&project_end],
-            )?;
+            if sample.graph_node().is_some() {
+                sample.source().validate_graph_sampling_suffix(
+                    &events[..=end],
+                    &project_events[..project_end],
+                    sample_id,
+                )?;
+            } else {
+                sample.source().validate_sampling_suffix_with_hashes(
+                    &events[..=end],
+                    &project_events[..project_end],
+                    &attempts,
+                    Some(sample_id),
+                    &session_hashes[&start],
+                    &project_hashes[&project_end],
+                )?;
+            }
         }
         let source = Self {
             project_id,
@@ -321,6 +329,7 @@ pub(crate) struct TaskCompactionValidationFacts {
     execution_receipt_ids: Vec<ExecutionReceiptId>,
     history_event_ids: Vec<EventId>,
     pub(super) model_samples: std::collections::BTreeMap<EventId, super::NarrativeSummary>,
+    pub(super) verified_graph: Option<super::VerifiedCompactionGraph>,
 }
 
 impl TaskCompactionValidationFacts {
@@ -335,7 +344,7 @@ impl TaskCompactionValidationFacts {
         events: &[EventEnvelope<Value>],
     ) -> Result<Self, SessionError> {
         let mut samples = BTreeMap::new();
-        if let Some((id, sample)) = state.compaction_samples().last()
+        if let Some((id, _, sample)) = state.compaction_samples().last()
             && sample.is_current_at(id, events, &source)?
         {
             samples.insert(id.clone(), sample.narrative().clone());
@@ -384,6 +393,15 @@ impl TaskCompactionValidationFacts {
         self
     }
 
+    pub(crate) fn with_verified_graph(mut self, graph: super::VerifiedCompactionGraph) -> Self {
+        self.verified_graph = Some(graph);
+        self
+    }
+
+    pub(crate) fn verified_graph(&self) -> Option<&super::VerifiedCompactionGraph> {
+        self.verified_graph.as_ref()
+    }
+
     pub(crate) fn new(
         source: SessionSourceIdentity,
         binding: &AgentDefinitionBinding,
@@ -400,6 +418,7 @@ impl TaskCompactionValidationFacts {
             execution_receipt_ids,
             history_event_ids,
             model_samples,
+            verified_graph: None,
         })
     }
 
@@ -427,13 +446,12 @@ impl TaskCompactionValidationFacts {
 }
 
 impl SessionReducer {
-    /// Capture only the latest Summary's typed source facts during the same
-    /// strict replay. No archived payload vector or historical State survives.
-    pub(crate) fn reduce_with_compaction_source(
+    pub(crate) fn reduce_with_compaction_source_checked(
         &self,
         project_id: ProjectId,
         events: &[EventEnvelope<Value>],
         project_events: &[EventEnvelope<Value>],
+        mut check: impl FnMut(&SessionState, &EventEnvelope<Value>) -> Result<(), SessionError>,
     ) -> Result<
         (
             SessionState,
@@ -468,6 +486,7 @@ impl SessionReducer {
         let mut state = SessionState::default();
         let mut checkpoint = None;
         for (index, event) in events.iter().enumerate() {
+            check(&state, event)?;
             self.apply_in_place(&mut state, event.clone())?;
             if let Some(source) = &source
                 && event.sequence == source.watermark()
