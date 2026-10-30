@@ -588,8 +588,12 @@ and a 50% soft target; required inputs, images and the latest complete tool batc
 take priority over that target. A useful reduction that fits the hard budget can
 still be adopted. A fitting source uses one handoff; larger sources use a finite
 preplanned segment/merge graph. Every physical attempt, including segments,
-merges and transport retries, shares the task's original request budget.
-Only a complete validated root permits durable replacement. Invalid, oversized,
+merges, transport retries and size regeneration, shares the task's original request budget.
+An isolated summary exceeding its UTF-8 byte limit may regenerate once using the
+same frozen request. Transport and size attempts together stay capped at three
+per node. Repeated oversize reports actual and maximum bytes; exhausted admissions
+report the request-limit error. Neither clips JSON nor replays tools.
+Only a complete validated root permits durable replacement. Invalid, persistently oversized,
 cancelled or failed handoffs visibly defer replacement and retain the original
 context and provider continuation. Summaries remain lossy, derived material;
 offline fixtures do not establish real-task quality gains.

@@ -17,7 +17,8 @@ pub(crate) enum ModelRetryError<AttemptError> {
 
 /// Executes one prepared request and at most two retries. The caller owns
 /// admission and audit through `before_attempt`; this service owns only the
-/// retryable transport boundary and cancellable backoff.
+/// retryable transport boundary, one isolated compaction size regeneration
+/// within that same attempt cap, and cancellable backoff.
 pub(crate) async fn prepare_and_consume_with_retry<'provider, Provider, AttemptError>(
     provider: &Provider,
     cancellation: AgentCancellation,
@@ -29,6 +30,7 @@ where
     Provider: ModelProvider + ?Sized + 'provider,
 {
     let mut prepared: Option<Box<dyn PreparedModelRequest + 'provider>> = None;
+    let mut compaction_size_retried = false;
     for retry in 0..=RETRY_BACKOFFS.len() {
         if cancellation.is_cancelled() {
             return Ok(ModelStreamOutcome::Cancelled { events: Vec::new() });
@@ -54,21 +56,30 @@ where
             .await;
         match outcome {
             Ok(outcome) => return Ok(outcome),
-            Err(error) if retry < RETRY_BACKOFFS.len() && retryable(&error) => continue,
+            Err(error)
+                if retry < RETRY_BACKOFFS.len()
+                    && retryable(&error, &mut compaction_size_retried) =>
+            {
+                continue;
+            }
             Err(error) => return Err(ModelRetryError::Streaming(error)),
         }
     }
     unreachable!("the bounded retry sequence always returns")
 }
 
-fn retryable(error: &ModelStreamingError) -> bool {
-    matches!(
-        error,
+fn retryable(error: &ModelStreamingError, compaction_size_retried: &mut bool) -> bool {
+    match error {
+        ModelStreamingError::CompactionSummaryTooLarge { .. } if !*compaction_size_retried => {
+            *compaction_size_retried = true;
+            true
+        }
         ModelStreamingError::Provider(
             crate::ports::model::ModelProviderError::ConnectionFailure { .. }
-                | crate::ports::model::ModelProviderError::ResponseInterrupted { .. }
-        )
-    )
+            | crate::ports::model::ModelProviderError::ResponseInterrupted { .. },
+        ) => true,
+        _ => false,
+    }
 }
 
 async fn wait_for_backoff_or_cancellation(

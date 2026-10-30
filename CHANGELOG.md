@@ -5,6 +5,15 @@ changes remain available in Git history.
 
 ## Unreleased
 
+### Bounded compaction size regeneration — 2026-10-30
+
+- Regenerate an oversized isolated compaction summary once through the existing
+  prepared-request retry owner. Transport and size attempts together remain
+  capped at three per node and use the original admission/audit budget.
+- Report actual/maximum UTF-8 bytes on failure. Repeated oversize still defers
+  without clipping JSON, discarding parent reasoning or replaying tools.
+- Label and display explicit compaction debug text as compaction rather than Vision.
+
 ### Actual diagnostic content — 2026-10-28
 
 - Prioritize personal use, functionality and efficiency. Remove message and

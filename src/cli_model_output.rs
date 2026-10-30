@@ -34,7 +34,7 @@ pub(crate) struct RequestOutput {
     completed: bool,
     rejected: bool,
 
-    vision_text_open: bool,
+    scoped_text_open: bool,
 
     full: bool,
 }
@@ -51,7 +51,7 @@ impl RequestOutput {
             completed: false,
             rejected: false,
 
-            vision_text_open: false,
+            scoped_text_open: false,
 
             full,
         }
@@ -88,10 +88,10 @@ impl RequestOutput {
         let _ = writeln!(
             stderr,
             "[debug send finished; model content {}]\n",
-            if self.role == "primary" {
-                "appears in assistant output"
-            } else {
-                "appears in Vision output below"
+            match self.role {
+                "primary" => "appears in assistant output".to_owned(),
+                "vision" => "appears in Vision output below".to_owned(),
+                role => format!("appears in {role} output below"),
             }
         );
     }
@@ -112,11 +112,16 @@ impl RequestOutput {
             ModelEvent::TextDelta { text } => {
                 self.end_reasoning_line();
 
-                if self.full && self.role == "vision" {
+                if self.full && self.role != "primary" {
                     let mut stderr = console::stderr();
-                    if !self.vision_text_open {
-                        let _ = writeln!(stderr, "[debug Vision output · pending]");
-                        self.vision_text_open = true;
+                    if !self.scoped_text_open {
+                        let label = if self.role == "vision" {
+                            "Vision"
+                        } else {
+                            self.role
+                        };
+                        let _ = writeln!(stderr, "[debug {label} output · pending]");
+                        self.scoped_text_open = true;
                     }
                     let _ = write!(stderr, "{}", escaped_text(text));
                     let _ = stderr.flush();

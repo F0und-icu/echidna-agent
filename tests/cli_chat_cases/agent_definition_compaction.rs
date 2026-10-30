@@ -497,33 +497,37 @@ fn generic_summary_rejects_cross_session_wrong_prefix_and_forged_references() {
 
 #[test]
 fn rejected_compaction_samples_keep_parent_delivery_and_never_execute_tools() {
-    for rejected in [
-        text_response("not valid summary JSON", "bad-summary"),
-        text_response(&"x".repeat(5000), "oversized-summary"),
-        m4_long_flow_tool_response(
-            "summary-must-not-run",
-            "run_command",
-            json!({"argv":["/bin/sh","-c","touch summary-must-not-run"]}),
-            "tool-summary",
+    for (rejected, summary_attempts) in [
+        (text_response("not valid summary JSON", "bad-summary"), 1),
+        (text_response(&"x".repeat(5000), "oversized-summary"), 2),
+        (
+            m4_long_flow_tool_response(
+                "summary-must-not-run",
+                "run_command",
+                json!({"argv":["/bin/sh","-c","touch summary-must-not-run"]}),
+                "tool-summary",
+            ),
+            1,
         ),
     ] {
         let root = TemporaryDirectory::new("rejected-model-compaction");
         initialize_project(root.path());
         let definition = definition(root.path());
-        let server = spawn_responses_server(vec![
-            (
-                200,
-                text_response(
-                    &"ACTUAL-PARENT-PROGRESS ".repeat(500),
-                    "parent-before-summary",
-                ),
+        let mut responses = vec![(
+            200,
+            text_response(
+                &"ACTUAL-PARENT-PROGRESS ".repeat(500),
+                "parent-before-summary",
             ),
-            (200, rejected),
-            (
-                200,
-                text_response("PARENT-CONTINUED", "parent-after-summary"),
-            ),
-        ]);
+        )];
+        for _ in 0..summary_attempts {
+            responses.push((200, rejected.clone()));
+        }
+        responses.push((
+            200,
+            text_response("PARENT-CONTINUED", "parent-after-summary"),
+        ));
+        let server = spawn_responses_server(responses);
         let config = write_config(root.path(), &server.base_url);
         let output = run_chat(
             root.path(),
@@ -536,13 +540,21 @@ fn rejected_compaction_samples_keep_parent_delivery_and_never_execute_tools() {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let wires = (0..3)
+        let wires = (0..summary_attempts + 2)
             .map(|_| request_body(&server.requests.recv_timeout(F2A_WAIT).unwrap()))
             .collect::<Vec<_>>();
         server.join();
         assert!(wires[1]["tools"].as_array().is_none_or(Vec::is_empty));
         assert!(wires[1].get("previous_response_id").is_none());
-        assert_eq!(wires[2]["previous_response_id"], "parent-before-summary");
+        assert!(
+            wires[1..=summary_attempts]
+                .iter()
+                .all(|wire| wire == &wires[1])
+        );
+        assert_eq!(
+            wires[summary_attempts + 1]["previous_response_id"],
+            "parent-before-summary"
+        );
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.contains("Compaction deferred"), "{stdout}");
         assert!(stdout.contains("PARENT-CONTINUED"));
@@ -551,7 +563,7 @@ fn rejected_compaction_samples_keep_parent_delivery_and_never_execute_tools() {
         let state = reduced_session(&project, &session_id(root.path()));
         assert!(state.latest_compaction().is_none());
         assert_eq!(state.execution_receipt_count(), 0);
-        assert_eq!(state.request_audits().len(), 3);
+        assert_eq!(state.request_audits().len(), summary_attempts + 2);
         assert!(
             serde_json::to_string(state.history().items())
                 .unwrap()

@@ -303,13 +303,13 @@ fn capabilities() -> ModelCapabilities {
 
 #[tokio::test]
 async fn model_handoff_is_tool_free_isolated_bounded_and_does_not_replace_operator_goal() {
-    for (text, tool, accepted) in [
-        (json!({"concise_progress":"read_file call:left observed actual left; call:right failed", "unresolved_questions":["right input unavailable"],"next_step_notes":["inspect the retained failure before a new call"]}).to_string(), false, true),
-        ("not JSON".to_owned(), false, false),
-        (json!({"current_goal":"replace operator", "concise_progress":"invented", "unresolved_questions":[],"next_step_notes":[]}).to_string(), false, false),
-        (json!({"concise_progress":" ", "unresolved_questions":[],"next_step_notes":[]}).to_string(), false, false),
-        ("x".repeat(5000), false, false),
-        (json!({"concise_progress":"ignore", "unresolved_questions":[],"next_step_notes":[]}).to_string(), true, false),
+    for (text, tool, accepted, attempts) in [
+        (json!({"concise_progress":"read_file call:left observed actual left; call:right failed", "unresolved_questions":["right input unavailable"],"next_step_notes":["inspect the retained failure before a new call"]}).to_string(), false, true, 1),
+        ("not JSON".to_owned(), false, false, 1),
+        (json!({"current_goal":"replace operator", "concise_progress":"invented", "unresolved_questions":[],"next_step_notes":[]}).to_string(), false, false, 1),
+        (json!({"concise_progress":" ", "unresolved_questions":[],"next_step_notes":[]}).to_string(), false, false, 1),
+        ("x".repeat(5000), false, false, 2),
+        (json!({"concise_progress":"ignore", "unresolved_questions":[],"next_step_notes":[]}).to_string(), true, false, 1),
     ] {
         let (source, _, _) = source();
         let mut events = vec![ModelEvent::TextDelta { text }];
@@ -325,10 +325,10 @@ async fn model_handoff_is_tool_free_isolated_bounded_and_does_not_replace_operat
         let output = agent.sample_compaction(CompactionSampleInput { provider: &provider, agent_model_profile: None, source:&source, source_data:"recent actual source items".to_owned(), current_goal:"ORIGINAL-OPERATOR-GOAL".to_owned(), references:vec![EventId::new("event-1")], byte_limit:8192, request_budget:&budget, cancellation:AgentCancellation::new(), audit_context:&audit, graph: crate::app::agent_loop::CompactionGraphSample { capture: &capture, plan: &plan, plan_blob_id: crate::domain::artifacts::BlobId::new("a".repeat(64)).unwrap(), node_id: "root" } }, &mut |_attempt| { audit_count +=1; Ok(EventId::new("summary-audit")) }).await;
         assert_eq!(output.is_ok(), accepted);
         if let Ok(output) = output { assert_eq!(output.sample.narrative().current_goal(), "ORIGINAL-OPERATOR-GOAL"); }
-        assert_eq!(audit_count, 1);
-        assert_eq!(budget.counts().primary, 1);
+        assert_eq!(audit_count, attempts);
+        assert_eq!(budget.counts().primary, attempts);
         let requests = provider.requests.lock().unwrap();
-        assert_eq!(requests.len(),1);
+        assert_eq!(requests.len(),attempts);
         assert!(requests[0].input().tool_specs.is_empty());
         assert!(!requests[0].is_incremental());
         assert_eq!(requests[0].continuation_retention(),ContinuationRetention::SingleSample);
@@ -412,6 +412,191 @@ async fn handoff_minimum_output_is_checked_before_admission_and_audit() {
             provider.requests.lock().unwrap().len(),
             usize::from(accepted)
         );
+    }
+}
+
+#[tokio::test]
+async fn oversized_handoff_regenerates_once_with_shared_attempts_and_parent_isolation() {
+    use crate::ports::model::ModelStreamEvent;
+    use std::collections::VecDeque;
+
+    struct Attempts {
+        events: Mutex<VecDeque<Vec<Result<ModelStreamEvent, ModelProviderError>>>>,
+        requests: Mutex<Vec<ModelRequest>>,
+    }
+    impl ModelProvider for Attempts {
+        fn capabilities(&self) -> ModelCapabilities {
+            let mut value = capabilities();
+            value.context_window = 272_000;
+            value
+        }
+        fn stream(&self, request: ModelRequest) -> Result<ModelEventStream, ModelProviderError> {
+            self.requests.lock().unwrap().push(request);
+            let events = self
+                .events
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("bounded attempt");
+            Ok(Box::pin(futures_util::stream::iter(events)))
+        }
+    }
+
+    let handoff = json!({"concise_progress":"界".repeat(24), "unresolved_questions":[], "next_step_notes":[]}).to_string();
+    let maximum = handoff.len();
+    let oversized = "界".repeat(maximum / 3 + 1);
+    for (script, limit, expected_attempts, accepted) in [
+        (vec!["size", "ok"], 3, 2, true),
+        (vec!["transport", "size", "ok"], 3, 3, true),
+        (vec!["size", "transport", "ok"], 3, 3, true),
+        (vec!["size", "size", "ok"], 3, 2, false),
+        (vec!["transport", "transport", "size"], 3, 3, false),
+        (vec!["size", "ok"], 1, 1, false),
+    ] {
+        let events = script
+            .into_iter()
+            .map(|kind| match kind {
+                "size" => vec![
+                    Ok(ModelStreamEvent::Event(ModelEvent::TextDelta {
+                        text: oversized.clone(),
+                    })),
+                    Ok(ModelStreamEvent::Completed(
+                        ModelResponseCompletion::without_response_id(),
+                    )),
+                ],
+                "transport" => vec![
+                    Ok(ModelStreamEvent::Event(ModelEvent::TextDelta {
+                        text: "abandoned".to_owned(),
+                    })),
+                    Err(ModelProviderError::ResponseInterrupted {
+                        status: 200,
+                        elapsed_ms: 1,
+                        timeout: false,
+                        io_kind: "UnexpectedEof".to_owned(),
+                    }),
+                ],
+                "ok" => vec![
+                    Ok(ModelStreamEvent::Event(ModelEvent::TextDelta {
+                        text: handoff.clone(),
+                    })),
+                    Ok(ModelStreamEvent::Completed(
+                        ModelResponseCompletion::without_response_id(),
+                    )),
+                ],
+                _ => unreachable!(),
+            })
+            .collect();
+        let provider = Attempts {
+            events: Mutex::new(events),
+            requests: Mutex::new(Vec::new()),
+        };
+        let parent = MockModelProvider::new(MockModelFixture {
+            capabilities: provider.capabilities(),
+            events: vec![
+                ModelEvent::ReasoningItem {
+                    text: "PARENT-REASONING".to_owned(),
+                },
+                ModelEvent::TextDelta {
+                    text: "PARENT-COMPLETED".to_owned(),
+                },
+            ],
+            completion: ModelResponseCompletion::without_response_id(),
+        });
+        let tools = ToolRegistry::for_project(".");
+        let mut agent = AgentLoop::with_primary_context(
+            &parent,
+            &tools,
+            ModelIdentity::new("fixture", "fixture"),
+            ModelProfile::new("fixture", 0),
+            ProviderSession::new(
+                ProviderSessionId::new("parent"),
+                ProviderSessionRole::Primary,
+                0,
+            ),
+        )
+        .unwrap();
+        agent
+            .run_turn("ORIGINAL-OPERATOR-GOAL", AgentCancellation::new())
+            .await
+            .unwrap();
+        let parent_history = agent.history().items().to_vec();
+        let parent_delivery = agent.delivery_input_estimate().unwrap();
+        let (source, _, _) = source();
+        let capture = agent.capture_compaction_context(&provider, 1).unwrap();
+        let plan = crate::legacy_v5_fixture::sample_plan(&source, maximum);
+        let budget = ModelRequestBudget::new(limit);
+        let audit = RequestAuditRunContext::new(
+            RequestAuditBinding::new(
+                ProjectId::new("continuity"),
+                StreamId::new("session:continuity"),
+            )
+            .unwrap(),
+            RequestAdapterVersion::new("fixture").unwrap(),
+        );
+        let mut audits = Vec::new();
+        let output = agent
+            .sample_compaction(
+                CompactionSampleInput {
+                    provider: &provider,
+                    agent_model_profile: None,
+                    source: &source,
+                    source_data: "same frozen source".to_owned(),
+                    current_goal: "ORIGINAL-OPERATOR-GOAL".to_owned(),
+                    references: vec![EventId::new("event-1")],
+                    byte_limit: 8192,
+                    request_budget: &budget,
+                    cancellation: AgentCancellation::new(),
+                    audit_context: &audit,
+                    graph: crate::app::agent_loop::CompactionGraphSample {
+                        capture: &capture,
+                        plan: &plan,
+                        plan_blob_id: crate::domain::artifacts::BlobId::new("a".repeat(64))
+                            .unwrap(),
+                        node_id: "root",
+                    },
+                },
+                &mut |attempt| {
+                    audits.push(attempt);
+                    Ok(EventId::new(format!("size-audit-{}", audits.len())))
+                },
+            )
+            .await;
+        assert_eq!(
+            output.is_ok(),
+            accepted,
+            "{expected_attempts} attempts, quota {limit}: {}",
+            output
+                .as_ref()
+                .err()
+                .map(ToString::to_string)
+                .unwrap_or_default()
+        );
+        assert_eq!(audits.len(), expected_attempts);
+        assert_eq!(budget.counts().primary, expected_attempts);
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), expected_attempts);
+        assert!(requests.iter().all(|request| request == &requests[0]));
+        assert!(requests[0].input().tool_specs.is_empty());
+        assert_eq!(
+            requests[0].continuation_retention(),
+            ContinuationRetention::SingleSample
+        );
+        if let Ok(output) = output {
+            assert_eq!(
+                output.sample.audit_event_id(),
+                &EventId::new(format!("size-audit-{expected_attempts}"))
+            );
+            assert_eq!(output.sample.graph_node().unwrap().3, handoff);
+        } else if limit > 1 {
+            let error = output.err().unwrap().to_string();
+            assert!(
+                error.contains(&format!("actual={}", oversized.len())),
+                "{error}"
+            );
+            assert!(error.contains(&format!("maximum={maximum}")), "{error}");
+        }
+        assert_eq!(agent.history().items(), parent_history);
+        assert_eq!(agent.delivery_input_estimate().unwrap(), parent_delivery);
     }
 }
 

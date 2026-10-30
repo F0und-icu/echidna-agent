@@ -211,8 +211,9 @@ impl<Provider: ModelProvider + ?Sized, Tools: ToolExecutor + ?Sized>
             if let crate::domain::model::ModelEvent::TextDelta { text } = event {
                 bytes.set(bytes.get() + text.len());
                 if bytes.get() > output_limit {
-                    return Err(ModelStreamingError::EventStage {
-                        message: "Compaction summary exceeds its byte limit".to_owned(),
+                    return Err(ModelStreamingError::CompactionSummaryTooLarge {
+                        actual: bytes.get(),
+                        maximum: output_limit,
                     });
                 }
             }

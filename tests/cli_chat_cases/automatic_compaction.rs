@@ -317,6 +317,97 @@ fn generic_auto_compaction_keeps_scoped_memory_persona_rsi_and_one_mcp_catalog()
 }
 
 #[test]
+fn oversized_completed_handoff_regenerates_and_adopts_only_the_valid_summary() {
+    let root = TemporaryDirectory::new("auto-compaction-size-regeneration");
+    initialize_project(root.path());
+    let definition = definition(root.path(), false, None);
+    let server = spawn_responses_server(vec![
+        (
+            200,
+            reasoning_answer("PARENT-DONE").replace(
+                "volatile-only-reasoning",
+                &"parent-reasoning ".repeat(18_000),
+            ),
+        ),
+        (
+            200,
+            compaction_summary_response(&"界".repeat(20_000), "oversized-summary"),
+        ),
+        (
+            200,
+            compaction_summary_response("REGENERATED-HANDOFF", "valid-summary"),
+        ),
+        (200, text_response("FOLLOWUP-DONE", "followup")),
+    ]);
+    let config = config(root.path(), &server.base_url, Some(true));
+    fs::write(
+        &config,
+        fs::read_to_string(&config)
+            .unwrap()
+            .replace("context_window = 32768", "context_window = 272000"),
+    )
+    .unwrap();
+    pressure_policy(&config, 1000, 500);
+    let output = run_chat(
+        root.path(),
+        &config,
+        "first task\nfollowup task\n/exit\n",
+        &["--agent", definition.to_str().unwrap(), "--debug"],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let requests = (0..4)
+        .map(|_| request_body(&server.requests.recv_timeout(F2A_WAIT).unwrap()))
+        .collect::<Vec<_>>();
+    assert_handoff_request(&requests[1]);
+    assert_eq!(
+        requests[1], requests[2],
+        "regeneration retains the exact prepared request"
+    );
+    assert!(requests[3].to_string().contains("REGENERATED-HANDOFF"));
+    assert!(!requests[3].to_string().contains(&"界".repeat(100)));
+    assert!(server.requests.try_recv().is_err());
+    server.join();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stdout.contains("FOLLOWUP-DONE"), "{stdout}");
+    assert!(
+        stdout.contains("Automatic completed-Turn compaction applied"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("[request budget] admitted=3 primary=3 vision=0"),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains("Automatic completed-Turn compaction deferred"),
+        "{stdout}"
+    );
+    assert!(
+        stderr.contains("model content appears in compaction output below"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("[debug compaction output · pending]"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("REGENERATED-HANDOFF"), "{stderr}");
+    assert!(!stderr.contains("Vision output"), "{stderr}");
+    let events = session_events(root.path(), &session_id(root.path()));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["event_type"] == "session.compaction_sample_recorded")
+            .count(),
+        1
+    );
+    assert_eq!(compactions(root.path()).len(), 1);
+}
+
+#[test]
 fn automatic_compaction_is_opt_in_and_low_pressure_retains_continuation() {
     for (enabled, large) in [(None, true), (Some(false), true), (Some(true), false)] {
         let root = TemporaryDirectory::new("auto-opt-in");

@@ -44,6 +44,10 @@ pub enum ModelStreamingError {
     EndedBeforeCompletion,
     #[error("model event stage failed: {message}")]
     EventStage { message: String },
+    #[error(
+        "Compaction summary exceeds its byte limit: actual={actual} bytes, maximum={maximum} bytes (UTF-8)"
+    )]
+    CompactionSummaryTooLarge { actual: usize, maximum: usize },
 }
 
 /// Application service for one provider-neutral streaming model request.
