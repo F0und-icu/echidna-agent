@@ -83,7 +83,7 @@ fn environment_prompt_revision_resumes_known_generations_without_rewriting_selec
             request["instructions"]
                 .as_str()
                 .unwrap()
-                .contains("Binary domain profile v2")
+                .contains("Binary domain profile v3")
         );
         assert!(
             request["instructions"]

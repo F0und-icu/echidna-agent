@@ -141,7 +141,7 @@ rules belong in these files rather than relying on a lossy session summary.
 
 | Agent template | Purpose |
 | --- | --- |
-| [Research](agents/research/agent.toml) | Built-in compatible research identity, domains and phases |
+| [Research](agents/research/agent.toml) | Research identity/phases with task-scoped technical domain guidance |
 | [Technical writing](agents/technical-writing/agent.toml) | Generic task definition and Agent-scoped memory |
 | [Self-improving](agents/self-improving/agent.toml) | Explicit persona/method RSI and bounded improvement, with operator-owned fixed rules |
 

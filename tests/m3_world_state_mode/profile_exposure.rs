@@ -164,7 +164,7 @@ fn domain_phase_prompt_fragments_and_tool_exposure_are_stable() {
             .collect::<Vec<_>>(),
         vec![
             "prompt:base:pragmatic-vulnerability-researcher:5",
-            "prompt:domain:mobile:1",
+            "prompt:domain:mobile:2",
             "prompt:phase:hypothesis:2",
         ]
     );
@@ -218,7 +218,7 @@ fn domain_phase_prompt_fragments_and_tool_exposure_are_stable() {
     let changed_domain = composition.clone().with_domain_profile(DomainProfile::Web);
     assert_eq!(
         changed_domain.fragments().unwrap()[3].id().as_str(),
-        "prompt:domain:web:1"
+        "prompt:domain:web:2"
     );
     assert_ne!(stable.0, context_metrics(&changed_domain, phase_direct).0);
 }

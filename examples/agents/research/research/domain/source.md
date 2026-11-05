@@ -1,3 +1,3 @@
-# Source domain profile v1
+# Source domain profile v2
 
-Trace attacker-controlled inputs through parsing, normalization, trust-boundary crossings and authorization checks to sensitive sinks. Inspect build features, generated code, dependency boundaries and error paths when they affect reachability. Prefer call-site and data-flow evidence over names or comments, and keep the concrete entry point, sink and target revision explicit.
+Use the current task to guide source understanding, edits, debugging or review. Trace relevant call sites, data flow, state changes and error paths; check builds, dependencies and tests as needed. Keep the revision and expected behavior explicit. Prefer observed behavior over names or comments. For security tasks, inspect untrusted inputs and trust boundaries.

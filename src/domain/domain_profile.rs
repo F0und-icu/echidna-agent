@@ -1,4 +1,4 @@
-//! Fixed vulnerability-research target domains.
+//! Fixed target domains with task-scoped technical guidance.
 //!
 //! The four compile-time values are one closed axis inside the single Agent.
 //! They are not personalities, workflow stages or a dynamic registry.
@@ -101,7 +101,10 @@ impl DomainProfileSelection {
     }
 
     pub fn validate(self) -> Result<(), DomainProfileSelectionError> {
-        let legacy_prompt = self.profile == DomainProfile::Binary && self.profile_generation == 1;
+        let legacy_prompt = matches!(
+            (self.profile, self.profile_generation),
+            (_, 1) | (DomainProfile::Binary, 2)
+        );
         if self.profile_generation != self.profile.generation() && !legacy_prompt {
             return Err(DomainProfileSelectionError::GenerationMismatch {
                 profile: self.profile,
@@ -153,8 +156,8 @@ impl DomainProfile {
 
     pub const fn generation(self) -> u64 {
         match self {
-            Self::Binary => 2,
-            _ => 1,
+            Self::Binary => 3,
+            _ => 2,
         }
     }
 
@@ -184,10 +187,10 @@ impl DomainProfile {
 
     pub const fn prompt(self) -> &'static str {
         match self {
-            Self::Source => include_str!("domain_profile/prompts/source-v1.md"),
-            Self::Web => include_str!("domain_profile/prompts/web-v1.md"),
-            Self::Mobile => include_str!("domain_profile/prompts/mobile-v1.md"),
-            Self::Binary => include_str!("domain_profile/prompts/binary-v2.md"),
+            Self::Source => include_str!("domain_profile/prompts/source-v2.md"),
+            Self::Web => include_str!("domain_profile/prompts/web-v2.md"),
+            Self::Mobile => include_str!("domain_profile/prompts/mobile-v2.md"),
+            Self::Binary => include_str!("domain_profile/prompts/binary-v3.md"),
         }
     }
 

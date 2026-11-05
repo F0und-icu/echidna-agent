@@ -1,3 +1,3 @@
-# Mobile domain profile v1
+# Mobile domain profile v2
 
-Trace package/build identity, exported components, Intent and IPC boundaries, deep links, WebView and JSBridge, permission and storage boundaries, and dependent server behavior. Keep device, account and OS prerequisites explicit. Root, ADB and Frida may observe or deploy experiments but are not ordinary-attacker capabilities; prove an ordinary-app, remote or physical path separately when that boundary matters.
+Use the current task to guide app implementation, debugging or analysis. Record package/build, device, OS and reproduction steps. Trace relevant UI lifecycle, components, Intent and IPC interactions, WebView, storage and server behavior. Root, ADB and Frida observations depend on instrumentation; for security tasks, establish the access required by the demonstrated path.

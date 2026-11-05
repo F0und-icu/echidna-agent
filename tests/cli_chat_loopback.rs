@@ -2369,7 +2369,7 @@ fn synthetic_long_flow_preserves_authoritative_evidence_across_compaction_and_re
         requests[0]["instructions"]
             .as_str()
             .unwrap()
-            .contains("Source domain profile v1")
+            .contains("Source domain profile v2")
     );
     assert!(
         requests[0]["instructions"]
@@ -2863,7 +2863,7 @@ fn chat_loopback_streams_text_and_persists_started_history_audit_and_explicit_re
         first_request["instructions"]
             .as_str()
             .unwrap()
-            .contains("Source domain profile v1")
+            .contains("Source domain profile v2")
     );
 
     let session = session_id(project.path());
@@ -2913,7 +2913,7 @@ fn chat_loopback_streams_text_and_persists_started_history_audit_and_explicit_re
         resumed_request["instructions"]
             .as_str()
             .unwrap()
-            .contains("Mobile domain profile v1")
+            .contains("Mobile domain profile v2")
     );
     assert!(resumed_request["previous_response_id"].is_null());
 
@@ -2974,7 +2974,7 @@ fn m5_paste_preserves_multiline_input_and_domain_resume_never_drifts_to_source()
         first_request["instructions"]
             .as_str()
             .unwrap()
-            .contains("Mobile domain profile v1")
+            .contains("Mobile domain profile v2")
     );
 
     let session = session_id(project.path());
@@ -2989,7 +2989,7 @@ fn m5_paste_preserves_multiline_input_and_domain_resume_never_drifts_to_source()
             "schema_version": 1,
             "selection": {
                 "profile": "mobile",
-                "profile_generation": 1,
+                "profile_generation": 2,
                 "source": "operator",
                 "reason_code": "OPERATOR_SELECTED"
             }
@@ -3024,7 +3024,7 @@ fn m5_paste_preserves_multiline_input_and_domain_resume_never_drifts_to_source()
         resumed_request["instructions"]
             .as_str()
             .unwrap()
-            .contains("Mobile domain profile v1")
+            .contains("Mobile domain profile v2")
     );
     assert_eq!(
         session_events(project.path(), &session)
@@ -3529,7 +3529,7 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
         resumed_request["instructions"]
             .as_str()
             .unwrap()
-            .contains("Mobile domain profile v1")
+            .contains("Mobile domain profile v2")
     );
     assert!(
         resumed_request["instructions"]
@@ -4409,7 +4409,7 @@ fn m5_legacy_domain_backfill_and_explicit_resume_override_are_durable() {
         source_request["instructions"]
             .as_str()
             .unwrap()
-            .contains("Source domain profile v1")
+            .contains("Source domain profile v2")
     );
 
     let web_server = spawn_responses_server(vec![(
@@ -4434,7 +4434,7 @@ fn m5_legacy_domain_backfill_and_explicit_resume_override_are_durable() {
         web_request["instructions"]
             .as_str()
             .unwrap()
-            .contains("Web domain profile v1")
+            .contains("Web domain profile v2")
     );
 
     let domains = session_events(project.path(), &session)
@@ -4446,7 +4446,7 @@ fn m5_legacy_domain_backfill_and_explicit_resume_override_are_durable() {
         domains[0]["payload"]["selection"],
         json!({
             "profile": "source",
-            "profile_generation": 1,
+            "profile_generation": 2,
             "source": "default",
             "reason_code": "LEGACY_DEFAULT_SOURCE"
         })
@@ -4455,7 +4455,7 @@ fn m5_legacy_domain_backfill_and_explicit_resume_override_are_durable() {
         domains[1]["payload"]["selection"],
         json!({
             "profile": "web",
-            "profile_generation": 1,
+            "profile_generation": 2,
             "source": "operator",
             "reason_code": "OPERATOR_SELECTED"
         })

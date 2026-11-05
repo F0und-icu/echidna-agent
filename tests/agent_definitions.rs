@@ -424,7 +424,7 @@ fn resume_rejects_a_tampered_durable_definition_snapshot() {
 }
 
 #[test]
-fn exported_builtin_research_definition_preserves_legacy_prompt_resources() {
+fn exported_builtin_research_definition_matches_current_prompt_resources() {
     let root = TemporaryDirectory::new("agent-definition-research-export");
     let exported_path = root.path().join("research");
     let output = command(

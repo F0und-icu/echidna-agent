@@ -5,6 +5,21 @@ changes remain available in Git history.
 
 ## Unreleased
 
+### General technical domain guidance — 2026-11-04
+
+- Make the persona branch's built-in Source/Web/Mobile/Binary guidance useful
+  for implementation, diagnosis and analysis. Security-specific guidance applies
+  when relevant to the requested task. The default research persona and phases
+  keep their existing roles.
+- Advance Source/Web/Mobile prompts to generation 2 and Binary to generation 3.
+  Preserve old selection values, saved instruction bindings and audit bytes.
+  Fresh builtin exports and new Sessions selecting the builtin definition use
+  revised prompts. External definitions load their selected local files; update
+  those files before a new Session or compatible reload can load the new text.
+  Saved bindings remain pinned until explicit compatible reload. Older binaries
+  cannot Resume Sessions with the new domain generations.
+- Existing external definitions and installed binaries are not modified.
+
 ### Bounded compaction size regeneration — 2026-10-30
 
 - Regenerate an oversized isolated compaction summary once through the existing

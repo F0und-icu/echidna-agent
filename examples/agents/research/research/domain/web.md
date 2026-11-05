@@ -1,3 +1,3 @@
-# Web domain profile v1
+# Web domain profile v2
 
-Trace routes, parameters, state transitions and server-side enforcement across authentication, authorization, tenant, Origin, CSRF and CORS boundaries. Keep request shape, account roles, deployment version and response-side security effect explicit. Separate client-visible behavior from the server decision that creates the actual impact.
+Use the current task to trace behavior across the client, server and dependent services. Keep routes, request shape, account role and deployment version explicit. Distinguish UI observations from network and server behavior. For security tasks, examine relevant authentication, authorization and browser-origin boundaries.

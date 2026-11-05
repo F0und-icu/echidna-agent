@@ -177,7 +177,7 @@ fn revised_environment_prompts_preserve_only_known_legacy_selections() {
             .with_domain_profile(domain.profile())
             .with_research_phase(phase.phase());
         let fragments = composition.fragments().unwrap();
-        assert_eq!(fragments[1].id().as_str(), "prompt:domain:binary:2");
+        assert_eq!(fragments[1].id().as_str(), "prompt:domain:binary:3");
         assert_eq!(fragments[2].id().as_str(), "prompt:phase:mapping:3");
         // Readback must not silently migrate durable selections.
         assert_eq!(
@@ -189,7 +189,7 @@ fn revised_environment_prompts_preserve_only_known_legacy_selections() {
             generation
         );
     }
-    for generation in [0, 3, u64::MAX] {
+    for generation in [0, 4, u64::MAX] {
         let domain: DomainProfileSelection = serde_json::from_value(json!({
             "profile":"binary", "profile_generation":generation,
             "source":"operator", "reason_code":"OPERATOR_SELECTED"
@@ -291,6 +291,118 @@ fn task_scoped_phases_preserve_methods_and_accept_only_known_generations() {
     }
 }
 
+#[test]
+fn general_domain_revision_preserves_known_generations_and_historical_prompt_bytes() {
+    use echidna::domain::context::{
+        ContextFragment, ContextFragmentContent, ContextFragmentId, ContextFragmentPriority,
+        FragmentCachePolicy,
+    };
+    use echidna::domain::domain_profile::DomainProfileSelection;
+
+    let historical = [
+        (
+            DomainProfile::Source,
+            1,
+            include_str!("fixtures/prompts/source-v1.md"),
+            "e59669bb52b887f0641686f69a9804b1161dc3adb5353d3133a7d7d76c90b713",
+        ),
+        (
+            DomainProfile::Web,
+            1,
+            include_str!("fixtures/prompts/web-v1.md"),
+            "66d929857f1b6003d9915a6db290b1e27a8134672ac3fb76742985b507ca0a17",
+        ),
+        (
+            DomainProfile::Mobile,
+            1,
+            include_str!("fixtures/prompts/mobile-v1.md"),
+            "ef7d1efce570a7c9596903ae50b29c6b62d4e0052a28609f4244ac3a958907c9",
+        ),
+        (
+            DomainProfile::Binary,
+            2,
+            include_str!("fixtures/prompts/binary-v2.md"),
+            "64b64ee8607407279352d3b270fcc462464396bac74f39fb2a5a6bea7227969b",
+        ),
+    ];
+    for (domain, old_generation, old, hash) in historical {
+        assert_eq!(sha256(old.as_bytes()), hash);
+        assert_eq!(domain.generation(), old_generation + 1);
+        assert!(domain.prompt().contains("Use the current task"));
+        assert!(
+            domain
+                .prompt()
+                .to_ascii_lowercase()
+                .contains("for security tasks,")
+        );
+        for generation in [0, 1, 2, 3, 4, u64::MAX] {
+            let selection: DomainProfileSelection = serde_json::from_value(json!({
+                "profile": domain, "profile_generation": generation,
+                "source": "operator", "reason_code": "OPERATOR_SELECTED"
+            }))
+            .unwrap();
+            let accepted = match domain {
+                DomainProfile::Binary => matches!(generation, 1..=3),
+                _ => matches!(generation, 1 | 2),
+            };
+            assert_eq!(
+                selection.validate().is_ok(),
+                accepted,
+                "{domain:?} {generation}"
+            );
+            assert_eq!(
+                serde_json::to_value(selection).unwrap()["profile_generation"],
+                generation
+            );
+        }
+        let composition = PromptComposition::current().with_domain_profile(domain);
+        let current = composition.fragments().unwrap();
+        let mut prior = current.clone();
+        prior[1] = ContextFragment::new(
+            ContextFragmentId::new(format!("prompt:domain:{}:{old_generation}", domain.id()))
+                .unwrap(),
+            ContextFragmentSource::DomainPrompt,
+            ContextFragmentPriority::Required,
+            FragmentCachePolicy::ContentAddressed,
+            ContextFragmentContent::Instructions {
+                text: old.to_owned(),
+            },
+        )
+        .unwrap();
+        assert_eq!(current[0], prior[0]);
+        assert_eq!(current[2..], prior[2..]);
+        let tools = ToolRegistry::for_project(Path::new(env!("CARGO_MANIFEST_DIR")));
+        let specs = tools
+            .resolve_tool_plan(&composition.tool_exposure(), &Default::default())
+            .unwrap();
+        let compile = |fragments| {
+            ContextPlanner::current()
+                .compile(
+                    fragments,
+                    ContextBudget::new(272_000, 0, 0).unwrap(),
+                    &ModelCapabilities {
+                        context_window: 272_000,
+                        ..capabilities()
+                    },
+                    specs.advertised_specs().to_vec(),
+                    Default::default(),
+                    None,
+                )
+                .unwrap()
+        };
+        let prior = compile(prior);
+        let current = compile(current);
+        assert_ne!(prior.context_fingerprint(), current.context_fingerprint());
+        assert_eq!(
+            prior.model_input().tool_specs,
+            current.model_input().tool_specs
+        );
+        assert!(prior.base_instructions().contains(old));
+        assert!(current.base_instructions().contains(domain.prompt()));
+        assert!(!current.base_instructions().contains(old));
+    }
+}
+
 fn capabilities() -> ModelCapabilities {
     ModelCapabilities {
         text_input: true,
@@ -358,9 +470,9 @@ fn stable_base_domain_and_phase_compile_into_one_orthogonal_contract() {
         assert_eq!(
             profile.generation(),
             if profile == DomainProfile::Binary {
-                2
+                3
             } else {
-                1
+                2
             }
         );
         assert_eq!(profile.target_kind(), target_kind);
@@ -369,10 +481,10 @@ fn stable_base_domain_and_phase_compile_into_one_orthogonal_contract() {
 
         let prompt = profile.prompt();
         let domain_audit_keyword = match profile {
-            DomainProfile::Source => "attacker-controlled inputs",
-            DomainProfile::Web => "authentication, authorization, tenant, Origin, CSRF and CORS",
-            DomainProfile::Mobile => "exported components, Intent and IPC boundaries",
-            DomainProfile::Binary => "length and lifetime fields",
+            DomainProfile::Source => "call sites, data flow, state changes and error paths",
+            DomainProfile::Web => "client, server and dependent services",
+            DomainProfile::Mobile => "UI lifecycle, components, Intent and IPC interactions",
+            DomainProfile::Binary => "control flow, data layout, parsing, memory lifetime",
         };
         assert!(prompt.contains(domain_audit_keyword));
         if profile == DomainProfile::Mobile {

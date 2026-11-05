@@ -1434,7 +1434,7 @@ async fn context_planner_and_cache_feed_the_baseline_without_owning_delivery() {
             .collect::<Vec<_>>(),
         vec![
             "prompt:base:pragmatic-vulnerability-researcher:5",
-            "prompt:domain:source:1",
+            "prompt:domain:source:2",
             "prompt:phase:mapping:3",
         ]
     );

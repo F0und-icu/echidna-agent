@@ -662,6 +662,64 @@ fn resume_uses_the_pinned_binding_after_its_definition_source_is_deleted() {
 }
 
 #[test]
+fn domain_prompt_revision_keeps_saved_binding_on_resume() {
+    use echidna::domain::domain_profile::DomainProfile;
+
+    let root = TemporaryDirectory::new("agent-definition-domain-revision");
+    initialize_project(root.path());
+    let definition = export_agent(root.path(), "research", "builtin-research");
+    let source = definition.join("research/domain/source.md");
+    let old = include_str!("../fixtures/prompts/source-v1.md");
+    fs::write(&source, old).unwrap();
+    let initial = spawn_responses_server(vec![(200, text_response("initial", "domain-initial"))]);
+    let config = write_config(root.path(), &initial.base_url);
+    let output = run_chat(
+        root.path(),
+        &config,
+        "Explain this fixture function.\n/exit\n",
+        &["--agent", definition.to_str().unwrap()],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let first = f2a_request_body(&initial.requests, "old domain request");
+    f2a_join_server(initial, "old domain request");
+    assert!(first["instructions"].as_str().unwrap().contains(old));
+    let session = session_id(root.path());
+    let before = session_events(root.path(), &session);
+
+    fs::write(&source, DomainProfile::Source.prompt()).unwrap();
+    let resumed = spawn_responses_server(vec![(200, text_response("resumed", "domain-resumed"))]);
+    let config = write_config(root.path(), &resumed.base_url);
+    let output = run_chat(
+        root.path(),
+        &config,
+        "Continue explaining the same function.\n/exit\n",
+        &["--resume", &session],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let request = f2a_request_body(&resumed.requests, "pinned domain request");
+    f2a_join_server(resumed, "pinned domain request");
+    assert!(request["instructions"].as_str().unwrap().contains(old));
+    assert!(
+        !request["instructions"]
+            .as_str()
+            .unwrap()
+            .contains(DomainProfile::Source.prompt())
+    );
+    let after = session_events(root.path(), &session);
+    assert_eq!(&after[..before.len()], before.as_slice());
+    let project = Project::discover(root.path()).unwrap();
+    assert_audits_reconstruct(root.path(), &reduced_session(&project, &session));
+}
+
+#[test]
 fn persona_reload_keeps_history_and_forces_a_fresh_full_provider_request() {
     let root = TemporaryDirectory::new("agent-definition-reload");
     initialize_project(root.path());
