@@ -1,3 +1,7 @@
+use super::task_context::{
+    ScriptedResponse::{ContinueSelection, InitialSelection, Response},
+    selector_candidates, spawn_scripted_responses_server,
+};
 use super::*;
 use echidna::domain::model::ContentItem;
 
@@ -359,7 +363,13 @@ fn one_startup_mcp_catalog_covers_reload_use_and_compaction_preflight() {
         200,
         compaction_summary_response("lifecycle observed", "lifecycle-summary"),
     ));
-    let provider = spawn_responses_server(lifecycle);
+    let mut steps = vec![InitialSelection];
+    steps.extend(
+        lifecycle
+            .into_iter()
+            .map(|(status, body)| Response(status, body)),
+    );
+    let provider = spawn_scripted_responses_server(steps);
     let config = mcp_config(harness.path(), &provider.base_url, &remote.base_url);
     let output = run_chat(
         root.path(),
@@ -382,10 +392,11 @@ fn one_startup_mcp_catalog_covers_reload_use_and_compaction_preflight() {
     let requests = take_requests(remote, 2, "one MCP catalog across bindings");
     assert_eq!(requests[0]["method"], "tools/list");
     assert_eq!(requests[1]["method"], "tools/call");
-    let sent = take_requests(provider, 4, "MCP binding lifecycle Provider");
-    assert!(!advertises_remote(&sent[0]));
-    assert!(advertises_remote(&sent[1]));
-    assert!(json_contains_text(&sent[2]["input"], "lifecycle observed"));
+    let sent = take_requests(provider, 5, "MCP binding lifecycle Provider");
+    selector_candidates(&sent[0]);
+    assert!(!advertises_remote(&sent[1]));
+    assert!(advertises_remote(&sent[2]));
+    assert!(json_contains_text(&sent[3]["input"], "lifecycle observed"));
     assert_eq!(session_ids(root.path()).len(), 2);
 }
 
@@ -401,9 +412,19 @@ fn deferred_remote_tool_survives_explicit_resume_without_rediscovery_or_replay()
         (200, completed_response("2", "first observed")),
         (200, completed_response("3", "second observed")),
     ]);
-    let mut responses = scripted_turn("first");
-    responses.extend(scripted_turn("second"));
-    let provider = spawn_responses_server(responses);
+    let mut responses = vec![InitialSelection];
+    responses.extend(
+        scripted_turn("first")
+            .into_iter()
+            .map(|(status, body)| Response(status, body)),
+    );
+    responses.push(ContinueSelection { usage: None });
+    responses.extend(
+        scripted_turn("second")
+            .into_iter()
+            .map(|(status, body)| Response(status, body)),
+    );
+    let provider = spawn_scripted_responses_server(responses);
     let config = mcp_config(harness.path(), &provider.base_url, &remote.base_url);
     let output = f2a_wait_child(
         spawn_f2a_chat(
@@ -429,8 +450,10 @@ fn deferred_remote_tool_survives_explicit_resume_without_rediscovery_or_replay()
             json!({"execution":{"tag":tag}})
         );
     }
-    let sent = take_requests(provider, 6, "MCP resume Provider");
-    for start in [0, 3] {
+    let sent = take_requests(provider, 8, "MCP resume Provider");
+    selector_candidates(&sent[0]);
+    selector_candidates(&sent[4]);
+    for start in [1, 5] {
         assert!(sent[start].get("previous_response_id").is_none());
         assert!(
             !advertises_remote(&sent[start]),
@@ -442,7 +465,7 @@ fn deferred_remote_tool_survives_explicit_resume_without_rediscovery_or_replay()
     let project = Project::discover(root.path()).unwrap();
     let state = reduced_session(&project, &session_id(root.path()));
     assert_eq!(state.execution_receipt_count(), 4);
-    assert_eq!(state.request_audits().len(), 6);
+    assert_eq!(state.request_audits().len(), 8);
     assert_eq!(
         state
             .history()
@@ -478,7 +501,13 @@ fn stale_compaction_resume_discovers_once_and_retains_remote_catalog_for_the_nex
             completed_response("2", &"retained historical payload ".repeat(256)),
         ),
     ]);
-    let provider = spawn_responses_server(scripted_turn("before"));
+    let mut steps = vec![InitialSelection];
+    steps.extend(
+        scripted_turn("before")
+            .into_iter()
+            .map(|(status, body)| Response(status, body)),
+    );
+    let provider = spawn_scripted_responses_server(steps);
     let config = mcp_config(harness.path(), &provider.base_url, &remote.base_url);
     let first = f2a_wait_child(
         spawn_f2a_chat(
@@ -495,7 +524,8 @@ fn stale_compaction_resume_discovers_once_and_retains_remote_catalog_for_the_nex
         String::from_utf8_lossy(&first.stderr)
     );
     take_requests(remote, 2, "MCP before compaction remote");
-    take_requests(provider, 3, "MCP before compaction Provider");
+    let sent = take_requests(provider, 4, "MCP before compaction Provider");
+    selector_candidates(&sent[0]);
     let session = session_id(root.path());
     let project = Project::discover(root.path()).unwrap();
     let bound = append_research_snapshot(&project, "mcp-bound");
@@ -507,7 +537,13 @@ fn stale_compaction_resume_discovers_once_and_retains_remote_catalog_for_the_nex
         (200, catalog_response()),
         (200, completed_response("2", "after observed")),
     ]);
-    let provider = spawn_responses_server(scripted_turn("after"));
+    let mut responses = vec![ContinueSelection { usage: None }];
+    responses.extend(
+        scripted_turn("after")
+            .into_iter()
+            .map(|(status, body)| Response(status, body)),
+    );
+    let provider = spawn_scripted_responses_server(responses);
     let config = mcp_config(harness.path(), &provider.base_url, &remote.base_url);
     let resumed = f2a_wait_child(
         spawn_f2a_chat(
@@ -530,9 +566,10 @@ fn stale_compaction_resume_discovers_once_and_retains_remote_catalog_for_the_nex
         requests[1]["params"]["arguments"],
         json!({"execution":{"tag":"after"}})
     );
-    let sent = take_requests(provider, 3, "MCP after compaction Provider");
-    assert!(sent[0].get("previous_response_id").is_none());
-    assert!(advertises_remote(&sent[1]));
+    let sent = take_requests(provider, 4, "MCP after compaction Provider");
+    selector_candidates(&sent[0]);
+    assert!(sent[1].get("previous_response_id").is_none());
+    assert!(advertises_remote(&sent[2]));
     let after = session_events(root.path(), &session);
     assert_eq!(&after[..before.len()], before.as_slice());
     assert_eq!(
@@ -547,7 +584,7 @@ fn stale_compaction_resume_discovers_once_and_retains_remote_catalog_for_the_nex
     );
     let state = reduced_session(&project, &session);
     assert_eq!(state.execution_receipt_count(), 4);
-    assert_eq!(state.request_audits().len(), 6);
+    assert_eq!(state.request_audits().len(), 8);
 }
 
 #[test]
@@ -563,7 +600,13 @@ fn remote_unknown_keeps_only_known_receipts_and_resume_does_not_replay_the_remot
     ]);
     let mut responses = scripted_turn("unknown");
     responses.pop();
-    let provider = spawn_responses_server(responses);
+    let mut steps = vec![InitialSelection];
+    steps.extend(
+        responses
+            .into_iter()
+            .map(|(status, body)| Response(status, body)),
+    );
+    let provider = spawn_scripted_responses_server(steps);
     let config = mcp_config(harness.path(), &provider.base_url, &remote.base_url);
     let output = f2a_wait_child(
         spawn_f2a_chat(
@@ -577,7 +620,8 @@ fn remote_unknown_keeps_only_known_receipts_and_resume_does_not_replay_the_remot
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("unknown"));
     take_requests(remote, 2, "MCP unknown remote");
-    take_requests(provider, 2, "MCP unknown Provider");
+    let sent = take_requests(provider, 3, "MCP unknown Provider");
+    selector_candidates(&sent[0]);
     let session = session_id(root.path());
     let project = Project::discover(root.path()).unwrap();
     let state = reduced_session(&project, &session);
@@ -588,7 +632,7 @@ fn remote_unknown_keeps_only_known_receipts_and_resume_does_not_replay_the_remot
     );
     assert_eq!(
         state.request_audits().len(),
-        2,
+        3,
         "no sample after unknown remote outcome"
     );
     assert!(state.history().items().iter().any(|item| matches!(
@@ -599,10 +643,13 @@ fn remote_unknown_keeps_only_known_receipts_and_resume_does_not_replay_the_remot
     )));
     let before = session_events(root.path(), &session);
     let remote = spawn_responses_server(vec![(200, catalog_response())]);
-    let provider = spawn_responses_server(vec![(
-        200,
-        text_response("Prior remote outcome remains unknown.", "after-unknown"),
-    )]);
+    let provider = spawn_scripted_responses_server(vec![
+        ContinueSelection { usage: None },
+        Response(
+            200,
+            text_response("Prior remote outcome remains unknown.", "after-unknown"),
+        ),
+    ]);
     let config = mcp_config(harness.path(), &provider.base_url, &remote.base_url);
     let resumed = f2a_wait_child(
         spawn_f2a_chat(
@@ -620,9 +667,10 @@ fn remote_unknown_keeps_only_known_receipts_and_resume_does_not_replay_the_remot
     );
     let requests = take_requests(remote, 1, "MCP unknown resume discovery");
     assert_eq!(requests[0]["method"], "tools/list");
-    let sent = take_requests(provider, 1, "MCP explicit unknown resume Provider");
-    assert!(sent[0].get("previous_response_id").is_none());
-    let markers = sent[0]["input"]
+    let sent = take_requests(provider, 2, "MCP explicit unknown resume Provider");
+    selector_candidates(&sent[0]);
+    assert!(sent[1].get("previous_response_id").is_none());
+    let markers = sent[1]["input"]
         .as_array()
         .unwrap()
         .iter()
@@ -642,7 +690,7 @@ fn remote_unknown_keeps_only_known_receipts_and_resume_does_not_replay_the_remot
     assert_eq!(after[before.len()]["event_type"], "session.resumed");
     let state = reduced_session(&project, &session);
     assert_eq!(state.execution_receipt_count(), 1);
-    assert_eq!(state.request_audits().len(), 3);
+    assert_eq!(state.request_audits().len(), 5);
     assert!(
         !state.history().items().iter().any(|item| matches!(
             item, ContentItem::ToolResult { result } if result.tool_name.as_str() == local_name()

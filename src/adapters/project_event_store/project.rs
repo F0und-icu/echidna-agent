@@ -292,6 +292,20 @@ impl Project {
     /// opening a stream. Inspection uses this to discover the current local
     /// Session while preserving the Event Store's read-only boundary.
     pub(crate) fn existing_session_ids(&self) -> Result<Vec<StreamId>, ProjectEventStoreError> {
+        let mut ids = Vec::new();
+        self.visit_existing_session_ids::<ProjectEventStoreError>(|id| {
+            ids.push(id);
+            Ok(())
+        })?;
+        ids.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        Ok(ids)
+    }
+
+    /// Iterate verified Session directory entries without retaining the directory.
+    pub(crate) fn visit_existing_session_ids<E: From<ProjectEventStoreError>>(
+        &self,
+        mut visit: impl FnMut(StreamId) -> Result<(), E>,
+    ) -> Result<(), E> {
         let path = self.control_directory().join(SESSIONS_DIRECTORY);
         let metadata =
             fs::symlink_metadata(&path).map_err(|source| ProjectEventStoreError::Io {
@@ -304,56 +318,54 @@ impl Project {
                 operation: "inspect Session directory",
                 path,
                 source: io::Error::new(io::ErrorKind::InvalidData, "not a regular directory"),
-            });
+            }
+            .into());
         }
-        let mut ids =
-            fs::read_dir(&path)
-                .map_err(|source| ProjectEventStoreError::Io {
-                    operation: "read Session directory",
-                    path: path.clone(),
+        let entries = fs::read_dir(&path).map_err(|source| ProjectEventStoreError::Io {
+            operation: "read Session directory",
+            path: path.clone(),
+            source,
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|source| ProjectEventStoreError::Io {
+                operation: "read Session directory entry",
+                path: path.clone(),
+                source,
+            })?;
+            let entry_path = entry.path();
+            let metadata =
+                fs::symlink_metadata(&entry_path).map_err(|source| ProjectEventStoreError::Io {
+                    operation: "inspect Session directory entry",
+                    path: entry_path.clone(),
                     source,
-                })?
-                .map(|entry| {
-                    let entry = entry.map_err(|source| ProjectEventStoreError::Io {
-                        operation: "read Session directory entry",
-                        path: path.clone(),
-                        source,
-                    })?;
-                    let entry_path = entry.path();
-                    let metadata = fs::symlink_metadata(&entry_path).map_err(|source| {
-                        ProjectEventStoreError::Io {
-                            operation: "inspect Session directory entry",
-                            path: entry_path.clone(),
-                            source,
-                        }
-                    })?;
-                    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                        return Err(ProjectEventStoreError::Io {
-                            operation: "inspect Session directory entry",
-                            path: entry_path,
-                            source: io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                "Session entry is not a regular directory",
-                            ),
-                        });
-                    }
-                    let name = entry.file_name().into_string().map_err(|_| {
-                        ProjectEventStoreError::Io {
-                            operation: "decode Session directory entry",
-                            path: entry_path.clone(),
-                            source: io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                "Session directory name is not valid UTF-8",
-                            ),
-                        }
-                    })?;
-                    let id = StreamId::new(name);
-                    self.session_stream_path_existing(&id)?;
-                    Ok(id)
-                })
-                .collect::<Result<Vec<_>, ProjectEventStoreError>>()?;
-        ids.sort_by(|left, right| left.as_str().cmp(right.as_str()));
-        Ok(ids)
+                })?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(ProjectEventStoreError::Io {
+                    operation: "inspect Session directory entry",
+                    path: entry_path,
+                    source: io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Session entry is not a regular directory",
+                    ),
+                }
+                .into());
+            }
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| ProjectEventStoreError::Io {
+                    operation: "decode Session directory entry",
+                    path: entry_path,
+                    source: io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Session directory name is not valid UTF-8",
+                    ),
+                })?;
+            let id = StreamId::new(name);
+            self.session_stream_path_existing(&id)?;
+            visit(id)?;
+        }
+        Ok(())
     }
 }
 

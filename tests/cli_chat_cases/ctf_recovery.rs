@@ -1,3 +1,8 @@
+use super::task_context::{
+    ScriptedResponse::{ContinueSelection, InitialSelection, Response},
+    selector_candidates, spawn_scripted_responses_server,
+    spawn_scripted_responses_server_with_wait,
+};
 use super::*;
 
 fn limit_config(config: &std::path::Path, limit: Option<usize>, incremental: bool) {
@@ -22,8 +27,9 @@ fn ctf_r2b_budget_stop_requires_explicit_resume_without_repeating_input_or_tool(
         let harness = TemporaryDirectory::new("ctf-r2b-harness");
         initialize_project(root.path());
         fs::write(root.path().join("target.txt"), "bounded fixture").unwrap();
-        let server = spawn_responses_server(vec![
-            (
+        let responses = vec![
+            InitialSelection,
+            Response(
                 200,
                 m4_long_flow_tool_response(
                     "r2b-read",
@@ -32,30 +38,55 @@ fn ctf_r2b_budget_stop_requires_explicit_resume_without_repeating_input_or_tool(
                     "before-stop",
                 ),
             ),
-            (
+            ContinueSelection { usage: None },
+            Response(
                 200,
                 text_response("explicit recovery completed", "after-resume"),
             ),
-        ]);
+        ];
+        let server = spawn_scripted_responses_server_with_wait(responses, Duration::from_secs(60));
         let config = write_config(harness.path(), &server.base_url);
-        limit_config(&config, Some(1), incremental);
-        let output = f2a_wait_child(
+        limit_config(&config, Some(2), incremental);
+        // These bounds cover fixture completion, not product latency.
+        let output = wait_child_before_deadline(
             spawn_f2a_chat(
                 root.path(),
                 &config,
-                "original task\nnot accepted task\n/context\n/resume\nnew instruction\n/exit\n",
+                "original task\nnot accepted task\n/context\n/resume\n/exit\n",
                 &[],
             ),
             "R2b explicit recovery",
+            Duration::from_secs(60),
         );
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(output.status.success(), "{stdout}\n{stderr}");
-        assert!(stderr.contains("per-Turn model-request limit of 1"));
+        assert!(stderr.contains("per-Turn model-request limit of 2"));
         assert!(stdout.contains("Task input not accepted or saved"));
-        assert!(stdout.contains("admitted=1 primary=1 vision=0 remaining=0 limit=1"));
-        assert!(stdout.contains("explicit recovery completed"));
+        assert!(stdout.contains("admitted=2 primary=2 vision=0 remaining=0 limit=2"));
+        selector_candidates(&f2a_request_body(&server.requests, "R2b initial selection"));
         let _first = f2a_request_body(&server.requests, "R2b first");
+        // The stopped Turn used exactly two admissions: selector and main.
+        // The resumed input receives a fresh budget for its selector and main.
+        let config = write_config(harness.path(), &server.base_url);
+        limit_config(&config, Some(2), incremental);
+        let resumed = wait_child_before_deadline(
+            spawn_f2a_chat(
+                root.path(),
+                &config,
+                "new instruction\n/exit\n",
+                &["--resume", "latest"],
+            ),
+            "R2b selected recovery",
+            Duration::from_secs(60),
+        );
+        assert!(
+            resumed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&resumed.stderr)
+        );
+        assert!(String::from_utf8_lossy(&resumed.stdout).contains("explicit recovery completed"));
+        selector_candidates(&f2a_request_body(&server.requests, "R2b resumed selection"));
         let second = f2a_request_body(&server.requests, "R2b resumed");
         assert!(second.get("previous_response_id").is_none());
         assert!(json_contains_type(&second["input"], "function_call_output"));
@@ -63,7 +94,7 @@ fn ctf_r2b_budget_stop_requires_explicit_resume_without_repeating_input_or_tool(
         f2a_join_server(server, "R2b resume");
         let project = Project::discover(root.path()).unwrap();
         let state = reduced_session(&project, &session_id(root.path()));
-        assert_eq!(state.request_audits().len(), 2);
+        assert_eq!(state.request_audits().len(), 4);
         assert_eq!(state.execution_receipt_count(), 1);
         assert_eq!(state.history().ensure_all_tool_calls_paired(), Ok(()));
         let users: Vec<_> = state
@@ -89,11 +120,11 @@ fn unlimited_budget_completes_more_than_32_steps_with_exact_durable_counts() {
     let root = TemporaryDirectory::new("unlimited-admission-cli");
     let harness = TemporaryDirectory::new("unlimited-admission-config");
     initialize_project(root.path());
-    let mut responses = Vec::new();
+    let mut responses = vec![InitialSelection];
     for index in 0..tool_calls {
         let path = format!("input-{index}.txt");
         fs::write(root.path().join(&path), format!("fixture {index}")).unwrap();
-        responses.push((
+        responses.push(Response(
             200,
             m4_long_flow_tool_response(
                 &format!("unlimited-call-{index}"),
@@ -103,11 +134,11 @@ fn unlimited_budget_completes_more_than_32_steps_with_exact_durable_counts() {
             ),
         ));
     }
-    responses.push((
+    responses.push(Response(
         200,
         text_response("UNLIMITED_COMPLETED", "unlimited-complete"),
     ));
-    let server = spawn_responses_server(responses);
+    let server = spawn_scripted_responses_server(responses);
     let config = write_config(harness.path(), &server.base_url);
     limit_config(&config, Some(0), false);
     let output = wait_child_before_deadline(
@@ -124,8 +155,12 @@ fn unlimited_budget_completes_more_than_32_steps_with_exact_durable_counts() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "{stdout}\n{stderr}");
     assert!(stdout.contains("UNLIMITED_COMPLETED"));
-    assert!(stdout.contains("admitted=34 primary=34 vision=0 remaining=unlimited limit=unlimited"));
+    assert!(stdout.contains("admitted=35 primary=35 vision=0 remaining=unlimited limit=unlimited"));
     assert!(!stderr.contains("[turn stopped]"));
+    selector_candidates(&f2a_request_body(
+        &server.requests,
+        "unlimited initial selection",
+    ));
     for _ in 0..=tool_calls {
         f2a_request_body(&server.requests, "unlimited request");
     }
@@ -133,7 +168,7 @@ fn unlimited_budget_completes_more_than_32_steps_with_exact_durable_counts() {
     f2a_join_server(server, "unlimited admission");
     let project = Project::discover(root.path()).unwrap();
     let state = reduced_session(&project, &session_id(root.path()));
-    assert_eq!(state.request_audits().len(), 34);
+    assert_eq!(state.request_audits().len(), 35);
     assert_eq!(
         state.execution_receipt_count(),
         u64::try_from(tool_calls).unwrap()
@@ -157,27 +192,26 @@ fn ctf_r2b_default32_and_explicit33_have_no_hidden_primary_cap() {
         let harness = TemporaryDirectory::new("ctf-r2b-harness");
         initialize_project(root.path());
         fs::write(root.path().join("target.txt"), "fixture").unwrap();
-        let responses = (0..count)
-            .map(|index| {
-                (
-                    200,
-                    m4_long_flow_tool_response(
-                        &format!("budget-call-{index}"),
-                        "read_file",
-                        // High-count lanes only need the request loop, not
-                        // repeated filesystem execution/Receipt I/O. Invalid
-                        // arguments yield real pre-execution paired failures.
-                        if count > 2 {
-                            json!({})
-                        } else {
-                            json!({"path":"target.txt"})
-                        },
-                        &format!("budget-response-{index}"),
-                    ),
-                )
-            })
-            .collect();
-        let server = spawn_responses_server(responses);
+        let mut responses = vec![InitialSelection];
+        responses.extend((0..count - 1).map(|index| {
+            Response(
+                200,
+                m4_long_flow_tool_response(
+                    &format!("budget-call-{index}"),
+                    "read_file",
+                    // High-count lanes only need the request loop, not
+                    // repeated filesystem execution/Receipt I/O. Invalid
+                    // arguments yield real pre-execution paired failures.
+                    if count > 2 {
+                        json!({})
+                    } else {
+                        json!({"path":"target.txt"})
+                    },
+                    &format!("budget-response-{index}"),
+                ),
+            )
+        }));
+        let server = spawn_scripted_responses_server(responses);
         let config = write_config(harness.path(), &server.base_url);
         limit_config(&config, configured, false);
         let output = wait_child_before_deadline(
@@ -196,7 +230,8 @@ fn ctf_r2b_default32_and_explicit33_have_no_hidden_primary_cap() {
         assert!(stdout.contains(&format!(
             "admitted={count} primary={count} vision=0 remaining=0 limit={count}"
         )));
-        for _ in 0..count {
+        selector_candidates(&f2a_request_body(&server.requests, "R2b limit selection"));
+        for _ in 1..count {
             let _ = f2a_request_body(&server.requests, "R2b limit");
         }
         assert!(server.requests.try_recv().is_err());
@@ -219,26 +254,31 @@ fn ctf_r2b_failed_provider_returns_to_prompt_without_committing_partial_output()
         let harness = TemporaryDirectory::new("ctf-r2b-harness");
         initialize_project(root.path());
         let failed_attempts = if response.0 == 200 { 2 } else { 1 };
-        let mut responses = vec![response; failed_attempts];
-        responses.push((200, text_response("recovered", "new-response")));
-        let server = spawn_responses_server(responses);
+        let mut responses = vec![response; failed_attempts].into_iter()
+            .map(|(status,body)| Response(status, body)).collect::<Vec<_>>();
+        responses.insert(0, InitialSelection);
+        responses.push(ContinueSelection { usage: None });
+        responses.push(Response(200, text_response("recovered", "new-response")));
+        let server = spawn_scripted_responses_server(responses);
         let config = write_config(harness.path(), &server.base_url);
-        limit_config(&config, Some(2), true);
+        limit_config(&config, Some(3), true);
         let output = f2a_wait_child(spawn_f2a_chat(root.path(), &config,
             "first input\n/resume\nsecond input\n/exit\n", &[]), "R2b provider failure");
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         assert!(String::from_utf8_lossy(&output.stderr).contains("[turn stopped]"));
+        selector_candidates(&f2a_request_body(&server.requests, "R2b failed input selection"));
         let first = f2a_request_body(&server.requests, "R2b failed");
         for _ in 1..failed_attempts {
             assert_eq!(first, f2a_request_body(&server.requests, "R2b failed retry"));
         }
+        selector_candidates(&f2a_request_body(&server.requests, "R2b recovered source selection"));
         let second = f2a_request_body(&server.requests, "R2b new provider");
         assert!(second.get("previous_response_id").is_none());
         assert!(!second.to_string().contains("uncommitted fragment"));
         assert!(server.requests.try_recv().is_err());
         f2a_join_server(server, "R2b provider");
         let state = reduced_session(&Project::discover(root.path()).unwrap(), &session_id(root.path()));
-        assert_eq!(state.request_audits().len(), failed_attempts + 1);
+        assert_eq!(state.request_audits().len(), failed_attempts + 3);
         assert_eq!(state.execution_receipt_count(), 0);
         assert!(!serde_json::to_string(state.history().items()).unwrap().contains("uncommitted fragment"));
         assert_audits_reconstruct(root.path(), &state);
@@ -257,17 +297,17 @@ fn ctf_r2b_initial_vision_shares_the_primary_admission_budget() {
         200,
         vision_response("initial bounded observation", "vision-first"),
     )]);
-    let primary = spawn_responses_server(vec![(
-        200,
-        text_response("explicit image recovery", "primary-new"),
-    )]);
+    let primary = spawn_scripted_responses_server(vec![
+        ContinueSelection { usage: None },
+        Response(200, text_response("explicit image recovery", "primary-new")),
+    ]);
     let config = write_dual_config(harness.path(), &primary.base_url, &vision.base_url);
     limit_config(&config, Some(1), false);
     let output = f2a_wait_child(
         spawn_f2a_chat(
             root.path(),
             &config,
-            "/image screen.png\ninspect image\n/resume\ncontinue with retained observation\n/exit\n",
+            "/image screen.png\ninspect image\n/resume\n/exit\n",
             &[],
         ),
         "R2b initial Vision budget",
@@ -280,13 +320,33 @@ fn ctf_r2b_initial_vision_shares_the_primary_admission_budget() {
     );
     assert!(stdout.contains("admitted=1 primary=0 vision=1 remaining=0 limit=1"));
     let _ = f2a_request_body(&vision.requests, "initial Vision");
+    let config = write_dual_config(harness.path(), &primary.base_url, &vision.base_url);
+    limit_config(&config, Some(3), false);
+    let resumed = f2a_wait_child(
+        spawn_f2a_chat(
+            root.path(),
+            &config,
+            "continue with retained observation\n/exit\n",
+            &["--resume", "latest"],
+        ),
+        "R2b initial Vision selected recovery",
+    );
+    assert!(
+        resumed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    selector_candidates(&f2a_request_body(
+        &primary.requests,
+        "initial Vision resumed selection",
+    ));
     let wire = f2a_request_body(&primary.requests, "resumed Primary");
     assert!(wire.get("previous_response_id").is_none());
     assert!(wire.to_string().contains("initial bounded observation"));
     f2a_join_server(vision, "initial Vision");
     f2a_join_server(primary, "resumed Primary");
     let state = reduced_session(&project, &session_id(root.path()));
-    assert_eq!(state.request_audits().len(), 2);
+    assert_eq!(state.request_audits().len(), 3);
     assert_eq!(state.vision_observations().len(), 1);
     assert_eq!(state.execution_receipt_count(), 1);
     assert_audits_reconstruct(root.path(), &state);
@@ -304,10 +364,12 @@ fn ctf_r2b_initial_vision_failure_is_durable_and_does_not_requeue_input() {
         400,
         "{\"error\":{\"message\":\"fixture Vision failure\"}}".to_owned(),
     )]);
-    let primary =
-        spawn_responses_server(vec![(200, text_response("text recovery", "primary-new"))]);
+    let primary = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(200, text_response("text recovery", "primary-new")),
+    ]);
     let config = write_dual_config(harness.path(), &primary.base_url, &vision.base_url);
-    limit_config(&config, Some(2), false);
+    limit_config(&config, Some(3), false);
     let output = f2a_wait_child(
         spawn_f2a_chat(
             root.path(),
@@ -324,13 +386,17 @@ fn ctf_r2b_initial_vision_failure_is_durable_and_does_not_requeue_input() {
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("reattach each image explicitly"));
     let _ = f2a_request_body(&vision.requests, "failed Vision");
+    selector_candidates(&f2a_request_body(
+        &primary.requests,
+        "failed Vision resumed selection",
+    ));
     let wire = f2a_request_body(&primary.requests, "new text");
     assert!(!wire.to_string().contains("FAILED_IMAGE_TASK"));
     assert!(!json_contains_type(&wire["input"], "input_image"));
     f2a_join_server(vision, "failed Vision");
     f2a_join_server(primary, "new text");
     let state = reduced_session(&project, &session_id(root.path()));
-    assert_eq!(state.request_audits().len(), 2);
+    assert_eq!(state.request_audits().len(), 3);
     assert_eq!(state.vision_failures().len(), 1);
     assert!(state.vision_observations().is_empty());
     assert_eq!(state.execution_receipt_count(), 1);
@@ -355,9 +421,11 @@ fn ctf_r2b_partial_image_followups_checkpoint_before_later_budget_stop() {
         .iter()
         .map(|(id, args)| (id.as_str(), "view_image", args.clone()))
         .collect();
-    let primary = spawn_responses_server(vec![
-        (200, tool_calls_response(&calls, "image-tool-response")),
-        (
+    let primary = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(200, tool_calls_response(&calls, "image-tool-response")),
+        ContinueSelection { usage: None },
+        Response(
             200,
             text_response("resumed after image budget", "image-resumed"),
         ),
@@ -367,7 +435,7 @@ fn ctf_r2b_partial_image_followups_checkpoint_before_later_budget_stop() {
         vision_response("checkpointed first observation", "one-vision"),
     )]);
     let config = write_dual_config(harness.path(), &primary.base_url, &vision.base_url);
-    limit_config(&config, Some(2), false);
+    limit_config(&config, Some(3), false);
     let output = f2a_wait_child(
         spawn_f2a_chat(
             root.path(),
@@ -383,8 +451,16 @@ fn ctf_r2b_partial_image_followups_checkpoint_before_later_budget_stop() {
         "{stdout}\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(stdout.contains("admitted=2 primary=1 vision=1 remaining=0 limit=2"));
+    assert!(stdout.contains("admitted=3 primary=2 vision=1 remaining=0 limit=3"));
+    selector_candidates(&f2a_request_body(
+        &primary.requests,
+        "image initial selection",
+    ));
     let _ = f2a_request_body(&primary.requests, "image calls");
+    selector_candidates(&f2a_request_body(
+        &primary.requests,
+        "image resumed selection",
+    ));
     let resumed = f2a_request_body(&primary.requests, "image resume");
     assert!(
         resumed
@@ -396,7 +472,7 @@ fn ctf_r2b_partial_image_followups_checkpoint_before_later_budget_stop() {
     f2a_join_server(primary, "image Primary");
     f2a_join_server(vision, "image Vision");
     let state = reduced_session(&project, &session_id(root.path()));
-    assert_eq!(state.request_audits().len(), 3);
+    assert_eq!(state.request_audits().len(), 5);
     assert_eq!(state.execution_receipt_count(), 2);
     assert_eq!(state.vision_observations().len(), 1);
     assert_eq!(state.history().ensure_all_tool_calls_paired(), Ok(()));
@@ -453,26 +529,28 @@ fn ctf_r2b_direct_image_followup_survives_budget_stop_before_primary_delivery() 
     let args = json!({"event_id":"direct-image-event", "occurred_at":"2026-09-12T00:00:00Z",
         "artifact_id":"artifact-direct-followup", "source_path":"screen.png",
         "target_snapshot_id":"snapshot-r2b-direct-followup", "toolchain_fingerprint":"r2b-fixture"});
-    let primary = spawn_responses_server(vec![
-        (
+    let primary = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(
             200,
             tool_calls_response(
                 &[("direct-image-call", "view_image", args)],
                 "direct-tool-response",
             ),
         ),
-        (
+        ContinueSelection { usage: None },
+        Response(
             200,
             text_response("direct image recovered", "direct-resumed"),
         ),
     ]);
     let config = write_direct_config(harness.path(), &primary.base_url);
-    limit_config(&config, Some(1), false);
+    limit_config(&config, Some(2), false);
     let output = f2a_wait_child(
         spawn_f2a_chat(
             root.path(),
             &config,
-            "inspect the image\n/resume\ncontinue without rerunning the tool\n/exit\n",
+            "inspect the image\n/resume\n/exit\n",
             &["--domain", "mobile"],
         ),
         "R2b direct follow-up",
@@ -483,7 +561,31 @@ fn ctf_r2b_direct_image_followup_survives_budget_stop_before_primary_delivery() 
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    selector_candidates(&f2a_request_body(
+        &primary.requests,
+        "direct image initial selection",
+    ));
     let _ = f2a_request_body(&primary.requests, "direct image call");
+    let config = write_direct_config(harness.path(), &primary.base_url);
+    limit_config(&config, Some(3), false);
+    let output = f2a_wait_child(
+        spawn_f2a_chat(
+            root.path(),
+            &config,
+            "continue without rerunning the tool\n/exit\n",
+            &["--domain", "mobile", "--resume", "latest"],
+        ),
+        "R2b direct selected recovery",
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    selector_candidates(&f2a_request_body(
+        &primary.requests,
+        "direct image resumed selection",
+    ));
     let resumed = f2a_request_body(&primary.requests, "direct image resume");
     assert_eq!(
         resumed["input"]
@@ -530,8 +632,9 @@ fn ctf_r2b_incremental_fallback_cannot_exceed_the_shared_limit() {
     let harness = TemporaryDirectory::new("ctf-r2b-harness");
     initialize_project(root.path());
     fs::write(root.path().join("target.txt"), "fixture").unwrap();
-    let server = spawn_responses_server(vec![
-        (
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(
             200,
             m4_long_flow_tool_response(
                 "fallback-read",
@@ -540,14 +643,14 @@ fn ctf_r2b_incremental_fallback_cannot_exceed_the_shared_limit() {
                 "before-rejection",
             ),
         ),
-        (
+        Response(
             400,
             "{\"error\":{\"code\":\"previous_response_not_found\",\"message\":\"fixture\"}}"
                 .to_owned(),
         ),
     ]);
     let config = write_config(harness.path(), &server.base_url);
-    limit_config(&config, Some(2), true);
+    limit_config(&config, Some(3), true);
     let output = f2a_wait_child(
         spawn_f2a_chat(root.path(), &config, "inspect target\n/exit\n", &[]),
         "R2b fallback cap",
@@ -557,7 +660,11 @@ fn ctf_r2b_incremental_fallback_cannot_exceed_the_shared_limit() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stderr).contains("per-Turn model-request limit of 2"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("per-Turn model-request limit of 3"));
+    selector_candidates(&f2a_request_body(
+        &server.requests,
+        "fallback input selection",
+    ));
     let _ = f2a_request_body(&server.requests, "fallback first");
     let second = f2a_request_body(&server.requests, "fallback incremental");
     assert_eq!(second["previous_response_id"], "before-rejection");
@@ -566,6 +673,6 @@ fn ctf_r2b_incremental_fallback_cannot_exceed_the_shared_limit() {
         &Project::discover(root.path()).unwrap(),
         &session_id(root.path()),
     );
-    assert_eq!(state.request_audits().len(), 2);
+    assert_eq!(state.request_audits().len(), 3);
     assert_eq!(state.execution_receipt_count(), 1);
 }

@@ -1,13 +1,17 @@
 //! Actual audited delivery lineage, persistence and negative replay controls.
 
+use super::task_context::{
+    ScriptedResponse::{InitialSelection, Response, TruncatedResponse},
+    selector_candidates, spawn_scripted_responses_server,
+};
 use super::*;
 use sha2::{Digest, Sha256};
 
-fn canonical_bytes(value: &impl serde::Serialize) -> Vec<u8> {
+pub(super) fn canonical_bytes(value: &impl serde::Serialize) -> Vec<u8> {
     serde_json::to_vec(&serde_json::to_value(value).unwrap()).unwrap()
 }
 
-fn canonical_hash(value: &impl serde::Serialize) -> String {
+pub(super) fn canonical_hash(value: &impl serde::Serialize) -> String {
     blake3::hash(&canonical_bytes(value)).to_hex().to_string()
 }
 
@@ -27,11 +31,12 @@ fn tool_incremental_retry_uses_only_accepted_baseline_and_requires_real_delivere
     );
     let partial = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"uncommitted\"}\n\n";
     let final_response = text_response("Verified answer.", "accepted-final");
-    let server = spawn_responses_server_with_lengths(vec![
-        (200, first.clone(), first.len()),
-        (200, malformed.clone(), malformed.len()),
-        (200, partial.to_owned(), partial.len() + 1),
-        (200, final_response.clone(), final_response.len()),
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(200, first),
+        Response(200, malformed),
+        TruncatedResponse(partial.to_owned()),
+        Response(200, final_response),
     ]);
     let config = write_config(root.path(), &server.base_url);
     let output = run_chat(root.path(), &config, "EXACT-INPUT-ANCHOR\n/exit\n", &[]);
@@ -40,6 +45,7 @@ fn tool_incremental_retry_uses_only_accepted_baseline_and_requires_real_delivere
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    selector_candidates(&f2a_request_body(&server.requests, "initial selection"));
     let wires = (0..4)
         .map(|_| request_body(&server.requests.recv_timeout(F2A_WAIT).unwrap()))
         .collect::<Vec<_>>();
@@ -62,7 +68,12 @@ fn tool_incremental_retry_uses_only_accepted_baseline_and_requires_real_delivere
         .iter()
         .filter(|event| event["event_type"] == "session.model_delivery_committed")
         .collect::<Vec<_>>();
-    assert_eq!(audits.len(), 4);
+    assert_eq!(audits.len(), 5);
+    let (selection_audit, audits) = audits.split_first().unwrap();
+    assert!(events.iter().any(|event| {
+        event["event_type"] == "session.task_selection_sample_recorded"
+            && event["payload"]["audit_event_id"] == selection_audit["event_id"]
+    }));
     assert_eq!(deliveries.len(), 2);
     assert_eq!(audits[0]["payload"]["delivery"]["mode"], "full");
     assert_eq!(audits[3]["payload"]["delivery"]["mode"], "incremental");
@@ -143,9 +154,12 @@ fn tool_incremental_retry_uses_only_accepted_baseline_and_requires_real_delivere
         .unwrap()
         .iter()
         .position(|entry| {
-            entry["provenance"]["references"]["source_event_refs"]
-                .as_array()
-                .is_some_and(|refs| refs.iter().any(|id| id == &anchor))
+            let position = entry["final_position"].as_u64().unwrap() as usize;
+            delivered.content_items[position]
+                == echidna::domain::model::ContentItem::user_text("EXACT-INPUT-ANCHOR")
+                && entry["provenance"]["references"]["source_event_refs"]
+                    .as_array()
+                    .is_some_and(|refs| refs.iter().any(|id| id == &anchor))
         })
         .unwrap();
     let position = payload["context_delivery_map"]["content_items"][entry_index]["final_position"]
@@ -221,12 +235,20 @@ fn tool_incremental_retry_uses_only_accepted_baseline_and_requires_real_delivere
     fs::remove_file(&required_path).unwrap();
     let missing = run_chat(root.path(), &config, "/exit\n", &["--resume", "latest"]);
     assert!(!missing.status.success());
-    assert!(String::from_utf8_lossy(&missing.stderr).contains("reconstruction failed"));
+    let missing_error = String::from_utf8_lossy(&missing.stderr);
+    assert!(
+        missing_error.contains("primary audit read failed"),
+        "{missing_error}"
+    );
     assert_eq!(session_events(root.path(), &session), before);
     fs::write(&required_path, b"corrupt audit blob").unwrap();
     let corrupt = run_chat(root.path(), &config, "/exit\n", &["--resume", "latest"]);
     assert!(!corrupt.status.success());
-    assert!(String::from_utf8_lossy(&corrupt.stderr).contains("reconstruction failed"));
+    let corrupt_error = String::from_utf8_lossy(&corrupt.stderr);
+    assert!(
+        corrupt_error.contains("primary audit read failed"),
+        "{corrupt_error}"
+    );
     assert_eq!(session_events(root.path(), &session), before);
     fs::write(required_path, original_blob).unwrap();
 }

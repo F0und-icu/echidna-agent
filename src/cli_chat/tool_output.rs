@@ -31,7 +31,7 @@ struct ActiveTool {
 impl ActiveTool {
     fn timing(&self) -> String {
         format!(
-            "总耗时 {:.1}s（含保存） / deadline 配置 {:.1}s",
+            "elapsed {:.1}s (including persistence) / configured deadline {:.1}s",
             self.started.elapsed().as_secs_f64(),
             self.deadline_ms as f64 / 1000.0
         )
@@ -63,7 +63,7 @@ impl ToolOutput {
             },
         );
         self.sink.send(format!(
-            "\n┌ 工具 #{} · {} · 执行中（结果尚未保存） · deadline 配置 {:.1}s\n{}\n",
+            "\n┌ Tool #{} · {} · running (result not yet persisted) · configured deadline {:.1}s\n{}\n",
             self.next,
             escaped_text(plan.call.name.as_str()),
             plan.timeout_ms as f64 / 1000.0,
@@ -77,8 +77,8 @@ impl ToolOutput {
             return;
         };
         let status = match checkpoint.status {
-            ToolResultStatus::Succeeded => "成功",
-            ToolResultStatus::Failed => "失败",
+            ToolResultStatus::Succeeded => "succeeded",
+            ToolResultStatus::Failed => "failed",
             ToolResultStatus::Cancelled => return,
         };
         let command = active
@@ -87,7 +87,7 @@ impl ToolOutput {
             .map(String::as_str)
             .unwrap_or("");
         self.sink.send(format!(
-            "\n├ 工具 #{} · 子命令 {}/{} · 已保存（{status}；非批次终态） · {}\n命令：\n{command}\n{}\n{}",
+            "\n├ Tool #{} · subcommand {}/{} · persisted ({status}; not a terminal batch result) · {}\nCommand:\n{command}\n{}\n{}",
             active.number, checkpoint.index as usize + 1, checkpoint.child_count,
             active.timing(), ContentView::preview(&checkpoint.result),
             capture_hints(&checkpoint.output_captures)
@@ -97,7 +97,7 @@ impl ToolOutput {
     pub(super) fn finish_turn(&mut self) {
         for (_, active) in std::mem::take(&mut self.active) {
             self.sink.send(format!(
-                "\n└ 工具 #{} · {} · 状态未知（未观察到批次终态） · {}\n已保存子项以 Session 为准；不自动重跑。\n",
+                "\n└ Tool #{} · {} · outcome unknown (no terminal batch outcome observed) · {}\nPersisted child outcomes are recorded in the Session; no automatic replay.\n",
                 active.number, active.name, active.timing()
             ));
         }
@@ -120,28 +120,28 @@ impl ToolOutput {
                     .and_then(serde_json::Value::as_bool)
                     == Some(true) =>
             {
-                "完成（部分失败）"
+                "completed (partial failure)"
             }
-            ToolResultStatus::Succeeded => "完成",
-            ToolResultStatus::Failed => "失败",
-            ToolResultStatus::Cancelled => "取消",
+            ToolResultStatus::Succeeded => "completed",
+            ToolResultStatus::Failed => "failed",
+            ToolResultStatus::Cancelled => "cancelled",
         };
         let reason = outcome
             .receipt
             .exit_reason
             .as_deref()
             .filter(|reason| !reason.trim().is_empty())
-            .map(|reason| format!(" · 原因 {}", bounded_reason(reason)))
+            .map(|reason| format!(" · reason {}", bounded_reason(reason)))
             .unwrap_or_default();
         let reuse = if reused {
-            " · 复用已有收据（未再次执行）"
+            " · reused receipt (not executed again)"
         } else if outcome.receipt.cache_source.is_some() {
-            " · 缓存结果"
+            " · cached result"
         } else {
             ""
         };
         self.sink.send(format!(
-            "└ 工具 #{number} · {} · {status}{reason}{reuse} · {timing}\n{}\n{}",
+            "└ Tool #{number} · {} · {status}{reason}{reuse} · {timing}\n{}\n{}",
             escaped_text(outcome.result.tool_name.as_str()),
             ContentView::preview(&outcome.result.output),
             capture_hints(&outcome.receipt.output_captures)
@@ -170,16 +170,16 @@ fn capture_hints(captures: &[OutputCapture]) -> String {
         };
         let child = capture
             .child_index
-            .map(|index| format!(" 子命令 {}", usize::from(index) + 1))
+            .map(|index| format!(" subcommand {}", usize::from(index) + 1))
             .unwrap_or_default();
         let completeness = if capture.complete {
-            "已完整捕获"
+            "capture complete"
         } else {
-            "捕获不完整；未保留字节不可回读"
+            "capture incomplete; unretained bytes cannot be read back"
         };
         let _ = writeln!(
             view,
-            "原始输出{child} {stream}：保留 {}/已观察 {} bytes · {completeness}\n  read_output blob_id={} offset=0",
+            "Raw output{child} {stream}: retained {}/observed {} bytes · {completeness}\n  read_output blob_id={} offset=0",
             capture.retained_bytes,
             capture.observed_bytes,
             capture.blob_id.as_str()
@@ -188,7 +188,7 @@ fn capture_hints(captures: &[OutputCapture]) -> String {
     if captures.len() > 4 {
         let _ = writeln!(
             view,
-            "[另有 {} 个捕获引用，见 Session 记录]",
+            "[{} more capture references; see the Session record]",
             captures.len() - 4
         );
     }

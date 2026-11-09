@@ -27,6 +27,13 @@ pub(crate) struct SessionSourceIdentity {
 }
 
 impl SessionSourceIdentity {
+    pub(crate) fn project_hash_for_events(
+        events: &[EventEnvelope<Value>],
+    ) -> Result<String, SessionError> {
+        crate::domain::canonical_json::canonical_array_hash(events)
+            .map_err(|error| invalid_task(error.to_string()))
+    }
+
     pub(crate) fn from_events(
         project_id: ProjectId,
         events: &[EventEnvelope<Value>],
@@ -93,10 +100,12 @@ impl SessionSourceIdentity {
                 ));
             }
             if sample.graph_node().is_some() {
-                sample.source().validate_graph_sampling_suffix(
+                sample.source().validate_graph_sampling_suffix_with_hashes(
                     &events[..=end],
                     &project_events[..project_end],
                     sample_id,
+                    &session_hashes[&start],
+                    &project_hashes[&project_end],
                 )?;
             } else {
                 sample.source().validate_sampling_suffix_with_hashes(
@@ -137,7 +146,7 @@ impl SessionSourceIdentity {
     pub(crate) const fn project_stream_watermark(&self) -> u64 {
         self.project_stream_watermark
     }
-    pub(super) fn project_stream_hash(&self) -> &str {
+    pub(crate) fn project_stream_hash(&self) -> &str {
         &self.project_stream_hash
     }
 
@@ -167,7 +176,7 @@ impl SessionSourceIdentity {
 /// A later explicit reload cannot retroactively change this provenance.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-struct DefinitionProvenance {
+pub(super) struct DefinitionProvenance {
     agent_id: String,
     definition_digest: String,
     personal_digest: Option<String>,
@@ -175,7 +184,7 @@ struct DefinitionProvenance {
 }
 
 impl DefinitionProvenance {
-    fn from_binding(binding: &AgentDefinitionBinding) -> Result<Self, SessionError> {
+    pub(super) fn from_binding(binding: &AgentDefinitionBinding) -> Result<Self, SessionError> {
         binding
             .validate()
             .map_err(|error| invalid_task(error.to_string()))?;
@@ -219,6 +228,49 @@ pub(crate) struct SessionTaskReferences {
 impl SessionTaskReferences {
     pub fn source(&self) -> &SessionSourceIdentity {
         &self.source
+    }
+
+    pub(super) fn history_refs(&self) -> &[EventId] {
+        &self.history_event_refs
+    }
+    pub(super) fn receipt_refs(&self) -> &[ExecutionReceiptId] {
+        &self.execution_receipt_refs
+    }
+    pub(super) fn artifact_refs(&self) -> &[ArtifactId] {
+        &self.artifact_refs
+    }
+
+    pub(super) fn validate_graph_projection(
+        &self,
+        graph: &super::VerifiedCompactionGraph,
+    ) -> Result<(), SessionError> {
+        if !graph.proof6 {
+            return Ok(());
+        }
+        if Some(&self.source) != graph.reference_source.as_ref()
+            || Some(&self.definition) != graph.task_definition.as_ref()
+        {
+            return Err(invalid_task(
+                "task Summary source or definition differs from its graph",
+            ));
+        }
+        let mut cap = graph.reference_limit;
+        loop {
+            let (artifacts, receipts, history) = graph.project_task_references(cap.max(1));
+            if self.artifact_refs == artifacts
+                && self.execution_receipt_refs == receipts
+                && self.history_event_refs == history
+            {
+                return Ok(());
+            }
+            if cap <= 1 {
+                break;
+            }
+            cap /= 2;
+        }
+        Err(invalid_task(
+            "task Summary references do not match a lawful graph projection",
+        ))
     }
 
     pub(super) fn validate_intrinsic(&self) -> Result<(), SessionError> {
@@ -423,6 +475,45 @@ impl TaskCompactionValidationFacts {
     }
 
     pub(crate) fn references(&self, limit: usize) -> SessionTaskReferences {
+        if let Some(graph) = &self.verified_graph
+            && graph.task_selection_event.is_some()
+        {
+            if graph.proof6 {
+                let (artifact_refs, execution_receipt_refs, history_event_refs) =
+                    graph.project_task_references(limit);
+                return SessionTaskReferences {
+                    source: self.source.clone(),
+                    definition: self.definition.clone(),
+                    artifact_refs,
+                    execution_receipt_refs,
+                    history_event_refs,
+                };
+            }
+            return SessionTaskReferences {
+                source: self.source.clone(),
+                definition: self.definition.clone(),
+                artifact_refs: graph
+                    .task_artifact_refs
+                    .iter()
+                    .filter(|id| self.artifact_ids.contains(*id))
+                    .take(limit)
+                    .cloned()
+                    .collect(),
+                execution_receipt_refs: graph
+                    .task_receipt_refs
+                    .iter()
+                    .take(limit)
+                    .cloned()
+                    .collect(),
+                history_event_refs: graph
+                    .task_history_refs
+                    .iter()
+                    .rev()
+                    .take(limit)
+                    .cloned()
+                    .collect(),
+            };
+        }
         SessionTaskReferences {
             source: self.source.clone(),
             definition: self.definition.clone(),

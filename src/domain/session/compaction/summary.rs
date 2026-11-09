@@ -230,9 +230,16 @@ impl SessionSummaryDraft {
                 || graph.plan_blob_id != recorded.plan_blob_id
                 || graph.source != recorded.source
                 || graph.narrative != recorded.narrative
+                || graph.task_selection_event != recorded.task_selection_event
+                || graph.task_id != recorded.task_id
+                || graph.task_scope != recorded.task_scope
+                || graph.summarized_history != recorded.summarized_history
                 || self.narrative != graph.narrative
             {
                 return Err(super::task::invalid_task("v6 Summary graph proof mismatch"));
+            }
+            if let Some(task) = &self.task_references {
+                task.validate_graph_projection(recorded)?;
             }
         }
         Ok(())
@@ -331,6 +338,14 @@ struct SessionSummaryV6 {
     source_plan_blob_id: crate::domain::artifacts::BlobId,
     source_plan_hash: String,
     protected_inputs: Vec<ProtectedInputReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    task_selection_event: Option<crate::domain::events::EventId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    task_scope: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    summarized_history: Vec<crate::domain::events::EventId>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -369,6 +384,7 @@ enum SessionSummaryVersion {
     CurrentV4(Box<SessionSummaryV4>),
     CurrentV5(Box<SessionSummaryV5>),
     CurrentV6(Box<SessionSummaryV6>),
+    CurrentV7(Box<SessionSummaryV6>),
     Preview(Box<SessionSummaryV4>),
 }
 
@@ -389,7 +405,8 @@ impl Serialize for SessionSummary {
             SessionSummaryVersion::CurrentV3(summary) => summary.serialize(serializer),
             SessionSummaryVersion::CurrentV4(summary) => summary.serialize(serializer),
             SessionSummaryVersion::CurrentV5(summary) => summary.serialize(serializer),
-            SessionSummaryVersion::CurrentV6(summary) => summary.serialize(serializer),
+            SessionSummaryVersion::CurrentV6(summary)
+            | SessionSummaryVersion::CurrentV7(summary) => summary.serialize(serializer),
             SessionSummaryVersion::Preview(_) => Err(serde::ser::Error::custom(
                 "a compaction preview cannot be persisted",
             )),
@@ -432,6 +449,10 @@ impl<'de> Deserialize<'de> for SessionSummary {
                 .map(Box::new)
                 .map(SessionSummaryVersion::CurrentV6)
                 .map_err(serde::de::Error::custom)?,
+            7 => serde_json::from_value::<SessionSummaryV6>(value)
+                .map(Box::new)
+                .map(SessionSummaryVersion::CurrentV7)
+                .map_err(serde::de::Error::custom)?,
             _ => {
                 return Err(serde::de::Error::custom(format!(
                     "unsupported Session Summary schema version {schema_version}"
@@ -443,6 +464,9 @@ impl<'de> Deserialize<'de> for SessionSummary {
 }
 
 impl SessionSummary {
+    pub(crate) fn is_preview(&self) -> bool {
+        matches!(self.version, SessionSummaryVersion::Preview(_))
+    }
     /// Historical refresh preserves the byte contract recorded by the old
     /// Summary; versions without a recorded limit use their historical default.
     pub(crate) fn historical_byte_limit(&self) -> Option<usize> {
@@ -452,7 +476,8 @@ impl SessionSummary {
             | SessionSummaryVersion::CurrentV3(_) => Some(MAX_SESSION_SUMMARY_BYTES),
             SessionSummaryVersion::CurrentV4(summary) => Some(summary.byte_limit),
             SessionSummaryVersion::CurrentV5(summary) => Some(summary.byte_limit),
-            SessionSummaryVersion::CurrentV6(summary) => Some(summary.byte_limit),
+            SessionSummaryVersion::CurrentV6(summary)
+            | SessionSummaryVersion::CurrentV7(summary) => Some(summary.byte_limit),
             SessionSummaryVersion::Preview(_) => None,
         }
     }
@@ -477,7 +502,11 @@ impl SessionSummary {
             SessionSummaryVersion::Preview(Box::new(summary))
         } else if let Some(graph) = &draft.graph {
             let mut summary = SessionSummaryV6 {
-                schema_version: 6,
+                schema_version: if graph.task_selection_event.is_some() {
+                    7
+                } else {
+                    6
+                },
                 revision,
                 fingerprint: String::new(),
                 byte_limit: draft.byte_limit,
@@ -491,9 +520,17 @@ impl SessionSummary {
                 source_plan_blob_id: graph.plan_blob_id.clone(),
                 source_plan_hash: graph.plan_hash.clone(),
                 protected_inputs: protected_references(graph)?,
+                task_selection_event: graph.task_selection_event.clone(),
+                task_id: graph.task_id.clone(),
+                task_scope: graph.task_scope.clone(),
+                summarized_history: graph.summarized_history.clone(),
             };
             summary.fingerprint = expected_v6_fingerprint(&summary)?;
-            SessionSummaryVersion::CurrentV6(Box::new(summary))
+            if summary.schema_version == 7 {
+                SessionSummaryVersion::CurrentV7(Box::new(summary))
+            } else {
+                SessionSummaryVersion::CurrentV6(Box::new(summary))
+            }
         } else if draft.byte_limit > MAX_SESSION_SUMMARY_BYTES {
             let mut summary = SessionSummaryV4 {
                 schema_version: 4,
@@ -606,8 +643,29 @@ impl SessionSummary {
                     return Err(SessionError::CompactionFingerprintMismatch);
                 }
             }
-            SessionSummaryVersion::CurrentV6(summary) => {
-                if summary.schema_version != 6 || summary.byte_limit == 0 {
+            SessionSummaryVersion::CurrentV6(summary)
+            | SessionSummaryVersion::CurrentV7(summary) => {
+                let task_scoped = matches!(self.version, SessionSummaryVersion::CurrentV7(_));
+                if summary.schema_version != if task_scoped { 7 } else { 6 }
+                    || summary.byte_limit == 0
+                    || task_scoped
+                        != (summary.task_selection_event.is_some()
+                            && summary
+                                .task_id
+                                .as_ref()
+                                .is_some_and(|id| !id.trim().is_empty()))
+                    || (!task_scoped
+                        && (summary.task_selection_event.is_some()
+                            || summary.task_id.is_some()
+                            || !summary.task_scope.is_empty()
+                            || !summary.summarized_history.is_empty()))
+                    || (task_scoped
+                        && (summary.task_scope.is_empty()
+                            || summary
+                                .task_id
+                                .as_ref()
+                                .is_none_or(|id| !summary.task_scope.contains(id))))
+                {
                     return Err(unsupported_summary_schema(summary.schema_version));
                 }
                 summary.task_references.validate_intrinsic()?;
@@ -626,6 +684,14 @@ impl SessionSummary {
                         .protected_inputs
                         .iter()
                         .map(|input| input.event_id.as_str()),
+                )?;
+                validate_unique_ids(
+                    "summary.summarized_history",
+                    summary.summarized_history.iter().map(|id| id.as_str()),
+                )?;
+                validate_unique_ids(
+                    "summary.task_scope",
+                    summary.task_scope.iter().map(String::as_str),
                 )?;
                 if summary.fingerprint != expected_v6_fingerprint(summary)? {
                     return Err(SessionError::CompactionFingerprintMismatch);
@@ -658,6 +724,7 @@ impl SessionSummary {
             SessionSummaryVersion::CurrentV4(_) => 4,
             SessionSummaryVersion::CurrentV5(_) => 5,
             SessionSummaryVersion::CurrentV6(_) => 6,
+            SessionSummaryVersion::CurrentV7(_) => 7,
             SessionSummaryVersion::Preview(_) => 4,
         }
     }
@@ -669,7 +736,8 @@ impl SessionSummary {
             SessionSummaryVersion::CurrentV3(summary) => summary.revision,
             SessionSummaryVersion::CurrentV4(summary) => summary.revision,
             SessionSummaryVersion::CurrentV5(summary) => summary.revision,
-            SessionSummaryVersion::CurrentV6(summary) => summary.revision,
+            SessionSummaryVersion::CurrentV6(summary)
+            | SessionSummaryVersion::CurrentV7(summary) => summary.revision,
             SessionSummaryVersion::Preview(summary) => summary.revision,
         }
     }
@@ -681,7 +749,8 @@ impl SessionSummary {
             SessionSummaryVersion::CurrentV3(summary) => &summary.fingerprint,
             SessionSummaryVersion::CurrentV4(summary) => &summary.fingerprint,
             SessionSummaryVersion::CurrentV5(summary) => &summary.fingerprint,
-            SessionSummaryVersion::CurrentV6(summary) => &summary.fingerprint,
+            SessionSummaryVersion::CurrentV6(summary)
+            | SessionSummaryVersion::CurrentV7(summary) => &summary.fingerprint,
             SessionSummaryVersion::Preview(summary) => &summary.fingerprint,
         }
     }
@@ -693,7 +762,8 @@ impl SessionSummary {
             SessionSummaryVersion::CurrentV3(summary) => summary.evidence_spine.as_ref(),
             SessionSummaryVersion::CurrentV4(summary) => summary.evidence_spine.as_ref(),
             SessionSummaryVersion::CurrentV5(summary) => summary.evidence_spine.as_ref(),
-            SessionSummaryVersion::CurrentV6(summary) => summary.evidence_spine.as_ref(),
+            SessionSummaryVersion::CurrentV6(summary)
+            | SessionSummaryVersion::CurrentV7(summary) => summary.evidence_spine.as_ref(),
             SessionSummaryVersion::Preview(summary) => summary.evidence_spine.as_ref(),
         }
     }
@@ -705,7 +775,8 @@ impl SessionSummary {
             SessionSummaryVersion::CurrentV3(summary) => Some(&summary.narrative),
             SessionSummaryVersion::CurrentV4(summary) => Some(&summary.narrative),
             SessionSummaryVersion::CurrentV5(summary) => Some(&summary.narrative),
-            SessionSummaryVersion::CurrentV6(summary) => Some(&summary.narrative),
+            SessionSummaryVersion::CurrentV6(summary)
+            | SessionSummaryVersion::CurrentV7(summary) => Some(&summary.narrative),
             SessionSummaryVersion::Preview(summary) => Some(&summary.narrative),
         }
     }
@@ -715,7 +786,8 @@ impl SessionSummary {
             SessionSummaryVersion::CurrentV3(summary) => Some(&summary.task_references),
             SessionSummaryVersion::CurrentV4(summary) => summary.task_references.as_ref(),
             SessionSummaryVersion::CurrentV5(summary) => Some(&summary.task_references),
-            SessionSummaryVersion::CurrentV6(summary) => Some(&summary.task_references),
+            SessionSummaryVersion::CurrentV6(summary)
+            | SessionSummaryVersion::CurrentV7(summary) => Some(&summary.task_references),
             SessionSummaryVersion::Preview(summary) => summary.task_references.as_ref(),
             _ => None,
         }
@@ -740,24 +812,17 @@ impl SessionSummary {
                 context,
             )?;
         }
-        if let SessionSummaryVersion::CurrentV6(summary) = &self.version {
+        if matches!(
+            self.version,
+            SessionSummaryVersion::CurrentV6(_) | SessionSummaryVersion::CurrentV7(_)
+        ) {
             let graph = context
                 .task
                 .and_then(|facts| facts.verified_graph.as_ref())
                 .ok_or_else(|| {
                     super::task::invalid_task("v6 Summary requires verified graph source")
                 })?;
-            if summary.model_sample_event_ref != graph.root_event_id
-                || summary.narrative_source != graph.source
-                || summary.source_plan_blob_id != graph.plan_blob_id
-                || summary.source_plan_hash != graph.plan_hash
-                || summary.narrative != graph.narrative
-                || summary.protected_inputs != protected_references(graph)?
-            {
-                return Err(super::task::invalid_task(
-                    "v6 Summary source or protected inputs do not match verified graph",
-                ));
-            }
+            self.validate_graph_reference(graph)?;
         }
         Ok(())
     }
@@ -771,7 +836,8 @@ impl SessionSummary {
         &str,
     )> {
         match &self.version {
-            SessionSummaryVersion::CurrentV6(summary) => Some((
+            SessionSummaryVersion::CurrentV6(summary)
+            | SessionSummaryVersion::CurrentV7(summary) => Some((
                 &summary.model_sample_event_ref,
                 &summary.narrative_source,
                 &summary.source_plan_blob_id,
@@ -785,7 +851,9 @@ impl SessionSummary {
         &self,
         graph: &super::VerifiedCompactionGraph,
     ) -> Result<(), SessionError> {
-        let SessionSummaryVersion::CurrentV6(summary) = &self.version else {
+        let (SessionSummaryVersion::CurrentV6(summary) | SessionSummaryVersion::CurrentV7(summary)) =
+            &self.version
+        else {
             return Err(super::task::invalid_task("Summary has no v6 graph"));
         };
         if summary.model_sample_event_ref != graph.root_event_id
@@ -794,12 +862,45 @@ impl SessionSummary {
             || summary.source_plan_hash != graph.plan_hash
             || summary.narrative != graph.narrative
             || summary.protected_inputs != protected_references(graph)?
+            || summary.task_selection_event != graph.task_selection_event
+            || summary.task_id != graph.task_id
+            || summary.task_scope != graph.task_scope
+            || summary.summarized_history != graph.summarized_history
         {
             return Err(super::task::invalid_task(
                 "v6 Summary source or protected inputs do not match verified graph",
             ));
         }
+        summary.task_references.validate_graph_projection(graph)?;
         Ok(())
+    }
+
+    pub(crate) fn selected_task_id(&self) -> Option<&str> {
+        match &self.version {
+            SessionSummaryVersion::CurrentV7(summary) => summary.task_id.as_deref(),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn task_selection_event(&self) -> Option<&crate::domain::events::EventId> {
+        match &self.version {
+            SessionSummaryVersion::CurrentV7(summary) => summary.task_selection_event.as_ref(),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn summarized_history(&self) -> &[crate::domain::events::EventId] {
+        match &self.version {
+            SessionSummaryVersion::CurrentV7(summary) => &summary.summarized_history,
+            _ => &[],
+        }
+    }
+
+    pub(crate) fn task_scope(&self) -> &[String] {
+        match &self.version {
+            SessionSummaryVersion::CurrentV7(summary) => &summary.task_scope,
+            _ => &[],
+        }
     }
 
     pub(crate) const fn requires_reference_validation(&self) -> bool {
@@ -859,7 +960,8 @@ impl SessionSummary {
                     SessionSummaryVersion::CurrentV5(summary) => {
                         Some(&summary.model_sample_event_ref)
                     }
-                    SessionSummaryVersion::CurrentV6(summary) => {
+                    SessionSummaryVersion::CurrentV6(summary)
+                    | SessionSummaryVersion::CurrentV7(summary) => {
                         Some(&summary.model_sample_event_ref)
                     }
                     _ => None,
@@ -921,7 +1023,8 @@ impl SessionSummary {
         let maximum = match &self.version {
             SessionSummaryVersion::CurrentV4(summary) => summary.byte_limit,
             SessionSummaryVersion::CurrentV5(summary) => summary.byte_limit,
-            SessionSummaryVersion::CurrentV6(summary) => {
+            SessionSummaryVersion::CurrentV6(summary)
+            | SessionSummaryVersion::CurrentV7(summary) => {
                 let narrative_bytes = serde_json::to_vec(&summary.narrative)
                     .map_err(|error| SessionError::PayloadEncode {
                         event_type: EventType::new(COMPACTION_CREATED_EVENT_TYPE),

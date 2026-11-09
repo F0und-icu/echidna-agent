@@ -1,3 +1,4 @@
+use super::task_context::{ScriptedResponse, selector_candidates, spawn_scripted_responses_server};
 use super::*;
 
 #[test]
@@ -25,11 +26,11 @@ fn resume_before_the_first_task_preserves_external_research_defaults() {
             .replace("phase = \"mapping\"", "phase = \"experiment\""),
     )
     .unwrap();
-    let server = spawn_responses_server(vec![(
-        200,
-        text_response("CUSTOM_DEFAULTS", "defaults-response"),
-    )]);
-    let config = write_config(root.path(), &server.base_url);
+    let server = spawn_scripted_responses_server(vec![
+        ScriptedResponse::InitialSelection,
+        ScriptedResponse::Response(200, text_response("CUSTOM_DEFAULTS", "defaults-response")),
+    ]);
+    let config = write_context_window_config(root.path(), &server.base_url, 272_000);
     let initial = run_chat(
         root.path(),
         &config,
@@ -53,6 +54,10 @@ fn resume_before_the_first_task_preserves_external_research_defaults() {
         "{}",
         String::from_utf8_lossy(&resumed.stderr)
     );
+    selector_candidates(&f2a_request_body(
+        &server.requests,
+        "custom default initial selection",
+    ));
     let request = f2a_request_body(&server.requests, "custom default resume");
     f2a_join_server(server, "custom default resume");
     assert!(
@@ -102,12 +107,14 @@ fn oversized_reload_preserves_binding_and_next_turn_without_a_transition_or_requ
     for file in ["persona.md", "work.md"] {
         fs::write(candidate.join(file), "OVERSIZED_CANDIDATE ".repeat(3_200)).unwrap();
     }
-    let server = spawn_responses_server(vec![
-        (
+    let server = spawn_scripted_responses_server(vec![
+        ScriptedResponse::InitialSelection,
+        ScriptedResponse::Response(
             200,
             text_response("BEFORE_RELOAD", "before-rejected-reload"),
         ),
-        (
+        ScriptedResponse::NewSelection,
+        ScriptedResponse::Response(
             200,
             text_response("AFTER_REJECTION", "after-rejected-reload"),
         ),
@@ -130,8 +137,19 @@ fn oversized_reload_preserves_binding_and_next_turn_without_a_transition_or_requ
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Agent reload rejected"), "{stdout}");
     assert!(stdout.contains("budget"), "{stdout}");
-    for index in 0..2 {
+    for index in 0..4 {
         let request = f2a_request_body(&server.requests, &format!("admission request {index}"));
+        if index == 0 {
+            assert_eq!(selector_candidates(&request)["input"]["text"], "FIRST_TASK");
+            continue;
+        }
+        if index == 2 {
+            assert_eq!(
+                selector_candidates(&request)["input"]["text"],
+                "SECOND_TASK"
+            );
+            continue;
+        }
         let instructions = request["instructions"].as_str().unwrap();
         assert!(instructions.contains("ADMITTED_WRITER_PERSONA"));
         assert!(!instructions.contains("OVERSIZED_CANDIDATE"));
@@ -155,5 +173,5 @@ fn oversized_reload_preserves_binding_and_next_turn_without_a_transition_or_requ
     assert_eq!(shown["agent_id"], "budget-writer");
     assert!(shown["domain"].is_null());
     assert!(shown["phase"].is_null());
-    assert_eq!(shown["requests"], 2);
+    assert_eq!(shown["requests"], 4);
 }

@@ -119,7 +119,7 @@ The version-1 `agent.toml` contains:
 | `instructions` | Relative `persona_file`, `work_file`, and ordered `method_files`. |
 | `context.personal` / `project` | `configured` snapshots the files selected in Provider config; `none` excludes them. |
 | `context.memory` | `none`, `project`, or `agent`; Agent memory is scoped by project and stable ID. |
-| `tools` | Known built-in or exact discovered MCP names mapped to `direct`, `deferred`, or `hidden`; omitted names are Hidden. Deferred tools require direct `tool_search`. |
+| `tools` | Known built-in or exact discovered MCP names mapped to `direct`, `deferred`, or `hidden`; omitted names are Hidden, except Session-bound `context_read` defaults to Direct in Chat. Explicit declarations take precedence. Deferred tools require direct `tool_search`. |
 | Optional `research` | Existing domain/phase selections and complete external prompt maps. Omission means no Research state or default Research events. |
 
 For research definitions, Direct/Deferred are baseline exposure and existing Domain/Phase
@@ -139,8 +139,10 @@ memory lives in `.echidna/memory/agents/<agent-id>/`. Legacy projects keep their
 existing `.cyber-agent/` layout. The first successful `memory_write` creates a
 document; an ordinary reply or compaction does not save memory. Enabled Agents
 receive built-in guidance to preserve reusable lessons and explicit remember
-requests through the memory tools. `core.md` is refreshed into later context;
-detail notes require explicit reads. There is no background model extraction
+requests through the memory tools. `core.md` is selected by task, source scope
+and revision, retaining established global constraints; detailed notes are read
+on demand. Context selection does not rewrite Memory files or trim the bound
+persona, work and method instructions. There is no background model extraction
 task or guarantee of a memory write on every turn.
 Current fixed guidance requests English narrative in new memory writes, preserving
 literal quotations, code, paths and identifiers. Existing documents are not translated.
@@ -158,6 +160,29 @@ changes. Neither command automatically samples a model, continues a task, or rep
 New Sessions select `chat --agent`, then top-level config `agent_definition`, then builtin
 research. Config paths resolve relative to that config file. Model and credential selection
 remain independent. Older binaries cannot read the new definition events.
+
+### Automatic task context
+
+Ask a new question, follow up or return to an earlier task naturally in the same
+Chat. The runtime keeps the complete Session record and selects relevant history,
+constraints and progress for the current request. References to earlier methods
+or comparisons combine the required sources. Excluding old material starts a
+new model context. The read-only `context_read` tool searches task sources,
+expands exact references and reads progress within the bound project and Agent.
+
+A new input normally adds one tool-free selection request. Inputs without old
+material and Tool continuations in the same Turn can need none. Explicit gaps
+or attribution corrections allow at most two semantic selections per Turn.
+Every actual request and retry uses the existing shared admission budget,
+reserving one admission for the main request. One selection plus one main
+request needs two admissions; images, Tool continuations and retries cost more.
+Short questions may take longer because of the control request. Actual reported
+cached usage and request counts remain available in the existing local records.
+
+Selection depends on the configured model's judgment; correct the intent in
+ordinary language when necessary. Task changes preserve real Tool outcomes and
+background work. Stops requiring recovery retain the existing `/resume` flow.
+Older binaries cannot Resume Sessions containing the new task-context events.
 
 ### Optional self-improvement
 
@@ -613,6 +638,12 @@ Optionally set `[runtime].compaction_reasoning_effort = "high"` for the isolated
 compaction request. Omit it to inherit the primary setting. Compaction uses the
 same model, endpoint and credentials; primary and vision requests are unchanged.
 The server must support the selected effort; a refusal is shown without downgrade.
+
+Optionally set `[runtime].task_selection_reasoning_effort = "low"` for isolated
+task-context selection using the same primary model. Omission inherits primary;
+main-task and compaction effort remain unchanged. The service must support the
+selected value. Completed selector responses retain reported usage even when
+their decisions fail validation; absent usage stays unknown.
 
 Connection failures and transport interruptions before a complete model response receive
 at most two retries, after 500ms and 1000ms. `/stop` and Ctrl+C can cancel the wait.

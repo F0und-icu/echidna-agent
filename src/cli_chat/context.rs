@@ -51,11 +51,20 @@ impl ChatContextCache {
         let project_snapshot = ProjectSnapshotContext::new(snapshot.snapshot)?;
         let core_memory =
             load_core_memory(project, binding, tools.window_policy().core_file_bytes())?;
-        Ok(CurrentContextState::new(
-            world_state,
-            project_snapshot,
-            core_memory,
-        ))
+        let memory_revision = crate::domain::canonical_json::canonical_blake3_hash(
+            &load_task_memory(project, binding)?,
+        )
+        .map_err(|error| ChatContextRefreshError::MemoryRevision(error.to_string()))?;
+        Ok(
+            CurrentContextState::new(world_state, project_snapshot, core_memory)
+                .with_research_revision(
+                    binding
+                        .definition()
+                        .research()
+                        .map(|_| read.research_digest.clone()),
+                )
+                .with_memory_revision(memory_revision),
+        )
     }
 
     fn current_project_context(
@@ -77,11 +86,9 @@ impl ChatContextCache {
                 Ok(None)
             };
         }
-        let state = read
-            .research_state()
-            .map_err(ChatContextRefreshError::ResearchProjection)?;
+        let state = read.research_state();
         let world = if research {
-            Some(ResearchWorldState::from_research_state(&state)?)
+            Some(ResearchWorldState::from_research_state(state)?)
         } else {
             None
         };
@@ -89,6 +96,32 @@ impl ChatContextCache {
         self.world_state = world.clone();
         Ok(world)
     }
+}
+
+pub(super) fn load_task_memory(
+    project: &Project,
+    binding: &AgentDefinitionBinding,
+) -> Result<Vec<crate::domain::session::TaskMemoryDocument>, ChatContextRefreshError> {
+    let Some(scope) = crate::cli_agent::memory_scope(binding) else {
+        return Ok(Vec::new());
+    };
+    LocalProjectMemory::with_scope(project, scope.clone())
+        .read_retrieval_documents()?
+        .into_iter()
+        .map(
+            |document| match (document.document.content, document.document.hash) {
+                (Some(content), Some(revision)) => Ok(crate::domain::session::TaskMemoryDocument {
+                    scope: scope.clone(),
+                    path: document.path,
+                    revision,
+                    content,
+                }),
+                _ => Err(ChatContextRefreshError::MemoryRevision(
+                    "Memory document and revision differ".to_owned(),
+                )),
+            },
+        )
+        .collect()
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -152,8 +185,8 @@ fn memory_core_fragment(
 
 #[derive(Debug, Error)]
 pub(crate) enum ChatContextRefreshError {
-    #[error("rebuild Research projection for current Context: {0}")]
-    ResearchProjection(String),
+    #[error("Memory snapshot revision failed: {0}")]
+    MemoryRevision(String),
     #[error("unchanged Research revision did not retain a cached WorldState")]
     MissingCachedWorldState,
     #[error(transparent)]

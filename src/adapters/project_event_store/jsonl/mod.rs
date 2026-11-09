@@ -4,11 +4,11 @@ mod recovery;
 mod scan;
 
 use std::fs::{File, OpenOptions};
-use std::io::{BufReader, Read, Write};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::marker::PhantomData;
 use std::path::PathBuf;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::domain::events::{
@@ -20,7 +20,7 @@ use crate::ports::{EventSink, EventSource};
 use super::ProjectEventStoreError;
 use super::project::{Project, ProjectEventStream, ProjectWriter, create_directory};
 use recovery::{RecoveryArtifact, persist_recovery_artifact, replace_stream_atomically};
-use scan::{StreamScan, next_sequence, scan_stream};
+use scan::{SessionRecordObserver, StreamScan, next_sequence, scan_stream};
 
 pub(crate) use scan::scan_stream_bytes;
 
@@ -34,6 +34,109 @@ pub(crate) struct SessionStreamCursor {
     bytes: usize,
     hash: blake3::Hasher,
     last_sequence: Option<EventSequence>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub(crate) struct SessionStreamCheckpoint {
+    pub(crate) bytes: usize,
+    pub(crate) hash: [u8; 32],
+    pub(crate) last_sequence: Option<EventSequence>,
+}
+
+impl SessionStreamCursor {
+    pub(crate) fn indexed_bytes(&self) -> usize {
+        self.bytes
+    }
+
+    pub(crate) fn indexed_events(&self) -> u64 {
+        self.last_sequence.map_or(0, |sequence| sequence.get())
+    }
+
+    pub(crate) fn checkpoint(&self) -> SessionStreamCheckpoint {
+        SessionStreamCheckpoint {
+            bytes: self.bytes,
+            hash: *self.hash.finalize().as_bytes(),
+            last_sequence: self.last_sequence,
+        }
+    }
+    pub(crate) fn matches_watermark(&self, bytes: usize, hash: blake3::Hash) -> bool {
+        self.bytes == bytes && self.hash.finalize() == hash
+    }
+
+    pub(crate) fn same_prefix(&self, other: &Self) -> bool {
+        self.path == other.path
+            && self.stream_id == other.stream_id
+            && self.matches_watermark(other.bytes, other.hash.finalize())
+    }
+}
+
+pub(crate) fn verify_session_checkpoint(
+    project: &Project,
+    session_id: &StreamId,
+    checkpoint: &SessionStreamCheckpoint,
+) -> Result<usize, ProjectEventStoreError> {
+    let path = project.session_stream_path_existing(session_id)?;
+    let file = File::open(&path).map_err(|source| ProjectEventStoreError::Io {
+        operation: "read Session Event prefix for source verification",
+        path: path.clone(),
+        source,
+    })?;
+    verify_prefix_bytes(
+        &mut BufReader::new(file),
+        &path,
+        checkpoint.bytes,
+        blake3::Hash::from(checkpoint.hash),
+    )?;
+    Ok(checkpoint.bytes)
+}
+
+fn verify_session_prefix(
+    reader: &mut BufReader<File>,
+    path: &std::path::Path,
+    stream_id: &StreamId,
+    cursor: &SessionStreamCursor,
+) -> Result<blake3::Hasher, ProjectEventStoreError> {
+    if cursor.path != path || &cursor.stream_id != stream_id {
+        return Err(ProjectEventStoreError::ValidatedPrefixChanged {
+            path: path.to_path_buf(),
+        });
+    }
+    verify_prefix_bytes(reader, path, cursor.bytes, cursor.hash.finalize())
+}
+
+fn verify_prefix_bytes(
+    reader: &mut BufReader<File>,
+    path: &std::path::Path,
+    bytes: usize,
+    expected: blake3::Hash,
+) -> Result<blake3::Hasher, ProjectEventStoreError> {
+    let mut remaining = bytes;
+    let mut hash = blake3::Hasher::new();
+    let mut chunk = [0; 65_536];
+    while remaining > 0 {
+        let capacity = remaining.min(chunk.len());
+        let count =
+            reader
+                .read(&mut chunk[..capacity])
+                .map_err(|source| ProjectEventStoreError::Io {
+                    operation: "verify Session Event prefix",
+                    path: path.to_path_buf(),
+                    source,
+                })?;
+        if count == 0 {
+            return Err(ProjectEventStoreError::ValidatedPrefixChanged {
+                path: path.to_path_buf(),
+            });
+        }
+        hash.update(&chunk[..count]);
+        remaining -= count;
+    }
+    if hash.finalize() != expected {
+        return Err(ProjectEventStoreError::ValidatedPrefixChanged {
+            path: path.to_path_buf(),
+        });
+    }
+    Ok(hash)
 }
 
 /// Reads the initialized Research stream without taking the writer lock or
@@ -60,6 +163,156 @@ pub(crate) fn read_existing_session_events(
     let stream_id = stream.stream_id();
     let registry = EventUpcasterRegistry::current();
     scan_stream(&path, &stream_id, &registry)?.into_complete(&path)
+}
+
+/// Visit each exact validated Session record and its original byte range for a
+/// disposable source index. No derived index is an authority for the stream.
+pub(crate) fn visit_existing_session_records(
+    project: &Project,
+    session_id: &StreamId,
+    observer: &mut SessionRecordObserver<'_>,
+) -> Result<(usize, blake3::Hash), ProjectEventStoreError> {
+    let path = project.session_stream_path_existing(session_id)?;
+    let stream_id = ProjectEventStream::Session(session_id.clone()).stream_id();
+    let registry = EventUpcasterRegistry::current();
+    let file = File::open(&path).map_err(|source| ProjectEventStoreError::Io {
+        operation: "read Session Event stream for source index",
+        path: path.clone(),
+        source,
+    })?;
+    let mut hasher = blake3::Hasher::new();
+    let scan = scan::scan_stream_reader_observed(
+        &mut BufReader::new(file),
+        &path,
+        &stream_id,
+        &registry,
+        0,
+        None,
+        &mut hasher,
+        false,
+        Some(observer),
+    )?;
+    match scan {
+        StreamScan::Complete {
+            validated_bytes, ..
+        } => Ok((validated_bytes, hasher.finalize())),
+        StreamScan::Trailing { offset, .. } => {
+            Err(ProjectEventStoreError::UnrecoveredTail { path, offset })
+        }
+    }
+}
+
+pub(crate) fn visit_session_records_after(
+    project: &Project,
+    session_id: &StreamId,
+    cursor: &SessionStreamCursor,
+    observer: &mut SessionRecordObserver<'_>,
+) -> Result<(usize, blake3::Hash), ProjectEventStoreError> {
+    let path = project.session_stream_path_existing(session_id)?;
+    let stream_id = ProjectEventStream::Session(session_id.clone()).stream_id();
+    if cursor.path != path || cursor.stream_id != stream_id {
+        return Err(ProjectEventStoreError::ValidatedPrefixChanged { path });
+    }
+    visit_session_records_after_checkpoint(
+        project,
+        session_id,
+        &SessionStreamCheckpoint {
+            bytes: cursor.bytes,
+            hash: *cursor.hash.finalize().as_bytes(),
+            last_sequence: cursor.last_sequence,
+        },
+        observer,
+    )
+}
+
+pub(crate) fn visit_session_records_after_checkpoint(
+    project: &Project,
+    session_id: &StreamId,
+    checkpoint: &SessionStreamCheckpoint,
+    observer: &mut SessionRecordObserver<'_>,
+) -> Result<(usize, blake3::Hash), ProjectEventStoreError> {
+    let path = project.session_stream_path_existing(session_id)?;
+    let stream_id = ProjectEventStream::Session(session_id.clone()).stream_id();
+    let file = File::open(&path).map_err(|source| ProjectEventStoreError::Io {
+        operation: "read Session Event suffix for source index",
+        path: path.clone(),
+        source,
+    })?;
+    let mut reader = BufReader::new(file);
+    let mut hash = verify_prefix_bytes(
+        &mut reader,
+        &path,
+        checkpoint.bytes,
+        blake3::Hash::from(checkpoint.hash),
+    )?;
+    let registry = EventUpcasterRegistry::current();
+    match scan::scan_stream_reader_observed(
+        &mut reader,
+        &path,
+        &stream_id,
+        &registry,
+        checkpoint.bytes,
+        checkpoint.last_sequence,
+        &mut hash,
+        false,
+        Some(observer),
+    )? {
+        StreamScan::Complete {
+            validated_bytes, ..
+        } => Ok((validated_bytes, hash.finalize())),
+        StreamScan::Trailing { offset, .. } => {
+            Err(ProjectEventStoreError::UnrecoveredTail { path, offset })
+        }
+    }
+}
+
+/// Load and verify one bounded original byte segment of a previously indexed
+/// Session stream. A same-size mutation is detected from bytes, not metadata.
+pub(crate) fn read_indexed_session_segment(
+    project: &Project,
+    session_id: &StreamId,
+    offset: u64,
+    length: usize,
+    expected: blake3::Hash,
+) -> Result<Vec<u8>, ProjectEventStoreError> {
+    const MAX_SEGMENT_BYTES: usize = 4 * 1024 * 1024;
+    let path = project.session_stream_path_existing(session_id)?;
+    if length > MAX_SEGMENT_BYTES {
+        return Err(ProjectEventStoreError::Io {
+            operation: "read indexed Session segment",
+            path,
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "indexed segment exceeds 4 MiB",
+            ),
+        });
+    }
+    let mut file = File::open(&path).map_err(|source| ProjectEventStoreError::Io {
+        operation: "open indexed Session segment",
+        path: path.clone(),
+        source,
+    })?;
+    file.seek(SeekFrom::Start(offset))
+        .map_err(|source| ProjectEventStoreError::Io {
+            operation: "seek indexed Session segment",
+            path: path.clone(),
+            source,
+        })?;
+    let mut bytes = vec![0; length];
+    if let Err(source) = file.read_exact(&mut bytes) {
+        if source.kind() == std::io::ErrorKind::UnexpectedEof {
+            return Err(ProjectEventStoreError::ValidatedPrefixChanged { path });
+        }
+        return Err(ProjectEventStoreError::Io {
+            operation: "read indexed Session segment",
+            path,
+            source,
+        });
+    }
+    if blake3::hash(&bytes) != expected {
+        return Err(ProjectEventStoreError::ValidatedPrefixChanged { path });
+    }
+    Ok(bytes)
 }
 
 /// Explicit caller-provided facts for a possible `StreamRecovered` Event.
@@ -116,32 +369,10 @@ impl ProjectWriter {
                 })?,
             );
         let offset = cursor.map_or(0, |cursor| cursor.bytes);
-        let mut hash = blake3::Hasher::new();
-        if let Some(cursor) = cursor {
-            if cursor.path != path || cursor.stream_id != stream_id {
-                return Err(ProjectEventStoreError::ValidatedPrefixChanged { path });
-            }
-            let mut remaining = offset;
-            let mut chunk = [0; 65_536];
-            while remaining > 0 {
-                let capacity = remaining.min(chunk.len());
-                let count = reader.read(&mut chunk[..capacity]).map_err(|source| {
-                    ProjectEventStoreError::Io {
-                        operation: "verify Session Event prefix",
-                        path: path.clone(),
-                        source,
-                    }
-                })?;
-                if count == 0 {
-                    return Err(ProjectEventStoreError::ValidatedPrefixChanged { path });
-                }
-                hash.update(&chunk[..count]);
-                remaining -= count;
-            }
-            if hash.finalize() != cursor.hash.finalize() {
-                return Err(ProjectEventStoreError::ValidatedPrefixChanged { path });
-            }
-        }
+        let mut hash = match cursor {
+            Some(cursor) => verify_session_prefix(&mut reader, &path, &stream_id, cursor)?,
+            None => blake3::Hasher::new(),
+        };
         let scan = scan::scan_stream_reader(
             &mut reader,
             &path,

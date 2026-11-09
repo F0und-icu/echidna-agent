@@ -36,6 +36,7 @@ pub(crate) struct RuntimeSettings {
     pub(crate) model_request_limit_per_turn: usize,
     pub(crate) auto_compact: bool,
     pub(crate) compaction_reasoning_effort: Option<ReasoningEffort>,
+    pub(crate) task_selection_reasoning_effort: Option<ReasoningEffort>,
     pub(crate) context_budget: crate::domain::context::ContextBudgetPolicy,
 }
 
@@ -46,6 +47,7 @@ impl Default for RuntimeSettings {
                 crate::app::model_request_budget::DEFAULT_MODEL_REQUEST_LIMIT,
             auto_compact: false,
             compaction_reasoning_effort: None,
+            task_selection_reasoning_effort: None,
             context_budget: Default::default(),
         }
     }

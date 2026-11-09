@@ -27,6 +27,8 @@ pub(crate) mod retrieval;
 pub mod sampling;
 pub mod session;
 pub mod snapshot;
+pub(crate) mod task_context;
+pub(crate) mod task_context_research;
 pub mod tools;
 pub mod trace_eval;
 pub mod vision;

@@ -1,3 +1,7 @@
+use super::task_context::{
+    ScriptedResponse::{InitialSelection, Response},
+    selector_candidates, spawn_scripted_responses_server,
+};
 use super::*;
 
 #[test]
@@ -60,8 +64,10 @@ fn environment_prompt_revision_resumes_known_generations_without_rewriting_selec
             }
         }
         let before = session_events(root.path(), session.as_str());
-        let server =
-            spawn_responses_server(vec![(200, text_response("resumed", "environment-resumed"))]);
+        let server = spawn_scripted_responses_server(vec![
+            InitialSelection,
+            Response(200, text_response("resumed", "environment-resumed")),
+        ]);
         let config = write_config(harness.path(), &server.base_url);
         let output = f2a_wait_child(
             spawn_f2a_chat(
@@ -76,6 +82,11 @@ fn environment_prompt_revision_resumes_known_generations_without_rewriting_selec
             output.status.success(),
             "{}",
             String::from_utf8_lossy(&output.stderr)
+        );
+        let selector = f2a_request_body(&server.requests, "legacy prompt initial selection");
+        assert_eq!(
+            selector_candidates(&selector)["input"]["text"],
+            "Only answer what phase is selected."
         );
         let request = f2a_request_body(&server.requests, "legacy prompt request");
         assert!(request.get("previous_response_id").is_none());
@@ -137,8 +148,9 @@ fn environment_guidance_delivers_actual_dialect_observations_and_versioned_promp
             })
         })
         .collect::<Vec<_>>();
-    let server = spawn_responses_server(vec![
-        (
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(
             200,
             m4_long_flow_tool_response(
                 "environment-probes",
@@ -147,7 +159,7 @@ fn environment_guidance_delivers_actual_dialect_observations_and_versioned_promp
                 "probe-response",
             ),
         ),
-        (
+        Response(
             200,
             m4_long_flow_tool_response(
                 "environment-actions",
@@ -156,7 +168,7 @@ fn environment_guidance_delivers_actual_dialect_observations_and_versioned_promp
                 "action-response",
             ),
         ),
-        (
+        Response(
             200,
             text_response("observed dialects retained", "environment-done"),
         ),
@@ -175,6 +187,11 @@ fn environment_guidance_delivers_actual_dialect_observations_and_versioned_promp
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
+    );
+    let selector = f2a_request_body(&server.requests, "environment initial selection");
+    assert_eq!(
+        selector_candidates(&selector)["input"]["text"],
+        "inspect synthetic tool identities"
     );
     let first = f2a_request_body(&server.requests, "environment initial");
     assert!(
@@ -227,11 +244,11 @@ fn environment_guidance_delivers_actual_dialect_observations_and_versioned_promp
     )
     .unwrap();
     let state = projection.state();
-    assert_eq!(state.request_audits().len(), 3);
+    assert_eq!(state.request_audits().len(), 4);
     assert_audits_reconstruct(root.path(), state);
     let definition = state.agent_definition_binding().unwrap().definition();
     let research = definition.research().unwrap();
-    for audit in state.request_audits() {
+    for audit in &state.request_audits()[1..] {
         let audit = serde_json::to_string(audit).unwrap();
         assert!(audit.contains(&format!(
             "prompt:agent:{}:domain:binary:{}",

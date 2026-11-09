@@ -24,6 +24,11 @@ impl CachedSessionProjection {
                 project.project_id().clone(),
                 &events,
                 &project_events,
+                || {
+                    crate::adapters::research_projection::load_reference_catalog(project).map_err(
+                        |message| crate::domain::session::SessionError::TaskContext { message },
+                    )
+                },
                 &crate::adapters::artifact_store::LocalArtifactStore::for_project(project),
             )?,
             cursor: store.projection_cursor(),
@@ -88,19 +93,7 @@ impl DurableChatSession {
         )?;
         let mut projection = match previous.take() {
             Some(mut cached) => {
-                let mut requires_project_replay = false;
-                for event in &events {
-                    if let crate::domain::session::SessionEvent::CompactionCreated { compaction } =
-                        crate::domain::session::SessionEvent::decode(
-                            &event.event_type,
-                            event.payload.clone(),
-                        )?
-                        && compaction.summary().graph_reference().is_some()
-                    {
-                        requires_project_replay = true;
-                    }
-                }
-                if requires_project_replay {
+                if cached.projection.suffix_requires_project_replay(&events)? {
                     let all_events =
                         crate::adapters::project_event_store::read_existing_session_events(
                             &self.project,
@@ -114,6 +107,14 @@ impl DurableChatSession {
                         self.project.project_id().clone(),
                         &all_events,
                         &project_events,
+                        || {
+                            crate::adapters::research_projection::load_reference_catalog(
+                                &self.project,
+                            )
+                            .map_err(|message| {
+                                crate::domain::session::SessionError::TaskContext { message }
+                            })
+                        },
                         &self.artifacts,
                     )?
                 } else {
@@ -132,6 +133,14 @@ impl DurableChatSession {
                     self.project.project_id().clone(),
                     &events,
                     &project_events,
+                    || {
+                        crate::adapters::research_projection::load_reference_catalog(&self.project)
+                            .map_err(
+                                |message| crate::domain::session::SessionError::TaskContext {
+                                    message,
+                                },
+                            )
+                    },
                     &self.artifacts,
                 )?
             }

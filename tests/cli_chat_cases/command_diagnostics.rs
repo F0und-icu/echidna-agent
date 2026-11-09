@@ -1,3 +1,7 @@
+use super::task_context::{
+    ScriptedResponse::{InitialSelection, Response},
+    selector_candidates, spawn_scripted_responses_server,
+};
 use super::*;
 
 #[test]
@@ -5,8 +9,9 @@ fn command_failure_diagnostics_survive_child_checkpoint_history_and_provider_del
     let root = TemporaryDirectory::new("command-diagnostics-chat");
     let harness = TemporaryDirectory::new("command-diagnostics-provider");
     initialize_project(root.path());
-    let server = spawn_responses_server(vec![
-        (
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(
             200,
             m4_long_flow_tool_response(
                 "diagnostics",
@@ -22,7 +27,7 @@ fn command_failure_diagnostics_survive_child_checkpoint_history_and_provider_del
                 "diagnostics-response",
             ),
         ),
-        (
+        Response(
             200,
             text_response("observations retained", "diagnostics-done"),
         ),
@@ -39,6 +44,8 @@ fn command_failure_diagnostics_survive_child_checkpoint_history_and_provider_del
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    let selector = f2a_request_body(&server.requests, "diagnostics selection");
+    selector_candidates(&selector);
     let _ = f2a_request_body(&server.requests, "diagnostics initial");
     let followup = f2a_request_body(&server.requests, "diagnostics results");
     let delivered = followup["input"]

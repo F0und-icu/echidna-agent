@@ -537,7 +537,13 @@ impl AgentDefinition {
                             .exposures
                             .get(&spec.name)
                             .copied()
-                            .unwrap_or(ToolExposure::Hidden),
+                            .unwrap_or_else(|| {
+                                if spec.name.as_str() == "context_read" {
+                                    spec.exposure
+                                } else {
+                                    ToolExposure::Hidden
+                                }
+                            }),
                     )
                 })
                 .collect::<BTreeMap<_, _>>(),

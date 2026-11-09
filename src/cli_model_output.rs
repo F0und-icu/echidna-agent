@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde_json::{Value, json};
 
 use crate::domain::model::ModelEvent;
+use crate::ports::model::ModelRequestPresentation;
 
 use crate::terminal_content::ContentView;
 use crate::terminal_content::escaped_text;
@@ -37,10 +38,11 @@ pub(crate) struct RequestOutput {
     scoped_text_open: bool,
 
     full: bool,
+    selection: bool,
 }
 
 impl RequestOutput {
-    pub(crate) fn new(role: &'static str, full: bool) -> Self {
+    pub(crate) fn new(role: &'static str, full: bool, selection: bool) -> Self {
         Self {
             role,
             request_id: NEXT_REQUEST.fetch_add(1, Ordering::Relaxed),
@@ -54,6 +56,7 @@ impl RequestOutput {
             scoped_text_open: false,
 
             full,
+            selection,
         }
     }
 
@@ -97,6 +100,9 @@ impl RequestOutput {
     }
 
     pub(crate) fn model_event(&mut self, event: &ModelEvent, reasoning_item_matches_deltas: bool) {
+        if self.selection && !self.full {
+            return;
+        }
         self.end_reasoning_summary_line();
         match event {
             ModelEvent::ReasoningDelta { text } => {
@@ -142,6 +148,9 @@ impl RequestOutput {
     }
 
     pub(crate) fn reasoning_summary(&mut self, text: &str, starts_part: bool) {
+        if self.selection && !self.full {
+            return;
+        }
         if text.is_empty() {
             return;
         }
@@ -206,11 +215,13 @@ impl RequestOutput {
             );
             return;
         }
-        let _ = writeln!(
-            console::stderr(),
-            "[rejected response] {}",
-            escaped_text(response)
-        );
+        if !self.selection {
+            let _ = writeln!(
+                console::stderr(),
+                "[rejected response] {}",
+                escaped_text(response)
+            );
+        }
         if self.saw_reasoning {
             let _ = writeln!(
                 console::stderr(),
@@ -317,8 +328,14 @@ impl ResponsesObserver for CliModelOutput {
     fn role(&self) -> &'static str {
         self.role
     }
-    fn begin(&self) -> Box<dyn RequestObserver> {
-        Box::new(RequestOutput::new(self.role, self.full))
+    fn begin(&self, presentation: ModelRequestPresentation) -> Box<dyn RequestObserver> {
+        let selection = presentation == ModelRequestPresentation::TaskSelection;
+        let role = if selection {
+            "task selection"
+        } else {
+            self.role
+        };
+        Box::new(RequestOutput::new(role, self.full, selection))
     }
 
     fn full_debug(&self) -> bool {
@@ -326,8 +343,16 @@ impl ResponsesObserver for CliModelOutput {
     }
     fn notify(&self, notice: ResponseNotice) {
         match notice {
-            ResponseNotice::RetryDiscarded { retry } => {
-                discarded_partial_response(self.role, retry)
+            ResponseNotice::RetryDiscarded {
+                retry,
+                presentation,
+            } => {
+                let role = if presentation == ModelRequestPresentation::TaskSelection {
+                    "task selection"
+                } else {
+                    self.role
+                };
+                discarded_partial_response(role, retry)
             }
             ResponseNotice::CaptureSaved { path } => {
                 let _ = writeln!(

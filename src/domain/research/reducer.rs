@@ -101,7 +101,7 @@ impl ResearchReferenceCatalog {
         Ok(())
     }
 
-    pub(super) fn execution_receipt(&self, id: &ExecutionReceiptId) -> Option<&ExecutionReceipt> {
+    pub(crate) fn execution_receipt(&self, id: &ExecutionReceiptId) -> Option<&ExecutionReceipt> {
         self.execution_receipts.get(id)
     }
 
@@ -480,7 +480,7 @@ impl ResearchEvent {
     }
 }
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct ResearchState {
     #[serde(skip)]
     pub(crate) stream_integrity: ProjectStreamIntegrity,

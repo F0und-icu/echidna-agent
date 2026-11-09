@@ -1,6 +1,20 @@
 //! Real terminal + loopback transport, no live Provider or model-quality claim.
+use super::task_context::{
+    ScriptedResponse::{ContinueSelection, InitialSelection, Response},
+    continue_selection_response, initial_selection_response, selector_candidates,
+    spawn_scripted_responses_server,
+};
 use super::*;
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
+
+fn serve_initial_selection(listener: &TcpListener, label: &str) -> String {
+    let mut socket = f3_context::accept_before_deadline(listener, label);
+    socket.set_read_timeout(Some(F2A_WAIT)).unwrap();
+    let raw = read_http_request(&mut socket);
+    let body = initial_selection_response(&request_body(&raw), label);
+    f3_context::write_sse_response(&mut socket, &body);
+    raw
+}
 
 struct TerminalChat {
     child: Box<dyn portable_pty::Child + Send + Sync>,
@@ -225,6 +239,9 @@ fn rsi2_terminal_stop_cancels_diagnosis_without_recovery_or_probe_requests() {
     let (observed, requests) = mpsc::channel();
     let (release, wait) = mpsc::channel();
     let server = thread::spawn(move || {
+        observed
+            .send(serve_initial_selection(&listener, "RSI2 initial selection"))
+            .unwrap();
         let mut first = f3_context::accept_before_deadline(&listener, "RSI2 primary");
         let request = read_http_request(&mut first);
         observed.send(request).unwrap();
@@ -248,6 +265,7 @@ fn rsi2_terminal_stop_cancels_diagnosis_without_recovery_or_probe_requests() {
         Some(&definition),
     );
     chat.send("[rsi-feedback] Keep future replies concise.\n");
+    selector_candidates(&f2a_request_body(&requests, "RSI2 initial selection"));
     requests.recv_timeout(Duration::from_secs(10)).unwrap();
     let diagnostic = requests.recv_timeout(Duration::from_secs(10)).unwrap();
     assert!(diagnostic.contains("RSI2 diagnosis"));
@@ -268,7 +286,7 @@ fn rsi2_terminal_stop_cancels_diagnosis_without_recovery_or_probe_requests() {
             .iter()
             .filter(|event| event["event_type"] == "session.request_audit_recorded")
             .count(),
-        2
+        3
     );
     assert_eq!(
         events
@@ -305,8 +323,20 @@ fn terminal_processing_prompt_whitespace_and_follow_up_handoff_are_truthful() {
     let (requests_tx, requests) = mpsc::channel();
     let (release, released) = mpsc::channel();
     let server = thread::spawn(move || {
+        requests_tx
+            .send(serve_initial_selection(
+                &listener,
+                "processing initial selection",
+            ))
+            .unwrap();
         let mut old = f3_context::accept_before_deadline(&listener, "old processing request");
         requests_tx.send(read_http_request(&mut old)).unwrap();
+        let mut selection = f3_context::accept_before_deadline(&listener, "follow-up selection");
+        let raw = read_http_request(&mut selection);
+        let body = continue_selection_response(&request_body(&raw), "follow-up-selection", None);
+        requests_tx.send(raw).unwrap();
+        write!(selection, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        drop(selection);
         let mut next = f3_context::accept_before_deadline(&listener, "follow-up request");
         requests_tx.send(read_http_request(&mut next)).unwrap();
         drop(old);
@@ -320,6 +350,7 @@ fn terminal_processing_prompt_whitespace_and_follow_up_handoff_are_truthful() {
     for working in [false, true] {
         if working {
             chat.send("old task\n");
+            selector_candidates(&f2a_request_body(&requests, "processing initial selection"));
             assert!(
                 requests
                     .recv_timeout(Duration::from_secs(10))
@@ -350,7 +381,17 @@ fn terminal_processing_prompt_whitespace_and_follow_up_handoff_are_truthful() {
     chat.assert_draft("working> new task", 17);
     assert!(requests.try_recv().is_err());
     chat.send("\n");
-    let next = requests.recv_timeout(Duration::from_secs(10)).unwrap();
+    let selection = requests.recv_timeout(Duration::from_secs(10)).unwrap();
+    selector_candidates(&request_body(&selection));
+    let next = requests
+        .recv_timeout(Duration::from_secs(10))
+        .unwrap_or_else(|error| {
+            chat.screen();
+            panic!(
+                "follow-up main request: {error}; {}",
+                String::from_utf8_lossy(&chat.captured)
+            );
+        });
     assert!(next.contains("new task"));
     chat.assert_draft("working> ", 9);
     let captured = String::from_utf8_lossy(&chat.captured);
@@ -366,7 +407,7 @@ fn terminal_processing_prompt_whitespace_and_follow_up_handoff_are_truthful() {
     server.join().unwrap();
     let project = Project::discover(root.path()).unwrap();
     let state = reduced_session(&project, &session_id(root.path()));
-    assert_eq!(state.request_audits().len(), 2);
+    assert_eq!(state.request_audits().len(), 4);
     let users = state
         .history()
         .items()
@@ -389,6 +430,12 @@ fn terminal_processing_prompt_whitespace_and_follow_up_handoff_are_truthful() {
     assert_eq!(
         captured
             .matches("[request budget] admitted=1 primary=1 vision=0")
+            .count(),
+        0
+    );
+    assert_eq!(
+        captured
+            .matches("[request budget] admitted=2 primary=2 vision=0")
             .count(),
         2
     );
@@ -422,10 +469,10 @@ fn terminal_processing_paste_mode_preserves_blank_lines_and_exact_text() {
     let root = TemporaryDirectory::new("terminal-processing-paste");
     let harness = TemporaryDirectory::new("terminal-processing-paste-config");
     initialize_project(root.path());
-    let server = spawn_responses_server(vec![(
-        200,
-        text_response("PASTE_BLANKS_DONE", "paste-blanks"),
-    )]);
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(200, text_response("PASTE_BLANKS_DONE", "paste-blanks")),
+    ]);
     let config = write_config(harness.path(), &server.base_url);
     let mut chat = TerminalChat::new(root.path(), &config);
     chat.send("/paste\n\n  \n\u{a0}\nbody\n\n/end\n");
@@ -433,6 +480,10 @@ fn terminal_processing_paste_mode_preserves_blank_lines_and_exact_text() {
     chat.wait_for_draft("you> ", 5);
     chat.exit();
     let expected = "\n  \n\u{a0}\nbody\n";
+    selector_candidates(&f2a_request_body(
+        &server.requests,
+        "paste initial selection",
+    ));
     let body = f2a_request_body(&server.requests, "paste blank lines");
     assert!(
         body["input"]
@@ -460,10 +511,14 @@ fn terminal_processing_follow_up_is_not_announced_after_persistence_failure() {
     let root = TemporaryDirectory::new("terminal-processing-persistence");
     let harness = TemporaryDirectory::new("terminal-processing-persistence-config");
     initialize_project(root.path());
-    let server = spawn_f2a_pending_vision_server();
+    let server = spawn_pending_responses_server(true);
     let config = write_config(harness.path(), &server.base_url);
     let mut chat = TerminalChat::new(root.path(), &config);
     chat.send("held task\n");
+    selector_candidates(&f2a_request_body(
+        &server.requests,
+        "persistence initial selection",
+    ));
     server
         .requests
         .recv_timeout(Duration::from_secs(10))
@@ -503,13 +558,13 @@ fn terminal_processing_follow_up_is_not_announced_after_persistence_failure() {
     fs::write(&events, original).unwrap();
     let project = Project::discover(root.path()).unwrap();
     let state = reduced_session(&project, &session_id(root.path()));
-    assert_eq!(state.request_audits().len(), 1);
+    assert_eq!(state.request_audits().len(), 2);
     assert!(
         !serde_json::to_string(state.history().items())
             .unwrap()
             .contains("follow-up must not start")
     );
-    assert!(server.shutdown().is_empty());
+    server.join();
 }
 
 #[test]
@@ -517,7 +572,10 @@ fn terminal_processing_pipe_preserves_streams_without_status_or_follow_up_notice
     let root = TemporaryDirectory::new("terminal-processing-pipe");
     let harness = TemporaryDirectory::new("terminal-processing-pipe-config");
     initialize_project(root.path());
-    let server = spawn_responses_server(vec![(200, text_response("PIPE_DONE", "pipe-done"))]);
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(200, text_response("PIPE_DONE", "pipe-done")),
+    ]);
     let config = write_config(harness.path(), &server.base_url);
     let output = run_chat(root.path(), &config, "piped task\n/exit\n", &[]);
     assert!(output.status.success());
@@ -528,6 +586,10 @@ fn terminal_processing_pipe_preserves_streams_without_status_or_follow_up_notice
         assert!(!text.contains("[Follow-up accepted"));
         assert!(!text.contains("\x1b[?2004"));
     }
+    selector_candidates(&f2a_request_body(
+        &server.requests,
+        "pipe initial selection",
+    ));
     let body = f2a_request_body(&server.requests, "piped task");
     assert!(body.to_string().contains("piped task"));
     f2a_join_server(server, "piped task");
@@ -551,10 +613,10 @@ fn terminal_editor_generic_agent_preserves_binding_and_exact_edited_task() {
         .output()
         .unwrap();
     assert!(exported.status.success());
-    let server = spawn_responses_server(vec![(
-        200,
-        text_response("GENERIC_EDITED", "generic-edited"),
-    )]);
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(200, text_response("GENERIC_EDITED", "generic-edited")),
+    ]);
     let config = write_config(harness.path(), &server.base_url);
     let mut chat = TerminalChat::start(
         root.path(),
@@ -571,6 +633,10 @@ fn terminal_editor_generic_agent_preserves_binding_and_exact_edited_task() {
     chat.wait_for("GENERIC_EDITED");
     chat.exit();
     chat.assert_restored();
+    selector_candidates(&f2a_request_body(
+        &server.requests,
+        "generic edited selection",
+    ));
     let request = f2a_request_body(&server.requests, "generic edited task");
     let instructions = request["instructions"].as_str().unwrap();
     assert!(instructions.contains("technical writer"));
@@ -588,7 +654,7 @@ fn terminal_editor_generic_agent_preserves_binding_and_exact_edited_task() {
             echidna::domain::model::ContentItem::assistant_text("GENERIC_EDITED"),
         ]
     );
-    assert_eq!(state.request_audits().len(), 1);
+    assert_eq!(state.request_audits().len(), 2);
     assert_eq!(state.execution_receipt_count(), 0);
     f2a_join_server(server, "generic edited task");
 }
@@ -598,12 +664,19 @@ fn terminal_editor_left_right_insert_submits_only_the_edited_text() {
     let root = TemporaryDirectory::new("terminal-editor-cursor");
     let harness = TemporaryDirectory::new("terminal-editor-config");
     initialize_project(root.path());
-    let server = spawn_responses_server(vec![(200, text_response("EDITED_REPLY", "edited"))]);
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(200, text_response("EDITED_REPLY", "edited")),
+    ]);
     let config = write_config(harness.path(), &server.base_url);
     let mut chat = TerminalChat::new(root.path(), &config);
     chat.send("abcd\x1b[D\x1b[DX\x1b[C\x1b[3~\n");
     chat.wait_for("EDITED_REPLY");
     chat.exit();
+    selector_candidates(&f2a_request_body(
+        &server.requests,
+        "edited terminal selection",
+    ));
     let body = f2a_request_body(&server.requests, "edited terminal request");
     assert!(
         body["input"]
@@ -623,7 +696,10 @@ fn terminal_editor_unicode_erase_and_long_viewport_leave_no_visible_ghosts() {
     let root = TemporaryDirectory::new("terminal-editor-display");
     let harness = TemporaryDirectory::new("terminal-editor-config");
     initialize_project(root.path());
-    let server = spawn_responses_server(vec![(200, text_response("UNICODE_REPLY", "unicode"))]);
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(200, text_response("UNICODE_REPLY", "unicode")),
+    ]);
     let config = write_config(harness.path(), &server.base_url);
     let mut chat = TerminalChat::new(root.path(), &config);
     chat.send("中文e\u{301}界\x1b[D\x7fX");
@@ -675,6 +751,12 @@ fn terminal_editor_typing_during_sampling_preserves_draft_until_enter() {
     let (release, released) = mpsc::channel();
     let (requests_tx, requests) = mpsc::channel();
     let server = thread::spawn(move || {
+        requests_tx
+            .send(serve_initial_selection(
+                &listener,
+                "editable stream selection",
+            ))
+            .unwrap();
         let mut socket = f3_context::accept_before_deadline(&listener, "editable stream");
         requests_tx.send(read_http_request(&mut socket)).unwrap();
         write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {{\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":\"STREAM_PREFIX\"}}\n\n").unwrap();
@@ -684,6 +766,12 @@ fn terminal_editor_typing_during_sampling_preserves_draft_until_enter() {
         // Completion is released only after typing/arrows/deletion were observed.
         write!(socket, "data: {{\"type\":\"response.output_text.done\",\"output_index\":0,\"content_index\":0,\"text\":\"STREAM_PREFIX_DONE\"}}\n\ndata: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"stream-edited\"}}}}\n\n").unwrap();
         drop(socket);
+        let mut socket = f3_context::accept_before_deadline(&listener, "draft selection");
+        let raw = read_http_request(&mut socket);
+        let body = continue_selection_response(&request_body(&raw), "draft-selection", None);
+        requests_tx.send(raw).unwrap();
+        write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        drop(socket);
         let mut socket = f3_context::accept_before_deadline(&listener, "submitted draft");
         requests_tx.send(read_http_request(&mut socket)).unwrap();
         let body = text_response("CORRECTION_DONE", "next-edited");
@@ -692,6 +780,7 @@ fn terminal_editor_typing_during_sampling_preserves_draft_until_enter() {
     let mut chat = TerminalChat::new(root.path(), &config);
     chat.send("first task\n");
     started.recv_timeout(Duration::from_secs(10)).unwrap();
+    selector_candidates(&f2a_request_body(&requests, "editable stream selection"));
     chat.wait_for("STREAM_PREFIX");
     chat.send("draft 中文zz\x7f\x7f\x1b[DX");
     chat.assert_draft("working> draft 中X文", 18);
@@ -703,6 +792,8 @@ fn terminal_editor_typing_during_sampling_preserves_draft_until_enter() {
     chat.send("\n");
     chat.wait_for("CORRECTION_DONE");
     chat.exit();
+    let selection = requests.recv_timeout(Duration::from_secs(10)).unwrap();
+    selector_candidates(&request_body(&selection));
     let next = requests.recv_timeout(Duration::from_secs(10)).unwrap();
     assert!(next.contains("draft 中X文"));
     assert!(!String::from_utf8_lossy(&chat.captured).contains("[request cancelled]"));
@@ -714,7 +805,10 @@ fn terminal_editor_paste_whitespace_is_visible_and_preserves_exact_text() {
     let root = TemporaryDirectory::new("terminal-editor-paste");
     let harness = TemporaryDirectory::new("terminal-editor-config");
     initialize_project(root.path());
-    let server = spawn_responses_server(vec![(200, text_response("PASTE_DONE", "paste"))]);
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(200, text_response("PASTE_DONE", "paste")),
+    ]);
     let config = write_config(harness.path(), &server.base_url);
     let mut chat = TerminalChat::new(root.path(), &config);
     chat.send("\x1b[200~line一\nline二\tend\x1b[201~");
@@ -774,6 +868,7 @@ fn assert_streamed_output_matches_direct(prefix: &str, suffix: &str) {
     let initial = prefix.to_owned();
     let final_text = format!("{prefix}{suffix}");
     let server = thread::spawn(move || {
+        serve_initial_selection(&listener, "wrapped stream selection");
         let mut socket = f3_context::accept_before_deadline(&listener, "wrapped stream");
         read_http_request(&mut socket);
         let delta = json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":initial});
@@ -897,8 +992,9 @@ fn terminal_editor_tool_preview_preserves_unsubmitted_draft_and_real_receipt() {
     let root = TemporaryDirectory::new("terminal-editor-tools");
     let harness = TemporaryDirectory::new("terminal-editor-config");
     initialize_project(root.path());
-    let server = spawn_responses_server(vec![
-        (
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(
             200,
             m4_long_flow_tool_response(
                 "editable-tool",
@@ -910,14 +1006,19 @@ fn terminal_editor_tool_preview_preserves_unsubmitted_draft_and_real_receipt() {
                 "editable-tool-response",
             ),
         ),
-        (200, text_response("TOOL_FINISHED", "tool-finished")),
-        (200, text_response("DRAFT_FINISHED", "draft-finished")),
+        Response(200, text_response("TOOL_FINISHED", "tool-finished")),
+        ContinueSelection { usage: None },
+        Response(200, text_response("DRAFT_FINISHED", "draft-finished")),
     ]);
     let config = write_config(harness.path(), &server.base_url);
     let mut chat = TerminalChat::new(root.path(), &config);
     chat.send("run two bounded commands\n");
+    selector_candidates(&f2a_request_body(
+        &server.requests,
+        "tool initial selection",
+    ));
     let _ = f2a_request_body(&server.requests, "tool request");
-    chat.wait_for("子命令 1/2");
+    chat.wait_for("subcommand 1/2");
     chat.send("next draftzz\x7f\x7f");
     chat.assert_draft("working> next draft", 19);
     assert!(server.requests.try_recv().is_err());
@@ -953,8 +1054,10 @@ fn echidna_terminal_theme_respects_no_color_and_dumb_without_changing_facts() {
         let root = TemporaryDirectory::new("echidna-terminal-theme");
         let harness = TemporaryDirectory::new("echidna-terminal-config");
         initialize_project(root.path());
-        let server =
-            spawn_responses_server(vec![(200, text_response("THEME_REPLY", "theme-response"))]);
+        let server = spawn_scripted_responses_server(vec![
+            InitialSelection,
+            Response(200, text_response("THEME_REPLY", "theme-response")),
+        ]);
         let config = write_config(harness.path(), &server.base_url);
         let mut chat = TerminalChat::with_theme_environment(root.path(), &config, no_color, term);
         chat.send("reply once\n");
@@ -969,6 +1072,10 @@ fn echidna_terminal_theme_respects_no_color_and_dumb_without_changing_facts() {
             .skip(1)
             .any(|sequence| sequence.chars().find(|c| ('@'..='~').contains(c)) == Some('m'));
         assert_eq!(has_sgr, colored, "{captured}");
+        selector_candidates(&f2a_request_body(
+            &server.requests,
+            "theme initial selection",
+        ));
         let request = f2a_request_body(&server.requests, "theme request").to_string();
         let history =
             serde_json::to_string(&session_events(root.path(), &session_id(root.path()))).unwrap();
@@ -994,6 +1101,7 @@ fn terminal_eof_during_sampling_finishes_the_response_without_cancelling() {
     let (seen_tx, seen) = mpsc::channel();
     let (release, released) = mpsc::channel();
     let server = thread::spawn(move || {
+        serve_initial_selection(&listener, "terminal EOF selection");
         let mut socket = f3_context::accept_before_deadline(&listener, "terminal EOF");
         socket
             .set_read_timeout(Some(Duration::from_secs(5)))
@@ -1032,18 +1140,25 @@ fn terminal_correction_during_unknown_tool_execution_is_not_automatically_submit
     let root = TemporaryDirectory::new("tool-steering");
     let harness = TemporaryDirectory::new("tool-steering-provider");
     initialize_project(root.path());
-    let server = spawn_responses_server(vec![(
-        200,
-        m4_long_flow_tool_response(
-            "started-command",
-            "run_command",
-            json!({"argv":["sh", "-c", "printf x >> started; exec sleep 5"]}),
-            "started-response",
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(
+            200,
+            m4_long_flow_tool_response(
+                "started-command",
+                "run_command",
+                json!({"argv":["sh", "-c", "printf x >> started; exec sleep 5"]}),
+                "started-response",
+            ),
         ),
-    )]);
+    ]);
     let config = write_config(harness.path(), &server.base_url);
     let mut chat = TerminalChat::new(root.path(), &config);
     chat.send("run the bounded command\n");
+    selector_candidates(&f2a_request_body(
+        &server.requests,
+        "unknown effect initial selection",
+    ));
     server
         .requests
         .recv_timeout(Duration::from_secs(10))
@@ -1070,7 +1185,7 @@ fn terminal_correction_during_unknown_tool_execution_is_not_automatically_submit
     assert!(!String::from_utf8_lossy(&chat.captured).contains("[Follow-up accepted"));
     let project = Project::discover(root.path()).unwrap();
     let state = reduced_session(&project, &session_id(root.path()));
-    assert_eq!(state.request_audits().len(), 1);
+    assert_eq!(state.request_audits().len(), 2);
     assert_eq!(state.execution_receipt_count(), 0);
     assert!(
         !serde_json::to_string(state.history().items())
@@ -1088,7 +1203,7 @@ fn terminal_stop_and_correction_cancel_inflight_sampling_before_new_turn() {
         initialize_project(root.path());
         // Hold old request open. A second accepted request can only come from
         // cancellation plus a new Turn, not completion of the old response.
-        let server = spawn_f2a_pending_vision_server();
+        let server = spawn_steering_selection_server();
         let config = write_config(harness.path(), &server.base_url);
         let mut chat = if interruption == "invalid_utf8" {
             TerminalChat::with_theme_environment(root.path(), &config, None, "dumb")
@@ -1096,6 +1211,10 @@ fn terminal_stop_and_correction_cancel_inflight_sampling_before_new_turn() {
             TerminalChat::new(root.path(), &config)
         };
         chat.send("old broad task\n");
+        selector_candidates(&f2a_request_body(
+            &server.requests,
+            "steering initial selection",
+        ));
         let old = server
             .requests
             .recv_timeout(Duration::from_secs(10))
@@ -1120,10 +1239,26 @@ fn terminal_stop_and_correction_cancel_inflight_sampling_before_new_turn() {
             assert!(!String::from_utf8_lossy(&chat.captured).contains("[request cancelled]"));
             chat.send("\n");
         }
-        let new = server
+        let selection = server
             .requests
             .recv_timeout(Duration::from_secs(10))
             .unwrap();
+        let candidates = selector_candidates(&request_body(&selection));
+        assert!(
+            candidates
+                .to_string()
+                .contains("only check connection and stop")
+        );
+        let new = server
+            .requests
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap_or_else(|error| {
+                chat.screen();
+                panic!(
+                    "{interruption} main request: {error}; {}",
+                    String::from_utf8_lossy(&chat.captured)
+                );
+            });
         assert!(new.contains("only check connection and stop"));
         assert!(new.contains("Latest user scope wins"));
         chat.send("/stop\n");
@@ -1156,6 +1291,60 @@ fn terminal_stop_and_correction_cancel_inflight_sampling_before_new_turn() {
     }
 }
 
+fn spawn_steering_selection_server() -> F2aPendingVisionServer {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let (request_sender, requests) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    let thread = thread::spawn(move || {
+        let deadline = Instant::now() + F2A_WAIT;
+        let mut held = Vec::new();
+        let mut index = 0;
+        while released.try_recv().is_err() && Instant::now() < deadline {
+            match listener.accept() {
+                Ok((mut socket, _)) => {
+                    socket.set_nonblocking(false).unwrap();
+                    socket
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    let raw = read_http_request(&mut socket);
+                    if index == 0 || index == 2 {
+                        let body = if index == 0 {
+                            initial_selection_response(
+                                &request_body(&raw),
+                                "steering-initial-selection",
+                            )
+                        } else {
+                            continue_selection_response(
+                                &request_body(&raw),
+                                "steered-selection",
+                                None,
+                            )
+                        };
+                        request_sender.send(raw).unwrap();
+                        write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                    } else {
+                        request_sender.send(raw).unwrap();
+                        held.push(socket);
+                    }
+                    index += 1;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("steering fixture accept failed: {error}"),
+            }
+        }
+    });
+    F2aPendingVisionServer {
+        base_url: format!("http://{address}/v1"),
+        requests,
+        release,
+        thread,
+    }
+}
+
 #[test]
 fn terminal_correction_during_initial_vision_does_not_submit_old_primary_task() {
     let root = TemporaryDirectory::new("vision-steering");
@@ -1163,7 +1352,10 @@ fn terminal_correction_during_initial_vision_does_not_submit_old_primary_task() 
     initialize_project(root.path());
     append_research_snapshot(&Project::discover(root.path()).unwrap(), "vision-steering");
     let vision = spawn_f2a_pending_vision_server();
-    let primary = spawn_responses_server(vec![(200, text_response("NEW_TASK_DONE", "corrected"))]);
+    let primary = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(200, text_response("NEW_TASK_DONE", "corrected")),
+    ]);
     let config = write_dual_config(harness.path(), &primary.base_url, &vision.base_url);
     let image = root.path().join("image.png");
     image::RgbImage::new(2, 2).save(&image).unwrap();
@@ -1175,6 +1367,10 @@ fn terminal_correction_during_initial_vision_does_not_submit_old_primary_task() 
         .recv_timeout(Duration::from_secs(10))
         .unwrap();
     chat.send("cancel the image task; answer this text only\n");
+    selector_candidates(&f2a_request_body(
+        &primary.requests,
+        "corrected source selection",
+    ));
     let request = primary
         .requests
         .recv_timeout(Duration::from_secs(10))

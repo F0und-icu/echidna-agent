@@ -37,7 +37,7 @@ impl Default for PresentationSink {
                         for frame in frames {
                             let count = missed.swap(0, Ordering::Relaxed);
                             if count > 0 && writeln!(writer,
-                            "[工具展示拥塞：跳过 {count} 条预览；执行事实以 Session 记录为准]"
+                            "[Tool presentation congested: skipped {count} previews; execution facts remain in the Session record]"
                         ).is_err() { break; }
                             if writer.write_all(frame.as_bytes()).is_err() {
                                 break;

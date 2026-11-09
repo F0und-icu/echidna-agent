@@ -20,6 +20,21 @@ pub(crate) struct VerifiedCompactionGraph {
     pub(crate) plan_blob_id: BlobId,
     pub(crate) plan_hash: String,
     pub(crate) root_event_id: EventId,
+    pub(crate) task_selection_event: Option<EventId>,
+    pub(crate) task_id: Option<String>,
+    pub(crate) task_scope: Vec<String>,
+    pub(crate) summarized_history: Vec<EventId>,
+    pub(crate) task_history_refs: Vec<EventId>,
+    pub(crate) task_receipt_refs: Vec<crate::domain::research::ExecutionReceiptId>,
+    pub(crate) task_artifact_refs: Vec<crate::domain::artifacts::ArtifactId>,
+    pub(super) proof6: bool,
+    pub(super) reference_limit: usize,
+    pub(super) reference_source: Option<SessionSourceIdentity>,
+    pub(super) task_definition: Option<super::task::DefinitionProvenance>,
+    ancestry_history: Vec<EventId>,
+    ancestry_receipts: Vec<crate::domain::research::ExecutionReceiptId>,
+    ancestry_artifacts: Vec<crate::domain::artifacts::ArtifactId>,
+    ancestry_summarized: Vec<EventId>,
     pub(crate) narrative: NarrativeSummary,
     pub(crate) protected_inputs: Vec<ProtectedOperatorInput>,
     pub(crate) required_source_blobs: Vec<BlobId>,
@@ -27,6 +42,37 @@ pub(crate) struct VerifiedCompactionGraph {
         crate::domain::vision::VisionObservation,
         Option<crate::domain::request_audit::RequestAuditManifest>,
     )>,
+}
+
+impl VerifiedCompactionGraph {
+    pub(super) fn project_task_references(
+        &self,
+        limit: usize,
+    ) -> (
+        Vec<crate::domain::artifacts::ArtifactId>,
+        Vec<crate::domain::research::ExecutionReceiptId>,
+        Vec<EventId>,
+    ) {
+        (
+            self.task_artifact_refs
+                .iter()
+                .take(limit)
+                .cloned()
+                .collect(),
+            self.task_receipt_refs
+                .iter()
+                .rev()
+                .take(limit)
+                .cloned()
+                .collect(),
+            self.task_history_refs
+                .iter()
+                .rev()
+                .take(limit)
+                .cloned()
+                .collect(),
+        )
+    }
 }
 
 impl CompactionSourcePlan {
@@ -45,7 +91,15 @@ impl CompactionSourcePlan {
             (ModelInputIR, crate::domain::context::ContextDeliveryMap),
         >,
         capabilities: &crate::domain::model::ModelCapabilities,
+        task_fragments: Option<&[crate::domain::context::ContextFragment]>,
+        reference_limit: usize,
+        prior_graph: Option<&VerifiedCompactionGraph>,
     ) -> Result<VerifiedCompactionGraph, SessionError> {
+        if self.task_selection_event().is_some() != task_fragments.is_some() {
+            return Err(invalid_task(
+                "task Compaction fragment proof is absent or unexpected",
+            ));
+        }
         let expected_capabilities =
             crate::domain::request_audit::RequestAuditCapabilityMapping::from_capabilities(
                 capabilities,
@@ -58,13 +112,10 @@ impl CompactionSourcePlan {
         }
         let boundary = events.partition_point(|event| event.sequence <= self.source().watermark());
         let state = self.validate_source_facts(contents, &events[..boundary], project_events)?;
-        let (expected_entries, expected_contents) =
-            Self::source_entries(self.source(), &events[..boundary], project_events)?;
-        if self.entries() != expected_entries || contents != expected_contents {
-            return Err(invalid_task(
-                "Compaction source plan does not exactly cover the derived source manifest",
-            ));
-        }
+        let proof6 = self.task_selection_event().is_some()
+            && state
+                .latest_task_context_selection()
+                .is_some_and(|(_, selection)| selection.request_proof_version >= 6);
         let mut samples = Vec::new();
         let mut audits = BTreeMap::new();
         for event in &events[boundary..] {
@@ -73,7 +124,7 @@ impl CompactionSourcePlan {
                     audits.insert(event.event_id.clone(), manifest);
                 }
                 SessionEvent::CompactionSampleRecorded { sample } => {
-                    samples.push((event.event_id.clone(), sample))
+                    samples.push((event.event_id.clone(), sample));
                 }
                 SessionEvent::ModelUsageRecorded { .. } => {}
                 _ => {
@@ -184,6 +235,30 @@ impl CompactionSourcePlan {
                     }
                     continue;
                 }
+                if let Some(fragments) = task_fragments {
+                    let exact = fragments.iter().any(|fragment| {
+                        let ContextFragmentContent::ContentItems { items } = fragment.content()
+                        else {
+                            return false;
+                        };
+                        items.iter().enumerate().any(|(ordinal, candidate)| {
+                            let Ok(ordinal) = u32::try_from(ordinal) else {
+                                return false;
+                            };
+                            candidate == item
+                                && fragment
+                                    .content_item_provenance(ordinal)
+                                    .unwrap_or_else(|| fragment.provenance())
+                                    == provenance
+                        })
+                    });
+                    if !exact || entry.transform() != &ContextTransform::Identity {
+                        return Err(invalid_task(
+                            "task Compaction fragment differs from its verified capture",
+                        ));
+                    }
+                    continue;
+                }
                 if !matches!(
                     (provenance.slot(), provenance.origin()),
                     (
@@ -220,17 +295,196 @@ impl CompactionSourcePlan {
                 "Compaction final sample is not the planned root",
             ));
         }
+        let (mut task_history_refs, mut task_receipt_refs, mut task_artifact_refs) =
+            if self.task_selection_event().is_some() {
+                self.task_fact_references()
+            } else {
+                (Vec::new(), Vec::new(), Vec::new())
+            };
+        let mut summarized_history = if self.task_selection_event().is_some() {
+            self.entries()
+                .iter()
+                .filter_map(|entry| match &entry.source {
+                    super::source_plan::CompactionSourceKind::History(id)
+                        if !entry.protected_exact =>
+                    {
+                        Some(id.clone())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        // Keep complete verified graph ancestry separately from the bounded
+        // display references persisted by older Summaries.
+        let mut ancestry_history = task_history_refs.clone();
+        let mut ancestry_receipts = task_receipt_refs.clone();
+        let mut ancestry_artifacts = task_artifact_refs.clone();
+        let mut ancestry_summarized = summarized_history.clone();
+        let prior_summary = state
+            .latest_compaction()
+            .map(|compaction| compaction.summary());
+        if let Some(prior) = prior_summary
+            && self.entries().iter().any(|entry| matches!(&entry.source, super::source_plan::CompactionSourceKind::Summary(id) if id == prior.fingerprint()))
+            && let Some((prior_root, _, _, _)) = prior.graph_reference()
+        {
+            if let Some(previous) = prior_graph.filter(|graph| &graph.root_event_id == prior_root) {
+                ancestry_history.extend_from_slice(&previous.ancestry_history);
+                ancestry_receipts.extend_from_slice(&previous.ancestry_receipts);
+                ancestry_artifacts.extend_from_slice(&previous.ancestry_artifacts);
+                ancestry_summarized.extend_from_slice(&previous.ancestry_summarized);
+            } else if proof6 {
+                return Err(invalid_task("Compaction prior Summary graph is absent"));
+            }
+        }
+        let history_set = ancestry_history
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        let receipt_set = ancestry_receipts
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        let summarized_set = ancestry_summarized
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        ancestry_history = state
+            .history_items_with_event_ids()
+            .filter_map(|(id, _)| history_set.contains(id).then_some(id.clone()))
+            .collect();
+        ancestry_receipts = state
+            .execution_receipts()
+            .iter()
+            .filter_map(|record| {
+                let id = crate::domain::research::ExecutionReceiptId::new(record.event_id.as_str());
+                receipt_set.contains(&id).then_some(id)
+            })
+            .collect();
+        ancestry_summarized = state
+            .history_items_with_event_ids()
+            .filter_map(|(id, _)| summarized_set.contains(id).then_some(id.clone()))
+            .collect();
+        ancestry_artifacts.sort();
+        ancestry_artifacts.dedup();
+        if proof6
+            && (ancestry_history.len() != history_set.len()
+                || ancestry_receipts.len() != receipt_set.len()
+                || ancestry_summarized.len() != summarized_set.len())
+        {
+            return Err(invalid_task(
+                "Compaction graph references are absent from original event order",
+            ));
+        }
+        let proof5 = self.task_selection_event().is_some()
+            && state
+                .latest_task_context_selection()
+                .is_some_and(|(_, selection)| selection.request_proof_version >= 5);
+        if proof5 && let Some(prior) = state.latest_compaction().map(|compaction| compaction.summary())
+            && self.entries().iter().any(|entry| matches!(&entry.source, super::source_plan::CompactionSourceKind::Summary(id) if id == prior.fingerprint()))
+        {
+            summarized_history.extend_from_slice(prior.summarized_history());
+            if let Some(refs) = prior.task_references() {
+                task_history_refs.extend_from_slice(refs.history_refs());
+                task_receipt_refs.extend_from_slice(refs.receipt_refs());
+                task_artifact_refs.extend_from_slice(refs.artifact_refs());
+            }
+            summarized_history.sort(); summarized_history.dedup();
+            task_history_refs.sort(); task_history_refs.dedup();
+            task_receipt_refs.sort(); task_receipt_refs.dedup();
+            task_artifact_refs.sort(); task_artifact_refs.dedup();
+        }
+        if proof6 {
+            let eligible = super::source_plan::session_artifact_refs(
+                project_events,
+                self.source().stream_id(),
+            )?;
+            task_history_refs = ancestry_history.clone();
+            task_receipt_refs = ancestry_receipts.clone();
+            task_artifact_refs = ancestry_artifacts
+                .iter()
+                .filter(|id| eligible.contains(*id))
+                .cloned()
+                .collect();
+            summarized_history = ancestry_summarized.clone();
+        }
         Ok(VerifiedCompactionGraph {
             source: self.source().clone(),
             plan_blob_id: plan_blob_id.clone(),
             plan_hash: self.hash()?,
             root_event_id: root_id.clone(),
+            task_selection_event: self.task_selection_event().cloned(),
+            task_id: self.task_selection_event().and_then(|_| {
+                state
+                    .latest_task_context_selection()
+                    .and_then(|(_, selection)| {
+                        selection
+                            .task_revisions
+                            .first()
+                            .map(|revision| revision.task_id.clone())
+                    })
+            }),
+            task_scope: self
+                .task_selection_event()
+                .and_then(|_| state.latest_task_context_selection())
+                .map(|(_, selection)| {
+                    selection
+                        .task_revisions
+                        .iter()
+                        .map(|revision| revision.task_id.clone())
+                        .chain(selection.decision.related_task_refs.iter().cloned())
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .into_iter()
+                        .collect()
+                })
+                .unwrap_or_default(),
+            summarized_history,
+            task_history_refs,
+            task_receipt_refs,
+            task_artifact_refs,
+            proof6,
+            reference_limit,
+            reference_source: if proof6 {
+                Some(
+                    SessionSourceIdentity::from_events(
+                        self.source().project_id().clone(),
+                        events,
+                        project_events,
+                    )?
+                    .0,
+                )
+            } else {
+                None
+            },
+            task_definition: if proof6 {
+                Some(super::task::DefinitionProvenance::from_binding(
+                    state
+                        .agent_definition_binding()
+                        .ok_or_else(|| invalid_task("task graph has no bound definition"))?,
+                )?)
+            } else {
+                None
+            },
+            ancestry_history,
+            ancestry_receipts,
+            ancestry_artifacts,
+            ancestry_summarized,
             narrative: root.narrative().clone(),
             protected_inputs: state.protected_operator_inputs()?,
             required_source_blobs: super::source_plan::required_source_blobs(
                 &state,
                 project_events,
-            )?,
+            )?
+            .into_iter()
+            .chain(
+                self.task_selection_event()
+                    .into_iter()
+                    .flat_map(|_| self.source_blob_references().cloned()),
+            )
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect(),
             required_vision_sources: state
                 .protected_vision_sources()?
                 .into_iter()

@@ -1,0 +1,1 @@
+{"call":{"arguments":{"argv":["/bin/sh","-c","printf 'one\\n' > effect-count.txt"]},"call_id":"actual-call","name":"run_command"},"kind":"tool_call"}

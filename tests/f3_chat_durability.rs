@@ -46,7 +46,24 @@ fn spawn_tool_then_pending_server(first_response: String) -> ToolThenPendingServ
     let (release_tool_response, release_receiver) = mpsc::channel();
     let (shutdown, shutdown_receiver) = mpsc::channel();
     let thread = thread::spawn(move || {
+        let (mut selector, _) = listener.accept().unwrap();
+        selector.set_read_timeout(Some(WAIT)).unwrap();
+        let raw = read_http_request(&mut selector);
+        let candidates = selection_candidates(&raw);
+        assert!(candidates["tasks"].as_array().unwrap().is_empty());
+        let decision = json!({
+            "relation":"new",
+            "focus":{"kind":"new_from_input","input_ref":candidates["input"]["ref"]},
+            "related_task_refs":[],"required_context_refs":[],"unresolved_references":[]
+        });
+        request_sender.send(raw).unwrap();
+        write_sse_response(
+            &mut selector,
+            &text_response(&decision.to_string(), "f3-initial-selection"),
+        );
+
         let (mut first, _) = listener.accept().unwrap();
+        first.set_read_timeout(Some(WAIT)).unwrap();
         request_sender.send(read_http_request(&mut first)).unwrap();
         release_receiver
             .recv()
@@ -100,13 +117,38 @@ impl TextServer {
     }
 }
 
-fn spawn_text_server(text: &str) -> TextServer {
+fn spawn_resume_selection_then_text_server(text: &str) -> TextServer {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let (request_sender, requests) = mpsc::channel();
-    let response = text_response(text);
+    let response = text_response(text, "f3-resumed");
     let thread = thread::spawn(move || {
+        // A new natural input after explicit Resume has one isolated selector,
+        // followed by the main request whose recovered results are checked below.
+        let (mut selector, _) = listener.accept().unwrap();
+        selector.set_read_timeout(Some(WAIT)).unwrap();
+        let raw = read_http_request(&mut selector);
+        let candidates = selection_candidates(&raw);
+        assert_eq!(candidates["tasks"].as_array().unwrap().len(), 1);
+        let references = candidates["context"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|unit| unit["ref"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        let decision = json!({
+            "relation":"continue",
+            "focus":{"kind":"existing","task_ref":candidates["tasks"][0]["ref"]},
+            "related_task_refs":[],"required_context_refs":references,
+            "unresolved_references":[]
+        });
+        request_sender.send(raw).unwrap();
+        write_sse_response(
+            &mut selector,
+            &text_response(&decision.to_string(), "f3-resume-selection"),
+        );
         let (mut socket, _) = listener.accept().unwrap();
+        socket.set_read_timeout(Some(WAIT)).unwrap();
         request_sender.send(read_http_request(&mut socket)).unwrap();
         write_sse_response(&mut socket, &response);
     });
@@ -115,6 +157,25 @@ fn spawn_text_server(text: &str) -> TextServer {
         requests,
         thread,
     }
+}
+
+fn selection_candidates(raw: &str) -> Value {
+    let wire: Value = serde_json::from_str(raw.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert!(wire.get("previous_response_id").is_none_or(Value::is_null));
+    assert!(
+        wire.get("tools")
+            .is_none_or(|tools| tools.as_array().unwrap().is_empty())
+    );
+    let candidates = wire["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|item| item["content"].as_array().into_iter().flatten())
+        .filter_map(|part| part["text"].as_str())
+        .filter_map(|text| text.strip_prefix("TASK_CONTEXT_CANDIDATES_V1\n"))
+        .collect::<Vec<_>>();
+    assert_eq!(candidates.len(), 1);
+    serde_json::from_str(candidates[0]).unwrap()
 }
 
 fn read_http_request(socket: &mut std::net::TcpStream) -> String {
@@ -185,11 +246,11 @@ fn tool_calls_response(calls: &[(&str, &str, Value)]) -> String {
     response
 }
 
-fn text_response(text: &str) -> String {
+fn text_response(text: &str, response_id: &str) -> String {
     let text = serde_json::to_string(text).unwrap();
     format!(
         "data: {{\"type\":\"response.output_text.delta\",\"delta\":{text}}}\n\n\
-         data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"f3-resumed\"}}}}\n\n"
+         data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"{response_id}\"}}}}\n\n"
     )
 }
 
@@ -319,7 +380,10 @@ fn killed_chat_retains_completed_tool_history_and_does_not_replay_the_tool_on_re
     let config = write_config(root.path(), &server.base_url);
     let mut child = spawn_chat(root.path(), &config, "read target.txt, then continue\n");
 
-    server.requests.recv_timeout(WAIT).unwrap();
+    let selector = server.requests.recv_timeout(WAIT).unwrap();
+    assert!(selector.contains("TASK_CONTEXT_CANDIDATES_V1"));
+    let first = server.requests.recv_timeout(WAIT).unwrap();
+    assert!(!first.contains("TASK_CONTEXT_CANDIDATES_V1"));
     server.release_tool_response();
     let second_request = server.requests.recv_timeout(WAIT).unwrap();
     assert!(
@@ -338,7 +402,7 @@ fn killed_chat_retains_completed_tool_history_and_does_not_replay_the_tool_on_re
     assert!(serialized_history.contains("f3-durable-read"));
     assert!(serialized_history.contains("durable tool fixture"));
 
-    let resumed = spawn_text_server("F3_RESUMED_WITHOUT_REPLAY");
+    let resumed = spawn_resume_selection_then_text_server("F3_RESUMED_WITHOUT_REPLAY");
     let resume_config = write_config(root.path(), &resumed.base_url);
     let output = run_chat(
         root.path(),
@@ -356,7 +420,11 @@ fn killed_chat_retains_completed_tool_history_and_does_not_replay_the_tool_on_re
             .unwrap()
             .contains("F3_RESUMED_WITHOUT_REPLAY")
     );
+    let selection_request = resumed.requests.recv_timeout(WAIT).unwrap();
+    assert!(selection_request.contains("TASK_CONTEXT_CANDIDATES_V1"));
     let resumed_request = resumed.requests.recv_timeout(WAIT).unwrap();
+    assert!(!resumed_request.contains("TASK_CONTEXT_CANDIDATES_V1"));
+    assert!(resumed.requests.try_recv().is_err());
     resumed.join();
     assert!(resumed_request.contains("function_call_output"));
     assert_eq!(
@@ -390,7 +458,10 @@ fn fast_completed_tool_receipt_survives_while_a_parallel_slow_tool_is_interrupte
     let config = write_config(root.path(), &server.base_url);
     let mut child = spawn_chat(root.path(), &config, "read the fast and slow fixtures\n");
 
-    server.requests.recv_timeout(WAIT).unwrap();
+    let selector = server.requests.recv_timeout(WAIT).unwrap();
+    assert!(selector.contains("TASK_CONTEXT_CANDIDATES_V1"));
+    let first = server.requests.recv_timeout(WAIT).unwrap();
+    assert!(!first.contains("TASK_CONTEXT_CANDIDATES_V1"));
     let session = only_session_id(root.path());
     server.release_tool_response();
     wait_for_outcome(root.path(), &session, 1);
@@ -418,7 +489,7 @@ fn fast_completed_tool_receipt_survives_while_a_parallel_slow_tool_is_interrupte
         .join("events.jsonl");
     let prefix = fs::read(&events_path).unwrap();
     fs::write(root.path().join("fast.txt"), "CHANGED_AFTER_INTERRUPTION\n").unwrap();
-    let resumed = spawn_text_server("F3_KNOWN_FAST_UNKNOWN_SLOW");
+    let resumed = spawn_resume_selection_then_text_server("F3_KNOWN_FAST_UNKNOWN_SLOW");
     let resume_config = write_config(root.path(), &resumed.base_url);
     let resume = run_chat(
         root.path(),
@@ -432,7 +503,11 @@ fn fast_completed_tool_receipt_survives_while_a_parallel_slow_tool_is_interrupte
         String::from_utf8_lossy(&resume.stderr)
     );
     assert!(String::from_utf8_lossy(&resume.stdout).contains("F3_KNOWN_FAST_UNKNOWN_SLOW"));
+    let selection_request = resumed.requests.recv_timeout(WAIT).unwrap();
+    assert!(selection_request.contains("TASK_CONTEXT_CANDIDATES_V1"));
     let request = resumed.requests.recv_timeout(WAIT).unwrap();
+    assert!(!request.contains("TASK_CONTEXT_CANDIDATES_V1"));
+    assert!(resumed.requests.try_recv().is_err());
     resumed.join();
     let request: Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
     let results = request["input"]
@@ -493,7 +568,10 @@ fn model_history_checkpoint_failure_stops_before_tool_execution() {
     let config = write_config(root.path(), &server.base_url);
     let child = spawn_chat(root.path(), &config, "call read_file\n");
 
-    server.requests.recv_timeout(WAIT).unwrap();
+    let selector = server.requests.recv_timeout(WAIT).unwrap();
+    assert!(selector.contains("TASK_CONTEXT_CANDIDATES_V1"));
+    let first = server.requests.recv_timeout(WAIT).unwrap();
+    assert!(!first.contains("TASK_CONTEXT_CANDIDATES_V1"));
     let session = only_session_id(root.path());
     let events_path = root
         .path()

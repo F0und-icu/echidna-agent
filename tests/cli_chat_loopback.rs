@@ -57,6 +57,32 @@ mod provider_config;
 #[path = "cli_chat_cases/provider_usage.rs"]
 mod provider_usage;
 mod support;
+#[path = "cli_chat_cases/task_context.rs"]
+mod task_context;
+#[path = "cli_chat_cases/task_context_attribution.rs"]
+mod task_context_attribution;
+#[path = "cli_chat_cases/task_context_auxiliary.rs"]
+mod task_context_auxiliary;
+#[path = "cli_chat_cases/task_context_delivery_repairs.rs"]
+mod task_context_delivery_repairs;
+#[path = "cli_chat_cases/task_context_live_compaction.rs"]
+mod task_context_live_compaction;
+#[path = "cli_chat_cases/task_context_live_repairs.rs"]
+mod task_context_live_repairs;
+#[path = "cli_chat_cases/task_context_paging.rs"]
+mod task_context_paging;
+#[path = "cli_chat_cases/task_context_peer_integrity.rs"]
+mod task_context_peer_integrity;
+#[path = "cli_chat_cases/task_context_presentation.rs"]
+mod task_context_presentation;
+#[path = "cli_chat_cases/task_context_progress.rs"]
+mod task_context_progress;
+#[path = "cli_chat_cases/task_context_resume.rs"]
+mod task_context_resume;
+#[path = "cli_chat_cases/task_context_search.rs"]
+mod task_context_search;
+#[path = "cli_chat_cases/task_context_source_repairs.rs"]
+mod task_context_source_repairs;
 #[path = "cli_chat_cases/tool_activation_continuation.rs"]
 mod tool_activation_continuation;
 #[path = "cli_chat_cases/tool_argument_integrity.rs"]
@@ -88,9 +114,16 @@ fn final_text_integrity_reaches_cli_and_history_without_committing_conflicts() {
             .iter()
             .map(|event| format!("data: {event}\n\n"))
             .collect();
-        let server = spawn_responses_server(vec![(200, body)]);
+        let server = task_context::spawn_scripted_responses_server(vec![
+            task_context::ScriptedResponse::InitialSelection,
+            task_context::ScriptedResponse::Response(200, body),
+        ]);
         let config = write_config(root.path(), &server.base_url);
         let output = run_chat(root.path(), &config, "reply once\n/exit\n", &[]);
+        task_context::selector_candidates(&f2a_request_body(
+            &server.requests,
+            "initial selection before final text integrity",
+        ));
         server
             .requests
             .recv_timeout(Duration::from_secs(10))
@@ -128,7 +161,7 @@ fn final_text_integrity_reaches_cli_and_history_without_committing_conflicts() {
                 &echidna::domain::model::ContentItem::assistant_text(suffix)
             );
         }
-        assert_eq!(state.request_audits().len(), 1);
+        assert_eq!(state.request_audits().len(), 2);
         assert_eq!(state.execution_receipt_count(), 0);
     }
 }
@@ -289,12 +322,23 @@ fn spawn_responses_server_with_lengths(responses: Vec<(u16, String, usize)>) -> 
     }
 }
 
-fn spawn_pending_responses_server() -> PendingLoopbackServer {
+fn spawn_pending_responses_server(initial_selection: bool) -> PendingLoopbackServer {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let (request_sender, requests) = mpsc::channel();
     let (release, release_receiver) = mpsc::channel();
     let thread = thread::spawn(move || {
+        if initial_selection {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket.set_read_timeout(Some(F2A_WAIT)).unwrap();
+            let raw = read_http_request(&mut socket);
+            let body = task_context::initial_selection_response(
+                &request_body(&raw),
+                "pending-primary-initial-selection",
+            );
+            request_sender.send(raw).unwrap();
+            f3_context::write_sse_response(&mut socket, &body);
+        }
         let (mut socket, _) = listener.accept().unwrap();
         socket
             .set_read_timeout(Some(Duration::from_secs(5)))
@@ -350,12 +394,12 @@ fn spawn_f2a_pending_vision_server() -> F2aPendingVisionServer {
     }
 }
 
-/// Delivers one completed Vision response and then deliberately leaves the
-/// second request pending until the fixture releases it. This isolates
-/// cancellation after a durable first observation without inventing a second
-/// Provider result.
+/// Delivers an explicitly declared optional selector and one completed response,
+/// then leaves the next request pending. Every received request stays visible to
+/// the caller; the pending request never gains an invented Provider result.
 fn spawn_f2a_first_response_then_pending_server(
     first_body: String,
+    initial_selection: bool,
 ) -> F2aFirstResponseThenPendingServer {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
@@ -375,8 +419,16 @@ fn spawn_f2a_first_response_then_pending_server(
                     socket
                         .set_read_timeout(Some(Duration::from_secs(5)))
                         .unwrap();
-                    request_sender.send(read_http_request(&mut socket)).unwrap();
-                    if received == 0 {
+                    let raw = read_http_request(&mut socket);
+                    if initial_selection && received == 0 {
+                        let body = task_context::initial_selection_response(
+                            &request_body(&raw),
+                            "pending-fixture-initial-selection",
+                        );
+                        request_sender.send(raw).unwrap();
+                        f3_context::write_sse_response(&mut socket, &body);
+                    } else if received == usize::from(initial_selection) {
+                        request_sender.send(raw).unwrap();
                         let headers = format!(
                             "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                             first_body.len()
@@ -385,6 +437,7 @@ fn spawn_f2a_first_response_then_pending_server(
                         socket.write_all(first_body.as_bytes()).unwrap();
                         socket.flush().unwrap();
                     } else {
+                        request_sender.send(raw).unwrap();
                         let _ = release_receiver.recv_timeout(F2A_WAIT);
                         return;
                     }
@@ -894,6 +947,53 @@ fn append_research_snapshot(project: &Project, label: &str) -> TargetSnapshotId 
     append_research_snapshot_with_artifacts(project, label, Vec::new())
 }
 
+fn load_pre_task_context_fixture(root: &std::path::Path, case: &str) -> String {
+    let project = Project::initialize(root).unwrap();
+    let fixtures =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/task_context_legacy");
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(fixtures.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(
+        manifest["baseline"],
+        "9241a468d45b4e6c91ef1d1ba5dc420a2a0c26f5"
+    );
+    let case = &manifest["cases"][case];
+    for (relative, hash) in case["files"].as_object().unwrap() {
+        let hash = hash.as_str().unwrap();
+        let bytes = fs::read(fixtures.join("blobs").join(hash)).unwrap();
+        assert_eq!(format!("{:x}", Sha256::digest(&bytes)), hash);
+        // Project identity is bound to its canonical directory. Relocate only
+        // the audit's owning project; source EventIds, IR, component hashes,
+        // History, receipts and accepted-delivery references stay unchanged.
+        if relative == ".echidna/project.toml" {
+            continue;
+        }
+        let bytes = if relative.ends_with("/events.jsonl") {
+            String::from_utf8(bytes)
+                .unwrap()
+                .lines()
+                .map(|line| {
+                    let mut event: Value = serde_json::from_str(line).unwrap();
+                    if event["event_type"] == "session.request_audit_recorded" {
+                        event["payload"]["binding"]["project_id"] =
+                            json!(project.project_id().as_str());
+                        format!("{event}\n")
+                    } else {
+                        format!("{line}\n")
+                    }
+                })
+                .collect::<String>()
+                .into_bytes()
+        } else {
+            bytes
+        };
+        let path = root.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, bytes).unwrap();
+    }
+    case["session_id"].as_str().unwrap().to_owned()
+}
+
 fn append_research_snapshot_with_artifacts(
     project: &Project,
     label: &str,
@@ -1062,10 +1162,22 @@ fn reduced_session(project: &Project, session: &str) -> SessionState {
 
 fn assert_audits_reconstruct(project_root: &std::path::Path, state: &SessionState) {
     for manifest in state.request_audits() {
-        assert_eq!(
-            manifest.schema_version(),
-            REQUEST_AUDIT_MANIFEST_SCHEMA_VERSION
-        );
+        let serialized = serde_json::to_value(manifest).unwrap();
+        match manifest.schema_version() {
+            REQUEST_AUDIT_MANIFEST_SCHEMA_VERSION => {
+                assert!(serialized.get("sampling_step_id").is_none());
+            }
+            5 => {
+                assert!(
+                    serialized["sampling_step_id"]
+                        .as_str()
+                        .is_some_and(|step| !step.trim().is_empty())
+                );
+                assert_eq!(serialized["provider_session"]["role"], "primary");
+                assert!(serialized.get("improvement_scope").is_none());
+            }
+            version => panic!("unexpected current request audit schema {version}"),
+        }
         let renderer = manifest.prompt_renderer().unwrap();
         assert_eq!(renderer.id(), "generic");
         assert_eq!(renderer.version(), 1);
@@ -1085,6 +1197,10 @@ fn assert_audits_reconstruct(project_root: &std::path::Path, state: &SessionStat
 
 #[test]
 fn f2a_secondary_cli_image_is_observed_before_primary_tool_loop_and_remains_auditable() {
+    use task_context::{
+        ScriptedResponse::{InitialSelection, Response},
+        selector_candidates, spawn_scripted_responses_server,
+    };
     let root = TemporaryDirectory::new("f2a-cli-secondary-image");
     initialize_project(root.path());
     let project = Project::discover(root.path()).unwrap();
@@ -1101,8 +1217,9 @@ fn f2a_secondary_cli_image_is_observed_before_primary_tool_loop_and_remains_audi
         200,
         vision_response("secondary fixture observation", "vision-secondary"),
     )]);
-    let primary = spawn_responses_server(vec![
-        (
+    let primary = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(
             200,
             m4_long_flow_tool_response(
                 "f2a-read-secondary",
@@ -1111,7 +1228,7 @@ fn f2a_secondary_cli_image_is_observed_before_primary_tool_loop_and_remains_audi
                 "primary-secondary-tool",
             ),
         ),
-        (
+        Response(
             200,
             text_response("F2A_SECONDARY_COMPLETE", "primary-secondary-final"),
         ),
@@ -1161,6 +1278,10 @@ fn f2a_secondary_cli_image_is_observed_before_primary_tool_loop_and_remains_audi
         "Inspect the synthetic image"
     ));
 
+    selector_candidates(&f2a_request_body(
+        &primary.requests,
+        "secondary source selection",
+    ));
     let first_primary = f2a_request_body(&primary.requests, "secondary Primary first");
     let second_primary = f2a_request_body(&primary.requests, "secondary Primary second");
     f2a_join_server(primary, "secondary Primary");
@@ -1189,9 +1310,9 @@ fn f2a_secondary_cli_image_is_observed_before_primary_tool_loop_and_remains_audi
         state.primary_provider_session().unwrap().id,
         state.vision_observations()[0].provider_session.id
     );
-    assert_eq!(state.request_audits().len(), 3);
+    assert_eq!(state.request_audits().len(), 4);
     assert_audits_reconstruct(root.path(), &state);
-    for (manifest, expected) in state.request_audits().iter().zip([1024, 4096, 4096]) {
+    for (manifest, expected) in state.request_audits().iter().zip([1024, 4096, 4096, 4096]) {
         let input = manifest
             .reconstruct(|blob| {
                 fs::read(
@@ -1237,6 +1358,10 @@ fn f2a_secondary_cli_image_is_observed_before_primary_tool_loop_and_remains_audi
 
 #[test]
 fn f2a_primary_direct_cli_image_reaches_only_primary_and_keeps_real_tool_receipt() {
+    use task_context::{
+        ScriptedResponse::{InitialSelection, Response},
+        selector_candidates, spawn_scripted_responses_server,
+    };
     let root = TemporaryDirectory::new("f2a-cli-primary-direct");
     initialize_project(root.path());
     let project = Project::discover(root.path()).unwrap();
@@ -1244,8 +1369,9 @@ fn f2a_primary_direct_cli_image_reaches_only_primary_and_keeps_real_tool_receipt
     fs::write(root.path().join("screen.png"), png_bytes(9, 7)).unwrap();
     fs::write(root.path().join("target.txt"), "direct fixture target\n").unwrap();
 
-    let primary = spawn_responses_server(vec![
-        (
+    let primary = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(
             200,
             m4_long_flow_tool_response(
                 "f2a-read-direct",
@@ -1254,7 +1380,7 @@ fn f2a_primary_direct_cli_image_reaches_only_primary_and_keeps_real_tool_receipt
                 "primary-direct-tool",
             ),
         ),
-        (
+        Response(
             200,
             text_response("F2A_DIRECT_COMPLETE", "primary-direct-final"),
         ),
@@ -1277,6 +1403,10 @@ fn f2a_primary_direct_cli_image_reaches_only_primary_and_keeps_real_tool_receipt
             .contains("F2A_DIRECT_COMPLETE")
     );
 
+    selector_candidates(&f2a_request_body(
+        &primary.requests,
+        "direct source selection",
+    ));
     let first_primary = f2a_request_body(&primary.requests, "direct Primary first");
     let second_primary = f2a_request_body(&primary.requests, "direct Primary second");
     f2a_join_server(primary, "direct Primary");
@@ -1295,7 +1425,7 @@ fn f2a_primary_direct_cli_image_reaches_only_primary_and_keeps_real_tool_receipt
         echidna::domain::profile::VisionRoute::PrimaryDirect
     );
     assert_eq!(state.vision_observations().len(), 0);
-    assert_eq!(state.request_audits().len(), 2);
+    assert_eq!(state.request_audits().len(), 3);
     assert_audits_reconstruct(root.path(), &state);
     let events = session_events(root.path(), &session);
     assert_eq!(
@@ -1321,6 +1451,10 @@ fn f2a_primary_direct_cli_image_reaches_only_primary_and_keeps_real_tool_receipt
 #[test]
 fn ec_k4_two_primary_direct_images_keep_order_without_duplicate_history_and_survive_compaction_resume()
  {
+    use task_context::{
+        ScriptedResponse::{ContinueSelection, InitialSelection, Response},
+        selector_candidates, spawn_scripted_responses_server,
+    };
     let root = TemporaryDirectory::new("ec-k4-two-direct-images");
     initialize_project(root.path());
     let project = Project::discover(root.path()).unwrap();
@@ -1328,15 +1462,21 @@ fn ec_k4_two_primary_direct_images_keep_order_without_duplicate_history_and_surv
     fs::write(root.path().join("first.png"), png_bytes(9, 7)).unwrap();
     fs::write(root.path().join("second.png"), png_bytes(13, 5)).unwrap();
 
-    let initial = spawn_responses_server(vec![(
-        200,
-        text_response("TWO_DIRECT_COMPLETE", "two-direct-initial"),
-    )]);
+    let initial = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(
+            200,
+            text_response(
+                &format!(
+                    "TWO_DIRECT_COMPLETE {}",
+                    "observed image details ".repeat(1800)
+                ),
+                "two-direct-initial",
+            ),
+        ),
+    ]);
     let config = write_direct_config(root.path(), &initial.base_url);
-    let initial_task = format!(
-        "Compare both attached images in order. {}",
-        "stable historical context ".repeat(1024)
-    );
+    let initial_task = "Compare both attached images in order.";
     let output = run_chat(
         root.path(),
         &config,
@@ -1348,6 +1488,10 @@ fn ec_k4_two_primary_direct_images_keep_order_without_duplicate_history_and_surv
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    selector_candidates(&f2a_request_body(
+        &initial.requests,
+        "two direct source selection",
+    ));
     let request = f2a_request_body(&initial.requests, "two direct Primary");
     f2a_join_server(initial, "two direct Primary");
     assert_eq!(json_count_type(&request["input"], "input_image"), 2);
@@ -1356,7 +1500,7 @@ fn ec_k4_two_primary_direct_images_keep_order_without_duplicate_history_and_surv
     let state = reduced_session(&project, &session);
     assert_eq!(state.vision_routes().len(), 2);
     assert!(state.vision_observations().is_empty());
-    assert_eq!(state.request_audits().len(), 1);
+    assert_eq!(state.request_audits().len(), 2);
     let route_sources = state
         .vision_routes()
         .iter()
@@ -1388,15 +1532,17 @@ fn ec_k4_two_primary_direct_images_keep_order_without_duplicate_history_and_surv
         2
     );
 
-    let resumed_server = spawn_responses_server(vec![
-        (
+    let resumed_server = spawn_scripted_responses_server(vec![
+        Response(
             200,
             compaction_summary_response(
                 "Retained the two observed image inputs.",
                 "two-image-summary",
             ),
         ),
-        (
+        ContinueSelection { usage: None },
+        ContinueSelection { usage: None },
+        Response(
             200,
             text_response("TWO_DIRECT_RESUMED", "two-direct-resumed"),
         ),
@@ -1410,7 +1556,8 @@ fn ec_k4_two_primary_direct_images_keep_order_without_duplicate_history_and_surv
     );
     assert!(
         resumed.status.success(),
-        "{}",
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&resumed.stdout),
         String::from_utf8_lossy(&resumed.stderr)
     );
     assert!(String::from_utf8_lossy(&resumed.stdout).contains("Compaction revision 1 applied"));
@@ -1420,6 +1567,12 @@ fn ec_k4_two_primary_direct_images_keep_order_without_duplicate_history_and_surv
             .as_array()
             .is_none_or(|tools| tools.is_empty())
     );
+    for _ in 0..2 {
+        selector_candidates(&f2a_request_body(
+            &resumed_server.requests,
+            "two direct resumed selection",
+        ));
+    }
     let resumed_request = f2a_request_body(&resumed_server.requests, "two direct resumed Primary");
     f2a_join_server(resumed_server, "two direct resumed Primary");
     assert!(json_contains_text(
@@ -1455,6 +1608,10 @@ fn ec_k4_two_primary_direct_images_keep_order_without_duplicate_history_and_surv
 
 #[test]
 fn ec_k4_two_secondary_images_make_ordered_distinct_observations_before_one_primary_request() {
+    use task_context::{
+        ScriptedResponse::{InitialSelection, Response},
+        selector_candidates, spawn_scripted_responses_server,
+    };
     let root = TemporaryDirectory::new("ec-k4-two-secondary-images");
     initialize_project(root.path());
     let project = Project::discover(root.path()).unwrap();
@@ -1472,10 +1629,13 @@ fn ec_k4_two_secondary_images_make_ordered_distinct_observations_before_one_prim
             vision_response("second queued observation", "vision-second"),
         ),
     ]);
-    let primary = spawn_responses_server(vec![(
-        200,
-        text_response("TWO_SECONDARY_COMPLETE", "two-secondary-primary"),
-    )]);
+    let primary = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(
+            200,
+            text_response("TWO_SECONDARY_COMPLETE", "two-secondary-primary"),
+        ),
+    ]);
     let config = write_dual_config(root.path(), &primary.base_url, &vision.base_url);
     let output = run_chat(
         root.path(),
@@ -1494,6 +1654,10 @@ fn ec_k4_two_secondary_images_make_ordered_distinct_observations_before_one_prim
     assert_eq!(json_count_type(&first_vision["input"], "input_image"), 1);
     assert_eq!(json_count_type(&second_vision["input"], "input_image"), 1);
     assert_ne!(first_vision["input"], second_vision["input"]);
+    selector_candidates(&f2a_request_body(
+        &primary.requests,
+        "two secondary source selection",
+    ));
     let primary_request = f2a_request_body(&primary.requests, "two queued Primary");
     f2a_join_server(primary, "two queued Primary");
     assert_eq!(json_count_type(&primary_request["input"], "input_image"), 0);
@@ -1510,7 +1674,7 @@ fn ec_k4_two_secondary_images_make_ordered_distinct_observations_before_one_prim
     let state = reduced_session(&project, &session);
     assert_eq!(state.vision_routes().len(), 2);
     assert_eq!(state.vision_observations().len(), 2);
-    assert_eq!(state.request_audits().len(), 3);
+    assert_eq!(state.request_audits().len(), 4);
     let first_geometry = state.vision_observations()[0]
         .image_geometry
         .as_ref()
@@ -1549,6 +1713,10 @@ fn ec_k4_two_secondary_images_make_ordered_distinct_observations_before_one_prim
 
 #[test]
 fn f2a_model_view_image_follow_up_runs_secondary_before_the_next_primary_sample() {
+    use task_context::{
+        ScriptedResponse::{InitialSelection, Response},
+        selector_candidates, spawn_scripted_responses_server,
+    };
     let root = TemporaryDirectory::new("f2a-cli-model-view-image-follow-up");
     initialize_project(root.path());
     let project = Project::discover(root.path()).unwrap();
@@ -1559,8 +1727,9 @@ fn f2a_model_view_image_follow_up_runs_secondary_before_the_next_primary_sample(
         200,
         vision_response("model follow-up observation", "vision-follow-up"),
     )]);
-    let primary = spawn_responses_server(vec![
-        (
+    let primary = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(
             200,
             m4_long_flow_tool_response(
                 "f2a-view-follow-up",
@@ -1576,7 +1745,7 @@ fn f2a_model_view_image_follow_up_runs_secondary_before_the_next_primary_sample(
                 "primary-follow-up-tool",
             ),
         ),
-        (
+        Response(
             200,
             text_response("F2A_FOLLOW_UP_COMPLETE", "primary-follow-up-final"),
         ),
@@ -1599,6 +1768,10 @@ fn f2a_model_view_image_follow_up_runs_secondary_before_the_next_primary_sample(
             .contains("F2A_FOLLOW_UP_COMPLETE")
     );
 
+    selector_candidates(&f2a_request_body(
+        &primary.requests,
+        "follow-up initial selection",
+    ));
     let first_primary = f2a_request_body(&primary.requests, "follow-up Primary first");
     let second_primary = f2a_request_body(&primary.requests, "follow-up Primary second");
     f2a_join_server(primary, "follow-up Primary");
@@ -1619,7 +1792,7 @@ fn f2a_model_view_image_follow_up_runs_secondary_before_the_next_primary_sample(
     let state = reduced_session(&project, &session);
     assert_eq!(state.vision_routes().len(), 1);
     assert_eq!(state.vision_observations().len(), 1);
-    assert_eq!(state.request_audits().len(), 3);
+    assert_eq!(state.request_audits().len(), 4);
     assert_audits_reconstruct(root.path(), &state);
     assert_eq!(
         session_events(root.path(), &session)
@@ -1804,10 +1977,13 @@ fn ec_k4_queued_but_unsubmitted_images_are_not_reconstructed_after_restart() {
         2
     );
 
-    let primary = spawn_responses_server(vec![(
-        200,
-        text_response("F2A_RESUME_WITHOUT_IMAGE", "resume-without-image"),
-    )]);
+    let primary = task_context::spawn_scripted_responses_server(vec![
+        task_context::ScriptedResponse::InitialSelection,
+        task_context::ScriptedResponse::Response(
+            200,
+            text_response("F2A_RESUME_WITHOUT_IMAGE", "resume-without-image"),
+        ),
+    ]);
     let resumed_config = write_dual_config(root.path(), &primary.base_url, "http://127.0.0.1:1/v1");
     let resumed = run_chat(
         root.path(),
@@ -1820,6 +1996,10 @@ fn ec_k4_queued_but_unsubmitted_images_are_not_reconstructed_after_restart() {
         "{}",
         String::from_utf8_lossy(&resumed.stderr)
     );
+    task_context::selector_candidates(&f2a_request_body(
+        &primary.requests,
+        "resume without queued images selection",
+    ));
     let request = f2a_request_body(&primary.requests, "resume Primary");
     f2a_join_server(primary, "resume Primary");
     assert!(!json_contains_type(&request["input"], "input_image"));
@@ -1944,10 +2124,10 @@ fn ec_k4_second_secondary_image_cancellation_keeps_prefix_without_primary_or_res
     append_research_snapshot(&project, "second-secondary-cancel");
     fs::write(root.path().join("first.png"), png_bytes(8, 6)).unwrap();
     fs::write(root.path().join("second.png"), png_bytes(6, 8)).unwrap();
-    let vision = spawn_f2a_first_response_then_pending_server(vision_response(
-        "cancel first observation",
-        "cancel-first",
-    ));
+    let vision = spawn_f2a_first_response_then_pending_server(
+        vision_response("cancel first observation", "cancel-first"),
+        false,
+    );
     let primary = spawn_f2a_pending_vision_server();
     let config = write_dual_config(root.path(), &primary.base_url, &vision.base_url);
     let child = spawn_f2a_chat(
@@ -2180,6 +2360,10 @@ fn f2a_secondary_pending_vision_sigint_releases_writer_and_resume_does_not_repla
 
 #[test]
 fn synthetic_long_flow_preserves_authoritative_evidence_across_compaction_and_resume() {
+    use task_context::{
+        ScriptedResponse::{ContinueSelection, Response},
+        spawn_scripted_responses_server,
+    };
     let fixture_root =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/m4_long_flow");
     let manifest_bytes = fs::read(fixture_root.join("manifest.json")).unwrap();
@@ -2286,8 +2470,9 @@ fn synthetic_long_flow_preserves_authoritative_evidence_across_compaction_and_re
             }
         }
     });
-    let server = spawn_responses_server(vec![
-        (
+    let server = task_context::spawn_scripted_responses_server(vec![
+        task_context::ScriptedResponse::InitialSelection,
+        task_context::ScriptedResponse::Response(
             200,
             m4_long_flow_tool_response(
                 "call-m4-s4-snapshot",
@@ -2296,7 +2481,7 @@ fn synthetic_long_flow_preserves_authoritative_evidence_across_compaction_and_re
                 "response-m4-s4-snapshot",
             ),
         ),
-        (
+        task_context::ScriptedResponse::Response(
             200,
             m4_long_flow_tool_response(
                 "call-m4-s4-artifact",
@@ -2305,7 +2490,7 @@ fn synthetic_long_flow_preserves_authoritative_evidence_across_compaction_and_re
                 "response-m4-s4-artifact",
             ),
         ),
-        (
+        task_context::ScriptedResponse::Response(
             200,
             m4_long_flow_tool_response(
                 "call-m4-s4-hypothesis",
@@ -2314,7 +2499,7 @@ fn synthetic_long_flow_preserves_authoritative_evidence_across_compaction_and_re
                 "response-m4-s4-hypothesis",
             ),
         ),
-        (
+        task_context::ScriptedResponse::Response(
             200,
             m4_long_flow_tool_response(
                 "call-m4-s4-read",
@@ -2323,7 +2508,7 @@ fn synthetic_long_flow_preserves_authoritative_evidence_across_compaction_and_re
                 "response-m4-s4-read",
             ),
         ),
-        (
+        task_context::ScriptedResponse::Response(
             200,
             m4_long_flow_tool_response(
                 "call-m4-s4-experiment",
@@ -2332,7 +2517,7 @@ fn synthetic_long_flow_preserves_authoritative_evidence_across_compaction_and_re
                 "response-m4-s4-experiment",
             ),
         ),
-        (
+        task_context::ScriptedResponse::Response(
             200,
             text_response(
                 "Candidate only: the offline source toy remains unverified.",
@@ -2342,7 +2527,7 @@ fn synthetic_long_flow_preserves_authoritative_evidence_across_compaction_and_re
     ]);
     // This is an evidence/continuation fixture, not a pressure threshold.
     // Leave schema headroom; m5_context_pressure independently proves trimming.
-    let config = write_context_window_config(root.path(), &server.base_url, 65_536);
+    let config = write_context_window_config(root.path(), &server.base_url, 272_000);
     let run = run_chat(
         root.path(),
         &config,
@@ -2358,6 +2543,10 @@ fn synthetic_long_flow_preserves_authoritative_evidence_across_compaction_and_re
     assert!(run_output.contains("Candidate only"));
     assert!(!run_output.to_ascii_lowercase().contains("confirmed"));
     assert!(!run_output.to_ascii_lowercase().contains("reproduced"));
+    task_context::selector_candidates(&f2a_request_body(
+        &server.requests,
+        "initial task selection",
+    ));
     let requests = (0..6)
         .map(|_| server.requests.recv().unwrap())
         .map(|request| {
@@ -2435,7 +2624,7 @@ fn synthetic_long_flow_preserves_authoritative_evidence_across_compaction_and_re
         Ok(())
     );
     assert_eq!(before_compaction.execution_receipt_count(), 5);
-    assert_eq!(before_compaction.request_audits().len(), 6);
+    assert_eq!(before_compaction.request_audits().len(), 7);
     assert!(before_compaction.vision_observations().is_empty());
     let raw_session_events = session_events(root.path(), &session);
     let receipt_event_ids = raw_session_events
@@ -2530,13 +2719,17 @@ fn synthetic_long_flow_preserves_authoritative_evidence_across_compaction_and_re
     drop(store);
     drop(writer);
 
-    let resumed_server = spawn_responses_server(vec![(
-        200,
-        text_response(
-            "Evidence curation keeps the source observation as a candidate.",
-            "response-m4-s4-resume",
+    let resumed_server = spawn_scripted_responses_server(vec![
+        ContinueSelection { usage: None },
+        ContinueSelection { usage: None },
+        Response(
+            200,
+            text_response(
+                "Evidence curation keeps the source observation as a candidate.",
+                "response-m4-s4-resume",
+            ),
         ),
-    )]);
+    ]);
     let resumed_config = write_config(root.path(), &resumed_server.base_url);
     let resumed = run_chat(
         root.path(),
@@ -2556,6 +2749,12 @@ fn synthetic_long_flow_preserves_authoritative_evidence_across_compaction_and_re
         "{}",
         String::from_utf8_lossy(&resumed.stderr)
     );
+    for _ in 0..2 {
+        task_context::selector_candidates(&f2a_request_body(
+            &resumed_server.requests,
+            "long-flow retained evidence selection",
+        ));
+    }
     let resumed_request = resumed_server.requests.recv().unwrap();
     resumed_server.join();
     let resumed_request: Value =
@@ -2586,7 +2785,7 @@ fn synthetic_long_flow_preserves_authoritative_evidence_across_compaction_and_re
     let final_state = reduced_session(&project, &session);
     assert_eq!(final_state.history().ensure_all_tool_calls_paired(), Ok(()));
     assert_eq!(final_state.execution_receipt_count(), 5);
-    assert_eq!(final_state.request_audits().len(), 7);
+    assert_eq!(final_state.request_audits().len(), 10);
     assert!(final_state.vision_observations().is_empty());
     assert_audits_reconstruct(root.path(), &final_state);
     let full_requests = final_state
@@ -2597,10 +2796,58 @@ fn synthetic_long_flow_preserves_authoritative_evidence_across_compaction_and_re
                 == echidna::domain::request_audit::RequestAuditDeliveryMode::Full
         })
         .count();
+    let selections = session_events(root.path(), &session)
+        .into_iter()
+        .filter(|event| event["event_type"] == "session.task_context_selected")
+        .take(3)
+        .map(|event| {
+            let p = &event["payload"];
+            json!({
+                "capture_blob":p["capture_blob"],
+                "provider_session":p["provider_session"], "selected_research":p["selected_research"],
+                "selected_core":p["selected_core"], "selected_memory":p["selected_memory"],
+                "selected_summary":p["selected_summary"], "selected_history":p["selected_history"],
+                "unresolved_gaps":p["unresolved_gaps"], "live_processes":p["live_processes"],
+                "source_project_hash":p["source"]["project_stream_hash"]
+            })
+        }).collect::<Vec<_>>();
+    let captured: Value = serde_json::from_slice(
+        &fs::read(
+            root.path()
+                .join(".echidna/artifacts/blobs/sha256")
+                .join(selections[1]["capture_blob"].as_str().unwrap()),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        captured["candidates"]["gaps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|gap| {
+                gap.as_str()
+                    .unwrap()
+                    .contains("Research candidates require expansion")
+            }),
+        "the selector still sees its candidate coverage limitation"
+    );
+    assert_eq!(selections[0]["selected_research"], json!([]));
+    assert_eq!(selections[1]["selected_research"], json!([]));
+    assert_eq!(selections[1]["unresolved_gaps"], json!([]));
+    assert_eq!(
+        selections[1]["provider_session"],
+        selections[0]["provider_session"]
+    );
+    assert!(
+        !requests[1]
+            .to_string()
+            .contains("Research candidates require expansion")
+    );
     assert_eq!(
         full_requests,
-        2,
-        "delivery decisions: {:?}",
+        5, // Three selection requests plus the two main Full requests.
+        "delivery decisions: {:?}; task selections: {selections:?}",
         final_state
             .request_audits()
             .iter()
@@ -2668,8 +2915,8 @@ fn synthetic_long_flow_preserves_authoritative_evidence_across_compaction_and_re
     );
     let metrics: Value = serde_json::from_slice(&metrics.stdout).unwrap();
     assert_eq!(metrics["status"], "ok");
-    assert_eq!(metrics["requests"], 7);
-    assert_eq!(metrics["full_requests"], 2);
+    assert_eq!(metrics["requests"], 10);
+    assert_eq!(metrics["full_requests"], 5);
     assert_eq!(metrics["incremental_requests"], 5);
     assert_eq!(metrics["fallbacks"], 0);
     assert_eq!(metrics["provider_usage"], "unavailable");
@@ -2777,10 +3024,13 @@ fn changed_historical_research_prefix_is_rejected_before_resume() {
 fn inline_api_key_drives_loopback_chat_without_entering_output_or_project_facts() {
     let project = TemporaryDirectory::new("cli-chat-inline-api-key");
     initialize_project(project.path());
-    let server = spawn_responses_server(vec![(
-        200,
-        text_response("inline credential answer", "response-inline"),
-    )]);
+    let server = task_context::spawn_scripted_responses_server(vec![
+        task_context::ScriptedResponse::InitialSelection,
+        task_context::ScriptedResponse::Response(
+            200,
+            text_response("inline credential answer", "response-inline"),
+        ),
+    ]);
     let config = write_inline_config(project.path(), &server.base_url);
 
     let output = run_chat(
@@ -2796,6 +3046,10 @@ fn inline_api_key_drives_loopback_chat_without_entering_output_or_project_facts(
     );
     assert!(!String::from_utf8_lossy(&output.stdout).contains(INLINE_API_KEY_FIXTURE));
     assert!(!String::from_utf8_lossy(&output.stderr).contains(INLINE_API_KEY_FIXTURE));
+    task_context::selector_candidates(&f2a_request_body(
+        &server.requests,
+        "initial task selection",
+    ));
     let request = server.requests.recv().unwrap();
     server.join();
     let authorization = request
@@ -2840,8 +3094,10 @@ fn new_session_ids_include_the_creating_process_and_do_not_repeat_across_process
 fn chat_loopback_streams_text_and_persists_started_history_audit_and_explicit_resume() {
     let project = TemporaryDirectory::new("cli-chat-loopback");
     initialize_project(project.path());
-    let first_server =
-        spawn_responses_server(vec![(200, text_response("source answer", "response-1"))]);
+    let first_server = task_context::spawn_scripted_responses_server(vec![
+        task_context::ScriptedResponse::InitialSelection,
+        task_context::ScriptedResponse::Response(200, text_response("source answer", "response-1")),
+    ]);
     let config = write_config(project.path(), &first_server.base_url);
 
     let first = run_chat(project.path(), &config, "inspect source\n/exit\n", &[]);
@@ -2854,6 +3110,10 @@ fn chat_loopback_streams_text_and_persists_started_history_audit_and_explicit_re
     assert!(first_output.contains("Started session"));
     assert!(first_output.contains("Echidna> source answer"));
     assert!(first_output.contains("remains active for explicit resume"));
+    task_context::selector_candidates(&f2a_request_body(
+        &first_server.requests,
+        "initial task selection",
+    ));
     let first_request = first_server.requests.recv().unwrap();
     first_server.join();
     let first_request: Value =
@@ -2885,12 +3145,15 @@ fn chat_loopback_streams_text_and_persists_started_history_audit_and_explicit_re
             .iter()
             .filter(|event| event["event_type"] == "session.request_audit_recorded")
             .count(),
-        1
+        2
     );
 
-    let second_server =
-        spawn_responses_server(vec![(200, text_response("mobile answer", "response-2"))]);
-    let resumed_config = write_config(project.path(), &second_server.base_url);
+    let second_server = task_context::spawn_scripted_responses_server(vec![
+        task_context::ScriptedResponse::NewSelection,
+        task_context::ScriptedResponse::Response(200, text_response("mobile answer", "response-2")),
+    ]);
+    let resumed_config =
+        write_context_window_config(project.path(), &second_server.base_url, 272_000);
     let resumed = run_chat(
         project.path(),
         &resumed_config,
@@ -2905,6 +3168,7 @@ fn chat_loopback_streams_text_and_persists_started_history_audit_and_explicit_re
     let resumed_output = String::from_utf8(resumed.stdout).unwrap();
     assert!(resumed_output.contains("Resumed session"));
     assert!(resumed_output.contains("Echidna> mobile answer"));
+    task_context::selector_candidates(&request_body(&second_server.requests.recv().unwrap()));
     let resumed_request = second_server.requests.recv().unwrap();
     second_server.join();
     let resumed_request: Value =
@@ -2935,7 +3199,7 @@ fn chat_loopback_streams_text_and_persists_started_history_audit_and_explicit_re
             .iter()
             .filter(|event| event["event_type"] == "session.request_audit_recorded")
             .count(),
-        2
+        4
     );
     assert!(
         project
@@ -2949,10 +3213,13 @@ fn chat_loopback_streams_text_and_persists_started_history_audit_and_explicit_re
 fn m5_paste_preserves_multiline_input_and_domain_resume_never_drifts_to_source() {
     let project = TemporaryDirectory::new("m5-cli-paste-domain-resume");
     initialize_project(project.path());
-    let first_server = spawn_responses_server(vec![(
-        200,
-        text_response("mobile multiline answer", "m5-paste-first"),
-    )]);
+    let first_server = task_context::spawn_scripted_responses_server(vec![
+        task_context::ScriptedResponse::InitialSelection,
+        task_context::ScriptedResponse::Response(
+            200,
+            text_response("mobile multiline answer", "m5-paste-first"),
+        ),
+    ]);
     let config = write_config(project.path(), &first_server.base_url);
     let pasted = "map exported component\n/phase verification\nretain exact newline";
     let first = run_chat(
@@ -2967,6 +3234,10 @@ fn m5_paste_preserves_multiline_input_and_domain_resume_never_drifts_to_source()
         String::from_utf8_lossy(&first.stderr)
     );
     assert!(String::from_utf8_lossy(&first.stdout).contains("Paste mode"));
+    task_context::selector_candidates(&f2a_request_body(
+        &first_server.requests,
+        "initial task selection",
+    ));
     let first_request = request_body(&first_server.requests.recv().unwrap());
     first_server.join();
     assert!(json_contains_text(&first_request["input"], pasted));
@@ -3002,10 +3273,13 @@ fn m5_paste_preserves_multiline_input_and_domain_resume_never_drifts_to_source()
     assert_eq!(phase_events.len(), 1);
     assert_eq!(phase_events[0]["payload"]["selection"]["phase"], "mapping");
 
-    let second_server = spawn_responses_server(vec![(
-        200,
-        text_response("restored mobile answer", "m5-paste-resumed"),
-    )]);
+    let second_server = task_context::spawn_scripted_responses_server(vec![
+        task_context::ScriptedResponse::ContinueSelection { usage: None },
+        task_context::ScriptedResponse::Response(
+            200,
+            text_response("restored mobile answer", "m5-paste-resumed"),
+        ),
+    ]);
     let resumed_config = write_config(project.path(), &second_server.base_url);
     let resumed = run_chat(
         project.path(),
@@ -3018,6 +3292,10 @@ fn m5_paste_preserves_multiline_input_and_domain_resume_never_drifts_to_source()
         "{}",
         String::from_utf8_lossy(&resumed.stderr)
     );
+    task_context::selector_candidates(&f2a_request_body(
+        &second_server.requests,
+        "pasted-task continuation selection",
+    ));
     let resumed_request = request_body(&second_server.requests.recv().unwrap());
     second_server.join();
     assert!(
@@ -3038,6 +3316,37 @@ fn m5_paste_preserves_multiline_input_and_domain_resume_never_drifts_to_source()
 
 #[test]
 fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_exactly() {
+    use current_fact_guidance::continue_with_summary_and_current_facts;
+    use task_context::{
+        ScriptedResponse::{InitialSelection, Response, SelectionDecision},
+        spawn_scripted_responses_server, spawn_scripted_responses_server_with_wait,
+    };
+    fn select_current_sources(candidates: &Value) -> Value {
+        let mut decision = continue_with_summary_and_current_facts(candidates);
+        decision["required_context_refs"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|reference| !reference.as_str().unwrap().contains("-old:"));
+        if candidates["input"]["text"] == "resume the compacted boundary" {
+            let prior_input = candidates["context"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|unit| unit["excerpt"] == "continue after explicit compaction")
+                .collect::<Vec<_>>();
+            assert_eq!(
+                prior_input.len(),
+                1,
+                "the original follow-up remains a source"
+            );
+            assert!(prior_input[0]["source_event_ref"].is_string());
+            decision["required_context_refs"]
+                .as_array_mut()
+                .unwrap()
+                .push(prior_input[0]["ref"].clone());
+        }
+        decision
+    }
     let root = TemporaryDirectory::new("m5-production-compaction");
     fs::write(root.path().join("candidate.txt"), "bounded candidate\n").unwrap();
     initialize_project(root.path());
@@ -3052,8 +3361,9 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
         ],
     );
 
-    let first_server = spawn_responses_server(vec![
-        (
+    let first_server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(
             200,
             format!(
                 "data: {}\n\n{}",
@@ -3074,7 +3384,7 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
                 )
             ),
         ),
-        (
+        Response(
             200,
             m4_long_flow_tool_response(
                 "m5-compact-artifact",
@@ -3091,7 +3401,7 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
                 "m5-compact-artifact-response",
             ),
         ),
-        (
+        Response(
             200,
             m4_long_flow_tool_response(
                 "m5-compact-read",
@@ -3100,10 +3410,10 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
                 "m5-compact-read-response",
             ),
         ),
-        (
+        Response(
             200,
             text_response(
-                "The bounded candidate is mapped but remains unverified.",
+                &"The bounded candidate is mapped but remains unverified. ".repeat(900),
                 "m5-compact-first-final",
             ),
         ),
@@ -3111,7 +3421,7 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
     // This fixture verifies evidence/compaction boundaries, not context
     // pressure. Keep room for the complete bound instructions and scoped
     // Artifact schemas; the separate pressure fixture tests tight windows.
-    let first_config = write_context_window_config(root.path(), &first_server.base_url, 65_536);
+    let first_config = write_context_window_config(root.path(), &first_server.base_url, 272_000);
     let first = run_chat(
         root.path(),
         &first_config,
@@ -3123,6 +3433,10 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
         "{}",
         String::from_utf8_lossy(&first.stderr)
     );
+    task_context::selector_candidates(&f2a_request_body(
+        &first_server.requests,
+        "evidence initial selection",
+    ));
     for _ in 0..4 {
         first_server.requests.recv().unwrap();
     }
@@ -3348,15 +3662,17 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
         ),
     );
 
-    let compacted_server = spawn_responses_server(vec![
-        (
+    let compacted_server = spawn_scripted_responses_server(vec![
+        Response(
             200,
             compaction_summary_response(
                 "Read bounded candidate; preserve the recorded experiment/finding source references.",
                 "m5-summary",
             ),
         ),
-        (
+        SelectionDecision(select_current_sources),
+        SelectionDecision(select_current_sources),
+        Response(
             200,
             text_response(
                 "Continue from the exact compacted evidence boundary.",
@@ -3365,9 +3681,8 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
         ),
     ]);
     let compacted_config =
-        write_context_window_config(root.path(), &compacted_server.base_url, 65_536);
-    // This fixture inspects the full bounded evidence-navigation spine. The
-    // configured target must leave room above this domain's fixed Tool schema.
+        write_context_window_config(root.path(), &compacted_server.base_url, 272_000);
+    // Leave room for selected source references above the fixed Tool schema.
     fs::write(
         &compacted_config,
         format!(
@@ -3384,7 +3699,8 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
     );
     assert!(
         compacted.status.success(),
-        "{}",
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&compacted.stdout),
         String::from_utf8_lossy(&compacted.stderr)
     );
     let compacted_output = String::from_utf8(compacted.stdout).unwrap();
@@ -3398,12 +3714,18 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
             .as_array()
             .is_none_or(|tools| tools.is_empty())
     );
+    for _ in 0..2 {
+        task_context::selector_candidates(&f2a_request_body(
+            &compacted_server.requests,
+            "compacted evidence selection",
+        ));
+    }
     let compacted_request = request_body(&compacted_server.requests.recv().unwrap());
     compacted_server.join();
     assert!(compacted_request["previous_response_id"].is_null());
     let compacted_wire = serde_json::to_string(&compacted_request).unwrap();
     for expected in [
-        "derived_session_summary_v6",
+        "derived_session_summary_v7",
         "snapshot-m5-compact",
         "hypothesis-m5-compact",
         "experiment-m5-compact",
@@ -3436,54 +3758,61 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
     );
     let summary =
         serde_json::to_value(compacted_state.latest_compaction().unwrap().summary()).unwrap();
-    assert_eq!(summary["schema_version"], 6);
+    assert_eq!(summary["schema_version"], 7);
     assert_eq!(summary["revision"], 1);
+    // v7 binds its exact task selection and source plan rather than making a
+    // second global Research spine. Positive Research continuity is checked
+    // against the actual main and resumed requests, below and above.
+    assert!(summary["evidence_spine"].is_null());
+    let compacted_events = session_events(root.path(), &session);
     assert_eq!(
-        summary["evidence_spine"]["target_snapshot_refs"],
-        json!(["snapshot-m5-compact"])
+        &compacted_events[..first_events.len()],
+        first_events.as_slice()
     );
-    assert_eq!(
-        summary["evidence_spine"]["active_hypothesis_refs"],
-        json!(["hypothesis-m5-compact"])
-    );
-    assert_eq!(
-        summary["evidence_spine"]["experiment_refs"],
-        json!(["experiment-m5-compact"])
-    );
-    assert_eq!(
-        summary["evidence_spine"]["finding_refs"],
-        json!(["finding-m5-compact"])
-    );
-    assert_eq!(
-        summary["evidence_spine"]["next_action_refs"],
-        json!(["next-action-m5-compact"])
-    );
-    assert_eq!(
-        summary["evidence_spine"]["artifact_refs"],
-        json!(["artifact-m5-compact"])
-    );
-    let receipt_refs = summary["evidence_spine"]["execution_receipt_refs"]
-        .as_array()
-        .unwrap()
+    let selection_source = compacted_events
         .iter()
-        .map(|value| value.as_str().unwrap())
-        .collect::<BTreeSet<_>>();
-    assert_eq!(receipt_refs, BTreeSet::from([read_receipt.as_str()]));
-    assert!(!receipt_refs.contains(artifact_receipt.as_str()));
-    assert!(!receipt_refs.contains(old_artifact_receipt.as_str()));
-    let summary_wire = serde_json::to_string(&summary).unwrap();
-    for old_reference in [
-        "snapshot-m5-compact-old",
-        "experiment-m5-compact-old",
-        "finding-m5-compact-old",
-        "next-action-m5-compact-old",
-        "artifact-m5-compact-old",
-    ] {
+        .find(|event| event["event_id"] == summary["task_selection_event"])
+        .expect("the v7 summary binds a real prior task selection");
+    assert_eq!(
+        selection_source["event_type"],
+        "session.task_context_selected"
+    );
+    assert_eq!(
+        summary["task_id"],
+        selection_source["payload"]["task_revisions"][0]["task_id"]
+    );
+    assert!(!summary["summarized_history"].as_array().unwrap().is_empty());
+    for reference in summary["summarized_history"].as_array().unwrap() {
         assert!(
-            !summary_wire.contains(old_reference),
-            "Summary retained older Snapshot reference {old_reference}"
+            first_events
+                .iter()
+                .any(|event| event["event_id"] == *reference)
         );
     }
+    let receipts = compacted_events
+        .iter()
+        .filter(|event| event["event_type"] == "tool.execution_outcome_recorded")
+        .map(|event| event["event_id"].as_str().unwrap())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        receipts,
+        BTreeSet::from([
+            read_receipt.as_str(),
+            artifact_receipt.as_str(),
+            old_artifact_receipt.as_str()
+        ])
+    );
+    for old_detail in [
+        "Older Snapshot candidate",
+        "read the older bounded candidate",
+        "do not retain this older Snapshot action",
+    ] {
+        assert!(
+            !compacted_wire.contains(old_detail),
+            "old Research detail leaked into main: {old_detail}"
+        );
+    }
+    assert_audits_reconstruct(root.path(), &compacted_state);
     assert_eq!(
         compacted_state
             .request_audits()
@@ -3495,6 +3824,37 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
             echidna::domain::context::BaselineInvalidationReason::CompactionReset
         )
     );
+    let applied_compaction = compacted_events
+        .iter()
+        .rfind(|event| event["event_type"] == "session.compaction_created")
+        .expect("the compaction is durable before the next Primary request");
+    let last_audit = compacted_state.request_audits().last().unwrap();
+    let main_audit = compacted_events
+        .iter()
+        .find(|event| event["event_id"] == last_audit.audit_event_id().as_str())
+        .unwrap();
+    assert!(
+        applied_compaction["sequence"].as_u64().unwrap() < main_audit["sequence"].as_u64().unwrap()
+    );
+    // The new task epoch has no predecessor but retains the unconsumed reset
+    // from the real durable compaction.
+    let latest_selection = compacted_events
+        .iter()
+        .rfind(|event| event["event_type"] == "session.task_context_selected")
+        .unwrap();
+    let latest_delivery = compacted_events
+        .iter()
+        .rfind(|event| event["event_type"] == "session.model_delivery_committed")
+        .unwrap();
+    assert_ne!(
+        latest_selection["payload"]["provider_session"],
+        selection_source["payload"]["provider_session"]
+    );
+    assert_eq!(
+        latest_delivery["payload"]["provider_session"],
+        latest_selection["payload"]["provider_session"]
+    );
+    assert!(latest_delivery["payload"]["previous_accepted_audit"].is_null());
     assert_eq!(
         session_events(root.path(), &session)
             .iter()
@@ -3503,14 +3863,22 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
         1
     );
 
-    let resumed_server = spawn_responses_server(vec![(
-        200,
-        text_response(
-            "Resume retained the compacted boundary.",
-            "m5-compact-resume",
+    let resumed_responses = vec![
+        SelectionDecision(select_current_sources),
+        SelectionDecision(select_current_sources),
+        Response(
+            200,
+            text_response(
+                "Resume retained the compacted boundary.",
+                "m5-compact-resume",
+            ),
         ),
-    )]);
-    let resumed_config = write_context_window_config(root.path(), &resumed_server.base_url, 65_536);
+    ];
+    // Bound fixture liveness separately from product latency.
+    let resumed_server =
+        spawn_scripted_responses_server_with_wait(resumed_responses, Duration::from_secs(60));
+    let resumed_config =
+        write_context_window_config(root.path(), &resumed_server.base_url, 272_000);
     let resumed = run_chat(
         root.path(),
         &resumed_config,
@@ -3522,6 +3890,12 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
         "{}",
         String::from_utf8_lossy(&resumed.stderr)
     );
+    for _ in 0..2 {
+        task_context::selector_candidates(&f2a_request_body(
+            &resumed_server.requests,
+            "resumed evidence selection",
+        ));
+    }
     let resumed_request = request_body(&resumed_server.requests.recv().unwrap());
     resumed_server.join();
     assert!(resumed_request["previous_response_id"].is_null());
@@ -3538,19 +3912,55 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
             .contains("execute the smallest decisive experiment")
     );
     let resumed_wire = serde_json::to_string(&resumed_request).unwrap();
-    assert!(resumed_wire.contains("derived_session_summary_v6"));
+    assert!(resumed_wire.contains("derived_session_summary_v7"));
     assert!(resumed_wire.contains("continue after explicit compaction"));
     assert!(resumed_wire.contains("resume the compacted boundary"));
+    for expected in [
+        "snapshot-m5-compact",
+        "hypothesis-m5-compact",
+        "experiment-m5-compact",
+        "capsule-m5-compact",
+        "finding-m5-compact",
+        "next-action-m5-compact",
+        "artifact-m5-compact",
+        read_receipt.as_str(),
+    ] {
+        assert!(
+            resumed_wire.contains(expected),
+            "Resume lost current Research source {expected}"
+        );
+    }
+    for old_detail in [
+        "Older Snapshot candidate",
+        "read the older bounded candidate",
+        "do not retain this older Snapshot action",
+    ] {
+        assert!(
+            !resumed_wire.contains(old_detail),
+            "Resume imported old Research detail {old_detail}"
+        );
+    }
+    let after_resume = session_events(root.path(), &session);
+    assert_eq!(
+        &after_resume[..compacted_events.len()],
+        compacted_events.as_slice()
+    );
+    let resumed_state = reduced_session(&project, &session);
+    assert_eq!(resumed_state.execution_receipt_count(), 3);
+    assert_audits_reconstruct(root.path(), &resumed_state);
 }
 
 #[test]
 fn m5_compaction_preconditions_never_append_a_partial_fact() {
     let missing_research = TemporaryDirectory::new("m5-compact-missing-research");
     initialize_project(missing_research.path());
-    let server = spawn_responses_server(vec![(
-        200,
-        text_response("history exists", "m5-compact-missing-research"),
-    )]);
+    let server = task_context::spawn_scripted_responses_server(vec![
+        task_context::ScriptedResponse::InitialSelection,
+        task_context::ScriptedResponse::Response(
+            200,
+            text_response("history exists", "m5-compact-missing-research"),
+        ),
+    ]);
     let config = write_config(missing_research.path(), &server.base_url);
     let first = run_chat(
         missing_research.path(),
@@ -3559,6 +3969,10 @@ fn m5_compaction_preconditions_never_append_a_partial_fact() {
         &[],
     );
     assert!(first.status.success());
+    task_context::selector_candidates(&f2a_request_body(
+        &server.requests,
+        "initial task selection",
+    ));
     server.requests.recv().unwrap();
     server.join();
     let session = session_id(missing_research.path());
@@ -3598,8 +4012,13 @@ fn m5_compaction_preconditions_never_append_a_partial_fact() {
         "{}",
         String::from_utf8_lossy(&rejected.stderr)
     );
+    // A task-aware summary no longer requires an unrelated Research target.
+    // This short task must still fail the useful-reduction preflight locally,
+    // without spending an admission or appending a partial summary.
     assert!(
-        String::from_utf8_lossy(&rejected.stdout).contains("requires a current TargetSnapshot")
+        String::from_utf8_lossy(&rejected.stdout).contains("smaller usable next-Turn Context"),
+        "{}",
+        String::from_utf8_lossy(&rejected.stdout)
     );
     assert!(String::from_utf8_lossy(&rejected.stdout).contains("Compaction deferred"));
     assert_eq!(
@@ -3607,7 +4026,7 @@ fn m5_compaction_preconditions_never_append_a_partial_fact() {
             .iter()
             .filter(|event| event["event_type"] == "session.request_audit_recorded")
             .count(),
-        1
+        2
     );
     assert!(
         session_events(missing_research.path(), &session)
@@ -3759,11 +4178,18 @@ fn m5_compaction_preconditions_never_append_a_partial_fact() {
 
 #[test]
 fn f3_compaction_rejects_negative_reduction_without_appending() {
+    use task_context::{
+        ScriptedResponse::{InitialSelection, Response},
+        spawn_scripted_responses_server,
+    };
     let root = TemporaryDirectory::new("f3-compaction-no-reduction");
     initialize_project(root.path());
     let project = Project::discover(root.path()).unwrap();
     append_research_snapshot(&project, "small");
-    let server = spawn_responses_server(vec![(200, text_response("ok", "short"))]);
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(200, text_response("ok", "short")),
+    ]);
     let config = write_config(root.path(), &server.base_url);
     assert!(
         run_chat(root.path(), &config, "hi\n/exit\n", &[])
@@ -3809,19 +4235,18 @@ fn f3_compaction_rejects_negative_reduction_without_appending() {
 #[test]
 fn f3_large_compaction_bounds_reference_subset_and_drops_oversized_recent_history() {
     let root = TemporaryDirectory::new("f3-compaction-bounded");
-    initialize_project(root.path());
+    // The bounded Research spine is the legacy summary contract. Use an
+    // actual pre-feature stream; task-scoped v7 summaries have their own
+    // selected-source regressions and must not inherit a mixed global spine.
+    let session = load_pre_task_context_fixture(root.path(), "long");
     let project = Project::discover(root.path()).unwrap();
-    append_research_snapshot(&project, "large");
-    let server = spawn_responses_server(vec![
-        (200, text_response(&"analysis ".repeat(3500), "large")),
-        (
-            200,
-            compaction_summary_response(
-                "Parser boundaries remain a candidate; source hypotheses require verification.",
-                "large-summary",
-            ),
+    let server = spawn_responses_server(vec![(
+        200,
+        compaction_summary_response(
+            "The source read is retained; hypotheses remain unverified.",
+            "large-summary",
         ),
-    ]);
+    )]);
     let config = write_config(root.path(), &server.base_url);
     fs::write(
         &config,
@@ -3831,18 +4256,6 @@ fn f3_large_compaction_bounds_reference_subset_and_drops_oversized_recent_histor
         ),
     )
     .unwrap();
-    let initial = run_chat(
-        root.path(),
-        &config,
-        "Investigate parser boundaries\n/exit\n",
-        &[],
-    );
-    assert!(
-        initial.status.success(),
-        "{}",
-        String::from_utf8_lossy(&initial.stderr)
-    );
-    let session = session_id(root.path());
     for index in 0..100 {
         let record = HypothesisRecord::from_draft(HypothesisDraft {
             id: HypothesisId::new(format!("hypothesis-f3-{index:03}-{}", "x".repeat(120))),
@@ -3881,7 +4294,6 @@ fn f3_large_compaction_bounds_reference_subset_and_drops_oversized_recent_histor
         String::from_utf8_lossy(&output.stderr)
     );
     server.requests.recv_timeout(F2A_WAIT).unwrap();
-    server.requests.recv_timeout(F2A_WAIT).unwrap();
     server.join();
     let events = session_events(root.path(), &session);
     let compaction = &events
@@ -3914,7 +4326,7 @@ fn f3_large_compaction_bounds_reference_subset_and_drops_oversized_recent_histor
         compaction["summary"]["narrative"]["current_goal"]
             .as_str()
             .unwrap()
-            .contains("parser boundaries")
+            .contains("Investigate parser boundaries")
     );
     assert!(
         !compaction["summary"]["narrative"]["unresolved_questions"]
@@ -3928,10 +4340,13 @@ fn f3_large_compaction_bounds_reference_subset_and_drops_oversized_recent_histor
 fn m5_context_pressure_uses_only_planner_manifest_and_never_auto_compacts() {
     let normal = TemporaryDirectory::new("m5-context-pressure-normal");
     initialize_project(normal.path());
-    let normal_server = spawn_responses_server(vec![(
-        200,
-        text_response("normal pressure", "m5-pressure-normal"),
-    )]);
+    let normal_server = task_context::spawn_scripted_responses_server(vec![
+        task_context::ScriptedResponse::InitialSelection,
+        task_context::ScriptedResponse::Response(
+            200,
+            text_response("normal pressure", "m5-pressure-normal"),
+        ),
+    ]);
     let normal_config = write_config(normal.path(), &normal_server.base_url);
     let normal_output = run_chat(
         normal.path(),
@@ -3940,6 +4355,10 @@ fn m5_context_pressure_uses_only_planner_manifest_and_never_auto_compacts() {
         &[],
     );
     assert!(normal_output.status.success());
+    task_context::selector_candidates(&f2a_request_body(
+        &normal_server.requests,
+        "initial task selection",
+    ));
     normal_server.requests.recv().unwrap();
     normal_server.join();
     let normal_stdout = String::from_utf8(normal_output.stdout).unwrap();
@@ -3951,10 +4370,13 @@ fn m5_context_pressure_uses_only_planner_manifest_and_never_auto_compacts() {
 
     let warning = TemporaryDirectory::new("m5-context-pressure-warning");
     initialize_project(warning.path());
-    let warning_server = spawn_responses_server(vec![(
-        200,
-        text_response("warning pressure", "m5-pressure-warning"),
-    )]);
+    let warning_server = task_context::spawn_scripted_responses_server(vec![
+        task_context::ScriptedResponse::InitialSelection,
+        task_context::ScriptedResponse::Response(
+            200,
+            text_response("warning pressure", "m5-pressure-warning"),
+        ),
+    ]);
     // Keep this fixture inside the warning band with headroom for canonical
     // ToolSpec guidance; the separate critical lane still proves truncation.
     let warning_config =
@@ -3970,6 +4392,10 @@ fn m5_context_pressure_uses_only_planner_manifest_and_never_auto_compacts() {
         "{}",
         String::from_utf8_lossy(&warning_output.stderr)
     );
+    task_context::selector_candidates(&f2a_request_body(
+        &warning_server.requests,
+        "initial task selection",
+    ));
     warning_server.requests.recv().unwrap();
     warning_server.join();
     let warning_stdout = String::from_utf8(warning_output.stdout).unwrap();
@@ -4005,27 +4431,24 @@ fn m5_context_pressure_uses_only_planner_manifest_and_never_auto_compacts() {
             keep_independent: false,
         },
     );
-    let critical_server = spawn_responses_server(vec![(
-        200,
-        text_response("critical pressure", "m5-pressure-critical"),
-    )]);
-    // Leave required fragments room while keeping the bounded Research
-    // projection above the input budget; critical must not be a stopped Turn.
+    // Before an input selects task sources, /context still reports the
+    // optional Research projection's truncation through the original planner.
+    // Selected required sources have separate typed-capacity regressions.
+    // The additional context_read schema requires this much fixed headroom.
     let critical_config =
-        write_context_window_config(critical.path(), &critical_server.base_url, 22_000);
-    let critical_output = run_chat(
-        critical.path(),
-        &critical_config,
-        "inspect critical pressure\n/context\n/exit\n",
-        &[],
-    );
+        write_context_window_config(critical.path(), "http://127.0.0.1:1/v1", 23_000);
+    let critical_output = run_chat(critical.path(), &critical_config, "/context\n/exit\n", &[]);
     assert!(
         critical_output.status.success(),
         "{}",
         String::from_utf8_lossy(&critical_output.stderr)
     );
-    critical_server.requests.recv().unwrap();
-    critical_server.join();
+    assert!(
+        reduced_session(&discovered, &session_id(critical.path()))
+            .request_audits()
+            .is_empty(),
+        "pressure inspection does not sample a model"
+    );
     let critical_stdout = String::from_utf8(critical_output.stdout).unwrap();
     assert!(
         critical_stdout.contains("[context pressure: critical]"),
@@ -4052,8 +4475,9 @@ fn m5_cli_reports_real_tool_start_and_persisted_terminal_receipt() {
     let project = TemporaryDirectory::new("m5-cli-tool-visibility");
     initialize_project(project.path());
     fs::write(project.path().join("target.txt"), "bounded fixture\n").unwrap();
-    let server = spawn_responses_server(vec![
-        (
+    let server = task_context::spawn_scripted_responses_server(vec![
+        task_context::ScriptedResponse::InitialSelection,
+        task_context::ScriptedResponse::Response(
             200,
             m4_long_flow_tool_response(
                 "m5-read",
@@ -4062,7 +4486,10 @@ fn m5_cli_reports_real_tool_start_and_persisted_terminal_receipt() {
                 "m5-tool",
             ),
         ),
-        (200, text_response("tool complete", "m5-tool-final")),
+        task_context::ScriptedResponse::Response(
+            200,
+            text_response("tool complete", "m5-tool-final"),
+        ),
     ]);
     let config = write_config(project.path(), &server.base_url);
     let output = run_chat(
@@ -4076,15 +4503,19 @@ fn m5_cli_reports_real_tool_start_and_persisted_terminal_receipt() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    task_context::selector_candidates(&f2a_request_body(
+        &server.requests,
+        "initial task selection",
+    ));
     server.requests.recv().unwrap();
     server.requests.recv().unwrap();
     server.join();
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("┌ 工具 #1 · read_file · 执行中"));
-    assert!(stderr.contains("└ 工具 #1 · read_file · 完成"));
-    assert!(stderr.contains("deadline 配置"), "{stderr}");
+    assert!(stderr.contains("┌ Tool #1 · read_file · running"));
+    assert!(stderr.contains("└ Tool #1 · read_file · completed"));
+    assert!(stderr.contains("configured deadline"), "{stderr}");
     assert!(
-        stderr.contains("总耗时") && stderr.contains("含保存"),
+        stderr.contains("elapsed") && stderr.contains("including persistence"),
         "{stderr}"
     );
     assert!(stderr.contains("path: target.txt"));
@@ -4127,8 +4558,9 @@ fn ec_r3_cli_shows_the_typed_research_rejection_reason_after_receipt_persistence
             }
         }
     });
-    let server = spawn_responses_server(vec![
-        (
+    let server = task_context::spawn_scripted_responses_server(vec![
+        task_context::ScriptedResponse::InitialSelection,
+        task_context::ScriptedResponse::Response(
             200,
             m4_long_flow_tool_response(
                 "ec-r3-rejected",
@@ -4137,7 +4569,7 @@ fn ec_r3_cli_shows_the_typed_research_rejection_reason_after_receipt_persistence
                 "ec-r3-rejected-step",
             ),
         ),
-        (
+        task_context::ScriptedResponse::Response(
             200,
             text_response("rejection observed", "ec-r3-rejected-final"),
         ),
@@ -4152,14 +4584,18 @@ fn ec_r3_cli_shows_the_typed_research_rejection_reason_after_receipt_persistence
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(output.status.success(), "{stderr}");
     assert!(
-        stderr.contains("· research_update · 失败 · 原因 research_transition_rejected"),
+        stderr.contains("· research_update · failed · reason research_transition_rejected"),
         "{stderr}"
     );
-    assert!(stderr.contains("deadline 配置"), "{stderr}");
+    assert!(stderr.contains("configured deadline"), "{stderr}");
     assert!(
-        stderr.contains("总耗时") && stderr.contains("含保存"),
+        stderr.contains("elapsed") && stderr.contains("including persistence"),
         "{stderr}"
     );
+    task_context::selector_candidates(&f2a_request_body(
+        &server.requests,
+        "initial task selection",
+    ));
     server.requests.recv().unwrap();
     server.requests.recv().unwrap();
     server.join();
@@ -4170,8 +4606,9 @@ fn m5_cli_labels_deduplicated_tool_calls_without_a_second_start_or_receipt() {
     let project = TemporaryDirectory::new("m5-cli-tool-dedup-visibility");
     initialize_project(project.path());
     let arguments = json!({"argv": ["/usr/bin/true"]});
-    let server = spawn_responses_server(vec![
-        (
+    let server = task_context::spawn_scripted_responses_server(vec![
+        task_context::ScriptedResponse::InitialSelection,
+        task_context::ScriptedResponse::Response(
             200,
             tool_calls_response(
                 &[
@@ -4181,7 +4618,7 @@ fn m5_cli_labels_deduplicated_tool_calls_without_a_second_start_or_receipt() {
                 "m5-dedup-tool",
             ),
         ),
-        (
+        task_context::ScriptedResponse::Response(
             200,
             text_response("deduplicated tool complete", "m5-dedup-final"),
         ),
@@ -4198,15 +4635,21 @@ fn m5_cli_labels_deduplicated_tool_calls_without_a_second_start_or_receipt() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    task_context::selector_candidates(&f2a_request_body(
+        &server.requests,
+        "initial task selection",
+    ));
     server.requests.recv().unwrap();
     server.requests.recv().unwrap();
     server.join();
 
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert_eq!(stderr.matches("· 执行中").count(), 1, "{stderr}");
-    assert_eq!(stderr.matches("· 完成").count(), 2, "{stderr}");
+    assert_eq!(stderr.matches("· running").count(), 1, "{stderr}");
+    assert_eq!(stderr.matches("· completed").count(), 2, "{stderr}");
     assert_eq!(
-        stderr.matches("复用已有收据（未再次执行）").count(),
+        stderr
+            .matches("reused receipt (not executed again)")
+            .count(),
         1,
         "{stderr}"
     );
@@ -4245,6 +4688,10 @@ fn m5_cli_labels_deduplicated_tool_calls_without_a_second_start_or_receipt() {
 
 #[test]
 fn f3_graceful_interrupt_never_fabricates_a_receipt_for_unobserved_external_effects() {
+    use task_context::{
+        ScriptedResponse::{ContinueSelection, InitialSelection, Response},
+        spawn_scripted_responses_server,
+    };
     let project = TemporaryDirectory::new("m5-cli-tool-terminal-visibility");
     initialize_project(project.path());
     let marker = project.path().join("blocking-tool-started");
@@ -4258,8 +4705,9 @@ fn f3_graceful_interrupt_never_fabricates_a_receipt_for_unobserved_external_effe
     permissions.set_mode(0o755);
     fs::set_permissions(&blocking_tool, permissions).unwrap();
 
-    let server = spawn_responses_server(vec![
-        (
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(
             200,
             m4_long_flow_tool_response(
                 "m5-failed",
@@ -4268,8 +4716,9 @@ fn f3_graceful_interrupt_never_fabricates_a_receipt_for_unobserved_external_effe
                 "m5-failed-tool",
             ),
         ),
-        (200, text_response("failure observed", "m5-failed-final")),
-        (
+        Response(200, text_response("failure observed", "m5-failed-final")),
+        ContinueSelection { usage: None },
+        Response(
             200,
             m4_long_flow_tool_response(
                 "m5-cancelled",
@@ -4324,19 +4773,19 @@ fn f3_graceful_interrupt_never_fabricates_a_receipt_for_unobserved_external_effe
         String::from_utf8_lossy(&output.stderr)
     );
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert_eq!(stderr.matches("· 执行中").count(), 2, "{stderr}");
+    assert_eq!(stderr.matches("· running").count(), 2, "{stderr}");
     assert!(
-        stderr.contains("· run_command · 失败 · 原因 command_failed"),
+        stderr.contains("· run_command · failed · reason command_failed"),
         "{stderr}"
     );
-    assert!(stderr.contains("deadline 配置"), "{stderr}");
+    assert!(stderr.contains("configured deadline"), "{stderr}");
     assert!(
-        stderr.contains("总耗时") && stderr.contains("含保存"),
+        stderr.contains("elapsed") && stderr.contains("including persistence"),
         "{stderr}"
     );
-    assert!(!stderr.contains("· 取消"));
+    assert!(!stderr.contains("· cancelled"));
     assert!(stderr.contains("external effects are unknown"));
-    assert!(stderr.contains("状态未知（未观察到批次终态）"));
+    assert!(stderr.contains("outcome unknown (no terminal batch outcome observed)"));
 
     let events = session_events(project.path(), &session_id(project.path()));
     let receipt_statuses = events
@@ -4372,6 +4821,10 @@ fn f3_graceful_interrupt_never_fabricates_a_receipt_for_unobserved_external_effe
 
 #[test]
 fn m5_legacy_domain_backfill_and_explicit_resume_override_are_durable() {
+    use task_context::{
+        ScriptedResponse::{ContinueSelection, Response},
+        spawn_scripted_responses_server,
+    };
     let project = TemporaryDirectory::new("m5-cli-legacy-domain-override");
     initialize_project(project.path());
     let inert = write_config(project.path(), "http://127.0.0.1:1/v1");
@@ -4387,10 +4840,13 @@ fn m5_legacy_domain_backfill_and_explicit_resume_override_are_durable() {
             .all(|event| event["event_type"] != "session.domain_profile_selected")
     );
 
-    let source_server = spawn_responses_server(vec![(
-        200,
-        text_response("legacy source answer", "m5-legacy-domain"),
-    )]);
+    let source_server = task_context::spawn_scripted_responses_server(vec![
+        task_context::ScriptedResponse::InitialSelection,
+        task_context::ScriptedResponse::Response(
+            200,
+            text_response("legacy source answer", "m5-legacy-domain"),
+        ),
+    ]);
     let source_config = write_config(project.path(), &source_server.base_url);
     let legacy = run_chat(
         project.path(),
@@ -4403,6 +4859,10 @@ fn m5_legacy_domain_backfill_and_explicit_resume_override_are_durable() {
         "{}",
         String::from_utf8_lossy(&legacy.stderr)
     );
+    task_context::selector_candidates(&f2a_request_body(
+        &source_server.requests,
+        "initial task selection",
+    ));
     let source_request = request_body(&source_server.requests.recv().unwrap());
     source_server.join();
     assert!(
@@ -4412,10 +4872,13 @@ fn m5_legacy_domain_backfill_and_explicit_resume_override_are_durable() {
             .contains("Source domain profile v2")
     );
 
-    let web_server = spawn_responses_server(vec![(
-        200,
-        text_response("explicit web answer", "m5-domain-override"),
-    )]);
+    let web_server = spawn_scripted_responses_server(vec![
+        ContinueSelection { usage: None },
+        Response(
+            200,
+            text_response("explicit web answer", "m5-domain-override"),
+        ),
+    ]);
     let web_config = write_config(project.path(), &web_server.base_url);
     let overridden = run_chat(
         project.path(),
@@ -4428,6 +4891,10 @@ fn m5_legacy_domain_backfill_and_explicit_resume_override_are_durable() {
         "{}",
         String::from_utf8_lossy(&overridden.stderr)
     );
+    task_context::selector_candidates(&f2a_request_body(
+        &web_server.requests,
+        "domain override selection",
+    ));
     let web_request = request_body(&web_server.requests.recv().unwrap());
     web_server.join();
     assert!(
@@ -4523,10 +4990,13 @@ fn m5_resume_latest_uses_most_recent_durable_activity_not_directory_order() {
             .status
             .success()
     );
-    let server = spawn_responses_server(vec![(
-        200,
-        text_response("latest activity restored", "m5-latest-activity"),
-    )]);
+    let server = task_context::spawn_scripted_responses_server(vec![
+        task_context::ScriptedResponse::InitialSelection,
+        task_context::ScriptedResponse::Response(
+            200,
+            text_response("latest activity restored", "m5-latest-activity"),
+        ),
+    ]);
     let config = write_config(project.path(), &server.base_url);
     let resumed = run_chat(
         project.path(),
@@ -4539,6 +5009,10 @@ fn m5_resume_latest_uses_most_recent_durable_activity_not_directory_order() {
         "{}",
         String::from_utf8_lossy(&resumed.stderr)
     );
+    task_context::selector_candidates(&f2a_request_body(
+        &server.requests,
+        "initial task selection",
+    ));
     server.requests.recv().unwrap();
     server.join();
     assert!(
@@ -4555,11 +5029,17 @@ fn m5_resume_latest_uses_most_recent_durable_activity_not_directory_order() {
 
 #[test]
 fn new_chat_writes_one_default_phase_before_its_first_provider_request() {
+    use task_context::{
+        ScriptedResponse::{ContinueSelection, InitialSelection, Response},
+        spawn_scripted_responses_server,
+    };
     let project = TemporaryDirectory::new("cli-chat-default-phase");
     initialize_project(project.path());
-    let server = spawn_responses_server(vec![
-        (200, text_response("first answer", "phase-first")),
-        (200, text_response("second answer", "phase-second")),
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(200, text_response("first answer", "phase-first")),
+        ContinueSelection { usage: None },
+        Response(200, text_response("second answer", "phase-second")),
     ]);
     let config = write_config(project.path(), &server.base_url);
 
@@ -4569,7 +5049,15 @@ fn new_chat_writes_one_default_phase_before_its_first_provider_request() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    task_context::selector_candidates(&f2a_request_body(
+        &server.requests,
+        "default phase initial selection",
+    ));
     let first_request = server.requests.recv().unwrap();
+    task_context::selector_candidates(&f2a_request_body(
+        &server.requests,
+        "default phase second-input selection",
+    ));
     let second_request = server.requests.recv().unwrap();
     server.join();
     assert!(first_request.starts_with("POST /v1/responses HTTP/1.1"));
@@ -4609,10 +5097,13 @@ fn legacy_resume_keeps_replay_read_only_then_writes_legacy_mapping_on_real_turn(
             .all(|event| event["event_type"] != "session.research_phase_selected")
     );
 
-    let server = spawn_responses_server(vec![(
-        200,
-        text_response("legacy mapping answer", "legacy-phase"),
-    )]);
+    let server = task_context::spawn_scripted_responses_server(vec![
+        task_context::ScriptedResponse::InitialSelection,
+        task_context::ScriptedResponse::Response(
+            200,
+            text_response("legacy mapping answer", "legacy-phase"),
+        ),
+    ]);
     let config = write_config(project.path(), &server.base_url);
     let resumed = run_chat(
         project.path(),
@@ -4625,6 +5116,10 @@ fn legacy_resume_keeps_replay_read_only_then_writes_legacy_mapping_on_real_turn(
         "{}",
         String::from_utf8_lossy(&resumed.stderr)
     );
+    task_context::selector_candidates(&f2a_request_body(
+        &server.requests,
+        "initial task selection",
+    ));
     let request = server.requests.recv().unwrap();
     server.join();
     assert!(request.starts_with("POST /v1/responses HTTP/1.1"));
@@ -4652,10 +5147,13 @@ fn legacy_resume_keeps_replay_read_only_then_writes_legacy_mapping_on_real_turn(
 fn explicit_phase_command_records_operator_source_and_reason_before_the_turn() {
     let project = TemporaryDirectory::new("cli-chat-operator-phase");
     initialize_project(project.path());
-    let server = spawn_responses_server(vec![(
-        200,
-        text_response("verification answer", "operator-phase"),
-    )]);
+    let server = task_context::spawn_scripted_responses_server(vec![
+        task_context::ScriptedResponse::InitialSelection,
+        task_context::ScriptedResponse::Response(
+            200,
+            text_response("verification answer", "operator-phase"),
+        ),
+    ]);
     let config = write_config(project.path(), &server.base_url);
 
     let output = run_chat(
@@ -4669,6 +5167,10 @@ fn explicit_phase_command_records_operator_source_and_reason_before_the_turn() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    task_context::selector_candidates(&f2a_request_body(
+        &server.requests,
+        "initial task selection",
+    ));
     server.requests.recv().unwrap();
     server.join();
 
@@ -4705,13 +5207,20 @@ fn durable_receipt_survives_a_later_provider_failure_without_a_stale_projection_
         "data: {\"type\":\"response.failed\",\"response\":{\"error\":{",
         "\"code\":\"rate_limit_exceeded\",\"message\":\"loopback failure\"}}}\n\n"
     );
-    let server =
-        spawn_responses_server(vec![(200, tool_call.to_owned()), (200, failed.to_owned())]);
+    let server = task_context::spawn_scripted_responses_server(vec![
+        task_context::ScriptedResponse::InitialSelection,
+        task_context::ScriptedResponse::Response(200, tool_call.to_owned()),
+        task_context::ScriptedResponse::Response(200, failed.to_owned()),
+    ]);
     let config = write_config(project.path(), &server.base_url);
 
     let output = run_chat(project.path(), &config, "read research\n", &[]);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("loopback failure"));
+    task_context::selector_candidates(&f2a_request_body(
+        &server.requests,
+        "initial task selection",
+    ));
     let first_request = server.requests.recv().unwrap();
     let second_request = server.requests.recv().unwrap();
     server.join();
@@ -4740,8 +5249,8 @@ fn durable_receipt_survives_a_later_provider_failure_without_a_stale_projection_
             .iter()
             .filter(|event| event["event_type"] == "session.request_audit_recorded")
             .count(),
-        2,
-        "both actual Provider attempts must have durable RequestAudit facts"
+        3,
+        "the selector and both main attempts must have durable RequestAudit facts"
     );
     assert_eq!(
         events
@@ -4769,19 +5278,43 @@ fn durable_receipt_survives_a_later_provider_failure_without_a_stale_projection_
 fn rejected_incremental_text_is_not_presented_before_the_full_fallback() {
     let project = TemporaryDirectory::new("cli-chat-incremental-fallback");
     initialize_project(project.path());
+    fs::write(project.path().join("candidate.txt"), "one observed read\n").unwrap();
     let rejected_incremental = concat!(
         "data: {\"type\":\"response.output_text.delta\",\"delta\":\"discarded incremental text\"}\n\n",
         "data: {\"type\":\"response.failed\",\"response\":{\"error\":{",
         "\"code\":\"previous_response_not_found\",\"message\":\"loopback rejection\"}}}\n\n"
     );
-    let server = spawn_responses_server(vec![
-        (200, text_response("first answer", "response-first")),
-        (200, rejected_incremental.to_owned()),
-        (200, text_response("full fallback", "response-fallback")),
+    let server = task_context::spawn_scripted_responses_server(vec![
+        task_context::ScriptedResponse::InitialSelection,
+        task_context::ScriptedResponse::Response(
+            200,
+            format!(
+                "data: {}\n\n{}",
+                json!({"type":"response.output_text.delta","delta":"first answer"}),
+                m4_long_flow_tool_response(
+                    "fallback-read",
+                    "read_file",
+                    json!({"path":"candidate.txt"}),
+                    "response-first"
+                )
+            ),
+        ),
+        task_context::ScriptedResponse::Response(200, rejected_incremental.to_owned()),
+        task_context::ScriptedResponse::Response(
+            200,
+            text_response("full fallback", "response-fallback"),
+        ),
     ]);
     let config = write_config(project.path(), &server.base_url);
 
-    let output = run_chat(project.path(), &config, "first\nsecond\n/exit\n", &[]);
+    // The continuation belongs to this exact Tool loop. A later operator input
+    // has its own isolated selection and may legitimately retire the epoch.
+    let output = run_chat(
+        project.path(),
+        &config,
+        "Read candidate.txt and explain it.\n/exit\n",
+        &[],
+    );
     assert!(
         output.status.success(),
         "{}",
@@ -4795,6 +5328,10 @@ fn rejected_incremental_text_is_not_presented_before_the_full_fallback() {
         "a rejected incremental attempt must not leak partial text before its Full fallback"
     );
 
+    task_context::selector_candidates(&f2a_request_body(
+        &server.requests,
+        "initial task selection",
+    ));
     let requests = (0..3)
         .map(|_| server.requests.recv().unwrap())
         .map(|request| {
@@ -4805,6 +5342,12 @@ fn rejected_incremental_text_is_not_presented_before_the_full_fallback() {
     assert!(requests[0]["previous_response_id"].is_null());
     assert_eq!(requests[1]["previous_response_id"], "response-first");
     assert!(requests[2]["previous_response_id"].is_null());
+    let state = reduced_session(
+        &Project::discover(project.path()).unwrap(),
+        &session_id(project.path()),
+    );
+    assert_eq!(state.execution_receipt_count(), 1);
+    assert_eq!(state.history().ensure_all_tool_calls_paired(), Ok(()));
 }
 
 #[test]
@@ -4812,9 +5355,10 @@ fn transport_retry_marks_discarded_primary_output_and_persists_only_the_recovere
     let project = TemporaryDirectory::new("cli-chat-transport-retry");
     initialize_project(project.path());
     let interrupted = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"discarded transport text\"}\n\n";
-    let server = spawn_responses_server(vec![
-        (200, interrupted.to_owned()),
-        (
+    let server = task_context::spawn_scripted_responses_server(vec![
+        task_context::ScriptedResponse::InitialSelection,
+        task_context::ScriptedResponse::Response(200, interrupted.to_owned()),
+        task_context::ScriptedResponse::Response(
             200,
             text_response("recovered transport answer", "response-recovered"),
         ),
@@ -4836,6 +5380,10 @@ fn transport_retry_marks_discarded_primary_output_and_persists_only_the_recovere
     assert!(output.contains("partial primary output discarded; retry 1/2"));
     assert!(output.contains("recovered transport answer"));
 
+    task_context::selector_candidates(&f2a_request_body(
+        &server.requests,
+        "initial task selection",
+    ));
     let first = server.requests.recv().unwrap();
     let second = server.requests.recv().unwrap();
     server.join();
@@ -4852,7 +5400,7 @@ fn transport_retry_marks_discarded_primary_output_and_persists_only_the_recovere
             .iter()
             .filter(|event| event["event_type"] == "session.request_audit_recorded")
             .count(),
-        2
+        3
     );
     let history = events
         .iter()
@@ -4908,7 +5456,7 @@ fn chat_runtime_leases_are_isolated_between_projects() {
 fn ctrl_c_cancels_an_active_request_and_keeps_the_session_resumable() {
     let project = TemporaryDirectory::new("cli-chat-ctrl-c");
     initialize_project(project.path());
-    let server = spawn_pending_responses_server();
+    let server = spawn_pending_responses_server(true);
     let config = write_config(project.path(), &server.base_url);
     let mut child = Command::new(env!("CARGO_BIN_EXE_echidna"))
         .current_dir(project.path())
@@ -4925,6 +5473,10 @@ fn ctrl_c_cancels_an_active_request_and_keeps_the_session_resumable() {
         .unwrap()
         .write_all(b"wait for cancellation\n/exit\n")
         .unwrap();
+    task_context::selector_candidates(&f2a_request_body(
+        &server.requests,
+        "initial selection before primary cancellation",
+    ));
     let request = server
         .requests
         // The complete Gate runs several process-heavy integration tests in
@@ -4962,7 +5514,7 @@ fn ctrl_c_cancels_an_active_request_and_keeps_the_session_resumable() {
             .iter()
             .filter(|event| event["event_type"] == "session.request_audit_recorded")
             .count(),
-        1
+        2
     );
 }
 
@@ -5062,7 +5614,15 @@ mod f3_context {
         listener: &TcpListener,
         label: &str,
     ) -> std::net::TcpStream {
-        let deadline = Instant::now() + Duration::from_secs(15);
+        accept_before_deadline_with_wait(listener, label, Duration::from_secs(15))
+    }
+
+    pub(super) fn accept_before_deadline_with_wait(
+        listener: &TcpListener,
+        label: &str,
+        wait: Duration,
+    ) -> std::net::TcpStream {
+        let deadline = Instant::now() + wait;
         loop {
             match listener.accept() {
                 Ok((socket, _)) => {
@@ -5120,6 +5680,38 @@ mod f3_context {
         let (request_sender, requests) = mpsc::channel();
         let (release, released) = mpsc::channel();
         let server = thread::spawn(move || {
+            for index in 0..2 {
+                let mut socket = accept_before_deadline(&listener, "F3 source selection");
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let raw = read_http_request(&mut socket);
+                let candidates = task_context::selector_candidates(&request_body(&raw));
+                let required = candidates["context"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|unit| {
+                        unit["core_range"].is_object()
+                            || [
+                                "research:target_snapshot:snapshot-f3-current:",
+                                "research:finding:f3-current-finding:",
+                                "research:hypothesis:f3-current-hypothesis:",
+                            ]
+                            .iter()
+                            .any(|prefix| unit["ref"].as_str().unwrap().starts_with(prefix))
+                    })
+                    .map(|unit| unit["ref"].clone())
+                    .collect::<Vec<_>>();
+                assert!(!required.is_empty());
+                request_sender.send(raw).unwrap();
+                write_sse_response(&mut socket, &text_response(&json!({
+                    "relation":"new",
+                    "focus":{"kind":"new_from_input","input_ref":candidates["input"]["ref"]},
+                    "related_task_refs":[],"required_context_refs":required,
+                    "unresolved_references":[]
+                }).to_string(), &format!("f3-selection-{index}")));
+            }
             let mut first = accept_before_deadline(&listener, "first F3 context");
             first
                 .set_read_timeout(Some(Duration::from_secs(5)))
@@ -5154,6 +5746,13 @@ mod f3_context {
             &[],
         );
 
+        for _ in 0..2 {
+            task_context::selector_candidates(&request_body(
+                &requests
+                    .recv_timeout(Duration::from_secs(15))
+                    .expect("source selection should arrive"),
+            ));
+        }
         let first = request_body(
             &requests
                 .recv_timeout(Duration::from_secs(15))
@@ -5185,6 +5784,20 @@ mod f3_context {
                     )),
                     priority: 5,
                     action: "F3 later next action".to_owned(),
+                    status: NextActionStatus::Pending,
+                })
+                .unwrap(),
+            ),
+        );
+        append_research_event(
+            &project,
+            "f3-unrelated-next-action",
+            ResearchEvent::NextActionRecorded(
+                NextActionRecord::from_draft(NextActionDraft {
+                    id: NextActionId::new("f3-unrelated-next-action"),
+                    research_id: ResearchRecordRef::Finding(FindingId::new("f3-old-finding")),
+                    priority: 10,
+                    action: "F3 UNRELATED ACTION MUST STAY EXCLUDED".to_owned(),
                     status: NextActionStatus::Pending,
                 })
                 .unwrap(),
@@ -5222,6 +5835,8 @@ mod f3_context {
         assert!(second_wire.contains("F3 core memory v2"));
         assert!(!second_wire.contains("F3 core memory v1"));
         assert!(second_wire.contains("F3 later next action"));
+        assert!(!second_wire.contains("F3 UNRELATED ACTION MUST STAY EXCLUDED"));
+        assert!(!second_wire.contains("f3-unrelated-next-action"));
     }
 
     #[test]

@@ -1,3 +1,7 @@
+use super::task_context::{
+    ScriptedResponse::{ContinueSelection, InitialSelection, Response},
+    selector_candidates, spawn_scripted_responses_server,
+};
 use super::*;
 
 fn export_agent(root: &std::path::Path, name: &str, template: &str) -> std::path::PathBuf {
@@ -110,8 +114,9 @@ fn memory_tool_write_becomes_visible_and_refreshes_later_requests_and_resume() {
     initialize_project(root.path());
     let definition = export_agent(root.path(), "writer", "technical-writing");
     let content = "# Durable preference\nUse compact release notes. SOURCE: operator preference.\nExact source label: `发布说明`.\n";
-    let server = spawn_responses_server(vec![
-        (
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(
             200,
             m4_long_flow_tool_response(
                 "read-memory",
@@ -120,7 +125,7 @@ fn memory_tool_write_becomes_visible_and_refreshes_later_requests_and_resume() {
                 "read-memory-response",
             ),
         ),
-        (
+        Response(
             200,
             m4_long_flow_tool_response(
                 "write-memory",
@@ -129,11 +134,12 @@ fn memory_tool_write_becomes_visible_and_refreshes_later_requests_and_resume() {
                 "write-memory-response",
             ),
         ),
-        (
+        Response(
             200,
             text_response("Preference saved.", "memory-saved-response"),
         ),
-        (
+        ContinueSelection { usage: None },
+        Response(
             200,
             text_response("Using the saved preference.", "memory-reused-response"),
         ),
@@ -163,34 +169,35 @@ fn memory_tool_write_becomes_visible_and_refreshes_later_requests_and_resume() {
     assert_eq!(statuses[0]["core_present"], false);
     assert_eq!(statuses[1]["core_present"], true);
     assert_eq!(statuses[1]["core_bytes"], content.len());
-    let requests = (0..4)
+    let requests = (0..6)
         .map(|_| f2a_request_body(&server.requests, "memory write flow"))
         .collect::<Vec<_>>();
+    selector_candidates(&requests[0]);
     assert!(
-        requests[0]["instructions"]
+        requests[1]["instructions"]
             .as_str()
             .unwrap()
             .contains("At a meaningful task")
     );
     assert!(
-        requests[0]["instructions"]
+        requests[1]["instructions"]
             .as_str()
             .unwrap()
             .contains("Use memory_read before memory_write")
     );
     assert!(
-        requests[0]["instructions"].as_str().unwrap().contains(
+        requests[1]["instructions"].as_str().unwrap().contains(
             "Write newly authored summaries, explanations and operational notes in English"
         )
     );
     assert!(
-        requests[0]["instructions"]
+        requests[1]["instructions"]
             .as_str()
             .unwrap()
             .contains("Preserve exact quotations, code, paths")
     );
     assert!(
-        requests[3]["input"]
+        requests[5]["input"]
             .to_string()
             .contains("Use compact release notes.")
     );
@@ -215,13 +222,16 @@ fn memory_tool_write_becomes_visible_and_refreshes_later_requests_and_resume() {
     let state = reduced_session(&project, &id);
     assert_eq!(state.execution_receipt_count(), 2);
     state.history().ensure_all_tool_calls_paired().unwrap();
-    let resumed_server = spawn_responses_server(vec![(
-        200,
-        text_response(
-            "Using the retained preference after Resume.",
-            "memory-resumed",
+    let resumed_server = spawn_scripted_responses_server(vec![
+        ContinueSelection { usage: None },
+        Response(
+            200,
+            text_response(
+                "Using the retained preference after Resume.",
+                "memory-resumed",
+            ),
         ),
-    )]);
+    ]);
     let resumed_config = write_config(root.path(), &resumed_server.base_url);
     let resumed = run_chat(
         root.path(),
@@ -237,6 +247,7 @@ fn memory_tool_write_becomes_visible_and_refreshes_later_requests_and_resume() {
     let restored = memory_status_values(&String::from_utf8_lossy(&resumed.stdout));
     assert_eq!(restored[0]["core_hash"], statuses[1]["core_hash"]);
     assert_eq!(restored[0]["core_path"], statuses[1]["core_path"]);
+    f2a_request_body(&resumed_server.requests, "explicit memory-resume selection");
     let resumed_request =
         f2a_request_body(&resumed_server.requests, "memory guidance after Resume");
     assert!(
@@ -305,10 +316,13 @@ fn generic_agent_omits_research_prompt_and_events() {
     let root = TemporaryDirectory::new("agent-definition-generic-loopback");
     initialize_project(root.path());
     let definition = export_agent(root.path(), "writer", "technical-writing");
-    let server = spawn_responses_server(vec![(
-        200,
-        text_response("TECHNICAL_WRITER_REPLY", "generic-agent-reply"),
-    )]);
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(
+            200,
+            text_response("TECHNICAL_WRITER_REPLY", "generic-agent-reply"),
+        ),
+    ]);
     let config = write_definition_config(root.path(), &server.base_url, &definition);
 
     let output = run_chat(
@@ -322,6 +336,10 @@ fn generic_agent_omits_research_prompt_and_events() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    selector_candidates(&f2a_request_body(
+        &server.requests,
+        "generic Agent selection",
+    ));
     let request = f2a_request_body(&server.requests, "generic Agent request");
     f2a_join_server(server, "generic Agent");
     let instructions = request["instructions"].as_str().unwrap();
@@ -362,10 +380,13 @@ fn generic_agent_queues_two_session_images_and_blocks_binding_changes_until_subm
     let replacement = export_agent(root.path(), "replacement", "technical-writing");
     fs::write(root.path().join("first.png"), png_bytes(9, 7)).unwrap();
     fs::write(root.path().join("second.png"), png_bytes(13, 5)).unwrap();
-    let server = spawn_responses_server(vec![(
-        200,
-        text_response("GENERIC_TWO_IMAGES", "generic-two-images"),
-    )]);
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(
+            200,
+            text_response("GENERIC_TWO_IMAGES", "generic-two-images"),
+        ),
+    ]);
     let config = write_direct_config(root.path(), &server.base_url);
 
     let output = run_chat(
@@ -393,6 +414,10 @@ fn generic_agent_queues_two_session_images_and_blocks_binding_changes_until_subm
         stdout.contains("Compaction is unavailable while 2 image(s)"),
         "{stdout}"
     );
+    selector_candidates(&f2a_request_body(
+        &server.requests,
+        "generic two-image selection",
+    ));
     let request = f2a_request_body(&server.requests, "generic two-image Primary");
     f2a_join_server(server, "generic two-image Primary");
     assert_eq!(json_count_type(&request["input"], "input_image"), 2);
@@ -407,7 +432,7 @@ fn generic_agent_queues_two_session_images_and_blocks_binding_changes_until_subm
     assert_eq!(state.vision_routes().len(), 2);
     assert!(state.vision_observations().is_empty());
     assert_eq!(state.execution_receipt_count(), 2);
-    assert_eq!(state.request_audits().len(), 1);
+    assert_eq!(state.request_audits().len(), 2);
     assert_eq!(
         state
             .history()
@@ -445,10 +470,13 @@ fn memoryless_agent_reports_no_logical_memory_namespace() {
         .replacen("memory_read = \"direct\"", "memory_read = \"hidden\"", 1)
         .replacen("memory_write = \"direct\"", "memory_write = \"hidden\"", 1);
     fs::write(&manifest, content).unwrap();
-    let server = spawn_responses_server(vec![(
-        200,
-        text_response("MEMORYLESS_WRITER_REPLY", "memoryless-agent-reply"),
-    )]);
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(
+            200,
+            text_response("MEMORYLESS_WRITER_REPLY", "memoryless-agent-reply"),
+        ),
+    ]);
     let config = write_config(root.path(), &server.base_url);
 
     let output = run_chat(
@@ -462,6 +490,10 @@ fn memoryless_agent_reports_no_logical_memory_namespace() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    selector_candidates(&f2a_request_body(
+        &server.requests,
+        "memoryless Agent selection",
+    ));
     let request = f2a_request_body(&server.requests, "memoryless Agent request");
     f2a_join_server(server, "memoryless Agent");
     let instructions = request["instructions"].as_str().unwrap();
@@ -560,9 +592,12 @@ fn research_definition_keeps_existing_domain_and_phase_tool_overlays() {
         let root = TemporaryDirectory::new(&format!("agent-definition-{name}"));
         initialize_project(root.path());
         let definition = export_agent(root.path(), "research", "builtin-research");
-        let server =
-            spawn_responses_server(vec![(200, text_response("RESEARCH_OVERLAY_REPLY", name))]);
-        let config = write_config(root.path(), &server.base_url);
+        let server = spawn_scripted_responses_server(vec![
+            InitialSelection,
+            Response(200, text_response("RESEARCH_OVERLAY_REPLY", name)),
+        ]);
+        // Exercise Tool overlays at the ordinary 272k acceptance baseline.
+        let config = write_context_window_config(root.path(), &server.base_url, 272_000);
         let mut arguments = vec!["--agent", definition.to_str().unwrap()];
         arguments.extend(args);
         let output = run_chat(
@@ -576,6 +611,10 @@ fn research_definition_keeps_existing_domain_and_phase_tool_overlays() {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+        selector_candidates(&f2a_request_body(
+            &server.requests,
+            "research overlay selection",
+        ));
         let request = f2a_request_body(&server.requests, name);
         f2a_join_server(server, name);
         let instructions = request["instructions"].as_str().unwrap();
@@ -607,10 +646,10 @@ fn resume_uses_the_pinned_binding_after_its_definition_source_is_deleted() {
     let root = TemporaryDirectory::new("agent-definition-resume-pinned");
     initialize_project(root.path());
     let definition = export_agent(root.path(), "writer", "technical-writing");
-    let initial = spawn_responses_server(vec![(
-        200,
-        text_response("INITIAL_WRITER_REPLY", "pinned-initial"),
-    )]);
+    let initial = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(200, text_response("INITIAL_WRITER_REPLY", "pinned-initial")),
+    ]);
     let config = write_config(root.path(), &initial.base_url);
     let output = run_chat(
         root.path(),
@@ -619,15 +658,19 @@ fn resume_uses_the_pinned_binding_after_its_definition_source_is_deleted() {
         &["--agent", definition.to_str().unwrap()],
     );
     assert!(output.status.success());
+    selector_candidates(&f2a_request_body(
+        &initial.requests,
+        "initial writer selection",
+    ));
     f2a_request_body(&initial.requests, "initial writer request");
     f2a_join_server(initial, "initial writer");
     let session = session_id(root.path());
     fs::remove_dir_all(&definition).unwrap();
 
-    let resumed = spawn_responses_server(vec![(
-        200,
-        text_response("RESUMED_WRITER_REPLY", "pinned-resume"),
-    )]);
+    let resumed = spawn_scripted_responses_server(vec![
+        ContinueSelection { usage: None },
+        Response(200, text_response("RESUMED_WRITER_REPLY", "pinned-resume")),
+    ]);
     let config = write_config(root.path(), &resumed.base_url);
     let output = run_chat(
         root.path(),
@@ -640,7 +683,9 @@ fn resume_uses_the_pinned_binding_after_its_definition_source_is_deleted() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    f2a_request_body(&resumed.requests, "explicit pinned-resume selection");
     let request = f2a_request_body(&resumed.requests, "pinned resume request");
+    assert!(resumed.requests.try_recv().is_err());
     f2a_join_server(resumed, "pinned resume");
     assert!(
         request["instructions"]
@@ -671,7 +716,10 @@ fn domain_prompt_revision_keeps_saved_binding_on_resume() {
     let source = definition.join("research/domain/source.md");
     let old = include_str!("../fixtures/prompts/source-v1.md");
     fs::write(&source, old).unwrap();
-    let initial = spawn_responses_server(vec![(200, text_response("initial", "domain-initial"))]);
+    let initial = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(200, text_response("initial", "domain-initial")),
+    ]);
     let config = write_config(root.path(), &initial.base_url);
     let output = run_chat(
         root.path(),
@@ -684,6 +732,7 @@ fn domain_prompt_revision_keeps_saved_binding_on_resume() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    selector_candidates(&f2a_request_body(&initial.requests, "old domain selection"));
     let first = f2a_request_body(&initial.requests, "old domain request");
     f2a_join_server(initial, "old domain request");
     assert!(first["instructions"].as_str().unwrap().contains(old));
@@ -691,7 +740,10 @@ fn domain_prompt_revision_keeps_saved_binding_on_resume() {
     let before = session_events(root.path(), &session);
 
     fs::write(&source, DomainProfile::Source.prompt()).unwrap();
-    let resumed = spawn_responses_server(vec![(200, text_response("resumed", "domain-resumed"))]);
+    let resumed = spawn_scripted_responses_server(vec![
+        ContinueSelection { usage: None },
+        Response(200, text_response("resumed", "domain-resumed")),
+    ]);
     let config = write_config(root.path(), &resumed.base_url);
     let output = run_chat(
         root.path(),
@@ -704,7 +756,9 @@ fn domain_prompt_revision_keeps_saved_binding_on_resume() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    f2a_request_body(&resumed.requests, "explicit pinned-domain selection");
     let request = f2a_request_body(&resumed.requests, "pinned domain request");
+    assert!(resumed.requests.try_recv().is_err());
     f2a_join_server(resumed, "pinned domain request");
     assert!(request["instructions"].as_str().unwrap().contains(old));
     assert!(
@@ -737,17 +791,20 @@ fn persona_reload_keeps_history_and_forces_a_fresh_full_provider_request() {
         text_response("INITIAL_PERSONA_REPLY", "reload-initial")
     );
     let server = thread::spawn(move || {
-        for (index, response) in [
-            initial_response,
-            text_response("RELOADED_PERSONA_REPLY", "reload-second"),
-        ]
-        .into_iter()
-        .enumerate()
-        {
+        for index in 0..4 {
             let (mut socket, _) = listener.accept().unwrap();
             socket.set_read_timeout(Some(F2A_WAIT)).unwrap();
-            sender.send(read_http_request(&mut socket)).unwrap();
-            if index == 0 {
+            let raw = read_http_request(&mut socket);
+            let wire = request_body(&raw);
+            sender.send(raw).unwrap();
+            let response = match index {
+                0 => task_context::initial_selection_response(&wire, "reload-initial-selection"),
+                1 => initial_response.clone(),
+                2 => task_context::continue_selection_response(&wire, "reload-selection", None),
+                3 => text_response("RELOADED_PERSONA_REPLY", "reload-second"),
+                _ => unreachable!(),
+            };
+            if index == 1 {
                 fs::write(
                     &persona,
                     "Technical writing persona after explicit reload.\n",
@@ -769,8 +826,11 @@ fn persona_reload_keeps_history_and_forces_a_fresh_full_provider_request() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    selector_candidates(&f2a_request_body(&requests, "initial reload selection"));
     let first = f2a_request_body(&requests, "initial reload request");
+    f2a_request_body(&requests, "explicit reload selection");
     let second = f2a_request_body(&requests, "reloaded request");
+    assert!(requests.try_recv().is_err());
     server.join().unwrap();
     assert!(
         first["instructions"]
@@ -814,9 +874,11 @@ fn agent_use_starts_a_new_session_without_changing_the_old_session() {
     let root = TemporaryDirectory::new("agent-definition-use");
     initialize_project(root.path());
     let definition = export_agent(root.path(), "writer", "technical-writing");
-    let server = spawn_responses_server(vec![
-        (200, text_response("OLD_SESSION_REPLY", "use-old")),
-        (200, text_response("NEW_SESSION_REPLY", "use-new")),
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(200, text_response("OLD_SESSION_REPLY", "use-old")),
+        InitialSelection,
+        Response(200, text_response("NEW_SESSION_REPLY", "use-new")),
     ]);
     let config = write_config(root.path(), &server.base_url);
     let output = run_chat(
@@ -833,7 +895,9 @@ fn agent_use_starts_a_new_session_without_changing_the_old_session() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    selector_candidates(&f2a_request_body(&server.requests, "old Session selection"));
     let old_request = f2a_request_body(&server.requests, "old Session request");
+    selector_candidates(&f2a_request_body(&server.requests, "new Session selection"));
     let new_request = f2a_request_body(&server.requests, "new Session request");
     f2a_join_server(server, "agent use");
     let old_instructions = old_request["instructions"].as_str().unwrap();
@@ -923,8 +987,9 @@ fn pending_image_and_running_job_reject_agent_switching() {
     let job_root = TemporaryDirectory::new("agent-definition-running-job");
     initialize_project(job_root.path());
     let next = export_agent(job_root.path(), "writer", "technical-writing");
-    let server = spawn_responses_server(vec![
-        (
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(
             200,
             m4_long_flow_tool_response(
                 "running-job",
@@ -933,7 +998,7 @@ fn pending_image_and_running_job_reject_agent_switching() {
                 "running-job-started",
             ),
         ),
-        (200, text_response("JOB_STARTED", "running-job-final")),
+        Response(200, text_response("JOB_STARTED", "running-job-final")),
     ]);
     let config = write_config(job_root.path(), &server.base_url);
     let output = run_chat(
@@ -947,6 +1012,7 @@ fn pending_image_and_running_job_reject_agent_switching() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    selector_candidates(&f2a_request_body(&server.requests, "running Job selection"));
     f2a_request_body(&server.requests, "running Job start");
     f2a_request_body(&server.requests, "running Job completion");
     f2a_join_server(server, "running Job");

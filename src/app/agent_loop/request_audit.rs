@@ -43,7 +43,7 @@ where
             }
             _ => return Err(AgentLoopError::RequestAuditDeliveryMismatch),
         };
-        let attempt = RequestAuditAttempt::new(
+        let mut attempt = RequestAuditAttempt::new(
             context,
             self.model.clone(),
             self.profile.clone(),
@@ -53,6 +53,9 @@ where
             delivery,
         )?
         .bind_sampling_step(sampling_step, delivery_map.clone())?;
+        if self.selected_history.is_some() {
+            attempt = attempt.retain_sampling_step_id();
+        }
         record_attempt(attempt)
     }
 }

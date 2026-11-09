@@ -104,11 +104,40 @@ impl SessionCompactionFacts {
         }
         Ok(draft)
     }
+
+    pub(crate) fn compose_selected_task_draft(
+        &self,
+        goal: &str,
+        reference_limit: usize,
+    ) -> Result<SessionSummaryDraft, SessionError> {
+        let task = self
+            .task
+            .as_ref()
+            .ok_or_else(|| SessionError::CompactionContextProvenance {
+                message: "selected task Compaction requires a bound Session".to_owned(),
+            })?;
+        let narrative = NarrativeSummary::new(
+            goal,
+            "Task-scoped handoff pending the verified compaction sample.",
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let draft = SessionSummaryDraft::for_task(
+            task.references(reference_limit.max(1)),
+            None,
+            narrative,
+        )?;
+        Ok(match &self.graph {
+            Some(graph) => draft.with_verified_graph(graph.clone()),
+            None => draft,
+        })
+    }
 }
 
 pub(crate) fn load_session_compaction_facts(
     project: &Project,
     state: &SessionState,
+    task_scoped: bool,
 ) -> Result<SessionCompactionFacts, CompactionValidationFactsError> {
     let Some(binding) = state.agent_definition_binding() else {
         return Ok(SessionCompactionFacts {
@@ -144,11 +173,15 @@ pub(crate) fn load_session_compaction_facts(
     let task = task_facts(source, &reduced, &catalog, &session_id, &events)?;
     Ok(SessionCompactionFacts {
         project_id: project.project_id().clone(),
-        research: binding
-            .definition()
-            .research()
-            .map(|_| load_compaction_validation_facts_with_references(project, references))
-            .transpose()?,
+        research: if task_scoped {
+            None
+        } else {
+            binding
+                .definition()
+                .research()
+                .map(|_| load_compaction_validation_facts_with_references(project, references))
+                .transpose()?
+        },
         task: Some(task),
         graph: None,
     })
@@ -163,7 +196,7 @@ pub(crate) fn load_session_compaction_facts_from_read(
     read: &ProjectReadContext,
 ) -> Result<SessionCompactionFacts, CompactionValidationFactsError> {
     let Some(source) = source else {
-        return load_session_compaction_facts(project, state);
+        return load_session_compaction_facts(project, state, false);
     };
     let Some(binding) = state.agent_definition_binding() else {
         return Ok(SessionCompactionFacts {

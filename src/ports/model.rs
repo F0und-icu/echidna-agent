@@ -43,6 +43,14 @@ pub(crate) enum ContinuationRetention {
     SingleSample,
 }
 
+/// Presentation of this request is separate from its delivery and retention.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum ModelRequestPresentation {
+    #[default]
+    Standard,
+    TaskSelection,
+}
+
 /// One semantic request plus the App-selected delivery mode.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelRequest {
@@ -50,6 +58,7 @@ pub struct ModelRequest {
     delivery: ModelRequestDelivery,
     opaque_continuation_scope: Option<OpaqueContinuationScope>,
     continuation_retention: ContinuationRetention,
+    presentation: ModelRequestPresentation,
 }
 
 impl ModelRequest {
@@ -59,6 +68,7 @@ impl ModelRequest {
             delivery: ModelRequestDelivery::Full,
             opaque_continuation_scope: None,
             continuation_retention: ContinuationRetention::Session,
+            presentation: ModelRequestPresentation::Standard,
         }
     }
 
@@ -68,6 +78,7 @@ impl ModelRequest {
             delivery: ModelRequestDelivery::Incremental { continuation },
             opaque_continuation_scope: None,
             continuation_retention: ContinuationRetention::Session,
+            presentation: ModelRequestPresentation::Standard,
         }
     }
 
@@ -101,6 +112,15 @@ impl ModelRequest {
 
     pub(crate) fn continuation_retention(&self) -> ContinuationRetention {
         self.continuation_retention
+    }
+
+    pub(crate) fn with_presentation(mut self, presentation: ModelRequestPresentation) -> Self {
+        self.presentation = presentation;
+        self
+    }
+
+    pub(crate) fn presentation(&self) -> ModelRequestPresentation {
+        self.presentation
     }
 
     pub fn into_parts(

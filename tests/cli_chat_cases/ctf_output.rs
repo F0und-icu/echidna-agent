@@ -1,3 +1,7 @@
+use super::task_context::{
+    ScriptedResponse::{ContinueSelection, InitialSelection, Response},
+    selector_candidates, spawn_scripted_responses_server,
+};
 use super::*;
 use base64::{Engine, engine::general_purpose::STANDARD};
 
@@ -16,15 +20,18 @@ fn ctf_r3a2_blob_failure_never_records_a_durable_receipt_or_tool_result() {
             b"bad",
         )
         .unwrap();
-        let server = spawn_responses_server(vec![(
-            200,
-            m4_long_flow_tool_response(
-                "capture",
-                "run_command",
-                json!({"argv":["sh","-c","printf x >> executed; printf OUT; printf ERR >&2"]}),
-                "capture-response",
+        let server = spawn_scripted_responses_server(vec![
+            InitialSelection,
+            Response(
+                200,
+                m4_long_flow_tool_response(
+                    "capture",
+                    "run_command",
+                    json!({"argv":["sh","-c","printf x >> executed; printf OUT; printf ERR >&2"]}),
+                    "capture-response",
+                ),
             ),
-        )]);
+        ]);
         let config = write_config(harness.path(), &server.base_url);
         let output = f2a_wait_child(
             spawn_f2a_chat(root.path(), &config, "capture\n/exit\n", &[]),
@@ -36,6 +43,10 @@ fn ctf_r3a2_blob_failure_never_records_a_durable_receipt_or_tool_result() {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+        selector_candidates(&f2a_request_body(
+            &server.requests,
+            "R3a2 failed publication selection",
+        ));
         let _ = f2a_request_body(&server.requests, "R3a2 failed publication");
         f2a_join_server(server, "R3a2 failed publication");
         assert_eq!(fs::read(root.path().join("executed")).unwrap(), b"x");
@@ -73,21 +84,24 @@ fn ctf_r3a2_durable_output_can_be_read_after_explicit_resume() {
     let mut expected = vec![0u8; 150 * 1024];
     expected.extend_from_slice(b"\xffTAIL");
     let blob_id = format!("{:x}", Sha256::digest(&expected));
-    let first_server = spawn_responses_server(vec![(
-        200,
-        m4_long_flow_tool_response(
-            "capture",
-            "run_command",
-            json!({"argv":["sh","-c","dd if=/dev/zero bs=1024 count=150 2>/dev/null; printf '\\377TAIL'; printf x >> executed"]}),
-            "capture-response",
+    let first_server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(
+            200,
+            m4_long_flow_tool_response(
+                "capture",
+                "run_command",
+                json!({"argv":["sh","-c","dd if=/dev/zero bs=1024 count=150 2>/dev/null; printf '\\377TAIL'; printf x >> executed"]}),
+                "capture-response",
+            ),
         ),
-    )]);
+    ]);
     let config = write_config(harness.path(), &first_server.base_url);
     let mut config_text = fs::read_to_string(&config)
         .unwrap()
         .replace("incremental_input = true", "incremental_input = false")
         .replace("context_window = 32768", "context_window = 1048576");
-    config_text.push_str("\n[runtime]\nmodel_request_limit_per_turn = 1\n");
+    config_text.push_str("\n[runtime]\nmodel_request_limit_per_turn = 2\n");
     fs::write(&config, config_text).unwrap();
     let stopped = f2a_wait_child(
         spawn_f2a_chat(root.path(), &config, "capture\n/exit\n", &[]),
@@ -95,10 +109,15 @@ fn ctf_r3a2_durable_output_can_be_read_after_explicit_resume() {
     );
     assert!(!stopped.status.success());
     assert!(String::from_utf8_lossy(&stopped.stderr).contains("per-Turn model-request limit"));
+    selector_candidates(&f2a_request_body(
+        &first_server.requests,
+        "R3a2 initial selection",
+    ));
     let _ = f2a_request_body(&first_server.requests, "R3a2 first");
     f2a_join_server(first_server, "R3a2 first");
-    let server = spawn_responses_server(vec![
-        (
+    let server = spawn_scripted_responses_server(vec![
+        ContinueSelection { usage: None },
+        Response(
             200,
             m4_long_flow_tool_response(
                 "search",
@@ -107,7 +126,7 @@ fn ctf_r3a2_durable_output_can_be_read_after_explicit_resume() {
                 "search-response",
             ),
         ),
-        (
+        Response(
             200,
             m4_long_flow_tool_response(
                 "readback",
@@ -116,7 +135,7 @@ fn ctf_r3a2_durable_output_can_be_read_after_explicit_resume() {
                 "readback-response",
             ),
         ),
-        (200, text_response("RECOVERED RAW OUTPUT", "finished")),
+        Response(200, text_response("RECOVERED RAW OUTPUT", "finished")),
     ]);
     let config = write_config(harness.path(), &server.base_url);
     let config_text = fs::read_to_string(&config)
@@ -139,6 +158,10 @@ fn ctf_r3a2_durable_output_can_be_read_after_explicit_resume() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    selector_candidates(&f2a_request_body(
+        &server.requests,
+        "R3a2 resumed source selection",
+    ));
     let requests: Vec<Value> = (0..3)
         .map(|_| f2a_request_body(&server.requests, "R3a2 recovery"))
         .collect();

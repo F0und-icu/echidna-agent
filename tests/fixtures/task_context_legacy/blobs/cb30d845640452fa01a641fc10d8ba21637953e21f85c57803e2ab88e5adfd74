@@ -1,0 +1,1 @@
+{"kind":"text","role":"user","text":"{\"image_geometry\":{\"delivery_artifact_id\":\"artifact-followup\",\"delivery_height\":8,\"delivery_width\":8,\"source_height\":8,\"source_width\":8},\"kind\":\"vision_image_geometry\",\"region_coordinate_space\":\"delivery_pixels\",\"schema_version\":1,\"source_artifact_id\":\"artifact-followup\"}"}

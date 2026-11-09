@@ -1,5 +1,5 @@
 //! Complete serialized ToolSpecs; the pre-refactor catalog remains historical.
-//! EC-CONTEXT2 intentionally changes capacity policy limits, not tool membership.
+//! EC-TASK-CONTEXT adds exactly one context_read tool to each prior catalog.
 
 use crate::adapters::tools::ToolRegistry;
 use crate::domain::agent_definition::AgentId;
@@ -45,7 +45,7 @@ fn complete_catalogs_preserve_tool_membership_and_current_policy_contracts() {
     let historical: BTreeMap<String, Value> =
         serde_json::from_str(include_str!("../fixtures/tools/catalog-baseline.json")).unwrap();
     let expected: BTreeMap<String, Value> =
-        serde_json::from_str(include_str!("../fixtures/tools/catalog-context2.json")).unwrap();
+        serde_json::from_str(include_str!("../fixtures/tools/catalog-task-context.json")).unwrap();
     let actual: BTreeMap<String, Value> = cases
         .into_iter()
         .map(|(label, registry)| {
@@ -63,7 +63,8 @@ fn complete_catalogs_preserve_tool_membership_and_current_policy_contracts() {
     );
     for (name, entry) in &actual {
         assert_eq!(
-            entry["count"], historical[name]["count"],
+            entry["count"],
+            json!(historical[name]["count"].as_u64().unwrap() + 1),
             "tool membership {name}"
         );
     }

@@ -55,7 +55,7 @@ fn expanded(schema: &Value, root: &Value, depth: usize) -> Value {
 }
 
 #[test]
-fn complete_catalog_preserves_baseline_outside_explicit_file_contract_additions() {
+fn complete_catalog_preserves_baseline_outside_explicit_tool_and_file_contract_additions() {
     let before: Value = serde_json::from_str(include_str!(
         "fixtures/tools/input_schema_before_sharing.json"
     ))
@@ -63,9 +63,22 @@ fn complete_catalog_preserves_baseline_outside_explicit_file_contract_additions(
     let tools = ToolRegistry::for_project(".");
     let catalog = tools.catalog();
     assert_eq!(catalog, tools.catalog(), "deterministic construction");
-    assert_eq!(catalog.len(), before.as_object().unwrap().len());
+    assert_eq!(catalog.len(), before.as_object().unwrap().len() + 1);
+    assert_eq!(
+        catalog
+            .iter()
+            .filter(|spec| spec.name.as_str() == "context_read")
+            .count(),
+        1
+    );
     let mut baseline_saved = 0;
     for spec in catalog {
+        // ADR-0074 adds this one Tool. Its full current contract is pinned by
+        // the separate task-context catalog fixture; the old R6 oracle stays exact.
+        if spec.name.as_str() == "context_read" {
+            assert_eq!(spec.version, "1");
+            continue;
+        }
         let original = &before[spec.name.as_str()];
         // Preserve the frozen R6 oracle. Reverse only explicitly checked
         // current-contract deltas before comparing all historical constraints.

@@ -61,3 +61,20 @@ mod argument_correction_checkpoint;
 
 #[path = "private_cases/session_read_reuse.rs"]
 mod session_read_reuse;
+#[path = "private_cases/task_cli_subscription_delivery.rs"]
+mod task_cli_subscription_delivery;
+#[path = "private_cases/task_context_version_replay.rs"]
+mod task_context_version_replay;
+#[path = "private_cases/task_delivery_suffix.rs"]
+mod task_delivery_suffix;
+#[path = "private_cases/task_input_clock.rs"]
+mod task_input_clock;
+#[path = "private_cases/task_progress_prefix.rs"]
+mod task_progress_prefix;
+#[path = "private_cases/task_subscription_epoch.rs"]
+mod task_subscription_epoch;
+#[path = "private_cases/task_vision_allocation.rs"]
+mod task_vision_allocation;
+
+#[path = "private_cases/terminal_input.rs"]
+mod terminal_input;

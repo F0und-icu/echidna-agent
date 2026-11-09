@@ -159,6 +159,11 @@ fn source_tree_requires_exact_utf8_coverage_and_a_single_reachable_root() {
 
 #[test]
 fn accepted_input_binds_exact_durable_history_and_rejects_tampering() {
+    let received_at = crate::domain::session::TaskInputTime {
+        unix_seconds: 1_793_894_399,
+        nanoseconds: 0,
+        timezone: crate::domain::session::TimeZoneObservation::Unknown,
+    };
     let input = ContentItem::user_text("original task");
     let events = vec![
         envelope(
@@ -187,7 +192,7 @@ fn accepted_input_binds_exact_durable_history_and_rejects_tampering() {
         ContextProvenance::operator_input("original task").unwrap(),
     )]);
     let boundary = state
-        .accepted_operator_input(&[input], &provenance)
+        .accepted_operator_input(&[input], &provenance, received_at.clone())
         .unwrap();
     assert!(
         matches!(&boundary, crate::domain::session::OperatorTurnBoundary::Accepted { anchor, .. } if anchor == &events[1].event_id)
@@ -201,7 +206,11 @@ fn accepted_input_binds_exact_durable_history_and_rejects_tampering() {
     reducer.apply(&mut state, accepted.clone()).unwrap();
     assert!(
         state
-            .accepted_operator_input(&[ContentItem::user_text("original task")], &provenance)
+            .accepted_operator_input(
+                &[ContentItem::user_text("original task")],
+                &provenance,
+                received_at
+            )
             .is_err()
     );
     let mut tampered = accepted;

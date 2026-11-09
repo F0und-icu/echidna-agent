@@ -1,3 +1,7 @@
+use super::task_context::{
+    ScriptedResponse::{InitialSelection, Response},
+    selector_candidates, spawn_scripted_responses_server,
+};
 use super::*;
 
 #[test]
@@ -11,8 +15,9 @@ fn ctf_r3b2_unread_tool_preview_does_not_block_child_durability() {
         "printf '%6000s' x; printf x >> completed", "p".repeat(3500)]})
         })
         .collect::<Vec<_>>();
-    let server = spawn_responses_server(vec![
-        (
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(
             200,
             m4_long_flow_tool_response(
                 "slow",
@@ -21,12 +26,13 @@ fn ctf_r3b2_unread_tool_preview_does_not_block_child_durability() {
                 "slow-response",
             ),
         ),
-        (200, text_response("DONE", "slow-final")),
+        Response(200, text_response("DONE", "slow-final")),
     ]);
     let config = write_context_window_config(harness.path(), &server.base_url, 1_000_000);
     // Intentionally leave stderr unread until every real child and parent
     // checkpoint exists. More than 128 KiB of previews exceeds the pipe/queue.
     let child = spawn_f2a_chat(root.path(), &config, "bounded output\n/exit\n", &[]);
+    selector_candidates(&f2a_request_body(&server.requests, "slow selection"));
     let _ = f2a_request_body(&server.requests, "slow first");
     let session = session_id(root.path());
     let path = root
@@ -79,13 +85,13 @@ fn ctf_r3b2_unread_tool_preview_does_not_block_child_durability() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("展示拥塞"),
+        stderr.contains("presentation congested"),
         "queue saturation must be explicit: {stderr}"
     );
     // Bytes already accepted by the OS pipe are not queue occupancy. Prove
     // that presentation was dropped while all32 execution facts survived.
     assert!(
-        stderr.matches("· 子命令").count() < 32,
+        stderr.matches("· subcommand").count() < 32,
         "saturated previews must be dropped"
     );
 }
@@ -96,20 +102,24 @@ fn ctf_r3b2_child_progress_is_visible_before_a_blocked_parent_finishes() {
         let root = TemporaryDirectory::new("r3b2-progress");
         let harness = TemporaryDirectory::new("r3b2-provider");
         initialize_project(root.path());
-        let server = spawn_responses_server(vec![(
-            200,
-            m4_long_flow_tool_response(
-                "progress",
-                "run_commands",
-                json!({"mode":mode,"commands":[
-                    {"argv":["sh","-c","printf CHILD_VISIBLE"],"resources":[{"kind":"output","path":"first"}]},
-                    {"argv":["sh","-c","printf x > sibling; sleep 4"],"resources":[{"kind":"output","path":"sibling"}]}
-                ]}),
-                "progress-response",
+        let server = spawn_scripted_responses_server(vec![
+            InitialSelection,
+            Response(
+                200,
+                m4_long_flow_tool_response(
+                    "progress",
+                    "run_commands",
+                    json!({"mode":mode,"commands":[
+                        {"argv":["sh","-c","printf CHILD_VISIBLE"],"resources":[{"kind":"output","path":"first"}]},
+                        {"argv":["sh","-c","printf x > sibling; sleep 4"],"resources":[{"kind":"output","path":"sibling"}]}
+                    ]}),
+                    "progress-response",
+                ),
             ),
-        )]);
+        ]);
         let config = write_config(harness.path(), &server.base_url);
         let mut child = spawn_f2a_chat(root.path(), &config, "bounded progress\n", &[]);
+        selector_candidates(&f2a_request_body(&server.requests, "progress selection"));
         let _ = f2a_request_body(&server.requests, "progress");
         f2a_join_server(server, "progress");
         let mut stderr = child.stderr.take().unwrap();
@@ -131,7 +141,9 @@ fn ctf_r3b2_child_progress_is_visible_before_a_blocked_parent_finishes() {
         while Instant::now() < deadline {
             if let Ok(text) = received.recv_timeout(Duration::from_millis(50)) {
                 visible = text;
-                if visible.contains("已保存") && visible.contains("CHILD_VISIBLE") {
+                if visible.contains("subcommand 1/2 · persisted")
+                    && visible.contains("CHILD_VISIBLE")
+                {
                     break;
                 }
             }
@@ -140,13 +152,13 @@ fn ctf_r3b2_child_progress_is_visible_before_a_blocked_parent_finishes() {
         let _ = child.kill();
         let _ = f2a_wait_child(child, "progress cleanup");
         let _ = reader.join().unwrap();
-        assert!(visible.contains("子命令 1/2"), "{visible}");
+        assert!(visible.contains("subcommand 1/2"), "{visible}");
         assert!(
-            visible.contains("已保存") && visible.contains("CHILD_VISIBLE"),
+            visible.contains("subcommand 1/2 · persisted") && visible.contains("CHILD_VISIBLE"),
             "{visible}"
         );
         assert!(
-            visible.contains("deadline") && visible.contains("耗时"),
+            visible.contains("deadline") && visible.contains("elapsed"),
             "{visible}"
         );
         assert!(

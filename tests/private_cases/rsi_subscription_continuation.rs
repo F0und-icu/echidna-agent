@@ -1,6 +1,6 @@
 //! The App's fixed one-sample service and retention sidecar stay crate-private.
 
-mod continuation_regression {
+pub(crate) mod continuation_regression {
     use std::sync::Mutex;
 
     use futures_util::StreamExt;
@@ -37,7 +37,7 @@ mod continuation_regression {
     };
     use crate::*;
 
-    struct FixtureCredential;
+    pub(crate) struct FixtureCredential;
 
     impl CredentialSource for FixtureCredential {
         fn read(&self, _: &str) -> Result<Option<String>, CredentialSourceError> {
@@ -119,7 +119,7 @@ mod continuation_regression {
         }
     }
 
-    fn capabilities() -> ModelCapabilities {
+    pub(crate) fn capabilities() -> ModelCapabilities {
         ModelCapabilities {
             text_input: true,
             image_input: false,
@@ -135,7 +135,7 @@ mod continuation_regression {
         }
     }
 
-    fn encrypted(id: &str) -> Value {
+    pub(crate) fn encrypted(id: &str) -> Value {
         json!({"type":"reasoning","id":id,
             "summary":[],"encrypted_content":format!("ciphertext-{id}")})
     }
@@ -145,7 +145,7 @@ mod continuation_regression {
             "arguments":json!({"argv":["/usr/bin/printf","actual-rsi-command"]}).to_string()})
     }
 
-    fn completed(id: &str, mut items: Vec<Value>, text: Option<&str>) -> String {
+    pub(crate) fn completed(id: &str, mut items: Vec<Value>, text: Option<&str>) -> String {
         if let Some(text) = text {
             items.push(json!({"type":"message","id":format!("message-{id}"),
                 "role":"assistant","status":"completed","content":[{
@@ -171,7 +171,7 @@ mod continuation_regression {
             .collect()
     }
 
-    async fn read_request(socket: &mut TcpStream) -> Value {
+    pub(crate) async fn read_request(socket: &mut TcpStream) -> Value {
         let mut bytes = Vec::new();
         let mut buffer = [0_u8; 4096];
         loop {
@@ -197,7 +197,7 @@ mod continuation_regression {
         }
     }
 
-    async fn server(
+    pub(crate) async fn server(
         bodies: Vec<String>,
     ) -> (String, mpsc::Receiver<Value>, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

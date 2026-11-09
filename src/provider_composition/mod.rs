@@ -31,6 +31,7 @@ pub struct ProviderComposition {
     agent_profile: AgentModelProfile,
     primary: Arc<dyn ModelProvider>,
     compaction: (Arc<dyn ModelProvider>, AgentModelProfile),
+    task_selection: (Arc<dyn ModelProvider>, AgentModelProfile),
     vision: Option<Arc<dyn ModelProvider>>,
     primary_request_adapter_version: RequestAdapterVersion,
     vision_request_adapter_version: Option<RequestAdapterVersion>,
@@ -194,6 +195,13 @@ impl ProviderComposition {
         (self.compaction.0.as_ref(), &self.compaction.1)
     }
 
+    pub(crate) fn task_selection_provider(&self) -> (Arc<dyn ModelProvider>, AgentModelProfile) {
+        (
+            Arc::clone(&self.task_selection.0),
+            self.task_selection.1.clone(),
+        )
+    }
+
     pub fn vision_provider(&self) -> Option<&dyn ModelProvider> {
         self.vision.as_deref()
     }
@@ -292,9 +300,14 @@ impl ProviderComposition {
             None => (None, None),
         };
         let agent_profile = config.active_agent_model_profile()?;
-        let compaction = {
+        let scoped_provider = |effort: Option<&ReasoningEffort>,
+                               label: &'static str|
+         -> Result<
+            (Arc<dyn ModelProvider>, AgentModelProfile),
+            ProviderCompositionError,
+        > {
             let mut capabilities = config.capabilities(primary_definition);
-            if let Some(effort) = &config.runtime.compaction_reasoning_effort {
+            if let Some(effort) = effort {
                 capabilities.reasoning_effort = Some(effort.clone());
             }
             let (provider, _) = compose_provider(
@@ -303,7 +316,7 @@ impl ProviderComposition {
                 capabilities.clone(),
                 Arc::clone(&credential_source),
                 project.as_ref(),
-                project.as_ref().map(|_| "compaction"),
+                project.as_ref().map(|_| label),
                 debug,
             )?;
             let primary_profile = agent_profile.primary();
@@ -321,17 +334,26 @@ impl ProviderComposition {
                 profile: config.active_agent_profile.clone(),
                 source,
             })?;
-            (
+            Ok((
                 Arc::new(provider.with_failure_capture(debug_failures.as_deref()))
                     as Arc<dyn ModelProvider>,
                 scoped_profile,
-            )
+            ))
         };
+        let compaction = scoped_provider(
+            config.runtime.compaction_reasoning_effort.as_ref(),
+            "compaction",
+        )?;
+        let task_selection = scoped_provider(
+            config.runtime.task_selection_reasoning_effort.as_ref(),
+            "task-selection",
+        )?;
 
         Ok(Self {
             agent_profile,
             primary: Arc::new(primary),
             compaction,
+            task_selection,
             vision,
             primary_request_adapter_version,
             vision_request_adapter_version,

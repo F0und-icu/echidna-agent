@@ -1,43 +1,36 @@
 //! Scripted responses prove delivery, not a model's adherence to guidance.
+use super::task_context::{
+    ScriptedResponse::{ContinueSelection, InitialSelection, Response, SelectionDecision},
+    selector_candidates, spawn_scripted_responses_server,
+};
 use super::*;
+
+pub(super) fn continue_with_summary_and_current_facts(candidates: &Value) -> Value {
+    let mut decision = super::automatic_compaction::continue_from_selected_summary(candidates);
+    let selected = decision["required_context_refs"].as_array_mut().unwrap();
+    selected.extend(
+        candidates["context"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|unit| {
+                unit["core_range"].is_object()
+                    || unit["ref"].as_str().unwrap().starts_with("research:")
+            })
+            .map(|unit| unit["ref"].clone()),
+    );
+    decision
+}
+
 use echidna::domain::model::ContentItem;
 
 #[test]
 fn legacy_zero_history_compaction_restores_latest_tool_batch_on_resume() {
     for stale in [false, true] {
         let root = TemporaryDirectory::new("legacy-empty-compaction-floor");
-        initialize_project(root.path());
-        fs::write(
-            root.path().join("current.txt"),
-            "RETAIN-CURRENT-RESULT ".repeat(900),
-        )
-        .unwrap();
+        let id = load_pre_task_context_fixture(root.path(), "read");
         let project = Project::discover(root.path()).unwrap();
-        let target = append_research_snapshot(&project, "legacy-zero-floor");
-        let server = spawn_responses_server(vec![
-            (
-                200,
-                m4_long_flow_tool_response(
-                    "latest-read",
-                    "read_file",
-                    json!({"path":"current.txt"}),
-                    "legacy-read",
-                ),
-            ),
-            (200, text_response("Current read complete.", "legacy-final")),
-        ]);
-        let config = write_config(root.path(), &server.base_url);
-        let initial = run_chat(root.path(), &config, "Read the current file.\n/exit\n", &[]);
-        assert!(
-            initial.status.success(),
-            "{}",
-            String::from_utf8_lossy(&initial.stderr)
-        );
-        for _ in 0..2 {
-            server.requests.recv_timeout(F2A_WAIT).unwrap();
-        }
-        server.join();
-        let id = session_id(root.path());
+        let target = TargetSnapshotId::new("snapshot-legacy-zero-floor");
         // Exercise a genuinely legacy stream with no durable completion facts.
         // Keep the actual History, audits, receipts and results byte-for-byte.
         let mut legacy = session_events(root.path(), &id);
@@ -81,9 +74,15 @@ fn legacy_zero_history_compaction_restores_latest_tool_batch_on_resume() {
         if stale {
             append_research_snapshot(&project, "legacy-refreshed");
         }
-        let resumed_server = spawn_responses_server(vec![
-            (200, text_response("first recovery done", "recovered-first")),
-            (
+        use super::task_context::{
+            ScriptedResponse::{ContinueSelection, InitialSelection, Response},
+            selector_candidates, spawn_scripted_responses_server,
+        };
+        let resumed_server = spawn_scripted_responses_server(vec![
+            InitialSelection,
+            Response(200, text_response("first recovery done", "recovered-first")),
+            ContinueSelection { usage: None },
+            Response(
                 200,
                 text_response("second recovery done", "recovered-second"),
             ),
@@ -105,6 +104,10 @@ fn legacy_zero_history_compaction_restores_latest_tool_batch_on_resume() {
             String::from_utf8_lossy(&resumed.stderr)
         );
         for _ in 0..2 {
+            selector_candidates(&f2a_request_body(
+                &resumed_server.requests,
+                "legacy restored batch selection",
+            ));
             let wire = f2a_request_body(&resumed_server.requests, "legacy restored batch");
             assert!(wire.get("previous_response_id").is_none());
             assert!(json_contains_type(&wire["input"], "function_call_output"));
@@ -127,27 +130,30 @@ fn legacy_zero_history_compaction_restores_latest_tool_batch_on_resume() {
 }
 
 #[test]
-fn append_only_research_refresh_keeps_v6_handoff_without_hidden_sampling() {
+fn append_only_research_refresh_keeps_task_handoff_without_hidden_sampling() {
     let root = TemporaryDirectory::new("v5-research-refresh");
     initialize_project(root.path());
     let project = Project::discover(root.path()).unwrap();
     append_research_snapshot(&project, "before-model-handoff");
-    let server = spawn_responses_server(vec![
-        (
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(
             200,
             text_response(
                 &"Old assistant preparation prose. ".repeat(600),
                 "before-handoff",
             ),
         ),
-        (
+        Response(
             200,
             compaction_summary_response(
                 "MODEL-HANDOFF-ACTUAL-PROGRESS: the neutral task completed and retained observations must be consulted.",
                 "model-handoff",
             ),
         ),
-        (
+        SelectionDecision(continue_with_summary_and_current_facts),
+        SelectionDecision(continue_with_summary_and_current_facts),
+        Response(
             200,
             text_response("CURRENT-NEUTRAL-ANSWER", "after-refresh"),
         ),
@@ -164,20 +170,20 @@ fn append_only_research_refresh_keeps_v6_handoff_without_hidden_sampling() {
         "{}",
         String::from_utf8_lossy(&first.stderr)
     );
-    for _ in 0..2 {
+    for _ in 0..3 {
         server.requests.recv_timeout(F2A_WAIT).unwrap();
     }
     let id = session_id(root.path());
     let before = session_events(root.path(), &id);
     let original = reduced_session(&project, &id);
     let old_summary = original.latest_compaction().unwrap().summary();
-    assert_eq!(old_summary.schema_version(), 6);
+    assert_eq!(old_summary.schema_version(), 7);
     let original_narrative = old_summary.narrative().unwrap().clone();
     let current = append_research_snapshot(&project, "after-model-handoff");
     let resumed = run_chat(
         root.path(),
         &config,
-        "Continue the neutral fixture.\n/exit\n",
+        "Continue the neutral fixture using snapshot-after-model-handoff.\n/exit\n",
         &["--resume", &id],
     );
     assert!(
@@ -185,6 +191,11 @@ fn append_only_research_refresh_keeps_v6_handoff_without_hidden_sampling() {
         "{}",
         String::from_utf8_lossy(&resumed.stderr)
     );
+    for _ in 0..2 {
+        selector_candidates(&request_body(
+            &server.requests.recv_timeout(F2A_WAIT).unwrap(),
+        ));
+    }
     let wire = request_body(&server.requests.recv_timeout(F2A_WAIT).unwrap());
     assert!(server.requests.try_recv().is_err());
     server.join();
@@ -203,12 +214,12 @@ fn append_only_research_refresh_keeps_v6_handoff_without_hidden_sampling() {
     assert_eq!(&after[..before.len()], before.as_slice());
     let state = reduced_session(&project, &id);
     let refreshed = state.latest_compaction().unwrap().summary();
-    assert_eq!(refreshed.revision(), 2);
+    assert_eq!(refreshed.revision(), 1);
     assert_eq!(refreshed.narrative(), Some(&original_narrative));
     assert_eq!(
         state.request_audits().len(),
-        3,
-        "Resume refresh must not sample a model"
+        6,
+        "Resume refresh itself adds no sample beyond the explicit later-input selection"
     );
     assert_audits_reconstruct(root.path(), &state);
 }
@@ -229,19 +240,23 @@ fn task_scope_is_delivered_in_a_fresh_session_and_on_resume_with_old_project_fac
         "Historical project note: old-report-target analysis is unfinished.",
     )
     .unwrap();
-    let server = spawn_responses_server(vec![
-        (
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        InitialSelection,
+        Response(
             200,
             text_response("Old plan: inspect src/old-report-target next.", "task-old"),
         ),
-        (
+        InitialSelection,
+        Response(
             200,
             text_response(
                 "Scripted greeting, not model-quality evidence.",
                 "task-hello",
             ),
         ),
-        (
+        ContinueSelection { usage: None },
+        Response(
             200,
             text_response(
                 "Scripted scope reply, not model-quality evidence.",
@@ -264,6 +279,14 @@ fn task_scope_is_delivered_in_a_fresh_session_and_on_resume_with_old_project_fac
         "{}",
         String::from_utf8_lossy(&old.stderr)
     );
+    selector_candidates(&f2a_request_body(
+        &server.requests,
+        "explicit task scope selection",
+    ));
+    selector_candidates(&f2a_request_body(
+        &server.requests,
+        "expanded old target source",
+    ));
     f2a_request_body(&server.requests, "old task");
     let old_id = session_id(root.path());
     let old_events = session_events(root.path(), &old_id);
@@ -276,6 +299,10 @@ fn task_scope_is_delivered_in_a_fresh_session_and_on_resume_with_old_project_fac
         "{}",
         String::from_utf8_lossy(&fresh.stderr)
     );
+    selector_candidates(&f2a_request_body(
+        &server.requests,
+        "explicit task scope selection",
+    ));
     let hello = f2a_request_body(&server.requests, "greeting request");
     let ids = session_ids(root.path());
     assert_eq!(ids.len(), 2);
@@ -297,6 +324,10 @@ fn task_scope_is_delivered_in_a_fresh_session_and_on_resume_with_old_project_fac
         "{}",
         String::from_utf8_lossy(&resumed.stderr)
     );
+    selector_candidates(&f2a_request_body(
+        &server.requests,
+        "explicit task scope selection",
+    ));
     let narrowed = f2a_request_body(&server.requests, "narrowed request");
     for (request, current) in [(&hello, "hello"), (&narrowed, scope)] {
         assert!(request.get("previous_response_id").is_none());
@@ -311,8 +342,9 @@ fn task_scope_is_delivered_in_a_fresh_session_and_on_resume_with_old_project_fac
                 .iter()
                 .any(|item| item["role"] == "user" && item.to_string().contains(current))
         );
-        // Retaining real background is intentional; do not solve scope by deleting it.
-        assert!(request.to_string().contains("snapshot-old-report-target"));
+        // Unrelated Research stays in its original stream; an unclassified Core
+        // requirement remains protected until its scope has been resolved.
+        assert!(!request.to_string().contains("snapshot-old-report-target"));
         assert!(request.to_string().contains("Historical project note"));
         assert!(!request.to_string().contains("Old plan: inspect"));
     }
@@ -322,7 +354,7 @@ fn task_scope_is_delivered_in_a_fresh_session_and_on_resume_with_old_project_fac
     assert_eq!(&after[..before_resume.len()], before_resume.as_slice());
     assert_eq!(fs::read(research_path).unwrap(), research_before);
     let state = reduced_session(&project, id);
-    assert_eq!(state.request_audits().len(), 2);
+    assert_eq!(state.request_audits().len(), 4);
     assert_audits_reconstruct(root.path(), &state);
     let users = state
         .history()
@@ -355,91 +387,103 @@ fn repeated_compaction_then_process_resume_refreshes_facts_without_reexecuting_c
     // Bounded old prose makes production compaction measurably useful. These
     // are scripted observations, never claims of real-model performance.
     let old_prose = "Earlier report currency was USD. ".repeat(256);
+    let later_old_prose = "Earlier currency was USD; consult the current read. ".repeat(256);
     let obsolete_prose_then_call = |response: String, prose: &str| {
         format!(
             "data: {}\n\n{response}",
             json!({"type":"response.output_text.delta", "delta":prose})
         )
     };
-    let server = spawn_responses_server(vec![
-        (
-            200,
-            obsolete_prose_then_call(
+    // Requests span separate CLI processes and independent source replay. Keep
+    // the listener aligned with this fixture's existing 60s compaction bound.
+    let server = super::task_context::spawn_scripted_responses_server_with_wait(
+        vec![
+            InitialSelection,
+            InitialSelection,
+            Response(
+                200,
                 m4_long_flow_tool_response(
                     "engineering-once",
                     "run_command",
                     json!({"argv":["/bin/sh", "-c", "printf 'executed\\n' >> once.txt"]}),
                     "engineering-command",
                 ),
-                &old_prose,
             ),
-        ),
-        (
-            200,
-            m4_long_flow_tool_response(
-                "engineering-old-read",
-                "read_file",
-                json!({"path":"src/report-settings"}),
-                "engineering-read",
+            Response(
+                200,
+                obsolete_prose_then_call(
+                    m4_long_flow_tool_response(
+                        "engineering-old-read",
+                        "read_file",
+                        json!({"path":"src/report-settings"}),
+                        "engineering-read",
+                    ),
+                    &old_prose,
+                ),
             ),
-        ),
-        (
-            200,
-            text_response(
-                "Scripted USD observation complete.",
-                "engineering-old-answer",
+            Response(
+                200,
+                text_response(
+                    "Scripted USD observation complete.",
+                    "engineering-old-answer",
+                ),
             ),
-        ),
-        (
-            200,
-            compaction_summary_response(
-                "engineering-once completed the once-only marker; engineering-old-read observed USD. The completed mutation must not repeat.",
-                "engineering-summary-1",
+            Response(
+                200,
+                compaction_summary_response(
+                    "engineering-once completed the once-only marker; engineering-old-read observed USD. The completed mutation must not repeat.",
+                    "engineering-summary-1",
+                ),
             ),
-        ),
-        (
-            200,
-            obsolete_prose_then_call(
+            SelectionDecision(continue_with_summary_and_current_facts),
+            SelectionDecision(continue_with_summary_and_current_facts),
+            Response(
+                200,
+                obsolete_prose_then_call(
+                    m4_long_flow_tool_response(
+                        "engineering-new-read",
+                        "read_file",
+                        json!({"path":"src/report-settings"}),
+                        "engineering-fresh-read",
+                    ),
+                    &later_old_prose,
+                ),
+            ),
+            Response(
+                200,
+                text_response(
+                    "Scripted current currency: EUR; earlier USD was observed before the operator update.",
+                    "engineering-current-answer",
+                ),
+            ),
+            Response(
+                200,
+                compaction_summary_response(
+                    "engineering-new-read observed EUR after the operator update; engineering-once previously completed and must not repeat.",
+                    "engineering-summary-2",
+                ),
+            ),
+            SelectionDecision(continue_with_summary_and_current_facts),
+            SelectionDecision(continue_with_summary_and_current_facts),
+            Response(
+                200,
                 m4_long_flow_tool_response(
-                    "engineering-new-read",
+                    "engineering-latest-read",
                     "read_file",
                     json!({"path":"src/report-settings"}),
-                    "engineering-fresh-read",
+                    "engineering-latest-result",
                 ),
-                &"Earlier currency was USD; consult the current read. ".repeat(256),
             ),
-        ),
-        (
-            200,
-            text_response(
-                "Scripted current currency: EUR; earlier USD was observed before the operator update.",
-                "engineering-current-answer",
+            Response(
+                200,
+                text_response(
+                    "scripted current currency: JPY",
+                    "engineering-latest-answer",
+                ),
             ),
-        ),
-        (
-            200,
-            compaction_summary_response(
-                "engineering-new-read observed EUR after the operator update; engineering-once previously completed and must not repeat.",
-                "engineering-summary-2",
-            ),
-        ),
-        (
-            200,
-            m4_long_flow_tool_response(
-                "engineering-latest-read",
-                "read_file",
-                json!({"path":"src/report-settings"}),
-                "engineering-latest-result",
-            ),
-        ),
-        (
-            200,
-            text_response(
-                "scripted current currency: JPY",
-                "engineering-latest-answer",
-            ),
-        ),
-    ]);
+        ],
+        Duration::from_secs(60),
+    );
     let config = write_config(harness.path(), &server.base_url);
     // Explicit rules are not dependent on historical README reads or Summary.
     let rules = "Only use the configured report/test commands. Never rerun the once-only marker.";
@@ -458,7 +502,7 @@ fn repeated_compaction_then_process_resume_refreshes_facts_without_reexecuting_c
         spawn_f2a_chat(
             root.path(),
             &config,
-            "Record the once-only marker and read report settings.\n/exit\n",
+            "Record the once-only marker and read snapshot-report-settings.\n/exit\n",
             &[],
         ),
         "engineering initial",
@@ -468,9 +512,20 @@ fn repeated_compaction_then_process_resume_refreshes_facts_without_reexecuting_c
         "{}",
         String::from_utf8_lossy(&first.stderr)
     );
+    selector_candidates(&f2a_request_body(
+        &server.requests,
+        "engineering initial selection",
+    ));
+    selector_candidates(&f2a_request_body(
+        &server.requests,
+        "engineering expanded target source",
+    ));
     let initial_wires: Vec<_> = (0..3)
         .map(|_| f2a_request_body(&server.requests, "engineering initial wire"))
         .collect();
+    // The real write refreshes task sources. The following observation must
+    // remain in the selected post-refresh History used by /compact on Resume.
+    assert!(initial_wires[2]["input"].to_string().contains(&old_prose));
     assert!(
         initial_wires[2]["input"]
             .as_array()
@@ -483,6 +538,11 @@ fn repeated_compaction_then_process_resume_refreshes_facts_without_reexecuting_c
     let id = session_id(root.path());
     let before = reduced_session(&project, &id);
     assert_eq!(before.execution_receipt_count(), 2);
+    assert!(before.history().items().iter().any(|item| matches!(
+        item,
+        ContentItem::Text { role: echidna::domain::model::MessageRole::Assistant, text }
+            if text == &old_prose
+    )));
     assert_eq!(
         fs::read_to_string(root.path().join("once.txt")).unwrap(),
         "executed\n"
@@ -514,7 +574,10 @@ fn repeated_compaction_then_process_resume_refreshes_facts_without_reexecuting_c
         );
         assert!(
             String::from_utf8_lossy(&compact.stdout)
-                .contains(&format!("Compaction revision {cycle} applied"))
+                .contains(&format!("Compaction revision {cycle} applied")),
+            "cycle={cycle}, stdout={}, stderr={}",
+            String::from_utf8_lossy(&compact.stdout),
+            String::from_utf8_lossy(&compact.stderr)
         );
         let summary_wire = f2a_request_body(&server.requests, "tool-free compaction handoff");
         assert!(summary_wire["tools"].as_array().is_none_or(Vec::is_empty));
@@ -540,9 +603,18 @@ fn repeated_compaction_then_process_resume_refreshes_facts_without_reexecuting_c
                 .to_string()
                 .contains("latest assistant continuation is not the original baseline")
         );
-        assert_eq!(
-            summary["evidence_spine"]["target_snapshot_refs"],
-            json!([snapshot.as_str()])
+        assert_eq!(summary["schema_version"], 7);
+        let selection = compact_events
+            .iter()
+            .find(|event| event["event_id"] == summary["task_selection_event"])
+            .unwrap();
+        assert_eq!(selection["event_type"], "session.task_context_selected");
+        assert!(
+            selection["payload"]["selected_research"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|reference| reference.as_str().unwrap().contains(snapshot.as_str()))
         );
         assert_eq!(
             compact_state.request_audits().len(),
@@ -557,8 +629,7 @@ fn repeated_compaction_then_process_resume_refreshes_facts_without_reexecuting_c
         // replacement underneath completed reasoning. Same-size current values.
         fs::write(&settings, format!("currency={currency}\n")).unwrap();
         fs::write(&memory, format!("report.currency={currency}\n")).unwrap();
-        let question =
-            "Read current settings; report only current currency. Do not rerun the marker.";
+        let question = "Read current snapshot-report-settings; report only current currency. Do not rerun the marker.";
         let resumed = wait_child_before_deadline(
             spawn_f2a_chat(
                 root.path(),
@@ -574,6 +645,12 @@ fn repeated_compaction_then_process_resume_refreshes_facts_without_reexecuting_c
             "{}",
             String::from_utf8_lossy(&resumed.stderr)
         );
+        for _ in 0..2 {
+            selector_candidates(&f2a_request_body(
+                &server.requests,
+                "engineering resumed selection",
+            ));
+        }
         let resumed_wire = f2a_request_body(&server.requests, "engineering resumed wire");
         let result_wire = f2a_request_body(&server.requests, "engineering fresh result");
         assert!(server.requests.try_recv().is_err());
@@ -596,7 +673,7 @@ fn repeated_compaction_then_process_resume_refreshes_facts_without_reexecuting_c
             assert!(
                 wire["input"]
                     .to_string()
-                    .contains("derived_session_summary_v6")
+                    .contains("derived_session_summary_v7")
             );
             assert!(wire["input"].to_string().contains(snapshot.as_str()));
             assert!(
@@ -613,6 +690,9 @@ fn repeated_compaction_then_process_resume_refreshes_facts_without_reexecuting_c
                     .unwrap()
                     .contains(&format!("currency={currency}"))
         }));
+        if cycle == 1 {
+            assert!(result_wire["input"].to_string().contains(&later_old_prose));
+        }
         let after_events = session_events(root.path(), &id);
         assert_eq!(
             &after_events[..compact_events.len()],
@@ -626,6 +706,13 @@ fn repeated_compaction_then_process_resume_refreshes_facts_without_reexecuting_c
             cycle
         );
         let after = reduced_session(&project, &id);
+        if cycle == 1 {
+            assert!(after.history().items().iter().any(|item| matches!(
+                item,
+                ContentItem::Text { role: echidna::domain::model::MessageRole::Assistant, text }
+                    if text == &later_old_prose
+            )));
+        }
         assert_eq!(
             &after.history().items()[..before.history().items().len()],
             before.history().items()
@@ -635,7 +722,7 @@ fn repeated_compaction_then_process_resume_refreshes_facts_without_reexecuting_c
             after.execution_receipt_count(),
             u64::try_from(2 + cycle).unwrap()
         );
-        assert_eq!(after.request_audits().len(), 3 + 3 * cycle);
+        assert_eq!(after.request_audits().len(), 5 + 5 * cycle);
         assert_eq!(
             &after.request_audits()[..before.request_audits().len()],
             before.request_audits()
@@ -675,15 +762,17 @@ fn resume_delivers_current_memory_alongside_old_prose_without_rewriting_history(
     let memory = root.path().join(".echidna/memory/core.md");
     fs::create_dir_all(memory.parent().unwrap()).unwrap();
     fs::write(&memory, "report.currency=USD\n").unwrap();
-    let server = spawn_responses_server(vec![
-        (
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(
             200,
             text_response(
                 "Earlier report currency was USD; current value uncertain.",
                 "fact-old",
             ),
         ),
-        (
+        ContinueSelection { usage: None },
+        Response(
             200,
             text_response("scripted reply, not model-quality evidence", "fact-current"),
         ),
@@ -703,6 +792,10 @@ fn resume_delivers_current_memory_alongside_old_prose_without_rewriting_history(
         "{}",
         String::from_utf8_lossy(&first.stderr)
     );
+    selector_candidates(&f2a_request_body(
+        &server.requests,
+        "fact initial selection",
+    ));
     let initial = f2a_request_body(&server.requests, "fact initial request");
     assert!(initial["input"].to_string().contains("report.currency=USD"));
     let id = session_id(root.path());
@@ -727,6 +820,10 @@ fn resume_delivers_current_memory_alongside_old_prose_without_rewriting_history(
         "{}",
         String::from_utf8_lossy(&resumed.stderr)
     );
+    selector_candidates(&f2a_request_body(
+        &server.requests,
+        "fact resumed selection",
+    ));
     let request = f2a_request_body(&server.requests, "fact resumed request");
     assert!(request.get("previous_response_id").is_none());
     assert!(
@@ -757,12 +854,17 @@ fn resume_delivers_current_memory_alongside_old_prose_without_rewriting_history(
     let after = session_events(root.path(), &id);
     assert_eq!(&after[..before.len()], before.as_slice());
     let after_state = reduced_session(&project, &id);
-    assert_eq!(after_state.request_audits().len(), 2);
+    assert_eq!(after_state.request_audits().len(), 4);
     assert_eq!(
-        &after_state.request_audits()[..1],
+        &after_state.request_audits()[..2],
         before_state.request_audits()
     );
-    for audit in after_state.request_audits() {
+    // The isolated selector has its own fixed instructions. Both actual main
+    // requests retain the complete bound persona identity.
+    for audit in [
+        &after_state.request_audits()[1],
+        &after_state.request_audits()[3],
+    ] {
         let binding = after_state.agent_definition_binding().unwrap();
         let definition = binding.definition();
         assert!(serde_json::to_string(audit).unwrap().contains(&format!(

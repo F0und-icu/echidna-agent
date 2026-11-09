@@ -59,29 +59,62 @@ pub(crate) fn minimum_compaction_handoff_bytes() -> usize {
 impl<Provider: ModelProvider + ?Sized, Tools: ToolExecutor + ?Sized>
     AgentLoop<'_, '_, Provider, Tools>
 {
-    pub(crate) fn capture_compaction_context(
+    pub(crate) fn capture_compaction_context<Scoped: ModelProvider + ?Sized>(
         &self,
-        provider: &dyn ModelProvider,
+        provider: &Scoped,
         reference_limit: usize,
+    ) -> Result<crate::domain::session::CompactionContextCapture, AgentLoopError> {
+        self.capture_compaction_context_for_task(provider, reference_limit, false, None)
+    }
+
+    pub(crate) fn capture_compaction_context_for_task<Scoped: ModelProvider + ?Sized>(
+        &self,
+        provider: &Scoped,
+        reference_limit: usize,
+        selected_task: bool,
+        protected: Option<&crate::domain::session::ProtectedOperatorContext>,
     ) -> Result<crate::domain::session::CompactionContextCapture, AgentLoopError> {
         let capabilities = provider.capabilities();
         let policy = self.context_planner.window_policy(&capabilities)?;
         let mut fragments = Vec::new();
-        if let Some(world) = &self.world_state {
+        if selected_task {
+            let protected = protected.ok_or(AgentLoopError::ContextStateMismatch)?;
+            fragments.extend(self.selected_constraints.for_history(
+                self.selected_history.as_ref(),
+                &[
+                    &protected.retained_provenance,
+                    &protected.detached_provenance,
+                ],
+            ));
+        } else if let Some(world) = &self.world_state {
             fragments.push(world.full_fragment_with_limit(policy.state_section_bytes())?);
         }
         if let Some(snapshot) = &self.project_snapshot {
             fragments.push(snapshot.full_fragment_with_limit(policy.state_section_bytes())?);
         }
-        if let Some(memory) = &self.project_memory_core {
+        let memory = if selected_task {
+            &self.selected_core_memory
+        } else {
+            &self.project_memory_core
+        };
+        if let Some(memory) = memory {
             fragments.push(memory.clone());
         }
-        Ok(crate::domain::session::CompactionContextCapture::new(
-            capabilities,
-            self.context_planner.budget_policy(),
-            reference_limit,
-            fragments,
-        ))
+        Ok(if selected_task {
+            crate::domain::session::CompactionContextCapture::new_task(
+                capabilities,
+                self.context_planner.budget_policy(),
+                reference_limit,
+                fragments,
+            )
+        } else {
+            crate::domain::session::CompactionContextCapture::new(
+                capabilities,
+                self.context_planner.budget_policy(),
+                reference_limit,
+                fragments,
+            )
+        })
     }
 }
 

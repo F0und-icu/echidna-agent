@@ -1,5 +1,10 @@
 //! Real CLI, loopback Provider and durable multi-node handoff regression.
 
+use super::automatic_compaction::continue_from_selected_summary;
+use super::task_context::{
+    ScriptedResponse::{ContinueSelection, InitialSelection, Response, SelectionDecision},
+    selector_candidates, spawn_scripted_responses_server,
+};
 use super::*;
 
 fn canonical_fixture_hash(value: &(impl serde::Serialize + ?Sized)) -> String {
@@ -221,21 +226,24 @@ fn long_completed_source_uses_bounded_nodes_and_one_verified_root() {
     initialize_project(root.path());
     let definition = writer_definition(root.path());
     let original = "NEUTRAL-SOURCE-".repeat(10_000);
-    let server = spawn_responses_server(vec![
-        (200, text_response(&original, "first")),
-        (
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(200, text_response(&original, "first")),
+        Response(
             200,
             compaction_summary_response("First bounded source section.", "leaf-1"),
         ),
-        (
+        Response(
             200,
             compaction_summary_response("Second bounded source section.", "leaf-2"),
         ),
-        (
+        Response(
             200,
             compaction_summary_response("Merged durable source sections.", "root"),
         ),
-        (200, text_response("Completed follow-up.", "last")),
+        SelectionDecision(continue_from_selected_summary),
+        SelectionDecision(continue_from_selected_summary),
+        Response(200, text_response("Completed follow-up.", "last")),
     ]);
     let config = write_config(root.path(), &server.base_url);
     let output = run_chat(
@@ -270,11 +278,17 @@ fn long_completed_source_uses_bounded_nodes_and_one_verified_root() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("Compaction revision 1 applied"));
-    let wires = (0..5)
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains("[turn stopped]"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let wires = (0..8)
         .map(|_| request_body(&server.requests.recv_timeout(F2A_WAIT).unwrap()))
         .collect::<Vec<_>>();
     server.join();
-    for wire in &wires[1..4] {
+    selector_candidates(&wires[0]);
+    for wire in &wires[2..5] {
         assert!(
             wire.get("tools")
                 .and_then(|value| value.as_array())
@@ -282,19 +296,21 @@ fn long_completed_source_uses_bounded_nodes_and_one_verified_root() {
         );
         assert!(wire.get("previous_response_id").is_none());
     }
-    assert_eq!(wires[0]["tools"], wires[4]["tools"]);
+    selector_candidates(&wires[5]);
+    selector_candidates(&wires[6]);
+    assert_eq!(wires[1]["tools"], wires[7]["tools"]);
     let project = Project::discover(root.path()).unwrap();
     let state = reduced_session(&project, &session_id(root.path()));
     let compaction = state
         .latest_compaction()
         .expect("verified root was adopted");
-    assert_eq!(compaction.summary().schema_version(), 6);
+    assert_eq!(compaction.summary().schema_version(), 7);
     assert!(
         serde_json::to_string(state.history().items())
             .unwrap()
             .contains(&original)
     );
-    assert_eq!(state.request_audits().len(), 5);
+    assert_eq!(state.request_audits().len(), 8);
     assert_audits_reconstruct(root.path(), &state);
     let resumed = run_chat(
         root.path(),
@@ -307,6 +323,12 @@ fn long_completed_source_uses_bounded_nodes_and_one_verified_root() {
         "{}",
         String::from_utf8_lossy(&resumed.stderr)
     );
+    let resumed_context = String::from_utf8_lossy(&resumed.stdout);
+    assert!(
+        !resumed_context.contains("required Context fragments need"),
+        "Resume must compile the durable selected view: {resumed_context}"
+    );
+    assert!(!resumed_context.contains(&original));
     let session = session_id(root.path());
     let before = session_events(root.path(), &session);
     let forged = forge_common_context(root.path(), &before);
@@ -394,10 +416,13 @@ fn explicit_capacity_rejection_resumes_to_commands_without_replaying_or_saving_n
     let root = TemporaryDirectory::new("context2-capacity-state");
     initialize_project(root.path());
     let definition = writer_definition(root.path());
-    let server = spawn_responses_server(vec![(
-        400,
-        r#"{"error":{"code":"context_length_exceeded","message":"too long"}}"#.to_owned(),
-    )]);
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(
+            400,
+            r#"{"error":{"code":"context_length_exceeded","message":"too long"}}"#.to_owned(),
+        ),
+    ]);
     let config = write_config(root.path(), &server.base_url);
     let output = run_chat(
         root.path(),
@@ -420,6 +445,10 @@ fn explicit_capacity_rejection_resumes_to_commands_without_replaying_or_saving_n
         "{stdout}"
     );
     assert!(!stdout.contains("[last successful plan]"), "{stdout}");
+    selector_candidates(&f2a_request_body(
+        &server.requests,
+        "capacity initial selection",
+    ));
     server.requests.recv_timeout(F2A_WAIT).unwrap();
     assert!(server.requests.try_recv().is_err());
     server.join();
@@ -428,7 +457,7 @@ fn explicit_capacity_rejection_resumes_to_commands_without_replaying_or_saving_n
     let history = serde_json::to_string(state.history().items()).unwrap();
     assert!(history.contains("ORIGINAL-CAPACITY-TASK"));
     assert!(!history.contains("MUST-NOT-BE-SAVED"));
-    assert_eq!(state.request_audits().len(), 1);
+    assert_eq!(state.request_audits().len(), 2);
     assert_eq!(state.execution_receipt_count(), 0);
 }
 
@@ -436,9 +465,11 @@ fn explicit_capacity_rejection_resumes_to_commands_without_replaying_or_saving_n
 fn context_keeps_accepted_plan_after_a_later_capacity_rejection() {
     let root = TemporaryDirectory::new("context2-successful-plan");
     initialize_project(root.path());
-    let server = spawn_responses_server(vec![
-        (200, text_response("First answer.", "accepted")),
-        (
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(200, text_response("First answer.", "accepted")),
+        ContinueSelection { usage: None },
+        Response(
             400,
             r#"{"error":{"code":"context_length_exceeded","message":"too long"}}"#.to_owned(),
         ),
@@ -457,8 +488,11 @@ fn context_keeps_accepted_plan_after_a_later_capacity_rejection() {
         .collect::<Vec<_>>();
     assert_eq!(plans.len(), 2, "{stdout}");
     assert_eq!(plans[0], plans[1], "{stdout}");
-    for _ in 0..2 {
-        server.requests.recv_timeout(F2A_WAIT).unwrap();
+    for index in 0..4 {
+        let request = f2a_request_body(&server.requests, "accepted plan request");
+        if index == 0 || index == 2 {
+            selector_candidates(&request);
+        }
     }
     server.join();
 }
@@ -476,9 +510,11 @@ fn incremental_cross_turn_reasoning_records_real_baseline_and_closes_inputs() {
         "data: {reasoning}\n\n{}",
         text_response("First complete.", "accepted-first")
     );
-    let server = spawn_responses_server(vec![
-        (200, first),
-        (200, text_response("Second complete.", "accepted-second")),
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(200, first),
+        ContinueSelection { usage: None },
+        Response(200, text_response("Second complete.", "accepted-second")),
     ]);
     let config = write_config(root.path(), &server.base_url);
     let output = run_chat(
@@ -492,7 +528,14 @@ fn incremental_cross_turn_reasoning_records_real_baseline_and_closes_inputs() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    selector_candidates(&f2a_request_body(
+        &server.requests,
+        "reasoning initial selection",
+    ));
     let first_wire = request_body(&server.requests.recv_timeout(F2A_WAIT).unwrap());
+    selector_candidates(&request_body(
+        &server.requests.recv_timeout(F2A_WAIT).unwrap(),
+    ));
     let second_wire = request_body(&server.requests.recv_timeout(F2A_WAIT).unwrap());
     server.join();
     assert!(
@@ -560,21 +603,25 @@ fn oversized_stopped_turn_compacts_then_restarts_with_exact_protected_input_once
     initialize_project(root.path());
     let definition = writer_definition(root.path());
     let original_output = "NEUTRAL-SOURCE-".repeat(10_000);
-    let server = spawn_responses_server(vec![
-        (200, text_response(&original_output, "first")),
-        (
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(200, text_response(&original_output, "first")),
+        ContinueSelection { usage: None },
+        Response(
             200,
             compaction_summary_response("First bounded source section.", "leaf-1"),
         ),
-        (
+        Response(
             200,
             compaction_summary_response("Second bounded source section.", "leaf-2"),
         ),
-        (
+        Response(
             200,
             compaction_summary_response("Merged durable source sections.", "root"),
         ),
-        (200, text_response("Resumed work completed.", "last")),
+        SelectionDecision(continue_from_selected_summary),
+        SelectionDecision(continue_from_selected_summary),
+        Response(200, text_response("Resumed work completed.", "last")),
     ]);
     let config = write_config(root.path(), &server.base_url);
     let initial = run_chat(
@@ -644,39 +691,41 @@ fn oversized_stopped_turn_compacts_then_restarts_with_exact_protected_input_once
         "{}",
         String::from_utf8_lossy(&resumed.stderr)
     );
-    let wires = (0..5)
+    let wires = (0..9)
         .map(|_| request_body(&server.requests.recv_timeout(F2A_WAIT).unwrap()))
         .collect::<Vec<_>>();
     server.join();
     assert_eq!(
-        wires[4]
+        wires[8]
             .to_string()
             .matches("EXACT-UNFINISHED-RESTRICTION")
             .count(),
         1
     );
-    assert_eq!(wires[0]["tools"], wires[4]["tools"]);
+    selector_candidates(&wires[0]);
+    assert_eq!(wires[1]["tools"], wires[8]["tools"]);
     let project = Project::discover(root.path()).unwrap();
     let state = reduced_session(&project, &session_id(root.path()));
     let history = serde_json::to_string(state.history().items()).unwrap();
     assert_eq!(history.matches("EXACT-UNFINISHED-RESTRICTION").count(), 1);
     assert!(history.contains(&original_output));
     assert_eq!(state.execution_receipt_count(), 0);
-    assert_eq!(state.request_audits().len(), 5);
+    assert_eq!(state.request_audits().len(), 9);
 }
 
 #[test]
-fn stale_research_refresh_preserves_v6_model_source_without_sampling() {
+fn stale_research_refresh_preserves_task_model_source_without_sampling() {
     let root = TemporaryDirectory::new("context2-stale-v6");
     initialize_project(root.path());
     let project = Project::discover(root.path()).unwrap();
     append_research_snapshot(&project, "original");
-    let server = spawn_responses_server(vec![
-        (
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(
             200,
             text_response(&"Prior research observation. ".repeat(1000), "before"),
         ),
-        (
+        Response(
             200,
             compaction_summary_response("Observed source with uncertainty.", "summary"),
         ),
@@ -694,7 +743,7 @@ fn stale_research_refresh_preserves_v6_model_source_without_sampling() {
         String::from_utf8_lossy(&first.stderr)
     );
     assert!(String::from_utf8_lossy(&first.stdout).contains("Compaction revision 1 applied"));
-    for _ in 0..2 {
+    for _ in 0..3 {
         server.requests.recv_timeout(F2A_WAIT).unwrap();
     }
     server.join();
@@ -705,8 +754,8 @@ fn stale_research_refresh_preserves_v6_model_source_without_sampling() {
         .find(|event| event["event_type"] == "session.compaction_created")
         .unwrap()["payload"]["summary"]
         .clone();
-    assert_eq!(summary["schema_version"], 6);
-    let next = append_research_snapshot(&project, "newer");
+    assert_eq!(summary["schema_version"], 7);
+    append_research_snapshot(&project, "newer");
     let resumed = run_chat(root.path(), &config, "/exit\n", &["--resume", "latest"]);
     assert!(
         resumed.status.success(),
@@ -719,44 +768,36 @@ fn stale_research_refresh_preserves_v6_model_source_without_sampling() {
         .filter(|event| event["event_type"] == "session.compaction_created")
         .map(|event| &event["payload"]["summary"])
         .collect::<Vec<_>>();
-    assert_eq!(summaries.len(), 2);
-    for field in [
-        "narrative",
-        "narrative_source",
-        "model_sample_event_ref",
-        "source_plan_blob_id",
-        "source_plan_hash",
-        "protected_inputs",
-    ] {
-        assert_eq!(summaries[1][field], summary[field], "{field}");
-    }
-    assert_eq!(
-        summaries[1]["evidence_spine"]["target_snapshot_refs"],
-        json!([next.as_str()])
-    );
+    assert_eq!(summaries.len(), 1);
+    // V7 remains bound to the selected task's exact sources. An unrelated
+    // append cannot relabel its old observations as the new current Target.
+    assert_eq!(*summaries[0], summary);
     assert_eq!(
         after
             .iter()
             .filter(|event| event["event_type"] == "session.request_audit_recorded")
             .count(),
-        2
+        3
     );
 }
 
 #[test]
-fn stale_v6_large_handoff_preserves_recorded_limit_after_window_shrinks() {
+fn stale_task_handoff_preserves_recorded_limit_after_window_shrinks() {
     let root = TemporaryDirectory::new("context2-stale-v6-narrow-window");
     initialize_project(root.path());
     let project = Project::discover(root.path()).unwrap();
     append_research_snapshot(&project, "before");
     let progress = "Original retained observation. ".repeat(160);
-    let server = spawn_responses_server(vec![
-        (
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(
             200,
             text_response(&"Prior observation. ".repeat(1500), "before"),
         ),
-        (200, compaction_summary_response(&progress, "summary")),
-        (
+        Response(200, compaction_summary_response(&progress, "summary")),
+        SelectionDecision(continue_from_selected_summary),
+        SelectionDecision(continue_from_selected_summary),
+        Response(
             400,
             r#"{"error":{"code":"context_length_exceeded","message":"too long"}}"#.to_owned(),
         ),
@@ -777,7 +818,7 @@ fn stale_v6_large_handoff_preserves_recorded_limit_after_window_shrinks() {
         &["--resume", &id],
     );
     assert!(!stopped.status.success());
-    for _ in 0..3 {
+    for _ in 0..6 {
         server.requests.recv_timeout(F2A_WAIT).unwrap();
     }
     assert!(server.requests.try_recv().is_err());
@@ -788,7 +829,7 @@ fn stale_v6_large_handoff_preserves_recorded_limit_after_window_shrinks() {
         .find(|event| event["event_type"] == "session.compaction_created")
         .unwrap()["payload"]["summary"]
         .clone();
-    assert_eq!(old["schema_version"], 6);
+    assert_eq!(old["schema_version"], 7);
     assert!(old["byte_limit"].as_u64().unwrap() > 1966);
     assert!(old["narrative"].to_string().len() > 1966);
     let before = reduced_session(&project, &id);
@@ -827,7 +868,7 @@ fn stale_v6_large_handoff_preserves_recorded_limit_after_window_shrinks() {
         .iter()
         .rfind(|event| event["event_type"] == "session.compaction_created")
         .unwrap()["payload"]["summary"];
-    assert_eq!(refreshed["revision"], 2);
+    assert_eq!(refreshed["revision"], 1);
     for field in [
         "byte_limit",
         "narrative",
@@ -842,17 +883,18 @@ fn stale_v6_large_handoff_preserves_recorded_limit_after_window_shrinks() {
 }
 
 #[test]
-fn stale_v6_with_over_budget_protected_input_restarts_into_recovery_commands() {
+fn stale_task_summary_with_over_budget_protected_input_restarts_into_recovery_commands() {
     let root = TemporaryDirectory::new("context2-stale-oversized");
     initialize_project(root.path());
     let project = Project::discover(root.path()).unwrap();
     append_research_snapshot(&project, "before");
-    let server = spawn_responses_server(vec![
-        (
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(
             200,
             text_response(&"Prior observation. ".repeat(500), "before"),
         ),
-        (
+        Response(
             200,
             compaction_summary_response("Preserved handoff.", "summary"),
         ),
@@ -869,7 +911,13 @@ fn stale_v6_with_over_budget_protected_input_restarts_into_recovery_commands() {
         "{}",
         String::from_utf8_lossy(&initial.stderr)
     );
-    for _ in 0..2 {
+    assert!(
+        String::from_utf8_lossy(&initial.stdout).contains("Compaction revision 1 applied"),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&initial.stdout),
+        String::from_utf8_lossy(&initial.stderr)
+    );
+    for _ in 0..3 {
         server.requests.recv_timeout(F2A_WAIT).unwrap();
     }
     assert!(server.requests.try_recv().is_err());
@@ -890,7 +938,7 @@ fn stale_v6_with_over_budget_protected_input_restarts_into_recovery_commands() {
             .unwrap()
             .summary()
             .schema_version(),
-        6
+        7
     );
     append_research_snapshot(&project, "after");
     let resumed = run_chat(
@@ -917,21 +965,22 @@ fn stale_v6_with_over_budget_protected_input_restarts_into_recovery_commands() {
         before.execution_receipt_count()
     );
     assert_eq!(after.history(), before.history());
-    assert_eq!(after.latest_compaction().unwrap().summary().revision(), 2);
+    assert_eq!(after.latest_compaction(), before.latest_compaction());
 }
 
 #[test]
-fn stale_v6_with_over_budget_protected_input_resumes_in_same_process() {
+fn stale_task_summary_with_over_budget_protected_input_resumes_in_same_process() {
     let root = TemporaryDirectory::new("context2-stale-oversized-live-process");
     initialize_project(root.path());
     let project = Project::discover(root.path()).unwrap();
     append_research_snapshot(&project, "before");
-    let server = spawn_responses_server(vec![
-        (
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(
             200,
             text_response(&"Prior observation. ".repeat(500), "before"),
         ),
-        (
+        Response(
             200,
             compaction_summary_response("Preserved handoff.", "summary"),
         ),
@@ -948,7 +997,13 @@ fn stale_v6_with_over_budget_protected_input_resumes_in_same_process() {
         "{}",
         String::from_utf8_lossy(&initial.stderr)
     );
-    for _ in 0..2 {
+    assert!(
+        String::from_utf8_lossy(&initial.stdout).contains("Compaction revision 1 applied"),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&initial.stdout),
+        String::from_utf8_lossy(&initial.stderr)
+    );
+    for _ in 0..3 {
         server.requests.recv_timeout(F2A_WAIT).unwrap();
     }
     server.join();
@@ -1018,5 +1073,5 @@ fn stale_v6_with_over_budget_protected_input_resumes_in_same_process() {
         before.execution_receipt_count()
     );
     assert_eq!(after.history(), before.history());
-    assert_eq!(after.latest_compaction().unwrap().summary().revision(), 2);
+    assert_eq!(after.latest_compaction(), before.latest_compaction());
 }

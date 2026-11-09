@@ -1,3 +1,7 @@
+use super::task_context::{
+    ScriptedResponse::{ContinueSelection, InitialSelection, Response, TruncatedResponse},
+    initial_selection_response, selector_candidates, spawn_scripted_responses_server,
+};
 use super::*;
 
 #[test]
@@ -9,10 +13,11 @@ fn failed_request_capture_normal_cli_tracks_physical_retries_and_uses_actual_cwd
     let partial =
         "data: {\"type\":\"response.output_text.delta\",\"delta\":\"discarded fragment\"}\n\n";
     let complete = text_response("only complete answer", "capture-cli-complete");
-    let server = spawn_responses_server_with_lengths(vec![
-        (200, partial.to_owned(), partial.len() + 1),
-        (200, partial.to_owned(), partial.len() + 1),
-        (200, complete.clone(), complete.len()),
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        TruncatedResponse(partial.to_owned()),
+        TruncatedResponse(partial.to_owned()),
+        Response(200, complete),
     ]);
     let config = write_config(&project, &server.base_url);
     let output = f2a_wait_child(
@@ -33,8 +38,9 @@ fn failed_request_capture_normal_cli_tracks_physical_retries_and_uses_actual_cwd
         "{stderr}"
     );
     assert!(stdout.contains("only complete answer"));
-    assert!(stdout.contains("admitted=3 primary=3 vision=0"));
+    assert!(stdout.contains("admitted=4 primary=4 vision=0"));
     assert!(!project.join("debug-failures").exists());
+    selector_candidates(&f2a_request_body(&server.requests, "initial selection"));
     let requests: Vec<_> = (0..3)
         .map(|_| f2a_request_body(&server.requests, "captured retry request"))
         .collect();
@@ -63,7 +69,7 @@ fn failed_request_capture_normal_cli_tracks_physical_retries_and_uses_actual_cwd
         );
     }
     let state = reduced_session(&Project::discover(&project).unwrap(), &session_id(&project));
-    assert_eq!(state.request_audits().len(), 3);
+    assert_eq!(state.request_audits().len(), 4);
     assert_eq!(state.execution_receipt_count(), 0);
     assert_eq!(state.history().items().len(), 2);
     assert_audits_reconstruct(&project, &state);
@@ -84,7 +90,10 @@ fn failed_request_capture_cli_io_error_is_visible_and_preserves_http_failure() {
     let root = TemporaryDirectory::new("failure-capture-io-cli");
     initialize_project(root.path());
     fs::write(root.path().join("ordinary-file"), "preserved").unwrap();
-    let server = spawn_responses_server(vec![(401, "RESPONSE_BODY_CANARY".to_owned())]);
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(401, "RESPONSE_BODY_CANARY".to_owned()),
+    ]);
     let config = write_config(root.path(), &server.base_url);
     let output = f2a_wait_child(
         spawn_f2a_chat(
@@ -116,6 +125,7 @@ fn failed_request_capture_cli_io_error_is_visible_and_preserves_http_failure() {
         fs::read_to_string(root.path().join("ordinary-file")).unwrap(),
         "preserved"
     );
+    selector_candidates(&f2a_request_body(&server.requests, "initial selection"));
     f2a_request_body(&server.requests, "failed HTTP attempt");
     assert!(server.requests.try_recv().is_err());
     f2a_join_server(server, "capture IO failure");
@@ -123,7 +133,7 @@ fn failed_request_capture_cli_io_error_is_visible_and_preserves_http_failure() {
         &Project::discover(root.path()).unwrap(),
         &session_id(root.path()),
     );
-    assert_eq!(state.request_audits().len(), 1);
+    assert_eq!(state.request_audits().len(), 2);
     assert_eq!(state.execution_receipt_count(), 0);
     assert_eq!(state.history().items().len(), 1);
     assert_audits_reconstruct(root.path(), &state);
@@ -160,6 +170,14 @@ fn request_send_diagnostics_retry_only_header_closure_without_replaying_a_comple
             let base_url = format!("http://{}/CLI_URL_CANARY", listener.local_addr().unwrap());
             let (sender, requests) = mpsc::channel();
             let worker = thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket.set_read_timeout(Some(F2A_WAIT)).unwrap();
+                let raw = read_http_request(&mut socket);
+                let body =
+                    initial_selection_response(&request_body(&raw), "send-diagnostic-selection");
+                sender.send(raw).unwrap();
+                f3_context::write_sse_response(&mut socket, &body);
+                drop(socket);
                 let first = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{completed_tool}",
                     completed_tool.len()
@@ -183,14 +201,15 @@ fn request_send_diagnostics_retry_only_header_closure_without_replaying_a_comple
             );
             worker.join().unwrap();
             let captured: Vec<_> = requests.try_iter().collect();
-            assert_eq!(captured.len(), 1 + failed_attempts);
+            assert_eq!(captured.len(), 2 + failed_attempts);
+            selector_candidates(&request_body(&captured[0]));
             assert!(
-                captured[1..]
+                captured[2..]
                     .windows(2)
                     .all(|pair| pair[0].split_once("\r\n\r\n").unwrap().1
                         == pair[1].split_once("\r\n\r\n").unwrap().1)
             );
-            let sent_body = captured[1].split_once("\r\n\r\n").unwrap().1;
+            let sent_body = captured[2].split_once("\r\n\r\n").unwrap().1;
             assert!(sent_body.contains("CLI_TOOL_BODY_CANARY"));
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -232,7 +251,7 @@ fn request_send_diagnostics_retry_only_header_closure_without_replaying_a_comple
                 0,
                 "header failures have no partial response to discard"
             );
-            let attempts = 1 + failed_attempts;
+            let attempts = 2 + failed_attempts;
             assert!(stdout.contains(&format!("admitted={attempts} primary={attempts} vision=0")));
             assert!(stdout.contains("Durable checkpoint retained"));
             let state = reduced_session(
@@ -272,7 +291,7 @@ fn error_event_details_reach_normal_cli_without_committing_tools_or_retrying() {
         .iter()
         .map(|event| format!("data: {event}\n\n"))
         .collect();
-    let server = spawn_responses_server(vec![(200, body)]);
+    let server = spawn_scripted_responses_server(vec![InitialSelection, Response(200, body)]);
     let config = write_config(root.path(), &server.base_url);
     let output = f2a_wait_child(
         spawn_f2a_chat(root.path(), &config, "fixture task\n/exit\n", &[]),
@@ -300,16 +319,17 @@ fn error_event_details_reach_normal_cli_without_committing_tools_or_retrying() {
         !stderr.contains("unsupported Responses event"),
         "{stderr:?}"
     );
-    assert!(stdout.contains("admitted=1 primary=1 vision=0"));
+    assert!(stdout.contains("admitted=2 primary=2 vision=0"));
     assert!(stdout.contains("Durable checkpoint retained"));
     assert!(!stderr.contains("retry"));
     assert!(!root.path().join("must-not-exist.txt").exists());
+    selector_candidates(&f2a_request_body(&server.requests, "initial selection"));
     f2a_request_body(&server.requests, "one failed error-event request");
     assert!(server.requests.try_recv().is_err());
     f2a_join_server(server, "error-event CLI");
     let project = Project::discover(root.path()).unwrap();
     let state = reduced_session(&project, &session_id(root.path()));
-    assert_eq!(state.request_audits().len(), 1);
+    assert_eq!(state.request_audits().len(), 2);
     assert_eq!(state.execution_receipt_count(), 0);
     assert_eq!(
         state.history().items(),
@@ -322,6 +342,15 @@ fn error_event_details_reach_normal_cli_without_committing_tools_or_retrying() {
 
 #[test]
 fn truncated_http_body_requires_explicit_resume_without_replaying_completed_tools() {
+    body_transport_recovery_case(false);
+}
+
+#[test]
+fn exhausted_incremental_transport_resumes_with_original_image_and_expired_activation() {
+    body_transport_recovery_case(true);
+}
+
+fn body_transport_recovery_case(with_image_activation: bool) {
     let root = TemporaryDirectory::new("body-transport-recovery");
     initialize_project(root.path());
     fs::write(root.path().join("target.txt"), "durable tool result").unwrap();
@@ -338,22 +367,54 @@ fn truncated_http_body_requires_explicit_resume_without_replaying_completed_tool
                 "arguments":"{\"path\":\"must-not-exist.txt\",\"content\":\"uncommitted\",\"expected_hash\":null}"}}),
     ].iter().map(|event| format!("data: {event}\n\n")).collect::<String>();
     let recovered = text_response("explicit recovery completed", "new-response");
-    let responses = vec![
-        (200, completed_tool.clone(), completed_tool.len()),
-        (200, interrupted.clone(), interrupted.len() + 1),
-        (200, interrupted.clone(), interrupted.len() + 1),
-        (200, interrupted.clone(), interrupted.len() + 1),
-        (200, recovered.clone(), recovered.len()),
-    ];
-    let server = spawn_responses_server_with_lengths(responses);
-    let config = write_config(root.path(), &server.base_url);
-    let output = f2a_wait_child(
-        spawn_f2a_chat(
-            root.path(),
+    let mut responses = vec![InitialSelection];
+    if with_image_activation {
+        append_research_snapshot(&Project::discover(root.path()).unwrap(), "transport-image");
+        fs::write(root.path().join("screen.png"), png_bytes(32, 16)).unwrap();
+        responses.push(Response(
+            200,
+            m4_long_flow_tool_response(
+                "activate-retained-reader",
+                "tool_search",
+                json!({"query":"read_output"}),
+                "activation-response",
+            ),
+        ));
+    }
+    responses.extend([
+        Response(200, completed_tool),
+        TruncatedResponse(interrupted.clone()),
+        TruncatedResponse(interrupted.clone()),
+        TruncatedResponse(interrupted),
+        ContinueSelection { usage: None },
+        Response(200, recovered),
+    ]);
+    let server = spawn_scripted_responses_server(responses);
+    let config = if with_image_activation {
+        let config = write_direct_config(root.path(), &server.base_url);
+        fs::write(
             &config,
-            "original task\nblocked input\n/resume\nnew instruction\n/exit\n",
-            &["--debug"],
-        ),
+            fs::read_to_string(&config).unwrap().replacen(
+                "context_window = 32768",
+                "context_window = 272000",
+                1,
+            ),
+        )
+        .unwrap();
+        config
+    } else {
+        write_config(root.path(), &server.base_url)
+    };
+    let input = format!(
+        "{}original task\nblocked input\n/resume\nnew instruction\n/exit\n",
+        if with_image_activation {
+            "/image screen.png\n"
+        } else {
+            ""
+        }
+    );
+    let output = f2a_wait_child(
+        spawn_f2a_chat(root.path(), &config, &input, &["--debug"]),
         "body transport recovery",
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -373,10 +434,17 @@ fn truncated_http_body_requires_explicit_resume_without_replaying_completed_tool
     }
     assert!(stdout.contains("Task input not accepted or saved"));
     assert!(stdout.contains("explicit recovery completed"));
+    selector_candidates(&f2a_request_body(&server.requests, "initial selection"));
+    let before_activation = with_image_activation
+        .then(|| f2a_request_body(&server.requests, "initial deferred-tool activation"));
     let completed = f2a_request_body(&server.requests, "completed tool sample");
     let interrupted_first = f2a_request_body(&server.requests, "interrupted followup first");
     let interrupted_second = f2a_request_body(&server.requests, "interrupted followup second");
     let interrupted_third = f2a_request_body(&server.requests, "interrupted followup third");
+    selector_candidates(&f2a_request_body(
+        &server.requests,
+        "transport recovery selection",
+    ));
     let resumed = f2a_request_body(&server.requests, "explicit recovery");
     assert!(completed.to_string().contains("original task"));
     assert_eq!(interrupted_first, interrupted_second);
@@ -386,6 +454,42 @@ fn truncated_http_body_requires_explicit_resume_without_replaying_completed_tool
         "completed-response"
     );
     assert!(resumed.get("previous_response_id").is_none());
+    if with_image_activation {
+        let images = |wire: &Value| {
+            wire["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|item| item["content"].as_array())
+                .flatten()
+                .filter(|item| item["type"] == "input_image")
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let before_activation = before_activation.as_ref().unwrap();
+        let original_images = images(before_activation);
+        assert_eq!(original_images.len(), 1);
+        assert_eq!(images(&completed), original_images);
+        assert_eq!(images(&resumed), original_images);
+        let advertised = |wire: &Value| {
+            wire["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["name"] == "read_output")
+        };
+        assert!(!advertised(before_activation));
+        assert!(advertised(&completed));
+        assert!(
+            completed["previous_response_id"].is_null(),
+            "a changed Tool plan starts Full before the later stable-plan incremental request"
+        );
+        assert!(advertised(&interrupted_first));
+        assert!(
+            !advertised(&resumed),
+            "Resume must expire Turn-local activation"
+        );
+    }
     for request in [
         &interrupted_first,
         &interrupted_second,
@@ -404,8 +508,15 @@ fn truncated_http_body_requires_explicit_resume_without_replaying_completed_tool
         &Project::discover(root.path()).unwrap(),
         &session_id(root.path()),
     );
-    assert_eq!(state.request_audits().len(), 5);
-    assert_eq!(state.execution_receipt_count(), 1);
+    assert_eq!(
+        state.request_audits().len(),
+        if with_image_activation { 8 } else { 7 }
+    );
+    assert_eq!(
+        state.execution_receipt_count(),
+        if with_image_activation { 3 } else { 1 },
+        "image ingestion, activation and read each retain their actual Receipt"
+    );
     assert_eq!(state.history().ensure_all_tool_calls_paired(), Ok(()));
     assert_eq!(
         state.history().items().last().unwrap(),

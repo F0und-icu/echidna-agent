@@ -64,40 +64,52 @@ where
             .tools
             .resolve_tool_plan(&exposure, &DeferredActivationSet::default())?;
         let mut items = history.to_vec();
-        let (turn_history_start, detached_input, protected_input) =
-            if let Some(index) = self.protected_input.retained_provenance.keys().next_back() {
-                (
-                    *index,
-                    None,
-                    Some((
-                        &self.protected_input.detached_items[..],
-                        &self.protected_input.detached_provenance,
-                    )),
-                )
-            } else if !self.protected_input.detached_items.is_empty() {
-                (
-                    items.len(),
-                    Some((
-                        &self.protected_input.detached_items[..],
-                        &self.protected_input.detached_provenance,
-                    )),
-                    None,
-                )
-            } else {
-                items.push(ContentItem::user_text("Continue."));
-                (history.len(), None, None)
-            };
+        let preview = context_state::preview_operator_context(
+            &mut items,
+            &self.protected_input,
+            self.selected_history.as_ref(),
+        )?;
         let (plan, _) = context_state::compile_context(context_state::ContextCompilationInput {
             prompt_composition: prompt,
-            world_state: self.world_state.as_ref(),
+            frozen_base_fragments: None,
+            world_state: if self.selected_history.is_some() {
+                None
+            } else {
+                self.world_state.as_ref()
+            },
             project_snapshot: self.project_snapshot.as_ref(),
-            project_memory_core: self.project_memory_core.as_ref(),
-            session_summary: summary,
+            project_memory_core: if self.selected_history.is_some() {
+                self.selected_core_memory.as_ref()
+            } else {
+                self.project_memory_core.as_ref()
+            },
+            session_summary: if self.selected_history.is_some() {
+                context_state::selected_summary(summary, self.selected_summary.as_deref())?
+            } else {
+                summary
+            },
             history: &items,
             history_provenance: &self.history_provenance,
-            protected_input,
-            turn_history_start,
-            detached_input,
+            selected_history: self.selected_history.as_ref(),
+            selected_constraints: &self.selected_constraints.for_history(
+                self.selected_history.as_ref(),
+                &[
+                    &preview.active_provenance,
+                    preview
+                        .protected
+                        .as_ref()
+                        .map_or(&preview.active_provenance, |(_, provenance)| provenance),
+                ],
+            ),
+            protected_input: preview
+                .protected
+                .as_ref()
+                .map(|(items, provenance)| (items.as_slice(), provenance)),
+            turn_history_start: preview.turn_history_start,
+            detached_input: preview
+                .detached
+                .as_ref()
+                .map(|(items, provenance)| (items.as_slice(), provenance)),
             planner: &self.context_planner,
             cache: None,
             budget,

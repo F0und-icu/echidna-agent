@@ -388,6 +388,7 @@ impl ModelProvider for ResponsesHttpAdapter {
         let continuation_required = self.config.capabilities.incremental_input;
         let continuation_requested = request.is_incremental();
         let opaque_scope = request.opaque_continuation_scope().cloned();
+        let presentation = request.presentation();
         let retained_opaque = OpaqueContinuationStore::references_in(request.input());
         let opaque_continuations = match request.continuation_retention() {
             ContinuationRetention::Session => self.opaque_continuations.clone(),
@@ -420,6 +421,7 @@ impl ModelProvider for ResponsesHttpAdapter {
             opaque_continuations,
             profile,
             observer: self.observer.clone(),
+            presentation,
             failure_capture: self.failure_capture.clone(),
             partial_text: Arc::new(AtomicBool::new(false)),
 
@@ -443,6 +445,7 @@ struct PreparedResponsesRequest {
     opaque_continuations: Arc<OpaqueContinuationStore>,
     profile: ResponsesWireProfile,
     observer: Option<Arc<dyn presentation::ResponsesObserver>>,
+    presentation: crate::ports::model::ModelRequestPresentation,
     failure_capture: Option<PathBuf>,
     partial_text: Arc<AtomicBool>,
 
@@ -465,6 +468,7 @@ impl PreparedModelRequest for PreparedResponsesRequest {
         let opaque_continuations = Arc::clone(&self.opaque_continuations);
         let profile = self.profile;
         let observer = self.observer.clone();
+        let presentation = self.presentation;
         let failure_capture = self.failure_capture.clone();
         let partial_text = Arc::clone(&self.partial_text);
 
@@ -478,14 +482,17 @@ impl PreparedModelRequest for PreparedResponsesRequest {
             } = credential;
             let capture = failure_capture.map(|directory| failure_capture::FailedRequestCapture::new(
                 directory,
-                observer.as_ref().map(|observer| observer.role()),
+                observer.as_ref().map(|observer| match presentation {
+                    crate::ports::model::ModelRequestPresentation::Standard => observer.role(),
+                    crate::ports::model::ModelRequestPresentation::TaskSelection => "task selection",
+                }),
                 endpoint.clone(),
                 request_body.clone(),
             ));
             let request_observer = observer.clone();
             let attempt = try_stream! {
             let mut decoder = response::ResponseDecoder::new(profile, opaque_scope);
-            let mut diagnostics = request_observer.as_ref().map(presentation::RequestOutput::new);
+            let mut diagnostics = request_observer.as_ref().map(|observer| presentation::RequestOutput::new(observer, presentation));
 
             if let Some(diagnostics) = &mut diagnostics {
                 diagnostics.request(&request_body);
@@ -631,7 +638,10 @@ impl PreparedModelRequest for PreparedResponsesRequest {
         if self.partial_text.swap(false, Ordering::Relaxed)
             && let Some(observer) = &self.observer
         {
-            observer.notify(presentation::ResponseNotice::RetryDiscarded { retry });
+            observer.notify(presentation::ResponseNotice::RetryDiscarded {
+                retry,
+                presentation: self.presentation,
+            });
         }
     }
 }

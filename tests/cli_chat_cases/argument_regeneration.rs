@@ -1,4 +1,8 @@
 //! Offline protocol recovery over the real CLI, audit and Tool runtime.
+use super::task_context::{
+    ScriptedResponse::{ContinueSelection, InitialSelection, NewSelection, Response},
+    initial_selection_response, selector_candidates, spawn_scripted_responses_server,
+};
 use super::*;
 
 fn invalid_sample() -> String {
@@ -50,8 +54,9 @@ fn argument_correction_retains_prior_effects_reasoning_and_exact_audit_without_h
         let root = TemporaryDirectory::new("argument-correction");
         let harness = TemporaryDirectory::new("argument-correction-provider");
         initialize_project(root.path());
-        let server = spawn_responses_server(vec![
-            (
+        let server = spawn_scripted_responses_server(vec![
+            InitialSelection,
+            Response(
                 200,
                 reasoned_call(
                     "done-once",
@@ -60,8 +65,8 @@ fn argument_correction_retains_prior_effects_reasoning_and_exact_audit_without_h
                     "committed-before-error",
                 ),
             ),
-            (200, invalid_sample()),
-            (
+            Response(200, invalid_sample()),
+            Response(
                 200,
                 m4_long_flow_tool_response(
                     "corrected",
@@ -70,8 +75,9 @@ fn argument_correction_retains_prior_effects_reasoning_and_exact_audit_without_h
                     "corrected-response",
                 ),
             ),
-            (200, text_response("RECOVERED", "final")),
-            (200, text_response("NEXT_TURN", "next")),
+            Response(200, text_response("RECOVERED", "final")),
+            ContinueSelection { usage: None },
+            Response(200, text_response("NEXT_TURN", "next")),
         ]);
         let config = write_context_window_config(harness.path(), &server.base_url, 1_048_576);
         if !incremental {
@@ -99,7 +105,8 @@ fn argument_correction_retains_prior_effects_reasoning_and_exact_audit_without_h
             b"corrected"
         );
         assert!(!root.path().join("must-not-exist.txt").exists());
-        let wires: Vec<_> = (0..5)
+        selector_candidates(&f2a_request_body(&server.requests, "initial selection"));
+        let wires: Vec<_> = (0..6)
             .map(|_| f2a_request_body(&server.requests, "argument correction"))
             .collect();
         assert!(
@@ -122,7 +129,7 @@ fn argument_correction_retains_prior_effects_reasoning_and_exact_audit_without_h
                     .iter()
                     .all(|wire| wire.get("previous_response_id").is_none())
             );
-            for wire in &wires[2..] {
+            for wire in wires[2..4].iter().chain(&wires[5..]) {
                 assert!(wire["input"].to_string().contains("RETAIN_VALID_REASONING"));
                 assert_eq!(
                     wire["input"]
@@ -133,6 +140,7 @@ fn argument_correction_retains_prior_effects_reasoning_and_exact_audit_without_h
                 );
             }
         }
+        selector_candidates(&wires[4]);
         assert!(server.requests.try_recv().is_err());
         server.join();
         let state = reduced_session(
@@ -140,7 +148,7 @@ fn argument_correction_retains_prior_effects_reasoning_and_exact_audit_without_h
             &session_id(root.path()),
         );
         assert_eq!(state.execution_receipt_count(), 2);
-        assert_eq!(state.request_audits().len(), 5);
+        assert_eq!(state.request_audits().len(), 7);
         let history = serde_json::to_string(state.history().items()).unwrap();
         for omitted in [
             "Runtime validation notice",
@@ -154,9 +162,9 @@ fn argument_correction_retains_prior_effects_reasoning_and_exact_audit_without_h
         assert_eq!(rejection.len(), 1);
         assert_eq!(
             rejection[0]["payload"]["request_audit_event_id"],
-            state.request_audits()[1].audit_event_id().as_str()
+            state.request_audits()[2].audit_event_id().as_str()
         );
-        let correction_map = state.request_audits()[2].context_delivery_map().unwrap();
+        let correction_map = state.request_audits()[3].context_delivery_map().unwrap();
         let feedback = correction_map
             .content_items()
             .iter()
@@ -178,9 +186,10 @@ fn argument_correction_retains_prior_effects_reasoning_and_exact_audit_without_h
 fn accepted_samples_reset_consecutive_corrections_with_pending_calls_and_without_usage() {
     let root = TemporaryDirectory::new("correction-success-reset");
     initialize_project(root.path());
-    let server = spawn_responses_server(vec![
-        (200, invalid_sample()),
-        (
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(200, invalid_sample()),
+        Response(
             200,
             m4_long_flow_tool_response(
                 "success-one",
@@ -189,8 +198,8 @@ fn accepted_samples_reset_consecutive_corrections_with_pending_calls_and_without
                 "one",
             ),
         ),
-        (200, invalid_sample()),
-        (
+        Response(200, invalid_sample()),
+        Response(
             200,
             m4_long_flow_tool_response(
                 "success-two",
@@ -199,8 +208,8 @@ fn accepted_samples_reset_consecutive_corrections_with_pending_calls_and_without
                 "two",
             ),
         ),
-        (200, invalid_sample()),
-        (200, text_response("ACCEPTED_WITHOUT_USAGE", "accepted")),
+        Response(200, invalid_sample()),
+        Response(200, text_response("ACCEPTED_WITHOUT_USAGE", "accepted")),
     ]);
     let config = write_context_window_config(root.path(), &server.base_url, 1_048_576);
     let output = run_chat(
@@ -217,6 +226,7 @@ fn accepted_samples_reset_consecutive_corrections_with_pending_calls_and_without
     assert!(String::from_utf8_lossy(&output.stdout).contains("ACCEPTED_WITHOUT_USAGE"));
     assert_eq!(fs::read(root.path().join("marker")).unwrap(), b"onetwo");
     assert!(!root.path().join("must-not-exist.txt").exists());
+    selector_candidates(&f2a_request_body(&server.requests, "initial selection"));
     let wires: Vec<_> = (0..6)
         .map(|_| f2a_request_body(&server.requests, "bounded correction"))
         .collect();
@@ -248,7 +258,12 @@ fn accepted_samples_reset_consecutive_corrections_with_pending_calls_and_without
             .any(|event| event["event_type"] == "model.usage_recorded")
     );
     for (index, rejection) in rejections.iter().enumerate() {
-        assert_eq!(rejection["payload"]["schema_version"], 2);
+        assert_eq!(rejection["payload"]["schema_version"], 3);
+        assert!(
+            rejection["payload"]["sampling_step_id"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty())
+        );
         assert_eq!(rejection["payload"]["corrections_used"], 0);
         assert_eq!(
             rejection["payload"]["reset_anchor"],
@@ -261,13 +276,15 @@ fn accepted_samples_reset_consecutive_corrections_with_pending_calls_and_without
         let (reset_index, reset) = resets[index];
         assert_eq!(
             reset["payload"]["accepted_request_audit_event_id"],
-            state.request_audits()[2 * index + 1]
+            state.request_audits()[2 * index + 2]
                 .audit_event_id()
                 .as_str()
         );
         assert_eq!(
             reset["payload"]["prior_rejection_audit_event_id"],
-            state.request_audits()[2 * index].audit_event_id().as_str()
+            state.request_audits()[2 * index + 1]
+                .audit_event_id()
+                .as_str()
         );
         assert_eq!(
             reset["payload"]["accepted_history_event_refs"],
@@ -285,33 +302,34 @@ fn accepted_samples_reset_consecutive_corrections_with_pending_calls_and_without
     }
     assert_audits_reconstruct(root.path(), &state);
 
-    // Historical v1 keeps its original per-Turn counters and needs no reset fact.
-    let mut legacy: Vec<_> = events
-        .into_iter()
-        .filter(|event| event["event_type"] != "model.argument_correction_reset")
-        .collect();
-    let mut used = 0;
-    for (index, event) in legacy.iter_mut().enumerate() {
-        event["sequence"] = json!(index + 1);
-        if event["event_type"] == "model.sample_rejected" {
-            event["payload"]["schema_version"] = json!(1);
-            event["payload"]["corrections_used"] = json!(used);
-            event["payload"]
-                .as_object_mut()
-                .unwrap()
-                .remove("reset_anchor");
-            used += 1;
+    // Replay the unmodified durable prefix with each historical rejection
+    // payload layout; do not remove task facts or renumber their source.
+    let first_rejection = events
+        .iter()
+        .position(|event| event["event_type"] == "model.sample_rejected")
+        .unwrap();
+    for version in [1, 2] {
+        let mut legacy = events[..=first_rejection].to_vec();
+        let payload = legacy[first_rejection]["payload"].as_object_mut().unwrap();
+        payload.insert("schema_version".to_owned(), json!(version));
+        payload.remove("sampling_step_id");
+        if version == 1 {
+            payload.remove("reset_anchor");
         }
+        assert!(
+            replay_events(legacy).is_ok(),
+            "legacy rejection schema {version}"
+        );
     }
-    assert!(replay_events(legacy).is_ok());
 }
 
 #[test]
 fn consecutive_correction_limit_stops_and_explicit_resume_does_not_requeue() {
     let root = TemporaryDirectory::new("correction-chain-bound");
     initialize_project(root.path());
-    let server = spawn_responses_server(vec![
-        (
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(
             200,
             m4_long_flow_tool_response(
                 "once",
@@ -320,10 +338,11 @@ fn consecutive_correction_limit_stops_and_explicit_resume_does_not_requeue() {
                 "prior-success",
             ),
         ),
-        (200, invalid_sample()),
-        (200, invalid_sample()),
-        (200, invalid_sample()),
-        (200, text_response("EXPLICIT_NEW_TASK", "resumed")),
+        Response(200, invalid_sample()),
+        Response(200, invalid_sample()),
+        Response(200, invalid_sample()),
+        NewSelection,
+        Response(200, text_response("EXPLICIT_NEW_TASK", "resumed")),
     ]);
     let config = write_context_window_config(root.path(), &server.base_url, 1_048_576);
     let output = run_chat(
@@ -339,16 +358,18 @@ fn consecutive_correction_limit_stops_and_explicit_resume_does_not_requeue() {
         "{stderr}"
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("Task input not accepted or saved"));
-    let wires: Vec<_> = (0..5)
+    selector_candidates(&f2a_request_body(&server.requests, "initial selection"));
+    let wires: Vec<_> = (0..6)
         .map(|_| f2a_request_body(&server.requests, "consecutive correction bound"))
         .collect();
-    assert!(wires[4].get("previous_response_id").is_none());
+    selector_candidates(&wires[4]);
+    assert!(wires[5].get("previous_response_id").is_none());
     assert!(
-        !wires[4]["input"]
+        !wires[5]["input"]
             .to_string()
             .contains("Runtime validation notice")
     );
-    assert!(!wires[4]["input"].to_string().contains("not accepted"));
+    assert!(!wires[5]["input"].to_string().contains("not accepted"));
     assert!(server.requests.try_recv().is_err());
     server.join();
     assert_eq!(fs::read(root.path().join("marker")).unwrap(), b"x");
@@ -376,19 +397,24 @@ fn consecutive_correction_limit_stops_and_explicit_resume_does_not_requeue() {
 fn argument_correction_respects_the_existing_request_budget() {
     let root = TemporaryDirectory::new("correction-admission");
     initialize_project(root.path());
-    let server = spawn_responses_server(vec![(200, invalid_sample())]);
+    let server =
+        spawn_scripted_responses_server(vec![InitialSelection, Response(200, invalid_sample())]);
     let config = write_config(root.path(), &server.base_url);
     fs::write(
         &config,
         format!(
-            "{}\n[runtime]\nmodel_request_limit_per_turn = 1\n",
+            "{}\n[runtime]\nmodel_request_limit_per_turn = 2\n",
             fs::read_to_string(&config).unwrap()
         ),
     )
     .unwrap();
     let output = run_chat(root.path(), &config, "Inspect a note.\n/exit\n", &[]);
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("model-request limit of 1"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("model-request limit of 2"));
+    selector_candidates(&f2a_request_body(
+        &server.requests,
+        "initial selection admission",
+    ));
     f2a_request_body(&server.requests, "only admitted attempt");
     assert!(server.requests.try_recv().is_err());
     server.join();
@@ -396,7 +422,7 @@ fn argument_correction_respects_the_existing_request_budget() {
         &Project::discover(root.path()).unwrap(),
         &session_id(root.path()),
     );
-    assert_eq!(state.request_audits().len(), 1);
+    assert_eq!(state.request_audits().len(), 2);
     assert_eq!(state.execution_receipt_count(), 0);
     assert_eq!(rejection_events(root.path()).len(), 1);
 }
@@ -414,6 +440,12 @@ fn rejection_checkpoint_failure_is_fatal_before_regeneration() {
     );
     let target = root.path().to_owned();
     let server = thread::spawn(move || {
+        let mut selection = f3_context::accept_before_deadline(&listener, "initial selection");
+        selection.set_read_timeout(Some(F2A_WAIT)).unwrap();
+        let wire = request_body(&read_http_request(&mut selection));
+        let body = initial_selection_response(&wire, "rejection-durability-selection");
+        f3_context::write_sse_response(&mut selection, &body);
+        drop(selection);
         let mut socket = f3_context::accept_before_deadline(&listener, "rejection durability");
         socket
             .set_read_timeout(Some(Duration::from_secs(5)))
@@ -441,7 +473,7 @@ fn rejection_checkpoint_failure_is_fatal_before_regeneration() {
             .iter()
             .filter(|e| e["event_type"] == "session.request_audit_recorded")
             .count(),
-        1
+        2
     );
     assert!(
         !events
@@ -455,9 +487,10 @@ fn rejection_checkpoint_failure_is_fatal_before_regeneration() {
 fn rejection_event_replay_rejects_wrong_audit_duplicate_unknown_schema_and_excess_budget() {
     let root = TemporaryDirectory::new("rejection-replay");
     initialize_project(root.path());
-    let server = spawn_responses_server(vec![
-        (200, invalid_sample()),
-        (200, text_response("ok", "valid")),
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(200, invalid_sample()),
+        Response(200, text_response("ok", "valid")),
     ]);
     let config = write_config(root.path(), &server.base_url);
     let output = run_chat(root.path(), &config, "Check a note.\n/exit\n", &[]);
@@ -466,6 +499,7 @@ fn rejection_event_replay_rejects_wrong_audit_duplicate_unknown_schema_and_exces
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    selector_candidates(&f2a_request_body(&server.requests, "initial selection"));
     for _ in 0..2 {
         f2a_request_body(&server.requests, "replay request");
     }
@@ -506,7 +540,12 @@ fn rejection_event_replay_rejects_wrong_audit_duplicate_unknown_schema_and_exces
         .rfind(|event| event["event_type"] == "session.request_audit_recorded")
         .unwrap();
     let mut late = events[rejected].clone();
-    assert_eq!(late["payload"]["schema_version"], 2);
+    assert_eq!(late["payload"]["schema_version"], 3);
+    assert!(
+        late["payload"]["sampling_step_id"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty())
+    );
     late["event_id"] = json!("rejection-after-accepted-history");
     late["sequence"] = json!(events[accepted_history]["sequence"].as_u64().unwrap() + 1);
     late["payload"]["request_audit_event_id"] = accepted_audit["event_id"].clone();
@@ -540,10 +579,11 @@ fn correction_reset_replay_requires_exact_audit_rejection_and_accepted_history_s
             "accepted-call-response"
         )
     );
-    let server = spawn_responses_server(vec![
-        (200, invalid_sample()),
-        (200, accepted),
-        (200, text_response("Done.", "done")),
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(200, invalid_sample()),
+        Response(200, accepted),
+        Response(200, text_response("Done.", "done")),
     ]);
     let config = write_config(root.path(), &server.base_url);
     let output = run_chat(
@@ -557,6 +597,7 @@ fn correction_reset_replay_requires_exact_audit_rejection_and_accepted_history_s
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    selector_candidates(&f2a_request_body(&server.requests, "initial selection"));
     for _ in 0..3 {
         f2a_request_body(&server.requests, "reset source binding");
     }

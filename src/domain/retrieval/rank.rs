@@ -18,10 +18,7 @@ pub(super) fn rank(
     candidates: Vec<RetrievalCandidate>,
     query_fingerprint: String,
 ) -> RetrievalShadowReport {
-    let query_identifiers = identifiers(&query.text);
-    let query_exact_identifiers = exact_identifiers(&query.text);
     let query_terms = normalized_terms(&query.text);
-    let query_ngrams = ngrams(&query.text);
     let mut exclusions = Vec::new();
     let mut eligible = Vec::new();
 
@@ -44,45 +41,7 @@ pub(super) fn rank(
     let queried_candidate_count = eligible.len() + exclusions.len();
     let eligible_candidate_count = eligible.len();
 
-    let identifier_ranks = identifier_ranks(&eligible, &query_exact_identifiers);
-    let bm25_ranks = bm25_ranks(&eligible, &query_terms);
-    let ngram_ranks = ngram_ranks(&eligible, &query_ngrams);
-
-    for candidate in &mut eligible {
-        candidate.exact_rank = identifier_ranks.get(&candidate.candidate.id).copied();
-        candidate.bm25_rank = bm25_ranks.get(&candidate.candidate.id).copied();
-        candidate.ngram_rank = ngram_ranks.get(&candidate.candidate.id).copied();
-        candidate.rrf = [
-            candidate.exact_rank,
-            candidate.bm25_rank,
-            candidate.ngram_rank,
-        ]
-        .into_iter()
-        .flatten()
-        .map(|rank| 1.0 / (RRF_K + rank as f64))
-        .sum();
-        candidate.matched_identifiers =
-            matched_identifiers(&candidate.candidate, &query_exact_identifiers);
-        candidate.matched_fields =
-            matched_fields(candidate, &query_terms, &query_identifiers, &query_ngrams);
-    }
-
-    eligible.retain(|candidate| candidate.rrf > 0.0);
-    eligible.sort_by(|left, right| {
-        right
-            .rrf
-            .total_cmp(&left.rrf)
-            .then_with(|| left.candidate.id.cmp(&right.candidate.id))
-    });
-    for (index, candidate) in eligible.iter_mut().enumerate() {
-        candidate.rrf_rank = index + 1;
-    }
-    eligible.sort_by(|left, right| {
-        left.tier
-            .cmp(&right.tier)
-            .then_with(|| left.rrf_rank.cmp(&right.rrf_rank))
-            .then_with(|| left.candidate.id.cmp(&right.candidate.id))
-    });
+    score_and_order(&query.text, &mut eligible);
 
     let results = eligible
         .into_iter()
@@ -122,6 +81,76 @@ pub(super) fn rank(
             reason: "no typed baseline or complete denominator is recorded by this Shadow slice",
         },
     }
+}
+
+fn score_and_order(query: &str, eligible: &mut Vec<RankedCandidate>) {
+    let query_identifiers = identifiers(query);
+    let query_exact_identifiers = exact_identifiers(query);
+    let query_terms = normalized_terms(query);
+    let query_ngrams = ngrams(query);
+    let exact = identifier_ranks(eligible, &query_exact_identifiers);
+    let bm25 = bm25_ranks(eligible, &query_terms);
+    let ngram = ngram_ranks(eligible, &query_ngrams);
+    for candidate in eligible.iter_mut() {
+        candidate.exact_rank = exact.get(&candidate.candidate.id).copied();
+        candidate.bm25_rank = bm25.get(&candidate.candidate.id).copied();
+        candidate.ngram_rank = ngram.get(&candidate.candidate.id).copied();
+        candidate.rrf = [
+            candidate.exact_rank,
+            candidate.bm25_rank,
+            candidate.ngram_rank,
+        ]
+        .into_iter()
+        .flatten()
+        .map(|rank| 1.0 / (RRF_K + rank as f64))
+        .sum();
+        candidate.matched_identifiers =
+            matched_identifiers(&candidate.candidate, &query_exact_identifiers);
+        candidate.matched_fields =
+            matched_fields(candidate, &query_terms, &query_identifiers, &query_ngrams);
+    }
+    eligible.retain(|candidate| candidate.rrf > 0.0);
+    eligible.sort_by(|left, right| {
+        right
+            .rrf
+            .total_cmp(&left.rrf)
+            .then_with(|| left.candidate.id.cmp(&right.candidate.id))
+    });
+    for (index, candidate) in eligible.iter_mut().enumerate() {
+        candidate.rrf_rank = index + 1;
+    }
+    eligible.sort_by(|left, right| {
+        left.tier
+            .cmp(&right.tier)
+            .then_with(|| left.rrf_rank.cmp(&right.rrf_rank))
+            .then_with(|| left.candidate.id.cmp(&right.candidate.id))
+    });
+}
+
+pub(super) fn rank_task(query: &str, candidates: Vec<RetrievalCandidate>) -> Vec<String> {
+    let has_terms = !normalized_terms(query).is_empty();
+    let mut eligible = candidates
+        .into_iter()
+        .map(|candidate| {
+            RankedCandidate::new(
+                candidate,
+                EligibilityReason::TaskContextEligible,
+                AuthorityFreshnessTier::TaskContext,
+                has_terms,
+            )
+        })
+        .collect::<Vec<_>>();
+    score_and_order(query, &mut eligible);
+    eligible
+        .into_iter()
+        .map(|candidate| candidate.candidate.id)
+        .collect()
+}
+
+/// Reuse the ranker's n-gram threshold when no lexical or identifier hit is
+/// possible in a bounded source window.
+pub(super) fn task_ngram_can_match(query_ngrams: &BTreeSet<String>, text: &str) -> bool {
+    ngram_similarity(query_ngrams, &ngrams(text)).is_some()
 }
 
 struct RankedCandidate {
@@ -268,6 +297,7 @@ fn current_target_tier(
         }
         RetrievalSource::ProjectMemory => AuthorityFreshnessTier::ProjectMemory,
         RetrievalSource::HistoricalSummary => AuthorityFreshnessTier::ExplicitHistoricalSummary,
+        RetrievalSource::TaskContext => AuthorityFreshnessTier::TaskContext,
     };
     (reason, tier)
 }

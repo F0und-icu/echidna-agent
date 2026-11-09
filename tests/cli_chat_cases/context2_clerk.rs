@@ -1,9 +1,13 @@
-//! Neutral 23-tool / 272k equivalent of the reported capacity failure.
+//! Neutral original 23 tools plus context_read / 272k capacity regression.
+use super::task_context::{
+    ScriptedResponse::{InitialSelection, Response},
+    selector_candidates, spawn_scripted_responses_server,
+};
 use super::*;
 use echidna::ports::tool::ToolExecutor;
 
 #[test]
-fn clerk_equivalent_keeps_23_tools_large_mcp_mirrors_and_original_image_across_compaction() {
+fn clerk_equivalent_keeps_original_tools_large_mcp_mirrors_and_image_across_compaction() {
     let root = TemporaryDirectory::new("context2-clerk-equivalent");
     initialize_project(root.path());
     fs::write(root.path().join("neutral.png"), png_bytes(16, 12)).unwrap();
@@ -109,7 +113,13 @@ fn clerk_equivalent_keeps_23_tools_large_mcp_mirrors_and_original_image_across_c
         .collect::<Vec<_>>();
     model_responses.push((200,compaction_summary_response("Completed earlier neutral metric polls; retain original limit and image. Latest batch remains exact.","clerk-handoff")));
     model_responses.push((200, text_response("NEUTRAL-WORK-COMPLETE", "clerk-final")));
-    let model = spawn_responses_server(model_responses);
+    let mut steps = vec![InitialSelection];
+    steps.extend(
+        model_responses
+            .into_iter()
+            .map(|(status, body)| Response(status, body)),
+    );
+    let model = spawn_scripted_responses_server(steps);
     let config = write_context_window_config(root.path(), &model.base_url, 272_000);
     let encoded = fs::read_to_string(&config)
         .unwrap()
@@ -133,17 +143,32 @@ fn clerk_equivalent_keeps_23_tools_large_mcp_mirrors_and_original_image_across_c
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let wires = (0..7)
+    let wires = (0..8)
         .map(|_| request_body(&model.requests.recv_timeout(F2A_WAIT).unwrap()))
         .collect::<Vec<_>>();
     model.join();
-    assert_eq!(wires[0]["tools"].as_array().unwrap().len(), 23);
-    for wire in &wires[..5] {
-        assert_eq!(wire["tools"], wires[0]["tools"]);
+    let selection = selector_candidates(&wires[0]);
+    assert_eq!(selection["input"]["text"], task);
+    let names = wires[1]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect::<BTreeSet<_>>();
+    let expected = keep
+        .iter()
+        .copied()
+        .chain(aliases.iter().map(String::as_str))
+        .chain(["context_read"])
+        .collect::<BTreeSet<_>>();
+    assert_eq!(names, expected);
+    assert_eq!(names.len(), 24);
+    for wire in &wires[1..6] {
+        assert_eq!(wire["tools"], wires[1]["tools"]);
     }
-    assert!(wires[5].get("tools").is_none());
-    assert_eq!(wires[6]["tools"], wires[0]["tools"]);
-    for wire in [&wires[0], &wires[6]] {
+    assert!(wires[6].get("tools").is_none());
+    assert_eq!(wires[7]["tools"], wires[1]["tools"]);
+    for wire in [&wires[1], &wires[7]] {
         assert!(json_contains_text(&wire["input"], task));
         assert_eq!(wire["input"].to_string().matches(task).count(), 1);
         assert_eq!(
@@ -179,7 +204,7 @@ fn clerk_equivalent_keeps_23_tools_large_mcp_mirrors_and_original_image_across_c
             .unwrap()
             .summary()
             .schema_version(),
-        6
+        7
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("NEUTRAL-WORK-COMPLETE"));
     let restarted = run_chat(

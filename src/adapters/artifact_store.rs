@@ -83,6 +83,32 @@ impl LocalArtifactStore {
         offset: u64,
         limit: usize,
     ) -> Result<(Vec<u8>, u64), LocalArtifactStoreError> {
+        self.read_verified_range(
+            blob_id,
+            offset,
+            limit,
+            Some(crate::domain::tools::MAX_CAPTURE_STREAM_BYTES as u64),
+        )
+        .map(|(bytes, size, _)| (bytes, size))
+    }
+
+    /// Read a bounded Artifact range while hashing the complete immutable Blob.
+    pub(crate) fn read_artifact_range(
+        &self,
+        blob_id: &BlobId,
+        offset: u64,
+        limit: usize,
+    ) -> Result<(Vec<u8>, u64, Option<String>), LocalArtifactStoreError> {
+        self.read_verified_range(blob_id, offset, limit, None)
+    }
+
+    fn read_verified_range(
+        &self,
+        blob_id: &BlobId,
+        offset: u64,
+        limit: usize,
+        maximum_size: Option<u64>,
+    ) -> Result<(Vec<u8>, u64, Option<String>), LocalArtifactStoreError> {
         self.inspect_blob_directory()?;
         let path = self.blob_directory().join(blob_id.as_str());
         let file = open_regular_existing_blob(&path)?;
@@ -93,16 +119,20 @@ impl LocalArtifactStore {
                 source,
             })?
             .len();
-        if size > crate::domain::tools::MAX_CAPTURE_STREAM_BYTES as u64 || offset > size {
+        if maximum_size.is_some_and(|maximum| size > maximum) || offset > size {
             return Err(LocalArtifactStoreError::OutputRange { offset, size });
         }
         let mut position = 0u64;
         let end = offset.saturating_add(limit as u64);
         let mut bytes = Vec::new();
+        let mut content_hash = maximum_size.is_none().then(blake3::Hasher::new);
         // Also bound reads if a concurrent writer grows the opened file after
         // metadata inspection. The extra byte makes growth an integrity error.
-        let mut file = file.take(crate::domain::tools::MAX_CAPTURE_STREAM_BYTES as u64 + 1);
+        let mut file = file.take(size.saturating_add(1));
         let (actual_blob_id, actual_size) = hash_open_existing_blob(&path, &mut file, |chunk| {
+            if let Some(hash) = &mut content_hash {
+                hash.update(chunk);
+            }
             let chunk_end = position.saturating_add(chunk.len() as u64);
             if offset < chunk_end && end > position {
                 let start = offset.saturating_sub(position) as usize;
@@ -117,7 +147,11 @@ impl LocalArtifactStore {
                 blob_id: blob_id.clone(),
             });
         }
-        Ok((bytes, size))
+        Ok((
+            bytes,
+            size,
+            content_hash.map(|hash| hash.finalize().to_hex().to_string()),
+        ))
     }
 
     /// Reads a previously published Blob only after revalidating its immutable

@@ -14,6 +14,7 @@ use super::manifest::{
 use super::{
     REQUEST_AUDIT_MANIFEST_SCHEMA_VERSION, RequestAuditComponentIdentity,
     RequestAuditComponentReference, RequestAuditComponentSource, RequestAuditError, SemanticHash,
+    TASK_REQUEST_AUDIT_MANIFEST_SCHEMA_VERSION,
 };
 
 pub(crate) struct RenderedRequestAudit {
@@ -135,7 +136,11 @@ impl RenderedRequestAudit {
             && self.attempt.resolved_tool_plan_fingerprint.is_some()
             && self.attempt.context_delivery_map.is_some()
         {
-            REQUEST_AUDIT_MANIFEST_SCHEMA_VERSION
+            if self.attempt.persist_sampling_step_id {
+                TASK_REQUEST_AUDIT_MANIFEST_SCHEMA_VERSION
+            } else {
+                REQUEST_AUDIT_MANIFEST_SCHEMA_VERSION
+            }
         } else if self.attempt.prompt_renderer.is_some()
             && self.attempt.resolved_tool_plan_fingerprint.is_some()
         {
@@ -144,6 +149,11 @@ impl RenderedRequestAudit {
             1
         };
         let manifest = RequestAuditManifest {
+            sampling_step_id: if self.attempt.persist_sampling_step_id {
+                self.attempt.sampling_step_id
+            } else {
+                None
+            },
             improvement_scope: self.attempt.improvement_scope,
             provider_session: self.attempt.provider_session,
             schema_version,

@@ -31,7 +31,7 @@ impl ContentView {
         view.value(value, 0);
         if view.truncated {
             view.text.push_str(
-                "\n  … [仅显示预览；此处省略不代表原始输出完整，结果及捕获边界见原有记录]\n",
+                "\n  … [preview only; omission here does not imply complete capture; see the original records for outcomes and capture limits]\n",
             );
         }
         view.text

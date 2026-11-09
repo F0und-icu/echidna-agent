@@ -1,0 +1,13 @@
+schema_version = 1
+id = "task-context-fixture"
+name = "Task context fixture"
+[instructions]
+persona_file = "persona.md"
+work_file = "work.md"
+method_files = []
+[context]
+personal = "none"
+project = "none"
+memory = "none"
+[tools]
+run_command = "direct"

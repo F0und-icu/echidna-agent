@@ -1,5 +1,9 @@
-//! Core Memory replacement remains a bounded full-only continuation update.
+//! Task-bound Core changes retire the old epoch only after durable selection.
 
+use super::task_context::{
+    ScriptedResponse::{InitialSelection, Response},
+    initial_selection_response, selector_candidates, spawn_scripted_responses_server_with_wait,
+};
 use super::*;
 
 #[derive(Clone, Copy, Debug)]
@@ -12,7 +16,7 @@ enum CoreMemoryTransition {
 }
 
 #[test]
-fn core_memory_transition_matrix_preserves_reasoning_pairing_and_audit_provenance() {
+fn core_memory_transition_matrix_preserves_pairing_and_source_bound_epochs() {
     for (transition, initial, expected_current, replacement_items) in [
         (CoreMemoryTransition::Unchanged, None, None, 0),
         (
@@ -30,7 +34,7 @@ fn core_memory_transition_matrix_preserves_reasoning_pairing_and_audit_provenanc
         (
             CoreMemoryTransition::Empty,
             Some("CORE_MEMORY_BEFORE"),
-            Some("Core Memory is explicitly empty."),
+            None,
             2,
         ),
         (
@@ -63,15 +67,29 @@ fn core_memory_transition_matrix_preserves_reasoning_pairing_and_audit_provenanc
         .unwrap();
         let (sender, requests) = mpsc::channel();
         let server_memory = memory.clone();
+        let changed = replacement_items > 0;
+        let request_count = 3;
         let server = thread::spawn(move || {
-            for request_index in 0..2 {
-                let mut socket =
-                    f3_context::accept_before_deadline(&listener, "Core Memory transition");
+            for request_index in 0..request_count {
+                let mut socket = f3_context::accept_before_deadline_with_wait(
+                    &listener,
+                    "Core Memory transition",
+                    Duration::from_secs(60),
+                );
                 socket
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .unwrap();
-                sender.send(read_http_request(&mut socket)).unwrap();
-                let response = if request_index == 0 {
+                let raw = read_http_request(&mut socket);
+                let wire = request_body(&raw);
+                sender.send(raw).unwrap();
+                if request_index == 0 {
+                    f3_context::write_sse_response(
+                        &mut socket,
+                        &initial_selection_response(&wire, "core-initial-selection"),
+                    );
+                    continue;
+                }
+                let response = if request_index == 1 {
                     match transition {
                         CoreMemoryTransition::Unchanged => {}
                         CoreMemoryTransition::Create | CoreMemoryTransition::Replace => {
@@ -109,9 +127,11 @@ fn core_memory_transition_matrix_preserves_reasoning_pairing_and_audit_provenanc
             requests,
             thread: server,
         };
-        let output = f2a_wait_child(
+        // These bounds cover fixture completion, not product latency.
+        let output = wait_child_before_deadline(
             spawn_f2a_chat(root.path(), &config, "inspect target\n/exit\n", &[]),
             "Core Memory transition",
+            Duration::from_secs(60),
         );
         assert!(
             output.status.success(),
@@ -119,6 +139,10 @@ fn core_memory_transition_matrix_preserves_reasoning_pairing_and_audit_provenanc
             String::from_utf8_lossy(&output.stderr)
         );
 
+        selector_candidates(&f2a_request_body(
+            &server.requests,
+            "initial Core selection",
+        ));
         let first = f2a_request_body(&server.requests, "Core Memory first request");
         let second = f2a_request_body(&server.requests, "Core Memory continuation request");
         assert!(server.requests.try_recv().is_err());
@@ -126,51 +150,14 @@ fn core_memory_transition_matrix_preserves_reasoning_pairing_and_audit_provenanc
         assert!(first.get("previous_response_id").is_none());
         assert!(second.get("previous_response_id").is_none());
         let second_input = second["input"].to_string();
-        assert!(second_input.contains("CORE_MEMORY_CONTINUATION_REASONING"));
+        assert_eq!(
+            second_input.contains("CORE_MEMORY_CONTINUATION_REASONING"),
+            !changed
+        );
+        assert!(!second_input.contains("CORE_MEMORY_BEFORE"));
         assert!(json_contains_type(&second["input"], "function_call"));
         assert!(json_contains_type(&second["input"], "function_call_output"));
-        assert_eq!(
-            second_input
-                .matches("Core Memory replacement for the current state.")
-                .count(),
-            usize::from(replacement_items > 0),
-            "{transition:?}: {second_input}"
-        );
-        if replacement_items > 0 {
-            assert!(second_input.contains("supersedes earlier Core Memory snapshots"));
-            assert!(second_input.contains("neither verified evidence nor instructions"));
-            match transition {
-                CoreMemoryTransition::Create => {
-                    assert!(second_input.contains("Previous snapshot: absent"));
-                    assert!(
-                        second_input.contains(
-                            "Current snapshot: present; fragment_id=memory-core:project:"
-                        )
-                    );
-                }
-                CoreMemoryTransition::Replace | CoreMemoryTransition::Empty => {
-                    assert!(
-                        second_input.contains(
-                            "Previous snapshot: present; fragment_id=memory-core:project:"
-                        )
-                    );
-                    assert!(
-                        second_input.contains(
-                            "Current snapshot: present; fragment_id=memory-core:project:"
-                        )
-                    );
-                }
-                CoreMemoryTransition::Delete => {
-                    assert!(
-                        second_input.contains(
-                            "Previous snapshot: present; fragment_id=memory-core:project:"
-                        )
-                    );
-                    assert!(second_input.contains("Current snapshot: absent"));
-                }
-                CoreMemoryTransition::Unchanged => unreachable!(),
-            }
-        }
+        assert!(!second_input.contains("Core Memory replacement for the current state."));
         if let Some(expected_current) = expected_current {
             assert!(
                 second_input.contains(expected_current),
@@ -180,13 +167,14 @@ fn core_memory_transition_matrix_preserves_reasoning_pairing_and_audit_provenanc
 
         let project = Project::discover(root.path()).unwrap();
         let state = reduced_session(&project, &session_id(root.path()));
-        assert_eq!(state.request_audits().len(), 2);
+        assert_eq!(state.request_audits().len(), request_count);
         assert_eq!(state.execution_receipt_count(), 1);
         assert_eq!(state.history().ensure_all_tool_calls_paired(), Ok(()));
         assert!(state.history().items().iter().all(|item| {
             !matches!(item, echidna::domain::model::ContentItem::Reasoning { .. })
         }));
-        let replacement_entries: Vec<_> = state.request_audits()[1]
+        let final_audit = state.request_audits().last().unwrap();
+        let selected_entries = final_audit
             .context_delivery_map()
             .unwrap()
             .content_items()
@@ -195,15 +183,15 @@ fn core_memory_transition_matrix_preserves_reasoning_pairing_and_audit_provenanc
                 entry
                     .fragment_id()
                     .as_str()
-                    .contains(":core-memory-replacement")
+                    .starts_with("memory-core-selected:")
             })
-            .collect();
+            .collect::<Vec<_>>();
         assert_eq!(
-            replacement_entries.len(),
-            replacement_items,
+            !selected_entries.is_empty(),
+            expected_current.is_some(),
             "{transition:?}"
         );
-        for entry in replacement_entries {
+        for entry in selected_entries {
             assert_eq!(
                 entry.provenance().origin(),
                 echidna::domain::context::ContextOrigin::ProjectMemory
@@ -213,17 +201,72 @@ fn core_memory_transition_matrix_preserves_reasoning_pairing_and_audit_provenanc
                 echidna::domain::context::AuthorityLevel::DerivedNonEvidence
             );
         }
+        let events = session_events(root.path(), &session_id(root.path()));
+        let mains = events
+            .iter()
+            .filter(|event| event["event_type"] == "session.model_delivery_committed")
+            .collect::<Vec<_>>();
+        assert_eq!(mains.len(), 2);
+        assert_eq!(
+            mains[0]["payload"]["provider_session"] == mains[1]["payload"]["provider_session"],
+            !changed
+        );
+        if changed {
+            let selection = events
+                .iter()
+                .rfind(|event| event["event_type"] == "session.task_context_selected")
+                .unwrap();
+            let capture: Value = serde_json::from_slice(
+                &fs::read(
+                    root.path()
+                        .join(".echidna/artifacts/blobs/sha256")
+                        .join(selection["payload"]["capture_blob"].as_str().unwrap()),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            let captured_core = capture["common"]["fragments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|fragment| fragment["source"] == "project_memory_core");
+            assert_eq!(
+                captured_core.is_some(),
+                !matches!(transition, CoreMemoryTransition::Delete)
+            );
+            if matches!(transition, CoreMemoryTransition::Empty) {
+                assert_eq!(fs::read_to_string(&memory).unwrap(), "");
+                assert!(
+                    !captured_core
+                        .unwrap()
+                        .to_string()
+                        .contains("CORE_MEMORY_BEFORE")
+                );
+            }
+            let result = events
+                .iter()
+                .find(|event| {
+                    event["event_type"] == "session.history_item_recorded"
+                        && event["payload"]["item"]["kind"] == "tool_result"
+                })
+                .unwrap();
+            assert!(result["sequence"].as_u64().unwrap() < selection["sequence"].as_u64().unwrap());
+            assert!(
+                selection["sequence"].as_u64().unwrap() < mains[1]["sequence"].as_u64().unwrap()
+            );
+        }
         assert_audits_reconstruct(root.path(), &state);
     }
 }
 
 #[test]
-fn evidence_curation_memory_write_creates_auditable_reasoning_continuation_update() {
+fn evidence_curation_memory_write_creates_auditable_task_context_epoch() {
     let root = TemporaryDirectory::new("core-memory-write-continuation");
     let harness = TemporaryDirectory::new("core-memory-write-provider");
     initialize_project(root.path());
-    let server = spawn_responses_server(vec![
-        (200, {
+    let responses = vec![
+        InitialSelection,
+        Response(200, {
             let reasoning = json!({"type":"response.output_item.done","item":{
                 "type":"reasoning","content":[{"type":"reasoning_text","text":"CORE_MEMORY_WRITE_REASONING"}]
             }});
@@ -242,14 +285,15 @@ fn evidence_curation_memory_write_creates_auditable_reasoning_continuation_updat
                 )
             )
         }),
-        (
+        Response(
             200,
             text_response(
                 "memory write continuation complete",
                 "core-memory-write-final",
             ),
         ),
-    ]);
+    ];
+    let server = spawn_scripted_responses_server_with_wait(responses, Duration::from_secs(60));
     let config = write_context_window_config(harness.path(), &server.base_url, 1_048_576);
     fs::write(
         &config,
@@ -258,7 +302,8 @@ fn evidence_curation_memory_write_creates_auditable_reasoning_continuation_updat
             .replace("incremental_input = true", "incremental_input = false"),
     )
     .unwrap();
-    let output = f2a_wait_child(
+    // These bounds cover fixture completion, not product latency.
+    let output = wait_child_before_deadline(
         spawn_f2a_chat(
             root.path(),
             &config,
@@ -266,12 +311,17 @@ fn evidence_curation_memory_write_creates_auditable_reasoning_continuation_updat
             &[],
         ),
         "Core Memory write continuation",
+        Duration::from_secs(60),
     );
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    selector_candidates(&f2a_request_body(
+        &server.requests,
+        "initial Core selection",
+    ));
     let first = f2a_request_body(&server.requests, "Core Memory write first request");
     let second = f2a_request_body(&server.requests, "Core Memory write continuation request");
     assert!(server.requests.try_recv().is_err());
@@ -285,17 +335,11 @@ fn evidence_curation_memory_write_creates_auditable_reasoning_continuation_updat
     );
     assert!(second.get("previous_response_id").is_none());
     let second_input = second["input"].to_string();
-    assert!(second_input.contains("CORE_MEMORY_WRITE_REASONING"));
-    assert!(second_input.contains("Previous snapshot: absent"));
+    assert!(!second_input.contains("CORE_MEMORY_WRITE_REASONING"));
     assert!(second_input.contains("CORE_MEMORY_WRITTEN_CURRENT"));
     assert!(json_contains_type(&second["input"], "function_call"));
     assert!(json_contains_type(&second["input"], "function_call_output"));
-    assert_eq!(
-        second_input
-            .matches("Core Memory replacement for the current state.")
-            .count(),
-        1
-    );
+    assert!(!second_input.contains("Core Memory replacement for the current state."));
     assert_eq!(
         fs::read_to_string(root.path().join(".echidna/memory/core.md")).unwrap(),
         "CORE_MEMORY_WRITTEN_CURRENT"
@@ -308,10 +352,10 @@ fn evidence_curation_memory_write_creates_auditable_reasoning_continuation_updat
 
     let project = Project::discover(root.path()).unwrap();
     let state = reduced_session(&project, &session_id(root.path()));
-    assert_eq!(state.request_audits().len(), 2);
+    assert_eq!(state.request_audits().len(), 3);
     assert_eq!(state.execution_receipt_count(), 1);
     assert_eq!(state.history().ensure_all_tool_calls_paired(), Ok(()));
-    let replacement_entries: Vec<_> = state.request_audits()[1]
+    let selected_entries: Vec<_> = state.request_audits()[2]
         .context_delivery_map()
         .unwrap()
         .content_items()
@@ -320,11 +364,11 @@ fn evidence_curation_memory_write_creates_auditable_reasoning_continuation_updat
             entry
                 .fragment_id()
                 .as_str()
-                .contains(":core-memory-replacement")
+                .starts_with("memory-core-selected:")
         })
         .collect();
-    assert_eq!(replacement_entries.len(), 2);
-    for entry in replacement_entries {
+    assert_eq!(selected_entries.len(), 1);
+    for entry in selected_entries {
         assert_eq!(
             entry.provenance().origin(),
             echidna::domain::context::ContextOrigin::ProjectMemory
@@ -338,97 +382,76 @@ fn evidence_curation_memory_write_creates_auditable_reasoning_continuation_updat
 }
 
 #[test]
-fn core_memory_omission_and_delivery_budget_retain_the_existing_fatal_boundaries() {
-    for (case, context_window, initial, replacement, expected) in [
-        (
-            "omitted",
-            32_768,
-            None,
-            "M".repeat(64 * 1024),
-            "CORE_MEMORY_CHANGED",
-        ),
-        (
-            "delivery-budget",
-            32_768,
-            Some("O".repeat(24 * 1024)),
-            "N".repeat(24 * 1024),
-            "DELIVERY_BUDGET_EXCEEDED",
-        ),
-    ] {
-        let root = TemporaryDirectory::new(&format!("core-memory-{case}"));
-        let harness = TemporaryDirectory::new(&format!("core-memory-{case}-provider"));
-        initialize_project(root.path());
-        fs::write(
-            root.path().join("target.txt"),
-            "bounded core memory fixture\n",
-        )
-        .unwrap();
-        let memory = root.path().join(".echidna/memory/core.md");
-        if let Some(initial) = initial {
-            fs::create_dir_all(memory.parent().unwrap()).unwrap();
-            fs::write(&memory, initial).unwrap();
-        }
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
-        let config = write_context_window_config(harness.path(), &base_url, context_window);
-        let (sender, requests) = mpsc::channel();
-        let server_memory = memory.clone();
-        let server = thread::spawn(move || {
-            let mut socket = f3_context::accept_before_deadline(&listener, "Core Memory rejection");
-            socket
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-            sender.send(read_http_request(&mut socket)).unwrap();
-            fs::create_dir_all(server_memory.parent().unwrap()).unwrap();
-            fs::write(&server_memory, replacement).unwrap();
-            let reasoning = json!({"type":"response.output_item.done","item":{
-                "type":"reasoning","content":[{"type":"reasoning_text","text":"CORE_MEMORY_REJECTION_REASONING"}]
-            }});
-            let response = format!(
-                "data: {reasoning}\n\n{}",
-                m4_long_flow_tool_response(
-                    "core-memory-rejection-read",
-                    "read_file",
-                    json!({"path":"target.txt"}),
-                    "core-memory-rejection-first",
+fn oversized_selected_core_stops_before_new_epoch_adoption_and_preserves_the_tool_result() {
+    // Legacy no-task retention failures remain in private opaque/Core and
+    // tool_loop_integration tests. Task mode must not adopt an inadmissible
+    // required Core selection merely to retire the old accepted reasoning.
+    let root = TemporaryDirectory::new("core-memory-selection-capacity");
+    let harness = TemporaryDirectory::new("core-memory-selection-provider");
+    initialize_project(root.path());
+    fs::write(
+        root.path().join("target.txt"),
+        "bounded core memory fixture\n",
+    )
+    .unwrap();
+    let memory = root.path().join(".echidna/memory/core.md");
+    let server = super::agent_evolution::server_with_wait(
+        move |step, request| match step {
+            0 => initial_selection_response(request, "oversized-core-initial-selection"),
+            1 => {
+                fs::create_dir_all(memory.parent().unwrap()).unwrap();
+                fs::write(&memory, "M".repeat(64 * 1024)).unwrap();
+                let reasoning = json!({"type":"response.output_item.done","item":{
+                    "type":"reasoning","content":[{"type":"reasoning_text","text":"CORE_MEMORY_REJECTION_REASONING"}]
+                }});
+                format!(
+                    "data: {reasoning}\n\n{}",
+                    m4_long_flow_tool_response(
+                        "core-memory-rejection-read",
+                        "read_file",
+                        json!({"path":"target.txt"}),
+                        "core-memory-rejection-first"
+                    )
                 )
-            );
-            f3_context::write_sse_response(&mut socket, &response);
-        });
-        let server = LoopbackServer {
-            base_url,
-            requests,
-            thread: server,
-        };
-        let output = f2a_wait_child(
-            spawn_f2a_chat(root.path(), &config, "inspect target\n/exit\n", &[]),
-            "Core Memory rejection",
-        );
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(!output.status.success(), "{case}: {stderr}");
-        assert!(stderr.contains(expected), "{case}: {stderr}");
-        assert!(
-            stderr.contains("candidate was not sent"),
-            "{case}: {stderr}"
-        );
-        assert_eq!(
-            stderr.contains("DELIVERY_BUDGET_EXCEEDED"),
-            expected == "DELIVERY_BUDGET_EXCEEDED",
-            "{case}: {stderr}"
-        );
-        f2a_request_body(&server.requests, "Core Memory rejection first request");
-        assert!(server.requests.try_recv().is_err());
-        f2a_join_server(server, "Core Memory rejection");
-
-        let project = Project::discover(root.path()).unwrap();
-        let state = reduced_session(&project, &session_id(root.path()));
-        assert_eq!(state.request_audits().len(), 1, "{case}");
-        assert_eq!(state.execution_receipt_count(), 1, "{case}");
-        assert_eq!(state.history().ensure_all_tool_calls_paired(), Ok(()));
-        assert!(state.history().items().iter().all(|item| {
-            !matches!(item, echidna::domain::model::ContentItem::Reasoning { .. })
-        }));
-        assert_audits_reconstruct(root.path(), &state);
-    }
+            }
+            _ => unreachable!(),
+        },
+        2,
+        Duration::from_secs(25),
+    );
+    let config = write_context_window_config(harness.path(), &server.base_url, 32_768);
+    let output = run_chat(root.path(), &config, "inspect target\n/exit\n", &[]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(stderr.to_lowercase().contains("context"), "{stderr}");
+    selector_candidates(&f2a_request_body(
+        &server.requests,
+        "oversized Core initial selection",
+    ));
+    f2a_request_body(&server.requests, "Tool before oversized Core refresh");
+    assert!(server.requests.try_recv().is_err());
+    server.join();
+    let state = reduced_session(
+        &Project::discover(root.path()).unwrap(),
+        &session_id(root.path()),
+    );
+    assert_eq!(state.request_audits().len(), 2);
+    assert_eq!(state.execution_receipt_count(), 1);
+    assert_eq!(state.history().ensure_all_tool_calls_paired(), Ok(()));
+    let events = session_events(root.path(), &session_id(root.path()));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["event_type"] == "session.task_context_selected")
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["event_type"] == "session.model_delivery_committed")
+            .count(),
+        1
+    );
+    assert_audits_reconstruct(root.path(), &state);
 }

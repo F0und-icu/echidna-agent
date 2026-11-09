@@ -430,6 +430,10 @@ pub struct ProjectSnapshotContext {
 }
 
 impl ProjectSnapshotContext {
+    pub(crate) fn snapshot(&self) -> &ProjectSnapshot {
+        &self.snapshot
+    }
+
     pub fn new(snapshot: ProjectSnapshot) -> Result<Self, WorldStateError> {
         let semantic_snapshot = ProjectSnapshotSemanticHash::from(&snapshot);
         let snapshot_hash =

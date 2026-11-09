@@ -1,4 +1,8 @@
 //! Actual completed-sample usage over the offline CLI request/audit path.
+use super::task_context::{
+    ScriptedResponse::{InitialSelection, Response},
+    selector_candidates, spawn_scripted_responses_server,
+};
 use super::*;
 
 fn reported_usage(input: u64, output: u64) -> Value {
@@ -56,8 +60,9 @@ fn primary_usage_preserves_each_completed_samples_totals_subsets_and_unknown_det
     let root = TemporaryDirectory::new("provider-usage-primary");
     initialize_project(root.path());
     fs::write(root.path().join("note.txt"), "fixture contents").unwrap();
-    let server = spawn_responses_server(vec![
-        (
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(
             200,
             with_usage(
                 m4_long_flow_tool_response(
@@ -69,7 +74,7 @@ fn primary_usage_preserves_each_completed_samples_totals_subsets_and_unknown_det
                 reported_usage(100, 20),
             ),
         ),
-        (
+        Response(
             200,
             with_usage(
                 text_response("Done.", "usage-final"),
@@ -89,7 +94,9 @@ fn primary_usage_preserves_each_completed_samples_totals_subsets_and_unknown_det
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(server.requests.try_iter().count(), 2);
+    let requests = server.requests.try_iter().collect::<Vec<_>>();
+    assert_eq!(requests.len(), 3);
+    selector_candidates(&request_body(&requests[0]));
     server.join();
     let events = session_events(root.path(), &session_id(root.path()));
     let usage = usage_events(&events);
@@ -135,9 +142,10 @@ fn rejected_tool_sample_never_persists_its_reported_usage_or_executes_its_call()
             "type":"function_call","call_id":"rejected-write","name":"write_file","arguments":"{"}}),
         json!({"type":"response.completed","response":{"id":"rejected","usage":reported_usage(900,90)}}),
     ].iter().map(|event| format!("data: {event}\n\n")).collect();
-    let server = spawn_responses_server(vec![
-        (200, invalid),
-        (
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(200, invalid),
+        Response(
             200,
             with_usage(
                 text_response("Corrected answer.", "accepted-correction"),
@@ -152,7 +160,9 @@ fn rejected_tool_sample_never_persists_its_reported_usage_or_executes_its_call()
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(server.requests.try_iter().count(), 2);
+    let requests = server.requests.try_iter().collect::<Vec<_>>();
+    assert_eq!(requests.len(), 3);
+    selector_candidates(&request_body(&requests[0]));
     server.join();
     let events = session_events(root.path(), &session_id(root.path()));
     let rejected = events
@@ -184,15 +194,16 @@ fn rsi_diagnosis_usage_keeps_its_scope_and_exact_audit_separate_from_the_parent(
     let root = TemporaryDirectory::new("provider-usage-rsi");
     initialize_project(root.path());
     let definition = super::agent_evolution::improvement_definition(root.path());
-    let server = spawn_responses_server(vec![
-        (
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(
             200,
             with_usage(
                 text_response("Task completed.", "parent-completed"),
                 reported_usage(300, 60),
             ),
         ),
-        (
+        Response(
             200,
             with_usage(
                 text_response(
@@ -216,7 +227,9 @@ fn rsi_diagnosis_usage_keeps_its_scope_and_exact_audit_separate_from_the_parent(
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(server.requests.try_iter().count(), 2);
+    let requests = server.requests.try_iter().collect::<Vec<_>>();
+    assert_eq!(requests.len(), 3);
+    selector_candidates(&request_body(&requests[0]));
     server.join();
     let events = session_events(root.path(), &session_id(root.path()));
     let usage = usage_events(&events);
@@ -266,13 +279,16 @@ fn vision_usage_follows_the_durable_observation_and_keeps_its_own_audit() {
             reported_usage(50, 10),
         ),
     )]);
-    let primary = spawn_responses_server(vec![(
-        200,
-        with_usage(
-            text_response("Observed.", "primary-completed"),
-            reported_usage(200, 40),
+    let primary = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(
+            200,
+            with_usage(
+                text_response("Observed.", "primary-completed"),
+                reported_usage(200, 40),
+            ),
         ),
-    )]);
+    ]);
     let config = write_dual_config(root.path(), &primary.base_url, &vision.base_url);
     let output = run_chat(
         root.path(),
@@ -286,6 +302,10 @@ fn vision_usage_follows_the_durable_observation_and_keeps_its_own_audit() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(vision.requests.try_iter().count(), 1);
+    selector_candidates(&f2a_request_body(
+        &primary.requests,
+        "Vision usage source selection",
+    ));
     assert_eq!(primary.requests.try_iter().count(), 1);
     vision.join();
     primary.join();

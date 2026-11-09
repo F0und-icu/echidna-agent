@@ -20,7 +20,7 @@ pub(crate) const RESEARCH_STREAM_ID: &str = "research";
 /// Global Event identity is shared by every consumer of `research.jsonl`.
 /// It is deliberately distinct from typed Research records, whose semantics
 /// are still reduced by `ResearchReducer`.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct ProjectStreamIntegrity {
     applied_event_digests: BTreeMap<EventId, String>,
 }

@@ -15,6 +15,11 @@ pub type ToolExecutionFuture<'executor> = Pin<
 >;
 
 pub trait ToolExecutor: Send + Sync {
+    /// A current observation from an executor that owns live Job/PTY state.
+    /// None means this executor does not provide that observation.
+    fn live_processes(&self) -> Option<Vec<crate::domain::tools::LiveProcessObservation>> {
+        None
+    }
     /// Optional fixed child-checkpoint path; non-command executors retain the
     /// ordinary execution contract. Only the owning App acknowledges durability.
     fn execute_observed(

@@ -1,5 +1,8 @@
 //! Offline measurements at the formal CLI/wire/audit boundaries, not telemetry.
 
+use super::task_context::{
+    continue_selection_response, initial_selection_response, selector_candidates,
+};
 use super::*;
 use echidna::domain::model::{ContentItem, MessageRole};
 use echidna::domain::request_audit::RequestAuditDeliveryMode;
@@ -43,7 +46,7 @@ fn delivery_server() -> LoopbackServer {
     let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
     let (sender, requests) = mpsc::channel();
     let thread = thread::spawn(move || {
-        for index in 0..4 {
+        for index in 0..6 {
             let mut socket = f3_context::accept_before_deadline(&listener, "delivery measurement");
             socket
                 .set_read_timeout(Some(Duration::from_secs(5)))
@@ -51,9 +54,17 @@ fn delivery_server() -> LoopbackServer {
             socket
                 .set_write_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
-            sender.send(read_http_request(&mut socket)).unwrap();
-            let phase = index / 2;
-            let response = if index % 2 == 0 {
+            let raw = read_http_request(&mut socket);
+            let wire = request_body(&raw);
+            sender.send(raw).unwrap();
+            let phase = index / 3;
+            let response = if index % 3 == 0 {
+                if phase == 0 {
+                    initial_selection_response(&wire, "measurement-initial-selection")
+                } else {
+                    continue_selection_response(&wire, "measurement-resumed-selection", None)
+                }
+            } else if index % 3 == 1 {
                 m4_long_flow_tool_response(
                     &format!("read-{phase}"),
                     "read_file",
@@ -160,7 +171,7 @@ fn four_cases(repetitions: usize, emit: bool) {
                     let events = fs::read(&event_path).unwrap();
                     assert!(events.starts_with(&old_events));
                     let state = reduced_session(&project, &session);
-                    assert_eq!(state.request_audits().len(), (phase + 1) * 2);
+                    assert_eq!(state.request_audits().len(), (phase + 1) * 3);
                     assert_eq!(state.execution_receipt_count(), (phase + 1) as u64);
                     assert_eq!(state.history().ensure_all_tool_calls_paired(), Ok(()));
                     assert_audits_reconstruct(root.path(), &state);
@@ -196,11 +207,25 @@ fn four_cases(repetitions: usize, emit: bool) {
                     assert!(state.history().items().iter().any(|item| matches!(item,
                         ContentItem::Text { role: MessageRole::Assistant, text } if text == &format!("DONE_{phase}"))));
                     let mut samples = Vec::new();
+                    let raw = server.requests.recv_timeout(F2A_WAIT).unwrap();
+                    let body = raw.split_once("\r\n\r\n").unwrap().1;
+                    let wire: Value = serde_json::from_str(body).unwrap();
+                    selector_candidates(&wire);
+                    let audit = &state.request_audits()[phase * 3];
+                    samples.push(json!({
+                        "kind":"task_selection", "http_body_bytes":body.len(),
+                        "input_json_bytes":serde_json::to_vec(&wire["input"]).unwrap().len(),
+                        "tools_json_bytes":serde_json::to_vec(&wire["tools"]).unwrap().len(),
+                        "instructions_utf8_bytes":wire["instructions"].as_str().unwrap().len(),
+                        "audit_manifest_json_bytes":serde_json::to_vec(audit).unwrap().len(),
+                        "audit_component_bytes":audit.components().iter().map(|c| c.size_bytes()).sum::<u64>(),
+                        "delivery":audit.delivery()
+                    }));
                     for step in 0..2 {
                         let raw = server.requests.recv_timeout(F2A_WAIT).unwrap();
                         let body = raw.split_once("\r\n\r\n").unwrap().1;
                         let wire: Value = serde_json::from_str(body).unwrap();
-                        let audit = &state.request_audits()[phase * 2 + step];
+                        let audit = &state.request_audits()[phase * 3 + 1 + step];
                         let is_delta = incremental && step == 1;
                         assert_eq!(
                             audit.delivery().mode(),
@@ -253,7 +278,7 @@ fn four_cases(repetitions: usize, emit: bool) {
                             assert_eq!(delivered["output"]["truncated"], false);
                         }
                         samples.push(json!({
-                            "step": step, "http_body_bytes": body.len(),
+                            "kind":"main", "step": step, "http_body_bytes": body.len(),
                             "input_json_bytes": serde_json::to_vec(&wire["input"]).unwrap().len(),
                             "tools_json_bytes": serde_json::to_vec(&wire["tools"]).unwrap().len(),
                             "instructions_utf8_bytes": wire["instructions"].as_str().unwrap().len(),
@@ -278,7 +303,7 @@ fn four_cases(repetitions: usize, emit: bool) {
                     assert!(metrics_output.status.success());
                     let metrics: Value = serde_json::from_slice(&metrics_output.stdout).unwrap();
                     assert_eq!(metrics["status"], "ok");
-                    assert_eq!(metrics["requests"], (phase + 1) * 2);
+                    assert_eq!(metrics["requests"], (phase + 1) * 3);
                     assert_eq!(metrics["provider_usage"], "unavailable");
                     let fingerprint = snapshot_fingerprint(root.path());
                     if phase == 1 && matches!(case, "unchanged" | "external_log_growth") {
@@ -300,7 +325,7 @@ fn four_cases(repetitions: usize, emit: bool) {
                         println!(
                             "CHAT_MEASUREMENT {}",
                             json!({
-                                "schema":1, "case":case, "incremental":incremental, "repetition":repetition,
+                                "schema":2, "case":case, "incremental":incremental, "repetition":repetition,
                                 "phase":phase, "cli_elapsed_ns":cli_elapsed_ns, "session_bytes":events.len(),
                             "requests":samples, "receipts":state.execution_receipt_count(),
                             "cumulative_audit_component_token_estimate": metrics["estimated_tokens"],

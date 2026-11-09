@@ -3,6 +3,7 @@
 mod active;
 mod artifact;
 mod command;
+mod context_read;
 mod environment;
 mod file_write;
 mod filesystem;
@@ -27,6 +28,7 @@ pub(crate) use view_image::ViewImageToolInput;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -57,6 +59,7 @@ enum BuiltinTool {
     Research(research::Tool),
     SearchFiles,
     ReadOutput,
+    ContextRead,
     ArtifactStore,
     ViewImage,
     HttpRequest,
@@ -82,6 +85,7 @@ pub struct ToolRegistry {
     active_leases: ActiveProcessLeases,
     artifact_scope: artifact::ArtifactScopeBinding,
     memory_scope: Option<MemoryScope>,
+    context_reader: Option<Arc<dyn crate::ports::context_read::ContextReadPort>>,
     input_verification_enabled: bool,
     automatic_verification_enabled: bool,
     window_policy: ContextWindowPolicy,
@@ -150,6 +154,7 @@ impl ToolRegistry {
             .chain([
                 BuiltinTool::SearchFiles,
                 BuiltinTool::ReadOutput,
+                BuiltinTool::ContextRead,
                 BuiltinTool::ArtifactStore,
                 BuiltinTool::ViewImage,
                 BuiltinTool::HttpRequest,
@@ -182,6 +187,7 @@ impl ToolRegistry {
             active_leases: ActiveProcessLeases::new(),
             artifact_scope,
             memory_scope,
+            context_reader: None,
             input_verification_enabled: false,
             automatic_verification_enabled: false,
             window_policy: ContextWindowPolicy::for_window(32768),
@@ -190,6 +196,14 @@ impl ToolRegistry {
 
     pub(crate) fn with_input_verification(mut self, enabled: bool) -> Self {
         self.input_verification_enabled = enabled;
+        self
+    }
+
+    pub(crate) fn with_context_reader(
+        mut self,
+        reader: Arc<dyn crate::ports::context_read::ContextReadPort>,
+    ) -> Self {
+        self.context_reader = Some(reader);
         self
     }
 
@@ -328,8 +342,64 @@ impl ToolRegistry {
 }
 
 impl ToolExecutor for ToolRegistry {
+    fn live_processes(&self) -> Option<Vec<crate::domain::tools::LiveProcessObservation>> {
+        use crate::domain::tools::LiveProcessObservation;
+        let mut observed = self
+            .jobs
+            .live_processes()
+            .into_iter()
+            .map(|(job_id, status)| {
+                let resources = self
+                    .active_leases
+                    .resources_for(&ActiveProcessId::Job(job_id.clone()));
+                LiveProcessObservation::Job {
+                    job_id,
+                    status,
+                    resources,
+                }
+            })
+            .collect::<Vec<_>>();
+        observed.extend(
+            self.ptys
+                .live_processes()
+                .into_iter()
+                .map(|(pty_session_id, status)| {
+                    let resources = self
+                        .active_leases
+                        .resources_for(&ActiveProcessId::Pty(pty_session_id.clone()));
+                    LiveProcessObservation::Pty {
+                        pty_session_id,
+                        status,
+                        resources,
+                    }
+                }),
+        );
+        Some(observed)
+    }
     fn catalog(&self) -> Vec<ToolSpec> {
         self.canonical_specs()
+    }
+
+    fn resolve_tool_plan(
+        &self,
+        exposure: &crate::domain::tools::ToolExposurePlan,
+        activations: &crate::domain::tools::DeferredActivationSet,
+    ) -> Result<ResolvedToolPlan, ToolExecutorError> {
+        let unavailable =
+            crate::domain::tools::ToolExposurePlan::new(if self.context_reader.is_none() {
+                BTreeMap::from([(ToolName::new(context_read::NAME), ToolExposure::Hidden)])
+            } else {
+                BTreeMap::new()
+            });
+        let plan = crate::domain::tools::ToolExposurePlan::layered([exposure.clone(), unavailable]);
+        ResolvedToolPlan::resolve(self.catalog(), &plan, activations).map_err(|error| match error {
+            crate::domain::tools::ToolContractError::UnknownToolExposure { tool_name } => {
+                ToolExecutorError::UnknownTool { tool_name }
+            }
+            error => ToolExecutorError::ResolvedPlanFailure {
+                message: error.to_string(),
+            },
+        })
     }
 
     fn plan(
@@ -464,6 +534,7 @@ impl BuiltinTool {
             Self::Research(tool) => tool.name(),
             Self::SearchFiles => search::NAME,
             Self::ReadOutput => read_output::NAME,
+            Self::ContextRead => context_read::NAME,
             Self::ArtifactStore => artifact::NAME,
             Self::ViewImage => view_image::NAME,
             Self::HttpRequest => http_request::NAME,
@@ -483,6 +554,7 @@ impl BuiltinTool {
             Self::Research(tool) => tool.spec(),
             Self::SearchFiles => search::spec(),
             Self::ReadOutput => read_output::spec(registry),
+            Self::ContextRead => context_read::spec(registry),
             Self::ArtifactStore => artifact::spec(registry),
             Self::ViewImage => view_image::spec(registry),
             Self::HttpRequest => http_request::spec(registry),
@@ -510,6 +582,7 @@ impl BuiltinTool {
             Self::Research(tool) => tool.normalize(registry, arguments),
             Self::SearchFiles => search::normalize(project_root, arguments),
             Self::ReadOutput => read_output::normalize(arguments, window_policy),
+            Self::ContextRead => context_read::normalize(arguments, window_policy),
             Self::ArtifactStore => {
                 artifact::normalize_for_scope(project_root, control, arguments, artifact_scope)
             }
@@ -546,6 +619,7 @@ impl BuiltinTool {
             Self::ReadOutput => {
                 read_output::execute(&registry.project_root, plan, registry.window_policy).await
             }
+            Self::ContextRead => context_read::execute(registry, plan).await,
             Self::ArtifactStore => artifact::execute(&registry.project_root, plan).await,
             Self::ViewImage => view_image::execute(&registry.project_root, plan).await,
             Self::HttpRequest => {

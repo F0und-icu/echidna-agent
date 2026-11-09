@@ -220,6 +220,18 @@ impl ProviderSession {
         &self.reference
     }
 
+    /// Start a task epoch without carrying the previous Provider baseline.
+    /// An unconsumed Compaction reset remains the cause of the next Full input.
+    pub(crate) fn next_task_epoch(&self, reference: ProviderSessionRef) -> Self {
+        Self {
+            reference,
+            baseline: None,
+            pending_reset: self
+                .pending_reset
+                .filter(|reason| *reason == BaselineInvalidationReason::CompactionReset),
+        }
+    }
+
     /// Marks a reset reason without discarding a Baseline before the forced
     /// full request completes successfully.
     pub fn reset(&mut self, reason: BaselineInvalidationReason) {

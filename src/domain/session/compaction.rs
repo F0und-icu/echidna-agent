@@ -5,13 +5,14 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::canonical_json::canonical_blake3_hash;
-use crate::domain::events::{EventSequence, EventType};
+use crate::domain::events::{EventId, EventSequence, EventType};
 use crate::domain::history::{ConversationHistory, retain_recent_complete_history};
 use crate::domain::model::ContentItem;
 
 use super::{COMPACTION_CREATED_EVENT_TYPE, SessionError};
 
 mod captured_context;
+pub(crate) use captured_context::{CapturedFragment, capture_fragments, restore_fragments};
 mod evidence;
 mod graph_validation;
 mod model_sample;
@@ -45,6 +46,24 @@ pub struct SessionCompaction {
     source_event_sequence: EventSequence,
     retained_from_normalized_history_index: usize,
     retained_history: Vec<ContentItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    retained_event_ids: Vec<Option<EventId>>,
+}
+
+/// The one source-retention rule shared by runtime delivery and task refresh.
+pub(crate) struct TaskHistoryRetention<'a> {
+    retained: BTreeSet<&'a EventId>,
+    summary: &'a SessionSummary,
+}
+
+impl TaskHistoryRetention<'_> {
+    pub(crate) fn retains(&self, source_refs: &[EventId]) -> bool {
+        source_refs.iter().any(|id| self.retained.contains(id))
+            || (!self.summary.is_preview()
+                && source_refs
+                    .iter()
+                    .all(|id| !self.summary.summarized_history().contains(id)))
+    }
 }
 
 impl SessionCompaction {
@@ -54,9 +73,17 @@ impl SessionCompaction {
         summary: SessionSummary,
         source_event_sequence: EventSequence,
         requested_recent_items: usize,
+        normalized_event_ids: Option<&[Option<EventId>]>,
     ) -> Result<Self, SessionError> {
         let (retained_from_normalized_history_index, retained_history) =
             retain_recent_complete_history(normalized, requested_recent_items)?;
+        let retained_event_ids = match normalized_event_ids {
+            Some(ids) if ids.len() == normalized.len() => {
+                ids[retained_from_normalized_history_index..].to_vec()
+            }
+            Some(_) => return Err(SessionError::CompactionRetentionMismatch),
+            None => Vec::new(),
+        };
         Ok(Self {
             schema_version: summary.schema_version(),
             summary,
@@ -64,6 +91,7 @@ impl SessionCompaction {
             source_event_sequence,
             retained_from_normalized_history_index,
             retained_history,
+            retained_event_ids,
         })
     }
 
@@ -87,11 +115,25 @@ impl SessionCompaction {
         &self.retained_history
     }
 
+    pub(crate) fn retained_event_ids(&self) -> &[Option<EventId>] {
+        &self.retained_event_ids
+    }
+
+    pub(crate) fn task_history_retention(&self) -> Result<TaskHistoryRetention<'_>, SessionError> {
+        if self.retained_event_ids.len() != self.retained_history.len() {
+            return Err(SessionError::CompactionRetentionMismatch);
+        }
+        Ok(TaskHistoryRetention {
+            retained: self.retained_event_ids.iter().flatten().collect(),
+            summary: &self.summary,
+        })
+    }
+
     pub(super) fn validate_shape(&self) -> Result<(), SessionError> {
         if self.schema_version != self.summary.schema_version()
             || !matches!(
                 self.schema_version,
-                1 | 2 | 3 | 4 | CURRENT_SESSION_SUMMARY_SCHEMA_VERSION | 6
+                1 | 2 | 3 | 4 | CURRENT_SESSION_SUMMARY_SCHEMA_VERSION | 6 | 7
             )
         {
             return Err(SessionError::UnsupportedPayloadSchema {
@@ -100,6 +142,16 @@ impl SessionCompaction {
             });
         }
         self.summary.validate_shape()?;
+        if self.schema_version == 7 && self.retained_event_ids.len() != self.retained_history.len()
+        {
+            return Err(SessionError::CompactionRetentionMismatch);
+        }
+        if self.schema_version != 7
+            && !self.summary.is_preview()
+            && !self.retained_event_ids.is_empty()
+        {
+            return Err(SessionError::CompactionRetentionMismatch);
+        }
         ConversationHistory::from_complete_content_items(&self.retained_history)?;
         Ok(())
     }

@@ -69,6 +69,15 @@ impl ProjectArtifactCatalog {
 #[derive(Default)]
 pub(crate) struct SessionReceiptCatalogCache {
     sessions: BTreeMap<crate::domain::events::StreamId, CachedSessionReceipts>,
+    research: Option<CachedResearchProjection>,
+}
+
+struct CachedResearchProjection {
+    count: usize,
+    byte_length: u64,
+    byte_digest: String,
+    receipt_digest: String,
+    state: std::sync::Arc<ResearchState>,
 }
 
 #[derive(Clone)]
@@ -173,6 +182,25 @@ fn session_source_digest(path: &std::path::Path) -> Result<String, String> {
     }
 }
 
+fn source_prefix_digest(path: &std::path::Path, mut remaining: u64) -> Result<String, String> {
+    let mut file = fs::File::open(path)
+        .map_err(|error| format!("read Event stream `{}`: {error}", path.display()))?;
+    let mut digest = blake3::Hasher::new();
+    let mut chunk = [0; 65_536];
+    while remaining != 0 {
+        let maximum = remaining.min(chunk.len() as u64) as usize;
+        let count = file
+            .read(&mut chunk[..maximum])
+            .map_err(|error| format!("read Event stream prefix `{}`: {error}", path.display()))?;
+        if count == 0 {
+            return Err("validated Project stream prefix changed".to_owned());
+        }
+        digest.update(&chunk[..count]);
+        remaining -= count as u64;
+    }
+    Ok(digest.finalize().to_hex().to_string())
+}
+
 /// One short-lived strictly scanned project view shared by Context and Summary
 /// validation in the same synchronized transaction.
 pub(crate) struct ProjectReadContext {
@@ -180,6 +208,7 @@ pub(crate) struct ProjectReadContext {
     pub(crate) references: ResearchReferenceCatalog,
     pub(crate) research_digest: String,
     pub(crate) receipt_digest: String,
+    research: std::sync::Arc<ResearchState>,
 }
 
 impl ProjectReadContext {
@@ -198,18 +227,63 @@ impl ProjectReadContext {
         if before != after {
             return Err("Project stream changed during projection read".to_owned());
         }
+        if let Some(value) = &cache.research
+            && value.byte_digest == after
+            && value.receipt_digest == receipt_digest
+        {
+            return Ok(Self {
+                events,
+                references,
+                research_digest: after,
+                receipt_digest,
+                research: value.state.clone(),
+            });
+        }
+        let byte_length = fs::metadata(&path)
+            .map_err(|error| format!("stat Event stream `{}`: {error}", path.display()))?
+            .len();
+        let mut cached = cache.research.take();
+        if let Some(value) = &cached
+            && (value.count > events.len()
+                || value.byte_length > byte_length
+                || source_prefix_digest(&path, value.byte_length)? != value.byte_digest)
+        {
+            return Err("validated Project stream prefix changed".to_owned());
+        }
+        let state = match cached.take() {
+            Some(mut value) if value.receipt_digest == receipt_digest => {
+                let state = std::sync::Arc::make_mut(&mut value.state);
+                for event in &events[value.count..] {
+                    ProjectStreamReducer
+                        .apply(state, event.clone(), &references)
+                        .map_err(|error| error.to_string())?;
+                }
+                value.state
+            }
+            _ => std::sync::Arc::new(
+                ProjectStreamReducer
+                    .reduce(events.iter().cloned(), &references)
+                    .map_err(|error| error.to_string())?,
+            ),
+        };
+        cache.research = Some(CachedResearchProjection {
+            count: events.len(),
+            byte_length,
+            byte_digest: after.clone(),
+            receipt_digest: receipt_digest.clone(),
+            state: state.clone(),
+        });
         Ok(Self {
             events,
             references,
             research_digest: after,
             receipt_digest,
+            research: state,
         })
     }
 
-    pub(crate) fn research_state(&self) -> Result<ResearchState, String> {
-        ProjectStreamReducer
-            .reduce(self.events.iter().cloned(), &self.references)
-            .map_err(|error| error.to_string())
+    pub(crate) fn research_state(&self) -> &ResearchState {
+        &self.research
     }
 
     pub(crate) fn event_prefix(&self, watermark: u64) -> &[EventEnvelope<serde_json::Value>] {

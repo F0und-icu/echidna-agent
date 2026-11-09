@@ -6,7 +6,7 @@ fn full_reasoning_with_project_diff_survives_additive_tool_activation() {
 }
 
 #[test]
-fn additive_activation_keeps_personal_instructions_pinned_and_preserves_core_memory_replacement() {
+fn additive_activation_pins_personal_instructions_and_commits_core_epoch_change() {
     for changed in ["prompt", "memory"] {
         activation_case(Some(changed));
     }
@@ -36,19 +36,48 @@ fn activation_case(change: Option<&str>) {
     .unwrap();
     let target = root.path().join("target.txt");
     let changed = change.map(str::to_owned);
-    let count = match change {
+    let main_count = match change {
         Some("prompt" | "memory") => 4,
         None => 6,
         Some(_) => unreachable!("the fixture only changes prompt or Core Memory"),
     };
+    let selector_steps: &[usize] = match change {
+        None => &[0, 5, 7],
+        Some("memory") => &[0],
+        Some("prompt") => &[0],
+        Some(_) => unreachable!(),
+    };
+    let count = main_count + selector_steps.len();
     let (sender, requests) = mpsc::channel();
     let thread = thread::spawn(move || {
-        for index in 0..count {
+        for step in 0..count {
             let mut socket = f3_context::accept_before_deadline(&listener, "activation");
             socket
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
-            sender.send(read_http_request(&mut socket)).unwrap();
+            let raw = read_http_request(&mut socket);
+            let wire = request_body(&raw);
+            sender.send(raw).unwrap();
+            if step == 0 {
+                let response =
+                    task_context::initial_selection_response(&wire, "activation-initial-selection");
+                f3_context::write_sse_response(&mut socket, &response);
+                continue;
+            }
+            if selector_steps.contains(&step) {
+                let response = task_context::continue_selection_response(
+                    &wire,
+                    &format!("activation-selection-{step}"),
+                    None,
+                );
+                f3_context::write_sse_response(&mut socket, &response);
+                continue;
+            }
+            let index = step
+                - selector_steps
+                    .iter()
+                    .filter(|selector| **selector < step)
+                    .count();
             let response = match index {
                 0 => {
                     fs::write(&target, "after: forces a current Project diff").unwrap();
@@ -133,11 +162,17 @@ fn activation_case(change: Option<&str>) {
             String::from_utf8_lossy(&resumed.stderr)
         );
     }
-    let wires: Vec<_> = (0..count)
+    let all_wires: Vec<_> = (0..count)
         .map(|_| f2a_request_body(&server.requests, "activation wire"))
         .collect();
     assert!(server.requests.try_recv().is_err());
     f2a_join_server(server, "activation server");
+    let wires = all_wires
+        .iter()
+        .enumerate()
+        .filter_map(|(step, wire)| (!selector_steps.contains(&step)).then_some(wire))
+        .collect::<Vec<_>>();
+    assert_eq!(wires.len(), main_count);
     for wire in &wires {
         assert!(wire.get("previous_response_id").is_none());
     }
@@ -149,16 +184,18 @@ fn activation_case(change: Option<&str>) {
             .iter()
             .any(|t| t["name"] == "read_output")
     };
-    assert!(!has_reader(&wires[0]));
-    assert!(!has_reader(&wires[1]));
-    assert!(has_reader(&wires[2]));
-    assert!(has_reader(&wires[3]));
-    for marker in [
-        "RETAIN_REASONING_0",
-        "RETAIN_REASONING_1",
-        "project_snapshot_diff",
-    ] {
-        assert!(wires[2].to_string().contains(marker));
+    assert!(!has_reader(wires[0]));
+    assert!(!has_reader(wires[1]));
+    assert!(has_reader(wires[2]));
+    assert!(has_reader(wires[3]));
+    if change != Some("memory") {
+        for marker in [
+            "RETAIN_REASONING_0",
+            "RETAIN_REASONING_1",
+            "project_snapshot_diff",
+        ] {
+            assert!(wires[2].to_string().contains(marker));
+        }
     }
     if change == Some("prompt") {
         let instructions = wires[2]["instructions"].as_str().unwrap();
@@ -166,12 +203,58 @@ fn activation_case(change: Option<&str>) {
         assert!(!instructions.contains("prompt-after"), "{instructions}");
     }
     if change == Some("memory") {
-        assert!(
-            wires[2]
-                .to_string()
-                .contains("Core Memory replacement for the current state.")
-        );
+        // ADR-0074 permits retirement after the durable source selection
+        // whose order and Provider identity are checked below.
         assert!(wires[2].to_string().contains("memory-after"));
+        for retired in ["memory-before", "RETAIN_REASONING_0", "RETAIN_REASONING_1"] {
+            assert!(
+                !wires[2].to_string().contains(retired),
+                "the source-verified Core selection must exclude retired content: {retired}"
+            );
+        }
+        let project_fragment = |wire: &Value, kind: &str| {
+            wire["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|item| item["content"].as_array().into_iter().flatten())
+                .filter_map(|content| serde_json::from_str::<Value>(content["text"].as_str()?).ok())
+                .find(|value| value["kind"] == kind)
+                .unwrap_or_else(|| panic!("missing {kind}"))
+        };
+        let current_full = project_fragment(wires[2], "project_snapshot_full");
+        let events = session_events(root.path(), &session_id(root.path()));
+        let selection = events
+            .iter()
+            .rfind(|event| event["event_type"] == "session.task_context_selected")
+            .unwrap();
+        let capture: Value = serde_json::from_slice(
+            &fs::read(
+                root.path()
+                    .join(".echidna/artifacts/blobs/sha256")
+                    .join(selection["payload"]["capture_blob"].as_str().unwrap()),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let captured_project = capture["common"]["fragments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|fragment| {
+                fragment["content"]["items"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+            })
+            .filter_map(|item| serde_json::from_str::<Value>(item["text"].as_str()?).ok())
+            .find(|value| value["kind"] == "project_snapshot_full")
+            .unwrap();
+        assert_eq!(current_full, captured_project);
+        assert!(
+            wires[3].to_string().contains("RETAIN_REASONING_2"),
+            "reasoning accepted in the new epoch continues normally"
+        );
     }
     let items = wires[3]["input"].as_array().unwrap();
     let mut pending = BTreeSet::new();
@@ -187,8 +270,8 @@ fn activation_case(change: Option<&str>) {
     if change.is_none() {
         // Normal expiry removes dispatch eligibility, not retained reasoning
         // or state diffs. A later explicit process Resume remains supported.
-        assert!(!has_reader(&wires[4]), "activation must clear at next Turn");
-        assert!(!has_reader(&wires[5]), "activation must clear at Resume");
+        assert!(!has_reader(wires[4]), "activation must clear at next Turn");
+        assert!(!has_reader(wires[5]), "activation must clear at Resume");
         assert!(wires[4].to_string().contains("RETAIN_REASONING_0"));
         assert!(wires[4].to_string().contains("project_snapshot_diff"));
     }
@@ -198,6 +281,57 @@ fn activation_case(change: Option<&str>) {
     assert_eq!(state.execution_receipt_count(), 3);
     assert_eq!(state.history().ensure_all_tool_calls_paired(), Ok(()));
     assert_audits_reconstruct(root.path(), &state);
+    if change == Some("memory") {
+        let events = session_events(root.path(), &session_id(root.path()));
+        let selections = events
+            .iter()
+            .filter(|event| event["event_type"] == "session.task_context_selected")
+            .collect::<Vec<_>>();
+        assert_eq!(selections.len(), 3);
+        assert_eq!(
+            selections[1]["payload"]["refresh_of"],
+            selections[0]["event_id"]
+        );
+        assert_eq!(
+            selections[2]["payload"]["refresh_of"],
+            selections[1]["event_id"]
+        );
+        assert_eq!(
+            selections[1]["payload"]["provider_session"],
+            selections[0]["payload"]["provider_session"],
+            "snapshot-only refresh must retain the accepted epoch"
+        );
+        assert!(selections[1]["payload"]["sample_event_id"].is_null());
+        assert!(selections[2]["payload"]["sample_event_id"].is_null());
+        let audits = events
+            .iter()
+            .filter(|event| event["event_type"] == "session.request_audit_recorded")
+            .collect::<Vec<_>>();
+        assert_ne!(
+            audits[2]["payload"]["provider_session"],
+            audits[4]["payload"]["provider_session"]
+        );
+        assert_eq!(
+            selections[2]["payload"]["provider_session"],
+            audits[4]["payload"]["provider_session"]
+        );
+        assert!(
+            selections[2]["sequence"].as_u64().unwrap() < audits[4]["sequence"].as_u64().unwrap()
+        );
+        let durable_result = events
+            .iter()
+            .find(|event| {
+                event["event_type"] == "session.history_item_recorded"
+                    && event["payload"]["item"]["kind"] == "tool_result"
+                    && event["payload"]["item"]["result"]["call_id"] == "activate-reader"
+            })
+            .unwrap();
+        assert!(
+            durable_result["sequence"].as_u64().unwrap()
+                < selections[2]["sequence"].as_u64().unwrap(),
+            "a complete durable Tool batch must precede Core epoch retirement"
+        );
+    }
     let calls: Vec<_> = state
         .history()
         .items()

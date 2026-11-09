@@ -72,6 +72,10 @@ impl PreparedTraceReplay {
                 | AgentTurnOutcome::Cancelled {
                     model_requests: requests,
                     ..
+                }
+                | AgentTurnOutcome::InitialSelectionCancelled {
+                    model_requests: requests,
+                    ..
                 } => model_requests = model_requests.saturating_add(requests),
             }
         }
@@ -105,7 +109,8 @@ impl PreparedTraceReplay {
             .map_err(TraceReplayRunError::Agent)?;
         let model_requests = match outcome {
             AgentTurnOutcome::Completed { model_requests, .. }
-            | AgentTurnOutcome::Cancelled { model_requests, .. } => model_requests,
+            | AgentTurnOutcome::Cancelled { model_requests, .. }
+            | AgentTurnOutcome::InitialSelectionCancelled { model_requests, .. } => model_requests,
         };
         if self.tools.remaining_steps() != 0 {
             return Err(TraceReplayRunError::ReplayToolsNotFullyConsumed {

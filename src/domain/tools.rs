@@ -532,6 +532,23 @@ pub enum PtySessionStatus {
     Cancelled,
 }
 
+/// A live process observed in the current Tool runtime, not a persisted claim
+/// that a process survives restart or remains active after this observation.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum LiveProcessObservation {
+    Job {
+        job_id: JobId,
+        status: JobStatus,
+        resources: Option<Vec<ResourceKey>>,
+    },
+    Pty {
+        pty_session_id: PtySessionId,
+        status: PtySessionStatus,
+        resources: Option<Vec<ResourceKey>>,
+    },
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ToolResult {
     pub call_id: ToolCallId,

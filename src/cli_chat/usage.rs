@@ -11,14 +11,45 @@ impl DurableChatSession {
         provider_session: &ProviderSessionRef,
         usage: ModelUsage,
     ) -> Result<(), ChatError> {
-        self.with_projection(|projection, store, stream_id| {
-            let sequence = store.next_sequence()?;
-            let event = SessionEvent::ModelUsageRecorded {
+        self.record_usage_event(
+            SessionEvent::ModelUsageRecorded {
                 request_audit_event_id: request_audit_event_id.clone(),
                 provider_session: provider_session.clone(),
                 usage,
-            }
-            .into_envelope(
+            },
+            provider_session,
+            usage,
+        )
+    }
+
+    pub(super) fn record_task_selection_usage(
+        &self,
+        capture_event_id: &EventId,
+        request_audit_event_id: &EventId,
+        provider_session: &ProviderSessionRef,
+        usage: ModelUsage,
+    ) -> Result<(), ChatError> {
+        self.record_usage_event(
+            SessionEvent::TaskSelectionUsageRecorded {
+                capture_event_id: capture_event_id.clone(),
+                request_audit_event_id: request_audit_event_id.clone(),
+                provider_session: provider_session.clone(),
+                usage,
+            },
+            provider_session,
+            usage,
+        )
+    }
+
+    fn record_usage_event(
+        &self,
+        event: SessionEvent,
+        provider_session: &ProviderSessionRef,
+        usage: ModelUsage,
+    ) -> Result<(), ChatError> {
+        self.with_projection(|projection, store, stream_id| {
+            let sequence = store.next_sequence()?;
+            let event = event.into_envelope(
                 event_id(
                     self.project.project_id(),
                     &self.session_id,

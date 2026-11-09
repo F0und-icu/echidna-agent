@@ -28,12 +28,15 @@ use super::{AgentLoopError, ContinuationRejection};
 /// The complete local inputs for one Planner-owned Context compilation.
 pub(super) struct ContextCompilationInput<'a> {
     pub(super) prompt_composition: &'a PromptComposition,
+    pub(super) frozen_base_fragments: Option<&'a [ContextFragment]>,
     pub(super) world_state: Option<&'a ResearchWorldState>,
     pub(super) project_snapshot: Option<&'a ProjectSnapshotContext>,
     pub(super) project_memory_core: Option<&'a ContextFragment>,
     pub(super) session_summary: Option<&'a SessionSummary>,
     pub(super) history: &'a [ContentItem],
     pub(super) history_provenance: &'a BTreeMap<usize, ContextProvenance>,
+    pub(super) selected_history: Option<&'a SelectedHistory>,
+    pub(super) selected_constraints: &'a [ContextFragment],
     pub(super) protected_input: Option<(&'a [ContentItem], &'a BTreeMap<usize, ContextProvenance>)>,
     pub(super) turn_history_start: usize,
     pub(super) detached_input: Option<(&'a [ContentItem], &'a BTreeMap<usize, ContextProvenance>)>,
@@ -48,6 +51,765 @@ pub(super) struct ContextCompilationInput<'a> {
         Option<&'a mut Option<crate::domain::context::ContextCapacityBreakdown>>,
 }
 
+/// Exact, event-bound History delivery chosen for this task. The original
+/// complete History continues to drive persistence and execution pairing.
+pub(super) struct SelectedHistory {
+    items: Vec<ContentItem>,
+    provenance: BTreeMap<usize, ContextProvenance>,
+}
+
+/// Source-bound task material follows its exact delivered operator source.
+pub(super) enum TaskFragment {
+    Fixed(ContextFragment),
+    Constraint(crate::domain::events::EventId, ContextFragment),
+    Progress(
+        crate::domain::events::EventId,
+        ContextFragment,
+        Box<(ContextFragment, ContextFragment)>,
+    ),
+}
+
+#[derive(Default)]
+pub(super) struct TaskFragments {
+    fragments: Vec<TaskFragment>,
+    operator_input_dedup: bool,
+}
+
+impl TaskFragments {
+    pub(super) fn push(&mut self, fragment: TaskFragment) {
+        self.fragments.push(fragment);
+    }
+
+    pub(super) fn extend_fixed(&mut self, fragments: impl IntoIterator<Item = ContextFragment>) {
+        self.fragments
+            .extend(fragments.into_iter().map(TaskFragment::Fixed));
+    }
+
+    pub(super) fn for_history(
+        &self,
+        history: Option<&SelectedHistory>,
+        operator_provenance: &[&BTreeMap<usize, ContextProvenance>],
+    ) -> Vec<ContextFragment> {
+        let selected = |id: &crate::domain::events::EventId| {
+            history.is_some_and(|history| history.contains_exact_source(id))
+        };
+        let operator = |id: &crate::domain::events::EventId| {
+            self.operator_input_dedup
+                && operator_provenance
+                    .iter()
+                    .flat_map(|map| map.values())
+                    .any(|provenance| {
+                        provenance.origin() == crate::domain::context::ContextOrigin::OperatorInput
+                            && provenance.references().source_event_refs().last() == Some(id)
+                    })
+        };
+        self.fragments
+            .iter()
+            .filter_map(|fragment| match fragment {
+                TaskFragment::Fixed(value) => Some(value.clone()),
+                TaskFragment::Constraint(id, value) => {
+                    (!(selected(id) || operator(id))).then(|| value.clone())
+                }
+                TaskFragment::Progress(id, with_goal, without_goal) => Some(
+                    if selected(id) {
+                        &without_goal.0
+                    } else if operator(id) {
+                        &without_goal.1
+                    } else {
+                        with_goal
+                    }
+                    .clone(),
+                ),
+            })
+            .collect()
+    }
+}
+
+impl SelectedHistory {
+    fn contains_exact_source(&self, id: &crate::domain::events::EventId) -> bool {
+        self.provenance.values().any(|provenance| {
+            let refs = provenance.references().source_event_refs();
+            refs.len() == 1 && &refs[0] == id
+        })
+    }
+    pub(super) fn without_selected_protected(
+        &self,
+        protected: &(Vec<ContentItem>, BTreeMap<usize, ContextProvenance>),
+    ) -> (Vec<ContentItem>, BTreeMap<usize, ContextProvenance>) {
+        let selected = self
+            .provenance
+            .values()
+            .flat_map(|value| value.references().source_event_refs())
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut items = Vec::new();
+        let mut provenance = BTreeMap::new();
+        for (index, item) in protected.0.iter().enumerate() {
+            let source = &protected.1[&index];
+            if source
+                .references()
+                .source_event_refs()
+                .last()
+                .is_some_and(|id| selected.contains(id))
+            {
+                continue;
+            }
+            provenance.insert(items.len(), source.clone());
+            items.push(item.clone());
+        }
+        (items, provenance)
+    }
+    pub(super) fn from_resume(
+        history: &[crate::domain::session::TaskResumeHistoryItem],
+        source_hash: &str,
+        producer: &str,
+    ) -> Result<Self, AgentLoopError> {
+        use crate::domain::context::{ContextSlot, FreshnessIdentity, RetentionClass};
+        let mut items = Vec::with_capacity(history.len());
+        let mut provenance = BTreeMap::new();
+        for source in history {
+            let artifacts = match &source.item {
+                ContentItem::ImageArtifact { artifact_id, .. } => vec![artifact_id.clone()],
+                _ => Vec::new(),
+            };
+            let references = task_source_references(
+                source.vision_references.as_ref(),
+                artifacts,
+                Vec::new(),
+                source.source_refs.clone(),
+            )?;
+            let value = ContextProvenance::new(
+                ContextSlot::History,
+                source.semantics.origin,
+                source.semantics.class,
+                source.semantics.authority,
+                RetentionClass::Recent,
+                FreshnessIdentity::new(source_hash)?.with_producer_version(
+                    if source.source_refs.len() > 1
+                        && source.semantics.class
+                            == crate::domain::context::SemanticClass::DerivedProjection
+                    {
+                        "task-context-resume:1"
+                    } else {
+                        producer
+                    },
+                ),
+                references,
+            )?;
+            provenance.insert(items.len(), value);
+            items.push(source.item.clone());
+        }
+        Ok(Self { items, provenance })
+    }
+    pub(super) fn retained_for_compaction(
+        &self,
+        compaction: &crate::domain::session::SessionCompaction,
+    ) -> Result<Self, AgentLoopError> {
+        let retained = compaction.task_history_retention()?;
+        let mut items = Vec::new();
+        let mut provenance = BTreeMap::new();
+        for (index, item) in self.items.iter().enumerate() {
+            let source = self
+                .provenance
+                .get(&index)
+                .ok_or(AgentLoopError::ContextStateMismatch)?;
+            let keep = retained.retains(source.references().source_event_refs());
+            if keep {
+                provenance.insert(items.len(), source.clone());
+                items.push(item.clone());
+            }
+        }
+        Ok(Self { items, provenance })
+    }
+}
+
+fn task_source_references(
+    vision: Option<&crate::domain::context::ContextReferences>,
+    mut artifacts: Vec<crate::domain::artifacts::ArtifactId>,
+    mut receipts: Vec<crate::domain::research::ExecutionReceiptId>,
+    mut events: Vec<crate::domain::events::EventId>,
+) -> Result<crate::domain::context::ContextReferences, crate::domain::context::ContextPlannerError>
+{
+    let mut research = Vec::new();
+    if let Some(vision) = vision {
+        research.extend_from_slice(vision.research_fact_refs());
+        for id in vision.artifact_refs() {
+            if !artifacts.contains(id) {
+                artifacts.push(id.clone());
+            }
+        }
+        for id in vision.execution_receipt_refs() {
+            if !receipts.contains(id) {
+                receipts.push(id.clone());
+            }
+        }
+        for id in vision.source_event_refs() {
+            if !events.contains(id) {
+                events.push(id.clone());
+            }
+        }
+    }
+    crate::domain::context::ContextReferences::new(research, artifacts, receipts, events)
+}
+
+/// Assemble the exact operator inputs used by offline compaction/definition
+/// previews, including earlier retained inputs that remain uncompleted.
+pub(super) struct PreviewOperatorContext {
+    pub(super) turn_history_start: usize,
+    pub(super) detached: Option<(Vec<ContentItem>, BTreeMap<usize, ContextProvenance>)>,
+    pub(super) protected: Option<(Vec<ContentItem>, BTreeMap<usize, ContextProvenance>)>,
+    pub(super) active_provenance: BTreeMap<usize, ContextProvenance>,
+}
+
+pub(super) fn preview_operator_context(
+    history: &mut Vec<ContentItem>,
+    protected: &crate::domain::session::ProtectedOperatorContext,
+    selected: Option<&SelectedHistory>,
+) -> Result<PreviewOperatorContext, AgentLoopError> {
+    if let Some(index) = protected.retained_provenance.keys().next_back().copied() {
+        let active_provenance =
+            BTreeMap::from([(0, protected.retained_provenance[&index].clone())]);
+        let delivered = match selected {
+            Some(selected) => {
+                let all = protected.all_without_active(&active_provenance, history)?;
+                selected.without_selected_protected(&all)
+            }
+            // Without a selected projection, the ordinary History fragment
+            // already contains earlier retained operator inputs.
+            None => protected.without_active(&active_provenance),
+        };
+        Ok(PreviewOperatorContext {
+            turn_history_start: index,
+            detached: None,
+            protected: Some(delivered),
+            active_provenance,
+        })
+    } else if !protected.detached_items.is_empty() {
+        Ok(PreviewOperatorContext {
+            turn_history_start: history.len(),
+            detached: Some((
+                protected.detached_items.clone(),
+                protected.detached_provenance.clone(),
+            )),
+            protected: None,
+            active_provenance: protected.detached_provenance.clone(),
+        })
+    } else {
+        let turn_history_start = history.len();
+        history.push(ContentItem::user_text("Continue."));
+        Ok(PreviewOperatorContext {
+            turn_history_start,
+            detached: None,
+            protected: None,
+            active_provenance: BTreeMap::new(),
+        })
+    }
+}
+
+pub(super) fn selected_summary<'a>(
+    summary: Option<&'a SessionSummary>,
+    reference: Option<&str>,
+) -> Result<Option<&'a SessionSummary>, AgentLoopError> {
+    match reference {
+        None => Ok(None),
+        Some(reference) => summary
+            .filter(|summary| {
+                summary.selected_task_id().is_some()
+                    && reference == format!("summary:{}", summary.fingerprint())
+            })
+            .map(Some)
+            .ok_or(AgentLoopError::ContextStateMismatch),
+    }
+}
+
+/// Render exact selected Core sections while retaining their original
+/// namespace, revision, byte ranges and content hashes in the provenance map.
+pub(super) fn selected_core_fragment(
+    original: Option<&ContextFragment>,
+    ranges: &[crate::domain::task_context::CoreRange],
+) -> Result<Option<ContextFragment>, AgentLoopError> {
+    if ranges.is_empty() {
+        return Ok(None);
+    }
+    let original = original.ok_or(AgentLoopError::ContextStateMismatch)?;
+    let ContextFragmentContent::ContentItems { items } = original.content() else {
+        return Err(AgentLoopError::ContextStateMismatch);
+    };
+    let [ContentItem::Text { text, .. }] = items.as_slice() else {
+        return Err(AgentLoopError::ContextStateMismatch);
+    };
+    let mut selected = Vec::with_capacity(ranges.len());
+    let mut item_provenance = Vec::with_capacity(ranges.len());
+    let mut previous_end = 0;
+    for range in ranges {
+        if range.fragment_id != original.id().as_str()
+            || range.start_byte < previous_end
+            || range.start_byte >= range.end_byte
+            || range.end_byte > text.len()
+            || !text.is_char_boundary(range.start_byte)
+            || !text.is_char_boundary(range.end_byte)
+        {
+            return Err(AgentLoopError::ContextStateMismatch);
+        }
+        let content = &text[range.start_byte..range.end_byte];
+        if crate::domain::canonical_json::canonical_blake3_hash(&content)
+            .map_err(|_| AgentLoopError::ContextStateMismatch)?
+            != range.content_hash
+        {
+            return Err(AgentLoopError::ContextStateMismatch);
+        }
+        let original_provenance = original.provenance();
+        let provenance = ContextProvenance::new(
+            original_provenance.slot(),
+            original_provenance.origin(),
+            original_provenance.semantic_class(),
+            original_provenance.authority_level(),
+            original_provenance.retention_class(),
+            crate::domain::context::FreshnessIdentity::new(format!(
+                "{}#{}..{}:{}",
+                range.fragment_id, range.start_byte, range.end_byte, range.content_hash
+            ))?
+            .with_producer_version("task-context-core:1"),
+            original_provenance.references().clone(),
+        )?;
+        item_provenance.push(provenance);
+        selected.push(ContentItem::user_text(content));
+        previous_end = range.end_byte;
+    }
+    let hash = crate::domain::canonical_json::canonical_blake3_hash(&ranges)
+        .map_err(|_| AgentLoopError::ContextStateMismatch)?;
+    let mut fragment = ContextFragment::new(
+        ContextFragmentId::new(format!("memory-core-selected:{hash}"))?,
+        original.source(),
+        ContextFragmentPriority::Required,
+        FragmentCachePolicy::DoNotCache,
+        ContextFragmentContent::ContentItems { items: selected },
+    )?
+    .with_provenance(original.provenance().clone())?;
+    for (ordinal, provenance) in item_provenance.into_iter().enumerate() {
+        fragment = fragment.with_content_item_provenance(
+            u32::try_from(ordinal).map_err(|_| AgentLoopError::ContextStateMismatch)?,
+            provenance,
+        )?;
+    }
+    Ok(Some(fragment))
+}
+
+pub(super) fn selected_constraint_fragments(
+    sources: &[(crate::domain::task_context::ConstraintRange, String)],
+) -> Result<Vec<ContextFragment>, AgentLoopError> {
+    use crate::domain::context::{
+        AuthorityLevel, ContextOrigin, ContextReferences, ContextSlot, FreshnessIdentity,
+        RetentionClass, SemanticClass,
+    };
+    let mut fragments = Vec::with_capacity(sources.len());
+    for (index, (range, content)) in sources.iter().enumerate() {
+        let id = crate::domain::canonical_json::canonical_blake3_hash(range)
+            .map_err(|_| AgentLoopError::ContextStateMismatch)?;
+        let provenance = ContextProvenance::new(
+            ContextSlot::History,
+            ContextOrigin::OperatorInput,
+            SemanticClass::Conversation,
+            AuthorityLevel::OperatorAssertion,
+            RetentionClass::Stable,
+            FreshnessIdentity::new(format!(
+                "{}#{}..{}:{}",
+                range.source_event_id, range.start_byte, range.end_byte, range.content_hash
+            ))?
+            .with_producer_version("task-context-constraint:1"),
+            ContextReferences::new(
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                vec![range.source_event_id.clone()],
+            )?,
+        )?;
+        fragments.push(
+            ContextFragment::new(
+                ContextFragmentId::new(format!("task-constraint:{index:08}:{id}"))?,
+                ContextFragmentSource::RecentHistory,
+                ContextFragmentPriority::Required,
+                FragmentCachePolicy::DoNotCache,
+                ContextFragmentContent::ContentItems {
+                    items: vec![ContentItem::user_text(content)],
+                },
+            )?
+            .with_provenance(provenance.clone())?
+            .with_content_item_provenance(0, provenance)?,
+        );
+    }
+    Ok(fragments)
+}
+
+pub(super) fn selected_excerpt_fragments(
+    excerpts: &[crate::domain::task_context::SourceExcerpt],
+) -> Result<Vec<ContextFragment>, AgentLoopError> {
+    use crate::domain::context::{ContextSlot, FreshnessIdentity, RetentionClass};
+    let mut fragments = Vec::with_capacity(excerpts.len());
+    for (index, excerpt) in excerpts.iter().enumerate() {
+        let range = &excerpt.range;
+        let id = crate::domain::canonical_json::canonical_blake3_hash(range)
+            .map_err(|_| AgentLoopError::ContextStateMismatch)?;
+        let receipts = excerpt
+            .receipt_event_id
+            .iter()
+            .map(|id| crate::domain::research::ExecutionReceiptId::new(id.as_str()))
+            .collect();
+        let provenance = ContextProvenance::new(
+            ContextSlot::History,
+            excerpt.semantics.origin,
+            excerpt.semantics.class,
+            excerpt.semantics.authority,
+            RetentionClass::Recent,
+            FreshnessIdentity::new(format!(
+                "{}#{}..{}:{}",
+                range.source_event_id, range.start_byte, range.end_byte, range.content_hash
+            ))?
+            .with_producer_version("task-context-excerpt:1"),
+            task_source_references(
+                excerpt.vision_references.as_ref(),
+                Vec::new(),
+                receipts,
+                vec![range.source_event_id.clone()],
+            )?,
+        )?;
+        let text = format!(
+            "Source excerpt {} bytes {}..{}; role: {:?}; origin: {:?}; authority: {:?}; recorded_at: {}; valid_time: unknown:\n{}",
+            range.source_event_id,
+            range.start_byte,
+            range.end_byte,
+            excerpt.role,
+            excerpt.semantics.origin,
+            excerpt.semantics.authority,
+            excerpt.observed_at,
+            excerpt.text
+        );
+        fragments.push(
+            ContextFragment::new(
+                ContextFragmentId::new(format!("task-excerpt:{index:08}:{id}"))?,
+                ContextFragmentSource::RecentHistory,
+                ContextFragmentPriority::Required,
+                FragmentCachePolicy::DoNotCache,
+                ContextFragmentContent::ContentItems {
+                    items: vec![ContentItem::user_text(text)],
+                },
+            )?
+            .with_provenance(provenance.clone())?
+            .with_content_item_provenance(0, provenance)?,
+        );
+    }
+    Ok(fragments)
+}
+
+#[derive(Clone, Copy)]
+enum ProgressGoalPlacement {
+    Progress,
+    SelectedHistory,
+    OperatorInput,
+}
+
+fn selected_task_progress_fragments(
+    selection: &crate::domain::session::TaskContextSelected,
+    sources: &[crate::domain::session::TaskProgressSource],
+    placement: ProgressGoalPlacement,
+) -> Result<Vec<ContextFragment>, AgentLoopError> {
+    use crate::domain::context::{
+        AuthorityLevel, ContextOrigin, ContextReferences, ContextSlot, FreshnessIdentity,
+        RetentionClass, SemanticClass,
+    };
+    sources.iter().map(|source| {
+        let progress = match placement {
+            ProgressGoalPlacement::Progress => &source.text,
+            ProgressGoalPlacement::SelectedHistory => &source.text_when_goal_in_history,
+            ProgressGoalPlacement::OperatorInput => &source.text_when_goal_in_operator_input,
+        };
+        let hash = crate::domain::canonical_json::canonical_blake3_hash(progress)
+            .map_err(|_| AgentLoopError::ContextStateMismatch)?;
+        let provenance = ContextProvenance::new(ContextSlot::History, ContextOrigin::SessionProjection,
+            SemanticClass::DerivedProjection, AuthorityLevel::DerivedNonEvidence, RetentionClass::Recent,
+            FreshnessIdentity::new(selection.source.stream_hash())?.with_producer_version("task-progress:1"),
+            ContextReferences::new(Vec::new(), source.artifact_refs.clone(), source.receipt_refs.clone(), source.event_refs.clone())?)?;
+        let text = format!("Source-bound task progress for {}; derived navigation, not an independent fact:\n{}", source.task_id, progress);
+        Ok(ContextFragment::new(ContextFragmentId::new(format!("task-progress:{hash}"))?,
+            ContextFragmentSource::RecentHistory, ContextFragmentPriority::Required, FragmentCachePolicy::DoNotCache,
+            ContextFragmentContent::ContentItems { items: vec![ContentItem::user_text(text)] })?
+            .with_provenance(provenance.clone())?.with_content_item_provenance(0, provenance)?)
+    }).collect()
+}
+
+pub(super) fn selected_task_fragments(
+    selection: &crate::domain::session::TaskContextSelected,
+    constraints: &[(crate::domain::task_context::ConstraintRange, String)],
+    excerpts: &[crate::domain::task_context::SourceExcerpt],
+    progress: &[crate::domain::session::TaskProgressSource],
+    research_units: &[crate::domain::task_context_research::ResearchTaskUnit],
+    memory: &[crate::domain::session::TaskMemoryDocument],
+) -> Result<TaskFragments, AgentLoopError> {
+    let mut fragments = TaskFragments {
+        operator_input_dedup: selection.has_complete_request_proof(),
+        ..TaskFragments::default()
+    };
+    for ((range, _), fragment) in constraints
+        .iter()
+        .zip(selected_constraint_fragments(constraints)?)
+    {
+        fragments.push(TaskFragment::Constraint(
+            range.source_event_id.clone(),
+            fragment,
+        ));
+    }
+    fragments.extend_fixed(selected_excerpt_fragments(excerpts)?);
+    let with_goal =
+        selected_task_progress_fragments(selection, progress, ProgressGoalPlacement::Progress)?;
+    let in_history = selected_task_progress_fragments(
+        selection,
+        progress,
+        ProgressGoalPlacement::SelectedHistory,
+    )?;
+    let in_operator = selected_task_progress_fragments(
+        selection,
+        progress,
+        ProgressGoalPlacement::OperatorInput,
+    )?;
+    for (((source, full), selected), operator) in progress
+        .iter()
+        .zip(with_goal)
+        .zip(in_history)
+        .zip(in_operator)
+    {
+        fragments.push(TaskFragment::Progress(
+            source.goal_source_event_id.clone(),
+            full,
+            Box::new((selected, operator)),
+        ));
+    }
+    fragments.extend_fixed(task_gap_fragment(selection)?);
+    fragments.push(TaskFragment::Fixed(task_input_time_fragment(selection)?));
+    fragments.extend_fixed(live_process_fragment(selection)?);
+    fragments.extend_fixed(selected_research_fragments(selection, research_units)?);
+    fragments.extend_fixed(selected_memory_fragments(selection, memory)?);
+    Ok(fragments)
+}
+
+pub(super) fn task_gap_fragment(
+    selection: &crate::domain::session::TaskContextSelected,
+) -> Result<Option<ContextFragment>, AgentLoopError> {
+    use crate::domain::context::{
+        AuthorityLevel, ContextOrigin, ContextReferences, ContextSlot, FreshnessIdentity,
+        RetentionClass, SemanticClass,
+    };
+    if selection.unresolved_gaps.is_empty() {
+        return Ok(None);
+    }
+    let text = format!(
+        "Task context selection has the following unresolved source gaps; current operator input remains separately available in full:\n{}",
+        selection.unresolved_gaps.join("\n")
+    );
+    let hash = crate::domain::canonical_json::canonical_blake3_hash(&selection.unresolved_gaps)
+        .map_err(|_| AgentLoopError::ContextStateMismatch)?;
+    let mut event_refs = vec![
+        selection.input_ref.clone(),
+        selection.capture_event_id.clone(),
+    ];
+    if let Some(sample_id) = &selection.sample_event_id {
+        event_refs.push(sample_id.clone());
+    }
+    let provenance = ContextProvenance::new(
+        ContextSlot::History,
+        ContextOrigin::SessionProjection,
+        SemanticClass::DerivedProjection,
+        AuthorityLevel::DerivedNonEvidence,
+        RetentionClass::Ephemeral,
+        FreshnessIdentity::new(selection.source.stream_hash())?
+            .with_producer_version("task-context-gaps:1"),
+        ContextReferences::new(Vec::new(), Vec::new(), Vec::new(), event_refs)?,
+    )?;
+    Ok(Some(
+        ContextFragment::new(
+            ContextFragmentId::new(format!("task-context-gaps:{hash}"))?,
+            ContextFragmentSource::RecentHistory,
+            ContextFragmentPriority::Required,
+            FragmentCachePolicy::DoNotCache,
+            ContextFragmentContent::ContentItems {
+                items: vec![ContentItem::user_text(text)],
+            },
+        )?
+        .with_provenance(provenance.clone())?
+        .with_content_item_provenance(0, provenance)?,
+    ))
+}
+
+pub(super) fn selected_memory_fragments(
+    selection: &crate::domain::session::TaskContextSelected,
+    documents: &[crate::domain::session::TaskMemoryDocument],
+) -> Result<Vec<ContextFragment>, AgentLoopError> {
+    use crate::domain::context::{
+        AuthorityLevel, ContextOrigin, ContextReferences, ContextSlot, FreshnessIdentity,
+        RetentionClass, SemanticClass,
+    };
+    selection.selected_memory.iter().map(|reference| {
+        let document = documents.iter().find(|document| {
+            *reference == format!("memory:{}:{}", document.path, document.revision)
+        }).ok_or(AgentLoopError::ContextStateMismatch)?;
+        if document.revision != blake3::hash(document.content.as_bytes()).to_hex().to_string() {
+            return Err(AgentLoopError::ContextStateMismatch);
+        }
+        let text = serde_json::json!({"kind":"task_memory", "reference":reference, "scope":document.scope, "content":document.content}).to_string();
+        let provenance = ContextProvenance::new(
+            ContextSlot::RetrievedContext, ContextOrigin::ProjectMemory, SemanticClass::DerivedProjection,
+            AuthorityLevel::DerivedNonEvidence, RetentionClass::Stable,
+            FreshnessIdentity::new(&document.revision)?.with_producer_version("task-memory:1"),
+            ContextReferences::new(Vec::new(), Vec::new(), Vec::new(), vec![selection.capture_event_id.clone()])?,
+        )?;
+        Ok(ContextFragment::new(
+            ContextFragmentId::new(format!("task-memory:{reference}"))?, ContextFragmentSource::RetrievedMemory,
+            ContextFragmentPriority::Required, FragmentCachePolicy::ContentAddressed,
+            ContextFragmentContent::ContentItems { items: vec![ContentItem::user_text(text)] },
+        )?.with_provenance(provenance.clone())?.with_content_item_provenance(0, provenance)?)
+    }).collect()
+}
+
+pub(super) fn selected_research_fragments(
+    selection: &crate::domain::session::TaskContextSelected,
+    units: &[crate::domain::task_context_research::ResearchTaskUnit],
+) -> Result<Vec<ContextFragment>, AgentLoopError> {
+    use crate::domain::context::{
+        AuthorityLevel, ContextOrigin, ContextReferences, ContextSlot, FreshnessIdentity,
+        RetentionClass, SemanticClass,
+    };
+    let closed = crate::domain::task_context_research::close_research_selection(
+        units,
+        &selection.selected_research,
+    )
+    .map_err(|_| AgentLoopError::ContextStateMismatch)?;
+    if closed
+        .iter()
+        .map(|unit| &unit.reference)
+        .ne(selection.selected_research.iter())
+    {
+        return Err(AgentLoopError::ContextStateMismatch);
+    }
+    closed.into_iter().map(|unit| {
+        let text = serde_json::json!({"kind":"task_research_record", "reference":unit.reference, "source_project_hash":selection.source.project_stream_hash(), "value":unit.value}).to_string();
+        let provenance = ContextProvenance::new(
+            ContextSlot::ResearchState, ContextOrigin::ResearchProjection, SemanticClass::DerivedProjection,
+            AuthorityLevel::DerivedNonEvidence, RetentionClass::Stable,
+            FreshnessIdentity::new(selection.source.project_stream_hash())?.with_producer_version("task-research:1"),
+            ContextReferences::new(Vec::new(), Vec::new(), Vec::new(), vec![selection.capture_event_id.clone()])?,
+        )?;
+        Ok(ContextFragment::new(
+            ContextFragmentId::new(format!("task-research:{}", unit.reference))?, ContextFragmentSource::ResearchWorldState,
+            ContextFragmentPriority::Required, FragmentCachePolicy::ContentAddressed,
+            ContextFragmentContent::ContentItems { items: vec![ContentItem::user_text(text)] },
+        )?.with_provenance(provenance.clone())?.with_content_item_provenance(0, provenance)?)
+    }).collect()
+}
+
+pub(super) fn task_input_time_fragment(
+    selection: &crate::domain::session::TaskContextSelected,
+) -> Result<ContextFragment, AgentLoopError> {
+    use crate::domain::context::{
+        AuthorityLevel, ContextOrigin, ContextReferences, ContextSlot, FreshnessIdentity,
+        RetentionClass, SemanticClass,
+    };
+    let encoded = serde_json::to_string(&selection.input_time)
+        .map_err(|_| AgentLoopError::ContextStateMismatch)?;
+    let hash = crate::domain::canonical_json::canonical_blake3_hash(&selection.input_time)
+        .map_err(|_| AgentLoopError::ContextStateMismatch)?;
+    let text = format!(
+        "Input {} receive-time anchor (UTC Unix seconds and nanoseconds; host timezone observation): {encoded}. A trading day or other domain calendar requires its own source.",
+        selection.input_ref
+    );
+    let provenance = ContextProvenance::new(
+        ContextSlot::History,
+        ContextOrigin::SessionProjection,
+        SemanticClass::AuthoritativeReference,
+        AuthorityLevel::FactReference,
+        RetentionClass::Stable,
+        FreshnessIdentity::new(hash.clone())?.with_producer_version("task-input-time:1"),
+        ContextReferences::new(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            vec![
+                selection.input_boundary_event_id.clone(),
+                selection.input_ref.clone(),
+            ],
+        )?,
+    )?;
+    Ok(ContextFragment::new(
+        ContextFragmentId::new(format!("task-input-time:{hash}"))?,
+        ContextFragmentSource::RecentHistory,
+        ContextFragmentPriority::Required,
+        FragmentCachePolicy::DoNotCache,
+        ContextFragmentContent::ContentItems {
+            items: vec![ContentItem::user_text(text)],
+        },
+    )?
+    .with_provenance(provenance.clone())?
+    .with_content_item_provenance(0, provenance)?)
+}
+
+pub(super) fn live_process_fragment(
+    selection: &crate::domain::session::TaskContextSelected,
+) -> Result<Option<ContextFragment>, AgentLoopError> {
+    use crate::domain::context::{
+        AuthorityLevel, ContextOrigin, ContextReferences, FreshnessIdentity, RetentionClass,
+        SemanticClass,
+    };
+    if selection.live_processes.is_empty() {
+        return Ok(None);
+    }
+    let encoded = serde_json::to_string(&selection.live_processes)
+        .map_err(|_| AgentLoopError::ContextStateMismatch)?;
+    let hash = crate::domain::canonical_json::canonical_blake3_hash(&selection.live_processes)
+        .map_err(|_| AgentLoopError::ContextStateMismatch)?;
+    let text = format!(
+        "Volatile live process observations captured during task preparation; statuses may change, so poll a handle for current state. Each handle refers to its original start result and receipt: {encoded}"
+    );
+    let mut fragment = ContextFragment::new(
+        ContextFragmentId::new(format!("task-live-processes:{hash}"))?,
+        ContextFragmentSource::ProjectSnapshot,
+        ContextFragmentPriority::Required,
+        FragmentCachePolicy::DoNotCache,
+        ContextFragmentContent::ContentItems {
+            items: vec![ContentItem::user_text(text)],
+        },
+    )?;
+    let mut events = selection
+        .live_processes
+        .iter()
+        .map(|process| process.result_event_id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    events.insert(selection.capture_event_id.clone());
+    let receipts = selection
+        .live_processes
+        .iter()
+        .map(|process| {
+            crate::domain::research::ExecutionReceiptId::new(process.receipt_event_id.as_str())
+        })
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let provenance = ContextProvenance::new(
+        fragment.slot(),
+        ContextOrigin::SessionProjection,
+        SemanticClass::DerivedProjection,
+        AuthorityLevel::DerivedNonEvidence,
+        RetentionClass::Ephemeral,
+        FreshnessIdentity::new(hash)?.with_producer_version("task-live-processes:1"),
+        ContextReferences::new(
+            Vec::new(),
+            Vec::new(),
+            receipts,
+            events.into_iter().collect(),
+        )?,
+    )?;
+    fragment = fragment
+        .with_provenance(provenance.clone())?
+        .with_content_item_provenance(0, provenance)?;
+    Ok(Some(fragment))
+}
+
 /// One fixed, typed replacement for volatile facts before a later sampling
 /// Step. It contains no ordering or delivery decision: ContextPlanner remains
 /// the sole compiler after AgentLoop installs these candidates.
@@ -56,6 +818,8 @@ pub(crate) struct CurrentContextState {
     world_state: Option<ResearchWorldState>,
     project_snapshot: ProjectSnapshotContext,
     project_memory_core: Option<ContextFragment>,
+    research_revision: Option<String>,
+    memory_revision: Option<String>,
 }
 
 impl CurrentContextState {
@@ -68,7 +832,27 @@ impl CurrentContextState {
             world_state,
             project_snapshot,
             project_memory_core,
+            research_revision: None,
+            memory_revision: None,
         }
+    }
+
+    pub(crate) fn with_research_revision(mut self, revision: Option<String>) -> Self {
+        self.research_revision = revision;
+        self
+    }
+
+    pub(crate) fn with_memory_revision(mut self, revision: String) -> Self {
+        self.memory_revision = Some(revision);
+        self
+    }
+
+    pub(super) fn memory_revision(&self) -> Option<&str> {
+        self.memory_revision.as_deref()
+    }
+
+    pub(super) fn research_revision(&self) -> Option<&str> {
+        self.research_revision.as_deref()
     }
 
     pub(crate) fn world_state(&self) -> Option<&ResearchWorldState> {
@@ -88,6 +872,7 @@ impl CurrentContextState {
 /// replacement is safe for incremental delivery.
 pub(super) struct StateDiffDeliveryInput<'a> {
     pub(super) correction_feedback: &'a [ContextFragment],
+    pub(super) selected_constraints: &'a [ContextFragment],
     pub(super) step_id: &'a str,
     pub(super) full_input: &'a ModelInputIR,
     pub(super) full_delivery_map: &'a ContextDeliveryMap,
@@ -103,17 +888,143 @@ pub(super) struct StateDiffDeliveryInput<'a> {
     pub(super) turn_history_start: usize,
 }
 
+/// The same delivery selection is used by the live loop and source replay.
+pub(super) struct DeliveryChoiceInput<'a> {
+    pub(super) state_diff: StateDiffDeliveryInput<'a>,
+    pub(super) provider_session: &'a crate::domain::context::ProviderSession,
+    pub(super) turn: &'a crate::domain::context::TurnContext,
+    pub(super) request_index: usize,
+    pub(super) capabilities: &'a ModelCapabilities,
+    pub(super) renderer: &'a crate::domain::context::PromptRendererIdentity,
+    pub(super) activation_or_expiry: bool,
+    pub(super) expired_plan: Option<&'a crate::domain::tools::ResolvedToolPlan>,
+}
+
+pub(super) fn choose_delivery(
+    choice: DeliveryChoiceInput<'_>,
+) -> Result<
+    (
+        ModelInputIR,
+        ContextDeliveryMap,
+        crate::domain::context::StepSnapshot,
+        crate::domain::context::BaselineAssessment,
+    ),
+    AgentLoopError,
+> {
+    use crate::domain::context::{
+        BaselineAssessment, BaselineInvalidationReason, InternalRequestMetadata, StepSnapshot,
+    };
+    let full_input = choice.state_diff.full_input;
+    let full_map = choice.state_diff.full_delivery_map;
+    let committed = choice.state_diff.committed_delivery;
+    let full_snapshot = StepSnapshot::capture_with_renderer(
+        choice.turn,
+        choice.request_index,
+        full_input,
+        choice.capabilities,
+        choice.renderer,
+        InternalRequestMetadata::default(),
+    )?;
+    let full_assessment = choice
+        .provider_session
+        .assess_delivery(&full_snapshot, choice.capabilities.incremental_input);
+    let retains_reasoning = committed.is_some_and(|state| {
+        state.input.content_items.iter().any(|item| {
+            matches!(
+                item,
+                ContentItem::Reasoning { .. } | ContentItem::OpaqueContinuation { .. }
+            )
+        })
+    });
+    if (retains_reasoning
+        || matches!(
+            full_assessment,
+            BaselineAssessment::FullRequest {
+                reason: BaselineInvalidationReason::InputNotAppendOnly
+            }
+        ))
+        && let Some((candidate, map)) = state_diff_delivery_input(choice.state_diff)?
+    {
+        let snapshot = StepSnapshot::capture_with_renderer(
+            choice.turn,
+            choice.request_index,
+            &candidate,
+            choice.capabilities,
+            choice.renderer,
+            InternalRequestMetadata::default(),
+        )?;
+        let assessment = choice
+            .provider_session
+            .assess_delivery(&snapshot, choice.capabilities.incremental_input);
+        match assessment {
+            BaselineAssessment::AppendOnlyCandidate { .. } => {
+                return Ok((candidate, map, snapshot, assessment));
+            }
+            BaselineAssessment::FullRequest { reason }
+                if reason.permits_full_input_relationship(full_input, &candidate)
+                    && (reason != BaselineInvalidationReason::ToolsChanged
+                        || candidate.is_reasoning_replay_of(full_input)
+                        || (choice.activation_or_expiry
+                            && committed.is_some_and(|previous| {
+                                choice.provider_session.tool_change_preserves_delivery(
+                                    &snapshot,
+                                    &previous.input,
+                                    &candidate,
+                                    choice.expired_plan,
+                                )
+                            }))) =>
+            {
+                return Ok((candidate, map, snapshot, assessment));
+            }
+            BaselineAssessment::FullRequest { reason } if retains_reasoning => {
+                return Err(AgentLoopError::ProviderContinuationUnavailable {
+                    reason: ContinuationRejection::BaselineRejected { reason },
+                });
+            }
+            _ => {}
+        }
+    }
+    Ok((
+        full_input.clone(),
+        full_map.clone(),
+        full_snapshot,
+        full_assessment,
+    ))
+}
+
+pub(super) fn project_delivery(
+    input: &ModelInputIR,
+    map: &ContextDeliveryMap,
+    assessment: &crate::domain::context::BaselineAssessment,
+) -> Result<(ModelInputIR, ContextDeliveryMap), AgentLoopError> {
+    map.validate_against(input)?;
+    match assessment {
+        crate::domain::context::BaselineAssessment::FullRequest { .. } => {
+            Ok((input.clone(), map.clone()))
+        }
+        crate::domain::context::BaselineAssessment::AppendOnlyCandidate { delta_items } => {
+            let mut delta = input.clone();
+            delta.content_items = delta_items.clone();
+            let delta_map = map.for_incremental_delta(input, &delta)?;
+            Ok((delta, delta_map))
+        }
+    }
+}
+
 pub(super) fn compile_context(
     input: ContextCompilationInput<'_>,
 ) -> Result<(ContextPlan, ContextCacheSummary), AgentLoopError> {
     let ContextCompilationInput {
         prompt_composition,
+        frozen_base_fragments,
         world_state,
         project_snapshot,
         project_memory_core,
         session_summary,
         history,
         history_provenance,
+        selected_history,
+        selected_constraints,
         protected_input,
         turn_history_start,
         detached_input,
@@ -135,49 +1046,63 @@ pub(super) fn compile_context(
     let mut cache_summary = ContextCacheSummary::default();
     let section_bytes = planner.window_policy(capabilities)?.state_section_bytes();
     let mut fragments = Vec::new();
-    for prompt_fragment in prompt_composition.fragments()? {
-        push_cached_fragment(
-            &mut fragments,
-            &mut cache_summary,
-            prompt_fragment,
-            planner,
-            cache,
-            capabilities,
-            budget,
-        )?;
-    }
-    if let Some(world_state) = world_state {
-        push_cached_fragment(
-            &mut fragments,
-            &mut cache_summary,
-            world_state.full_fragment_with_limit(section_bytes)?,
-            planner,
-            cache,
-            capabilities,
-            budget,
-        )?;
-    }
-    if let Some(project_snapshot) = project_snapshot {
-        push_cached_fragment(
-            &mut fragments,
-            &mut cache_summary,
-            project_snapshot.full_fragment_with_limit(section_bytes)?,
-            planner,
-            cache,
-            capabilities,
-            budget,
-        )?;
-    }
-    if let Some(project_memory_core) = project_memory_core {
-        push_cached_fragment(
-            &mut fragments,
-            &mut cache_summary,
-            project_memory_core.clone(),
-            planner,
-            cache,
-            capabilities,
-            budget,
-        )?;
+    if let Some(frozen) = frozen_base_fragments {
+        for fragment in frozen {
+            push_cached_fragment(
+                &mut fragments,
+                &mut cache_summary,
+                fragment.clone(),
+                planner,
+                cache,
+                capabilities,
+                budget,
+            )?;
+        }
+    } else {
+        for prompt_fragment in prompt_composition.fragments()? {
+            push_cached_fragment(
+                &mut fragments,
+                &mut cache_summary,
+                prompt_fragment,
+                planner,
+                cache,
+                capabilities,
+                budget,
+            )?;
+        }
+        if let Some(world_state) = world_state {
+            push_cached_fragment(
+                &mut fragments,
+                &mut cache_summary,
+                world_state.full_fragment_with_limit(section_bytes)?,
+                planner,
+                cache,
+                capabilities,
+                budget,
+            )?;
+        }
+        if let Some(project_snapshot) = project_snapshot {
+            push_cached_fragment(
+                &mut fragments,
+                &mut cache_summary,
+                project_snapshot.full_fragment_with_limit(section_bytes)?,
+                planner,
+                cache,
+                capabilities,
+                budget,
+            )?;
+        }
+        if let Some(project_memory_core) = project_memory_core {
+            push_cached_fragment(
+                &mut fragments,
+                &mut cache_summary,
+                project_memory_core.clone(),
+                planner,
+                cache,
+                capabilities,
+                budget,
+            )?;
+        }
     }
     if let Some(session_summary) = session_summary {
         let mut summary_fragment = ContextFragment::new(
@@ -215,16 +1140,21 @@ pub(super) fn compile_context(
             },
         )?;
     }
+    let (recent_items, recent_provenance) = match selected_history {
+        Some(selected) => (selected.items.as_slice(), &selected.provenance),
+        None => (&history[..turn_history_start], history_provenance),
+    };
     push_content_fragment(
         &mut fragments,
         ContentFragmentInput {
             id: "history:recent".to_owned(),
             source: ContextFragmentSource::RecentHistory,
-            items: &history[..turn_history_start],
+            items: recent_items,
             history_start: 0,
-            history_provenance,
+            history_provenance: recent_provenance,
         },
     )?;
+    fragments.extend_from_slice(selected_constraints);
     push_content_fragment(
         &mut fragments,
         ContentFragmentInput {
@@ -280,6 +1210,7 @@ pub(super) fn state_diff_delivery_input(
 ) -> Result<Option<(ModelInputIR, ContextDeliveryMap)>, AgentLoopError> {
     let StateDiffDeliveryInput {
         correction_feedback,
+        selected_constraints,
         step_id,
         full_input,
         full_delivery_map,
@@ -456,6 +1387,15 @@ pub(super) fn state_diff_delivery_input(
         )?;
     }
     for fragment in correction_feedback {
+        if !delivery_map
+            .content_items()
+            .iter()
+            .any(|item| item.fragment_id() == fragment.id())
+        {
+            append_delivery_fragment(&mut candidate, &mut delivery_map, planner, fragment.clone())?;
+        }
+    }
+    for fragment in selected_constraints {
         if !delivery_map
             .content_items()
             .iter()

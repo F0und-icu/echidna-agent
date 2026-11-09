@@ -6,11 +6,11 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use crate::domain::model::ModelEvent;
-use crate::ports::model::ModelProviderError;
+use crate::ports::model::{ModelProviderError, ModelRequestPresentation};
 
 pub(crate) trait ResponsesObserver: Send + Sync {
     fn role(&self) -> &'static str;
-    fn begin(&self) -> Box<dyn RequestObserver>;
+    fn begin(&self, presentation: ModelRequestPresentation) -> Box<dyn RequestObserver>;
     fn notify(&self, notice: ResponseNotice);
 
     fn full_debug(&self) -> bool;
@@ -22,9 +22,16 @@ pub(crate) trait RequestObserver: Send {
 
 #[derive(Debug)]
 pub(crate) enum ResponseNotice {
-    RetryDiscarded { retry: usize },
-    CaptureSaved { path: String },
-    CaptureFailed { kind: std::io::ErrorKind },
+    RetryDiscarded {
+        retry: usize,
+        presentation: ModelRequestPresentation,
+    },
+    CaptureSaved {
+        path: String,
+    },
+    CaptureFailed {
+        kind: std::io::ErrorKind,
+    },
 }
 
 #[derive(Debug)]
@@ -61,9 +68,12 @@ pub(super) struct RequestOutput {
 }
 
 impl RequestOutput {
-    pub(super) fn new(observer: &Arc<dyn ResponsesObserver>) -> Self {
+    pub(super) fn new(
+        observer: &Arc<dyn ResponsesObserver>,
+        presentation: ModelRequestPresentation,
+    ) -> Self {
         Self {
-            observer: observer.begin(),
+            observer: observer.begin(presentation),
             completed: false,
             pending_reasoning_deltas: String::new(),
 

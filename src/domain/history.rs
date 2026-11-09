@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use thiserror::Error;
 
+use super::events::EventId;
 use super::model::{ContentItem, MessageRole};
 use super::tools::{ToolCall, ToolCallId, ToolName, ToolResult};
 
@@ -354,8 +355,114 @@ pub(crate) fn validate_content_items(items: &[ContentItem]) -> Result<(), Histor
     history.ensure_all_tool_calls_paired()
 }
 
+/// A delivery view retains the identity of each original History fact. The
+/// Session remains the owner of the complete ordered History; this view is
+/// only a selection for one request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct HistoryDeliveryProjection {
+    items: Vec<(EventId, ContentItem)>,
+}
+
+impl HistoryDeliveryProjection {
+    /// Close selected Tool Calls/Results over their original counterparts.
+    /// Calls known to predate Resume may retain an unresolved original Call;
+    /// their derived recovery marker is built separately from source facts.
+    pub(crate) fn from_dependencies<'a>(
+        source: impl Iterator<Item = (&'a EventId, &'a ContentItem)> + Clone,
+        selected: &[EventId],
+        recovered_calls: &std::collections::BTreeSet<crate::domain::tools::ToolCallId>,
+    ) -> Result<Self, HistoryError> {
+        let mut selected_ids = selected
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        if selected_ids.len() != selected.len() {
+            return Err(HistoryError::InvalidDeliverySource {
+                event_id: selected[0].clone(),
+            });
+        }
+        let mut calls = std::collections::BTreeSet::new();
+        for (event_id, item) in source.clone() {
+            if selected_ids.contains(event_id) {
+                match item {
+                    ContentItem::ToolCall { call } => {
+                        calls.insert(call.call_id.clone());
+                    }
+                    ContentItem::ToolResult { result } => {
+                        calls.insert(result.call_id.clone());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for (event_id, item) in source.clone() {
+            if match item {
+                ContentItem::ToolCall { call } => calls.contains(&call.call_id),
+                ContentItem::ToolResult { result } => calls.contains(&result.call_id),
+                _ => false,
+            } {
+                selected_ids.insert(event_id.clone());
+            }
+        }
+        let ordered = source
+            .clone()
+            .filter(|(id, _)| selected_ids.remove(*id))
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        if let Some(id) = selected_ids.into_iter().next() {
+            return Err(HistoryError::InvalidDeliverySource { event_id: id });
+        }
+        Self::from_selected(source, &ordered, recovered_calls)
+    }
+
+    pub(crate) fn from_selected<'a>(
+        source: impl IntoIterator<Item = (&'a EventId, &'a ContentItem)>,
+        selected: &[EventId],
+        recovered_calls: &std::collections::BTreeSet<crate::domain::tools::ToolCallId>,
+    ) -> Result<Self, HistoryError> {
+        let mut remaining = selected.iter();
+        let mut next = remaining.next();
+        let mut items = Vec::with_capacity(selected.len());
+        for (event_id, item) in source {
+            if next == Some(event_id) {
+                items.push((event_id.clone(), item.clone()));
+                next = remaining.next();
+            }
+        }
+        if let Some(event_id) = next {
+            return Err(HistoryError::InvalidDeliverySource {
+                event_id: event_id.clone(),
+            });
+        }
+        let content = items
+            .iter()
+            .map(|(_, item)| item.clone())
+            .collect::<Vec<_>>();
+        let mut original = ConversationHistory::default();
+        for item in &content {
+            original.append_content_item(item.clone())?;
+        }
+        if let Some((call_id, _)) = original
+            .unpaired_tool_calls_in_call_order()
+            .into_iter()
+            .find(|(id, _)| !recovered_calls.contains(id))
+        {
+            return Err(HistoryError::MissingToolResult { call_id });
+        }
+        let normalized = normalize_content_items(&content)?;
+        ConversationHistory::from_complete_content_items(&normalized)?;
+        Ok(Self { items })
+    }
+
+    pub(crate) fn items(&self) -> &[(EventId, ContentItem)] {
+        &self.items
+    }
+}
+
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum HistoryError {
+    #[error("selected History Event `{event_id}` is missing, duplicated, or out of order")]
+    InvalidDeliverySource { event_id: EventId },
     #[error("provider continuation reasoning is not Conversation History")]
     ProviderContinuationItem,
     #[error("Tool Call `{call_id}` already exists in History")]

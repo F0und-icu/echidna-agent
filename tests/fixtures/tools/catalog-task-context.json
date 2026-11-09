@@ -1,0 +1,54 @@
+{
+  "agent-research-false-memory-false": {
+    "count": 25,
+    "sha256": "9d3a1c08a22c7500a07f88bb0fbaae464e347ce7f68e9307402ad776f106556b"
+  },
+  "agent-research-false-memory-true": {
+    "count": 27,
+    "sha256": "a1686cc8872fd9ec6ac16b32d814d5b3ea4015f1b816c451232ebfe00a05cd38"
+  },
+  "agent-research-true-memory-false": {
+    "count": 27,
+    "sha256": "b6efbc9a865bec48c1e136ce2c345f42f616f8f0c1a151dba2888c7c17c0c087"
+  },
+  "agent-research-true-memory-true": {
+    "count": 29,
+    "sha256": "3a1a2a94bd3072f163572ae8406af718e285d090fd087d0f47cc8d6876aa7c89"
+  },
+  "project-window-1048576-verified-false-automatic-false": {
+    "count": 29,
+    "sha256": "16cc17329f91697d9eef68b0bced1cb3f5662046240b8e564f596d3cfe0e9464"
+  },
+  "project-window-1048576-verified-true-automatic-false": {
+    "count": 29,
+    "sha256": "dde6a766224e9891c827099d1c15166913ee2648acbb1b45ab5a3390671a9cd9"
+  },
+  "project-window-1048576-verified-true-automatic-true": {
+    "count": 29,
+    "sha256": "496f05fcaf5bc655a310f14822559a78e57b31d24d541e2c6cc343779465f59b"
+  },
+  "project-window-272000-verified-false-automatic-false": {
+    "count": 29,
+    "sha256": "641b1ec1fc51436f0573e2e8b74dc327b502a6785931e9f77a334819f468a5da"
+  },
+  "project-window-272000-verified-true-automatic-false": {
+    "count": 29,
+    "sha256": "125893d3d4e60091a6c6729fe64cca35e085f4802617eac9d498f3bceed293df"
+  },
+  "project-window-272000-verified-true-automatic-true": {
+    "count": 29,
+    "sha256": "83d8c62c0dedf4a5c55113c73f56e0a5ef69620d716ba032d69da516d2c3d481"
+  },
+  "project-window-32768-verified-false-automatic-false": {
+    "count": 29,
+    "sha256": "3a1a2a94bd3072f163572ae8406af718e285d090fd087d0f47cc8d6876aa7c89"
+  },
+  "project-window-32768-verified-true-automatic-false": {
+    "count": 29,
+    "sha256": "c5094dffec75b732c7a751da34aa862ab14240e3f3be908028f56ba137a2784a"
+  },
+  "project-window-32768-verified-true-automatic-true": {
+    "count": 29,
+    "sha256": "e8d665c810a57a9ea730ac685cc49965495128865309e1e7a6a4e0eee3ea8007"
+  }
+}

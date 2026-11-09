@@ -195,7 +195,7 @@ pub(super) fn apply_completed<Provider: crate::ports::model::ModelProvider + ?Si
         session.session_id.as_str(),
     )?);
     agent.resume_from_session(&state, provider_session, validation.as_ref())?;
-    session.binding = preview.binding;
+    session.set_binding(preview.binding)?;
     console_eprintln!(
         "[RSI applied] revision {}; next request uses the new instructions. Structural publication permits a trial; improvement remains unverified.",
         session.binding.definition().digest().as_str()

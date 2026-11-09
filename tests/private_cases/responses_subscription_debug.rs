@@ -385,7 +385,10 @@ mod debug_regression {
             fn role(&self) -> &'static str {
                 "primary"
             }
-            fn begin(&self) -> Box<dyn RequestObserver> {
+            fn begin(
+                &self,
+                _: crate::ports::model::ModelRequestPresentation,
+            ) -> Box<dyn RequestObserver> {
                 Box::new(Recorder(Arc::clone(&self.0)))
             }
             fn notify(&self, notice: ResponseNotice) {

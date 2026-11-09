@@ -1,6 +1,6 @@
 //! Append-before-apply Session composition through Event ports.
 
-use crate::domain::events::{ApplyOutcome, EventEnvelope};
+use crate::domain::events::{ApplyOutcome, EventEnvelope, EventId};
 use crate::domain::session::{SessionError, SessionReducer, SessionState};
 use crate::ports::EventSink;
 
@@ -45,6 +45,18 @@ pub struct SessionProjection {
     state: SessionState,
     compaction_source: Option<crate::domain::session::TaskCompactionValidationFacts>,
     current_source: Option<crate::domain::session::SessionSourceIdentity>,
+}
+
+struct TaskPlanReplay {
+    session: crate::domain::context::ProviderSessionRef,
+    plan: crate::domain::context::ContextPlan,
+    requires_full: bool,
+    first: bool,
+    selection: crate::domain::session::TaskContextSelected,
+    source: SessionState,
+    capture: crate::domain::session::TaskContextCapture,
+    research_units: Vec<crate::domain::task_context_research::ResearchTaskUnit>,
+    delivery: Option<crate::app::agent_loop::TaskDeliveryReplay>,
 }
 
 /// Required image/observation references are derived from the verified source
@@ -114,6 +126,10 @@ impl SessionProjection {
         project_id: crate::domain::project::ProjectId,
         events: &[EventEnvelope<serde_json::Value>],
         project_events: &[EventEnvelope<serde_json::Value>],
+        mut load_research_references: impl FnMut() -> Result<
+            crate::domain::research::ResearchReferenceCatalog,
+            SessionError,
+        >,
         blobs: &Store,
     ) -> Result<Self, SessionError>
     where
@@ -121,24 +137,155 @@ impl SessionProjection {
     {
         use crate::domain::session::SessionEvent;
         let mut graphs = std::collections::BTreeMap::new();
+        let mut research_references = None;
+        let empty_references = crate::domain::research::ResearchReferenceCatalog::default();
+        let mut pending_task_plan: Option<TaskPlanReplay> = None;
         let reducer = SessionReducer;
         let mut index = 0usize;
+        let expected_project = project_id.clone();
+        let mut prefix_hash = crate::domain::canonical_json::CanonicalArrayHasher::new();
+        let mut pending_capture = None::<EventId>;
+        let mut captured_source = None::<(EventId, SessionState, String)>;
+        let mut project_hash = None::<(usize, String)>;
         let (state, mut compaction_source, current_source) = reducer
             .reduce_with_compaction_source_checked(
                 project_id,
                 events,
                 project_events,
                 |state, event| {
+                    if index != 0 {
+                        prefix_hash.push(&events[index - 1]).map_err(|error| SessionError::TaskContext { message: format!("Session prefix hashing failed: {error}") })?;
+                        if let Some(pending) = &mut pending_task_plan
+                            && pending.selection.has_complete_request_proof()
+                        {
+                            match SessionEvent::decode(&events[index - 1].event_type, events[index - 1].payload.clone())? {
+                                SessionEvent::AgentDefinitionAppliedAtCheckpoint { .. } => {
+                                    pending.session = state.primary_provider_session()
+                                        .ok_or_else(|| SessionError::TaskContext { message: "checkpoint primary session is absent".to_owned() })?.clone();
+                                    pending.requires_full = true;
+                                    if pending.selection.request_proof_version >= 4 {
+                                        let mut delivery = crate::app::agent_loop::TaskDeliveryReplay::new(&pending.session);
+                                        delivery.set_proof6(pending.selection.request_proof_version >= 6);
+                                        pending.delivery = Some(delivery);
+                                    }
+                                }
+                                SessionEvent::CompactionCreated { .. } => {
+                                    pending.requires_full = true;
+                                    if let Some(delivery) = &mut pending.delivery { delivery.reset_compaction(); }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    if let Some(id) = pending_capture.take() {
+                        captured_source = Some((id, state.clone(), prefix_hash.finish()));
+                    }
                     verify_completed_event(state, event, blobs)?;
+                    if event.event_type.as_str() == "session.task_context_captured" {
+                        pending_capture = Some(event.event_id.clone());
+                    }
+                    if let SessionEvent::TaskContextSelected { selection } =
+                        SessionEvent::decode(&event.event_type, event.payload.clone())?
+                    {
+                        let research = state.agent_definition_binding().is_some_and(|binding| binding.definition().research().is_some());
+                        if research && research_references.is_none() { research_references = Some(load_research_references()?); }
+                        let references = if research { research_references.as_ref().expect("Research catalog was loaded") } else { &empty_references };
+                        let project_end = project_events.partition_point(|event| event.sequence.get() <= selection.source.project_stream_watermark());
+                        if project_hash.as_ref().is_none_or(|(end, _)| *end != project_end) {
+                            project_hash = Some((project_end, crate::domain::canonical_json::canonical_array_hash(&project_events[..project_end])
+                                .map_err(|error| SessionError::TaskContext { message: format!("Project prefix hashing failed: {error}") })?));
+                        }
+                        let checkpoint = captured_source.as_ref().filter(|(id, _, _)| id == &selection.capture_event_id)
+                            .map(|(_, state, hash)| (state, hash.as_str(), project_hash.as_ref().expect("Project hash was computed").1.as_str()));
+                        let (plan, requires_full, source, capture, research_units) = verify_task_context_selection(state, &selection, &events[..index], project_events, references, blobs, &expected_project, checkpoint)?;
+                        let requires_full = requires_full || (selection.has_complete_request_proof() && pending_task_plan.as_ref().is_some_and(|pending| pending.selection.has_complete_request_proof() && pending.requires_full));
+                        let delivery = if selection.request_proof_version >= 4 {
+                            let prior = pending_task_plan.take().filter(|pending| pending.selection.request_proof_version >= 4 && pending.session == selection.provider_session).and_then(|pending| pending.delivery);
+                            let mut delivery = prior.unwrap_or_else(|| crate::app::agent_loop::TaskDeliveryReplay::new(&selection.provider_session));
+                            delivery.set_proof6(selection.request_proof_version >= 6);
+                            Some(delivery)
+                        } else { None };
+                        pending_task_plan = Some(TaskPlanReplay { session: selection.provider_session.clone(), plan, requires_full, first: true, selection, source, capture, research_units, delivery });
+                    }
+                    if let SessionEvent::RequestAuditRecorded { manifest } = SessionEvent::decode(&event.event_type, event.payload.clone())?
+                        && let Some(pending) = &mut pending_task_plan
+                        && manifest.provider_session() == Some(&pending.session)
+                        && manifest.improvement_scope().is_none()
+                    {
+                        if pending.selection.request_proof_version >= 4 && manifest.sampling_step_id().is_none() {
+                            return Err(SessionError::TaskContext { message: "primary task audit has no sampling step identity".to_owned() });
+                        }
+                        let replay_inputs = if (!pending.first && pending.selection.has_complete_request_proof()) || pending.selection.request_proof_version >= 4 {
+                            let inputs = crate::app::agent_loop::compile_following_task_context(
+                                &pending.source, state, &pending.capture, &pending.selection,
+                                &events[..index], &pending.research_units,
+                            ).map_err(|error| SessionError::TaskContext { message: format!("primary task suffix compilation failed: {error}") })?;
+                            if pending.first && (inputs.plan.model_input() != pending.plan.model_input() || inputs.plan.delivery_map() != pending.plan.delivery_map()) {
+                                return Err(SessionError::TaskContext { message: "initial task replay plan differs from captured plan".to_owned() });
+                            }
+                            pending.plan = inputs.plan.clone();
+                            Some(inputs)
+                        } else { None };
+                        let plan = &pending.plan;
+                        let actual = manifest.reconstruct_full_logical(|id| blobs.read_blob(id))
+                            .map_err(|error| SessionError::TaskContext { message: format!("primary audit read failed: {error:?}") })?
+                            .ok_or_else(|| SessionError::TaskContext { message: "primary audit has no full logical input".to_owned() })?;
+                        if actual.input() != &plan.model_input() || actual.delivery_map() != plan.delivery_map() {
+                            return Err(SessionError::TaskContext { message: "primary audit differs from independently compiled task source".to_owned() });
+                        }
+                        if pending.requires_full || pending.selection.request_proof_version >= 4 {
+                            let delivered = manifest.reconstruct(|id| blobs.read_blob(id))
+                                .map_err(|error| SessionError::TaskContext { message: format!("primary delivery read failed: {error:?}") })?;
+                            if pending.requires_full && (manifest.delivery().mode() != crate::domain::request_audit::RequestAuditDeliveryMode::Full
+                                || delivered != plan.model_input())
+                            {
+                                return Err(SessionError::TaskContext { message: "new task epoch did not begin with the independently compiled Full input".to_owned() });
+                            }
+                            if let Some(delivery) = &mut pending.delivery {
+                                delivery.verify_attempt(&manifest, &delivered, replay_inputs.expect("proof4 compiles replay inputs"), &pending.capture.common.capabilities)
+                                    .map_err(|error| SessionError::TaskContext { message: format!("primary delivery differs from independently reconstructed source and baseline: {error}") })?;
+                            }
+                        }
+                        pending.first = false;
+                    }
+                    if let SessionEvent::ModelDeliveryCommitted { delivery } = SessionEvent::decode(&event.event_type, event.payload.clone())?
+                        && pending_task_plan.as_ref().is_some_and(|pending| {
+                            state.request_audits().iter().any(|audit| audit.audit_event_id() == delivery.audit_event_id() && audit.provider_session() == Some(&pending.session))
+                        })
+                    {
+                        if pending_task_plan.as_ref().is_some_and(|pending| pending.selection.request_proof_version >= 4) {
+                            let (blob, step) = delivery.output_source().ok_or_else(|| SessionError::TaskContext { message: "accepted task delivery has no output source".to_owned() })?;
+                            let bytes = blobs.read_blob(blob).map_err(|error| SessionError::TaskContext { message: format!("accepted output read failed: {error:?}") })?;
+                            let output: Vec<crate::domain::model::ContentItem> = serde_json::from_slice(&bytes).map_err(|error| SessionError::TaskContext { message: format!("accepted output decode failed: {error}") })?;
+                            let output_history_items = state.verify_model_delivery_output(&output)?;
+                            pending_task_plan.as_mut().expect("proof4 pending task exists").delivery.as_mut().expect("proof4 delivery replay exists")
+                                .accept(delivery.audit_event_id(), step, output, output_history_items)
+                                .map_err(|error| SessionError::TaskContext { message: format!("accepted task delivery reconstruction failed: {error}") })?;
+                        }
+                        if pending_task_plan.as_ref().is_some_and(|pending| pending.selection.request_proof_version == 0) {
+                            pending_task_plan = None;
+                        } else if let Some(pending) = &mut pending_task_plan {
+                            pending.requires_full = false;
+                        }
+                    }
                     if let SessionEvent::CompactionCreated { compaction } =
                         SessionEvent::decode(&event.event_type, event.payload.clone())?
                         && compaction.summary().graph_reference().is_some()
                     {
+                        let research = compaction.summary().schema_version() == 7
+                            && state.agent_definition_binding().is_some_and(|binding| binding.definition().research().is_some());
+                        if research && research_references.is_none() { research_references = Some(load_research_references()?); }
+                        let references = if research { research_references.as_ref().expect("Research catalog was loaded") } else { &empty_references };
+                        let prior_graph = state.latest_compaction()
+                            .and_then(|prior| prior.summary().graph_reference())
+                            .and_then(|(root, _, _, _)| graphs.get(root));
                         let graph = reconstruct_summary_graph(
                             compaction.summary(),
                             &events[..index],
                             project_events,
+                            references,
                             blobs,
+                            prior_graph,
                         )?;
                         compaction.summary().validate_graph_reference(&graph)?;
                         graphs.insert(graph.root_event_id.clone(), graph);
@@ -188,6 +335,40 @@ impl SessionProjection {
         })
     }
 
+    /// External suffixes with task delivery facts require the same Project and
+    /// Blob-backed source reconstruction as an initial Session load.
+    pub(crate) fn suffix_requires_project_replay(
+        &self,
+        events: &[EventEnvelope<serde_json::Value>],
+    ) -> Result<bool, SessionError> {
+        use crate::domain::session::SessionEvent;
+        let proof4 = self
+            .state
+            .latest_task_context_selection()
+            .is_some_and(|(_, selection)| selection.request_proof_version >= 4);
+        for event in events {
+            match SessionEvent::decode(&event.event_type, event.payload.clone())? {
+                SessionEvent::TaskContextSelected { .. } => return Ok(true),
+                SessionEvent::CompactionCreated { compaction }
+                    if compaction.summary().graph_reference().is_some() =>
+                {
+                    return Ok(true);
+                }
+                SessionEvent::RequestAuditRecorded { manifest }
+                    if proof4
+                        && manifest.provider_session().is_some_and(|scope| {
+                            scope.role == crate::domain::context::ProviderSessionRole::Primary
+                        }) =>
+                {
+                    return Ok(true);
+                }
+                SessionEvent::ModelDeliveryCommitted { .. } if proof4 => return Ok(true),
+                _ => {}
+            }
+        }
+        Ok(false)
+    }
+
     pub(crate) fn ingest_durable_verified<Store: crate::ports::artifact::ArtifactStore>(
         &mut self,
         events: Vec<EventEnvelope<serde_json::Value>>,
@@ -218,6 +399,14 @@ impl SessionProjection {
         Store::Error: std::fmt::Debug,
     {
         verify_completed_event(state, &event, blobs)?;
+        if matches!(
+            crate::domain::session::SessionEvent::decode(&event.event_type, event.payload.clone())?,
+            crate::domain::session::SessionEvent::TaskContextSelected { .. }
+        ) {
+            return Err(SessionError::TaskContext {
+                message: "task selection requires project-aware replay".to_owned(),
+            });
+        }
         if let crate::domain::session::SessionEvent::CompactionCreated { compaction } =
             crate::domain::session::SessionEvent::decode(&event.event_type, event.payload.clone())?
             && compaction.summary().graph_reference().is_some()
@@ -390,6 +579,318 @@ impl SessionProjection {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn verify_task_context_selection<Store: crate::ports::artifact::ArtifactStore>(
+    state: &SessionState,
+    selection: &crate::domain::session::TaskContextSelected,
+    events: &[EventEnvelope<serde_json::Value>],
+    project_events: &[EventEnvelope<serde_json::Value>],
+    research_references: &crate::domain::research::ResearchReferenceCatalog,
+    blobs: &Store,
+    project_id: &crate::domain::project::ProjectId,
+    checkpoint: Option<(&SessionState, &str, &str)>,
+) -> Result<
+    (
+        crate::domain::context::ContextPlan,
+        bool,
+        SessionState,
+        crate::domain::session::TaskContextCapture,
+        Vec<crate::domain::task_context_research::ResearchTaskUnit>,
+    ),
+    SessionError,
+>
+where
+    Store::Error: std::fmt::Debug,
+{
+    use crate::domain::session::{SessionEvent, SessionSourceIdentity, TaskContextCapture};
+    let invalid = |message: String| SessionError::TaskContext { message };
+    let end = events.partition_point(|event| event.sequence <= selection.source.watermark());
+    let project_end = project_events.partition_point(|event| {
+        event.sequence.get() <= selection.source.project_stream_watermark()
+    });
+    let capture_event = events
+        .get(
+            end.checked_sub(1)
+                .ok_or_else(|| invalid("task source is empty".to_owned()))?,
+        )
+        .ok_or_else(|| invalid("task context capture is absent".to_owned()))?;
+    if capture_event.event_id != selection.capture_event_id
+        || !matches!(SessionEvent::decode(&capture_event.event_type, capture_event.payload.clone())?,
+            SessionEvent::TaskContextCaptured { blob_id } if blob_id == selection.capture_blob)
+    {
+        return Err(invalid(
+            "task context capture does not match its source prefix".to_owned(),
+        ));
+    }
+    let bytes = blobs
+        .read_blob(&selection.capture_blob)
+        .map_err(|error| invalid(format!("task context capture read failed: {error:?}")))?;
+    let capture: TaskContextCapture = serde_json::from_slice(&bytes)
+        .map_err(|error| invalid(format!("task context capture is invalid: {error}")))?;
+    let owned_source_state;
+    let (source, source_state) =
+        if let Some((source_state, session_hash, project_hash)) = checkpoint {
+            let project_watermark = project_events[..project_end]
+                .last()
+                .map_or(0, |event| event.sequence.get());
+            if selection.source.project_id() != project_id
+                || source_state.stream_id() != Some(selection.source.stream_id())
+                || capture_event.sequence != selection.source.watermark()
+                || &capture_event.stream_id != selection.source.stream_id()
+                || session_hash != selection.source.stream_hash()
+                || project_watermark != selection.source.project_stream_watermark()
+                || project_hash != selection.source.project_stream_hash()
+            {
+                return Err(invalid("task context source prefix changed".to_owned()));
+            }
+            (selection.source.clone(), source_state)
+        } else {
+            // Older accepted streams can reference a prior capture. Rebuild that
+            // exact prefix rather than treating the latest checkpoint as its source.
+            let (source, state) = SessionSourceIdentity::from_events(
+                selection.source.project_id().clone(),
+                &events[..end],
+                &project_events[..project_end],
+            )?;
+            owned_source_state = state;
+            (source, &owned_source_state)
+        };
+    if capture.compile.research_enabled
+        != source_state
+            .agent_definition_binding()
+            .is_some_and(|binding| binding.definition().research().is_some())
+    {
+        return Err(invalid(
+            "Research capture does not match the bound AgentDefinition".to_owned(),
+        ));
+    }
+    let (research_candidates, research_omitted) = source_state.task_research_candidates(
+        source.project_id().as_str(),
+        &selection.input_ref,
+        source.project_stream_hash(),
+        &capture.compile,
+        &project_events[..project_end],
+        research_references,
+        capture.expansion.as_ref(),
+        capture.source_refresh,
+    )?;
+    if research_candidates != capture.research_candidates
+        || research_omitted != capture.research_omitted
+    {
+        return Err(invalid(
+            "Research navigation differs from its Project source".to_owned(),
+        ));
+    }
+    let mut expected_candidates = source_state.task_selection_candidates_with_capture(
+        source.project_id().as_str(),
+        &selection.input_ref,
+        &capture.common,
+        &capture.research_candidates,
+        capture.research_omitted,
+        &capture.memory,
+        capture.expansion.as_ref(),
+        capture.source_refresh,
+        capture.candidate_policy_version,
+        &crate::app::context_read::history_navigation_excerpt,
+    )?;
+    if selection.request_proof_version >= 5 {
+        source_state
+            .append_current_visual_candidates(&selection.input_ref, &mut expected_candidates)?;
+    }
+    if (selection.request_proof_version >= 4 && capture.schema_version != 2)
+        || (selection.request_proof_version < 4 && capture.schema_version != 1)
+        || capture.candidate_policy_version
+            != if selection.request_proof_version >= 7 {
+                4
+            } else if selection.request_proof_version >= 6 {
+                3
+            } else if selection.request_proof_version >= 5 {
+                2
+            } else {
+                1
+            }
+        || capture.source_refresh != selection.refresh_of.is_some()
+        || (capture.source_refresh && capture.expansion.is_some())
+        || source != selection.source
+        || expected_candidates != capture.candidates
+    {
+        return Err(invalid(
+            "task context capture does not match its original source".to_owned(),
+        ));
+    }
+    let fragments = capture.common.fragments()?;
+    if capture.schema_version == 2 {
+        use crate::domain::context::ContextFragmentSource;
+        let project_fragments = fragments
+            .iter()
+            .filter(|fragment| fragment.source() == ContextFragmentSource::ProjectSnapshot)
+            .collect::<Vec<_>>();
+        let expected = capture
+            .compile
+            .project_snapshot
+            .as_ref()
+            .map(|snapshot| {
+                if &snapshot.project_id != source.project_id() {
+                    return Err(invalid(
+                        "captured Project Snapshot belongs to a different Project".to_owned(),
+                    ));
+                }
+                let context =
+                    crate::domain::world_state::ProjectSnapshotContext::new(snapshot.clone())
+                        .map_err(|error| {
+                            invalid(format!("captured Project Snapshot is invalid: {error}"))
+                        })?;
+                let policy = capture
+                    .common
+                    .policy
+                    .for_capabilities(&capture.common.capabilities)
+                    .map_err(|error| {
+                        invalid(format!(
+                            "captured Project Snapshot budget is invalid: {error}"
+                        ))
+                    })?;
+                context
+                    .full_fragment_with_limit(policy.state_section_bytes())
+                    .map_err(|error| {
+                        invalid(format!(
+                            "captured Project Snapshot rendering failed: {error}"
+                        ))
+                    })
+            })
+            .transpose()?;
+        if project_fragments.as_slice()
+            != expected.as_ref().into_iter().collect::<Vec<_>>().as_slice()
+        {
+            return Err(invalid(
+                "captured Project Snapshot differs from its common fragment".to_owned(),
+            ));
+        }
+    } else if capture.compile.project_snapshot.is_some() {
+        return Err(invalid(
+            "legacy task capture contains a new Project Snapshot source".to_owned(),
+        ));
+    }
+    let mut selected_research = capture
+        .candidates
+        .context
+        .iter()
+        .filter_map(|candidate| {
+            candidate
+                .research_ref
+                .as_ref()
+                .filter(|_| {
+                    selection
+                        .decision
+                        .required_context_refs
+                        .contains(&candidate.reference)
+                })
+                .cloned()
+        })
+        .collect::<Vec<_>>();
+    selected_research.extend(
+        source_state
+            .selected_summary_research_refs(&selection.decision, source.project_stream_hash())?,
+    );
+    selected_research.sort();
+    selected_research.dedup();
+    let research_units = source_state.task_research_units(
+        source.project_stream_hash(),
+        &capture.compile,
+        &project_events[..project_end],
+        research_references,
+        &selected_research,
+    )?;
+    let (mut expected, _) = source_state.prepare_task_selection(
+        source.clone(),
+        selection.capture_event_id.clone(),
+        selection.capture_blob.clone(),
+        selection.input_ref.clone(),
+        selection.sample_event_id.clone(),
+        &capture.candidates,
+        &research_units,
+        &capture.compile.live_processes,
+        selection.decision.clone(),
+    )?;
+    if let Some(refresh_of) = &selection.refresh_of {
+        let (id, decision) = source_state.deterministic_task_refresh(
+            &selection.input_ref,
+            &capture.candidates,
+            selection.has_complete_request_proof(),
+            selection.request_proof_version,
+        )?;
+        let previous = source_state
+            .latest_task_context_selection()
+            .ok_or_else(|| invalid("source refresh prior selection is absent".to_owned()))?
+            .1;
+        if &id != refresh_of
+            || decision != selection.decision
+            || selection.sample_event_id.is_some()
+        {
+            return Err(invalid(
+                "source refresh differs from its independently derived dependencies".to_owned(),
+            ));
+        }
+        expected.refresh_of = Some(id);
+        expected.task_revisions = previous.task_revisions.clone();
+    }
+    expected.request_proof_version = selection.request_proof_version;
+    expected.planned_context_hash = selection.planned_context_hash.clone();
+    if expected != *selection {
+        return Err(invalid(
+            "task selection differs from its independently reconstructed sources".to_owned(),
+        ));
+    }
+    if let Some(sample_id) = &selection.sample_event_id {
+        let sample = state
+            .task_selection_sample(sample_id)
+            .ok_or_else(|| invalid("selection sample is absent".to_owned()))?;
+        let audit = state
+            .request_audits()
+            .iter()
+            .find(|audit| audit.audit_event_id() == &sample.audit_event_id)
+            .ok_or_else(|| invalid("selection audit is absent".to_owned()))?;
+        let planner = crate::domain::context::ContextPlanner::current()
+            .with_budget_policy(capture.common.policy);
+        let plan = crate::app::agent_loop::compile_selection(
+            &planner,
+            &capture
+                .compile
+                .selection_capabilities(&capture.common.capabilities),
+            &source,
+            &capture.candidates,
+            capture.compile.selection_prompt_version,
+        )
+        .map_err(|error| invalid(format!("selection source compilation failed: {error}")))?;
+        let actual = audit
+            .reconstruct_full_logical(|id| blobs.read_blob(id))
+            .map_err(|error| invalid(format!("selection audit read failed: {error:?}")))?
+            .ok_or_else(|| invalid("selection audit has no full logical input".to_owned()))?;
+        if actual.input() != &plan.model_input() || actual.delivery_map() != plan.delivery_map() {
+            return Err(invalid(
+                "selection audit differs from independently compiled source".to_owned(),
+            ));
+        }
+    }
+    let requires_full = source_state.primary_provider_session()
+        != Some(&selection.provider_session)
+        || !source_state.has_primary_model_delivery(&selection.provider_session);
+    let plan = crate::app::agent_loop::compile_captured_task_context(
+        source_state,
+        &capture,
+        selection,
+        &events[..end],
+        &research_units,
+    )
+    .map_err(|error| invalid(format!("primary task source compilation failed: {error}")))?;
+    Ok((
+        plan,
+        requires_full,
+        source_state.clone(),
+        capture,
+        research_units,
+    ))
+}
+
 fn verify_completed_event<Store: crate::ports::artifact::ArtifactStore>(
     state: &SessionState,
     event: &EventEnvelope<serde_json::Value>,
@@ -446,7 +947,9 @@ fn reconstruct_summary_graph<Store: crate::ports::artifact::ArtifactStore>(
     summary: &crate::domain::session::SessionSummary,
     events: &[EventEnvelope<serde_json::Value>],
     project_events: &[EventEnvelope<serde_json::Value>],
+    research_references: &crate::domain::research::ResearchReferenceCatalog,
     blobs: &Store,
+    prior_graph: Option<&crate::domain::session::VerifiedCompactionGraph>,
 ) -> Result<crate::domain::session::VerifiedCompactionGraph, SessionError>
 where
     Store::Error: std::fmt::Debug,
@@ -497,6 +1000,53 @@ where
         serde_json::from_slice(&capture_bytes)
             .map_err(|error| invalid(format!("Compaction context Blob invalid: {error}")))?;
     let source_state = SessionReducer.reduce(operation[..boundary].iter().cloned())?;
+    match plan.task_selection_event() {
+        Some(expected) => {
+            let (id, selection) = source_state
+                .latest_task_context_selection()
+                .ok_or_else(|| invalid("task Compaction selection is absent".to_owned()))?;
+            if id != expected {
+                return Err(invalid("task Compaction selection changed".to_owned()));
+            }
+            let bytes = blobs
+                .read_blob(&selection.capture_blob)
+                .map_err(|error| invalid(format!("task capture read failed: {error:?}")))?;
+            let task_capture: crate::domain::session::TaskContextCapture =
+                serde_json::from_slice(&bytes)
+                    .map_err(|error| invalid(format!("task capture is invalid: {error}")))?;
+            let end = project_events.partition_point(|event| {
+                event.sequence.get() <= selection.source.project_stream_watermark()
+            });
+            let hash = crate::domain::session::SessionSourceIdentity::project_hash_for_events(
+                &project_events[..end],
+            )?;
+            if hash != selection.source.project_stream_hash() {
+                return Err(invalid("selected Research source changed".to_owned()));
+            }
+            let units = source_state.task_research_units(
+                &hash,
+                &task_capture.compile,
+                &project_events[..end],
+                research_references,
+                &selection.selected_research,
+            )?;
+            crate::app::agent_loop::verify_task_compaction_capture(
+                &source_state,
+                selection,
+                &operation[..boundary],
+                &task_capture,
+                &capture,
+                &units,
+            )
+            .map_err(|error| invalid(format!("task Compaction capture mismatch: {error}")))?;
+        }
+        None if capture.is_task_scoped() => {
+            return Err(invalid(
+                "legacy Compaction has task-scoped capture".to_owned(),
+            ));
+        }
+        None => {}
+    }
     let references = source_state
         .history_items_with_event_ids()
         .map(|(id, _)| id.clone())
@@ -506,8 +1056,17 @@ where
     let project_end = project_events
         .partition_point(|event| event.sequence.get() <= source.project_stream_watermark());
     let project_prefix = &project_events[..project_end];
-    let (entries, contents) =
-        CompactionSourcePlan::source_entries(source, &operation[..boundary], project_prefix)?;
+    let (entries, contents) = match plan.task_selection_event() {
+        Some(event) => CompactionSourcePlan::source_entries_for_selection(
+            source,
+            &operation[..boundary],
+            project_prefix,
+            Some(event),
+        )?,
+        None => {
+            CompactionSourcePlan::source_entries(source, &operation[..boundary], project_prefix)?
+        }
+    };
     if entries != plan.entries() {
         return Err(invalid("Compaction source manifest changed".to_owned()));
     }
@@ -535,6 +1094,7 @@ where
                         ))
                     })?
                     .ok_or_else(|| invalid("Compaction node full audit unavailable".to_owned()))?;
+                proofs.insert(sample.audit_event_id().clone(), proof);
                 let inputs = match &node.input {
                     crate::domain::session::CompactionSourceNodeInput::Source(_) => {
                         std::collections::BTreeMap::new()
@@ -568,7 +1128,6 @@ where
                     (compiled.model_input(), compiled.delivery_map().clone()),
                 );
                 children.insert(node.id.clone(), (event.event_id.clone(), output.to_owned()));
-                proofs.insert(sample.audit_event_id().clone(), proof);
             }
             SessionEvent::ModelUsageRecorded { .. } => {}
             _ => {
@@ -578,6 +1137,10 @@ where
             }
         }
     }
+    let task_fragments = plan
+        .task_selection_event()
+        .map(|_| capture.fragments())
+        .transpose()?;
     let graph = plan.verify_model_node_audits(
         blob,
         &contents,
@@ -586,6 +1149,9 @@ where
         &proofs,
         &expected,
         &capture.capabilities,
+        task_fragments.as_deref(),
+        capture.reference_limit,
+        prior_graph,
     )?;
     verify_compaction_source_blobs(&graph, blobs)?;
     Ok(graph)

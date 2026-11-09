@@ -1,0 +1,1 @@
+{"kind":"text","role":"user","text":"{\"kind\":\"project_snapshot_full\",\"snapshot\":{\"rendered_bytes\":443,\"rendered_prefix\":\"{\\\"cache_schema_version\\\":1,\\\"file_count\\\":3,\\\"file_manifest_hash\\\":\\\"2cfa108b45a61128b539d9677056f28a4d3c\",\"truncated\":true},\"snapshot_hash\":\"4229b320b23ae77a640d62be7116a8661f0610a7064b7142897545858b1726db\"}"}

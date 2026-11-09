@@ -25,6 +25,7 @@ impl super::DurableChatSession {
         references: &[EventId],
         entries: &[CompactionSourceEntry],
         contents: &[String],
+        selection_event: Option<&EventId>,
         byte_limit: usize,
         output_limit: usize,
     ) -> Result<crate::domain::session::VerifiedCompactionGraph, ChatError> {
@@ -40,6 +41,7 @@ impl super::DurableChatSession {
             source,
             entries,
             contents,
+            selection_event,
             references,
             output_limit,
             &max_id,
@@ -245,6 +247,10 @@ impl super::DurableChatSession {
                     })?;
                 proofs.insert(audit_id.clone(), proof);
             }
+            let task_fragments = plan
+                .task_selection_event()
+                .map(|_| capture.fragments())
+                .transpose()?;
             let graph = plan.verify_model_node_audits(
                 &blob_id,
                 contents,
@@ -253,6 +259,13 @@ impl super::DurableChatSession {
                 &proofs,
                 &expected_inputs,
                 &capture.capabilities,
+                task_fragments.as_deref(),
+                capture.reference_limit,
+                projection
+                    .state()
+                    .latest_compaction()
+                    .and_then(|prior| projection.compaction_source_for(prior.summary()))
+                    .and_then(|facts| facts.verified_graph()),
             )?;
             crate::app::session::verify_compaction_source_blobs(&graph, &self.artifacts)?;
             Ok(graph)
@@ -264,6 +277,7 @@ async fn build_plan(
     source: &SessionSourceIdentity,
     entries: &[CompactionSourceEntry],
     contents: &[String],
+    selection_event: Option<&EventId>,
     chunk_bytes: usize,
     output_limit: usize,
     cancellation: &crate::app::cancellation::AgentCancellation,
@@ -349,12 +363,11 @@ async fn build_plan(
         level = next;
     }
     nodes.last_mut().expect("non-empty source tree").is_root = true;
-    Ok(CompactionSourcePlan::new(
-        source.clone(),
-        entries.to_vec(),
-        nodes,
-        contents,
-    )?)
+    let plan = CompactionSourcePlan::new(source.clone(), entries.to_vec(), nodes, contents)?;
+    Ok(match selection_event {
+        Some(event) => plan.with_task_selection(event.clone(), contents)?,
+        None => plan,
+    })
 }
 
 /// Build the entire finite tree and check the actual encoded IR for every
@@ -365,6 +378,7 @@ pub(super) async fn plan(
     source: &SessionSourceIdentity,
     entries: &[CompactionSourceEntry],
     contents: &[String],
+    selection_event: Option<&EventId>,
     references: &[EventId],
     byte_limit: usize,
     maximum_event_id: &EventId,
@@ -380,7 +394,16 @@ pub(super) async fn plan(
     }
     let mut chunk = contents.iter().map(String::len).sum::<usize>().max(1);
     loop {
-        let plan = build_plan(source, entries, contents, chunk, output_limit, cancellation).await?;
+        let plan = build_plan(
+            source,
+            entries,
+            contents,
+            selection_event,
+            chunk,
+            output_limit,
+            cancellation,
+        )
+        .await?;
         let mut source_failed = false;
         let mut merge_failed = false;
         let mut templates = BTreeMap::new();

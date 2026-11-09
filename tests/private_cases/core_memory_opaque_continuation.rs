@@ -603,6 +603,118 @@ mod opaque_core_memory_continuation {
     }
 
     #[tokio::test]
+    async fn legacy_opaque_continuation_rejects_omitted_new_core_before_resampling() {
+        let root = TemporaryDirectory::new("opaque-core-memory-omitted");
+        let project = Project::initialize(root.path()).unwrap();
+        std::fs::write(root.path().join("target.txt"), "synthetic target").unwrap();
+        let call = json!({"type":"function_call", "call_id":"opaque-omitted-read", "name":"read_file",
+            "arguments":json!({"path":"target.txt"}).to_string()});
+        let (url, mut requests, server) = server(vec![completed(
+            "opaque-omitted-first",
+            vec![encrypted_reasoning(), call],
+            None,
+        )])
+        .await;
+        let mut mapping = capabilities();
+        mapping.context_window = 32_768;
+        let provider = ResponsesHttpAdapter::new(
+            ResponsesHttpConfig::new(
+                url,
+                "fixture-subscription",
+                "codex_subscription:opaque-core-memory",
+                mapping,
+            )
+            .with_codex_subscription_profile(),
+            Arc::new(FixtureCredential),
+        );
+        let tools = ToolRegistry::for_project(project.root());
+        let mut agent = AgentLoop::new(&provider, &tools)
+            .with_output_store(LocalArtifactStore::for_project(&project));
+        let audit = RequestAuditRunContext::new(
+            RequestAuditBinding::new(
+                project.project_id().clone(),
+                StreamId::new("session:opaque-omitted"),
+            )
+            .unwrap(),
+            ResponsesHttpAdapter::request_adapter_version(),
+        );
+        let mut attempts = 0;
+        let mut record = |_| {
+            attempts += 1;
+            Ok(())
+        };
+        let mut follow_up =
+            |_| -> ViewImageFollowUpFuture<'_> { Box::pin(async { unreachable!("no image") }) };
+        let mut text = |_: &str| Ok(());
+        let mut start = ignore_tool_start;
+        let mut durable = |_: ChatDurabilityCheckpoint<'_>| Ok(());
+        let mut refreshes = 0;
+        let mut refresh = || {
+            refreshes += 1;
+            let snapshot = LocalProjectSnapshot::new(&project)
+                .inspect(&tools.specs(), &[], "opaque-omission")
+                .unwrap();
+            let core = if refreshes == 1 {
+                None
+            } else {
+                Some(
+                    ContextFragment::new(
+                        ContextFragmentId::new("memory-core:project:replacement").unwrap(),
+                        ContextFragmentSource::ProjectMemoryCore,
+                        ContextFragmentPriority::High,
+                        FragmentCachePolicy::ContentAddressed,
+                        ContextFragmentContent::ContentItems {
+                            items: vec![ContentItem::user_text("M".repeat(64 * 1024))],
+                        },
+                    )
+                    .unwrap(),
+                )
+            };
+            Ok(CurrentContextState::new(
+                None,
+                ProjectSnapshotContext::new(snapshot.snapshot).unwrap(),
+                core,
+            ))
+        };
+        let error = agent
+            .run_turn_audited_with_context_refresh_and_vision_stages(
+                "inspect target",
+                Vec::new(),
+                AgentCancellation::new(),
+                &audit,
+                &mut record,
+                CliRuntimeStages::new(
+                    &mut follow_up,
+                    &mut text,
+                    &mut start,
+                    &mut durable,
+                    &mut refresh,
+                    Arc::new(ModelRequestBudget::new(3)),
+                ),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                AgentLoopError::ProviderContinuationUnavailable {
+                    reason: crate::app::agent_loop::ContinuationRejection::CoreMemoryChanged
+                }
+            ),
+            "{error:?}"
+        );
+        assert_eq!(
+            attempts, 1,
+            "rejected continuation never reaches the provider"
+        );
+        assert_eq!(agent.history().ensure_all_tool_calls_paired(), Ok(()));
+        let _ = requests.recv().await.unwrap();
+        assert!(requests.try_recv().is_err());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn subscription_opaque_reasoning_preserves_project_and_agent_core_memory_replacements() {
         for (label, memory_scope) in [
             ("project", MemoryScope::Project),

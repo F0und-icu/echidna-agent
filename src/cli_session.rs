@@ -138,6 +138,11 @@ pub(crate) fn resolve_resume_target(
             project.project_id().clone(),
             &events,
             &project_events,
+            || {
+                crate::adapters::research_projection::load_reference_catalog(project).map_err(
+                    |message| crate::domain::session::SessionError::TaskContext { message },
+                )
+            },
             &crate::adapters::artifact_store::LocalArtifactStore::for_project(project),
         )
         .map_err(|error| session_error(error.to_string()))?
@@ -246,6 +251,10 @@ pub(crate) fn end(requested: &str) -> Result<(), CliError> {
         project.project_id().clone(),
         &events,
         &project_events,
+        || {
+            crate::adapters::research_projection::load_reference_catalog(&project)
+                .map_err(|message| crate::domain::session::SessionError::TaskContext { message })
+        },
         &crate::adapters::artifact_store::LocalArtifactStore::for_project(&project),
     )
     .map_err(|error| session_error(error.to_string()))?;
@@ -473,6 +482,10 @@ fn reduce(project: &Project, session_id: &StreamId) -> Result<SessionState, Stri
         project.project_id().clone(),
         &events,
         &project_events,
+        || {
+            crate::adapters::research_projection::load_reference_catalog(project)
+                .map_err(|message| crate::domain::session::SessionError::TaskContext { message })
+        },
         &crate::adapters::artifact_store::LocalArtifactStore::for_project(project),
     )
     .map(|projection| projection.state().clone())

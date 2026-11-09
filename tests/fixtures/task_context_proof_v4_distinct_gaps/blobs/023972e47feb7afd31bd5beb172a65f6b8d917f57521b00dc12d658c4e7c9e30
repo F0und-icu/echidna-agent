@@ -1,0 +1,12 @@
+schema_version = 1
+id = "gap-fixture"
+name = "Gap fixture"
+[instructions]
+persona_file = "persona.md"
+work_file = "work.md"
+method_files = []
+[context]
+personal = "none"
+project = "none"
+memory = "none"
+[tools]

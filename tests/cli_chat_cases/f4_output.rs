@@ -1,3 +1,7 @@
+use super::task_context::{
+    ScriptedResponse::{ContinueSelection, InitialSelection, Response},
+    initial_selection_response, selector_candidates, spawn_scripted_responses_server,
+};
 use super::*;
 
 fn reasoning_response() -> String {
@@ -13,7 +17,10 @@ fn reasoning_response() -> String {
 fn f4_default_reasoning_is_separate_from_answer_and_history_in_all_builds() {
     let root = TemporaryDirectory::new("f4-default-reasoning");
     initialize_project(root.path());
-    let server = spawn_responses_server(vec![(200, reasoning_response())]);
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(200, reasoning_response()),
+    ]);
     let config = write_config(root.path(), &server.base_url);
     let output = run_chat(root.path(), &config, "hello\n/exit\n", &[]);
     assert!(
@@ -55,7 +62,7 @@ fn f4_item_only_reasoning_and_incomplete_stream_are_labeled_without_success() {
         "data: {}\n\n",
         json!({"type":"response.output_item.done","item":{"type":"reasoning","content":[{"type":"reasoning_text","text":"F4_ITEM_ONLY"}]}})
     );
-    let server = spawn_responses_server(vec![(200, body)]);
+    let server = spawn_scripted_responses_server(vec![InitialSelection, Response(200, body)]);
     let config = write_config(root.path(), &server.base_url);
     let output = run_chat(root.path(), &config, "hello\n", &[]);
     assert!(!output.status.success());
@@ -77,7 +84,7 @@ fn f4_default_shows_raw_rejected_events_without_committing_them() {
         let root = TemporaryDirectory::new("f4-rejected-event-default");
         initialize_project(root.path());
         let body = format!("data: {event}\n\n");
-        let server = spawn_responses_server(vec![(200, body)]);
+        let server = spawn_scripted_responses_server(vec![InitialSelection, Response(200, body)]);
         let config = write_config(root.path(), &server.base_url);
         let output = run_chat(root.path(), &config, "hello\n/exit\n", &[]);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -151,7 +158,7 @@ fn f4_reasoning_dedup_requires_exact_delta_text_match() {
             json!({"type":"response.output_item.done","item":{"type":"reasoning","content":[{"type":"reasoning_text","text":completed}]}}),
             text_response("F4_FINAL_MARKER", "f4-reasoning-dedup")
         );
-        let server = spawn_responses_server(vec![(200, body)]);
+        let server = spawn_scripted_responses_server(vec![InitialSelection, Response(200, body)]);
         let config = write_config(root.path(), &server.base_url);
         let output = run_chat(root.path(), &config, "hello\n/exit\n", &[]);
         assert!(output.status.success());
@@ -187,6 +194,12 @@ fn assert_reasoning_streams(extra_args: &[&str]) {
     );
     let (release, released) = mpsc::channel();
     let server = thread::spawn(move || {
+        let (mut selection_socket, _) = listener.accept().unwrap();
+        selection_socket.set_read_timeout(Some(F2A_WAIT)).unwrap();
+        let selection_wire = request_body(&read_http_request(&mut selection_socket));
+        let selection_body = initial_selection_response(&selection_wire, "f4-stream-selection");
+        f3_context::write_sse_response(&mut selection_socket, &selection_body);
+        drop(selection_socket);
         let (mut socket, _) = listener.accept().unwrap();
         socket.set_read_timeout(Some(F2A_WAIT)).unwrap();
         let _ = read_http_request(&mut socket);
@@ -280,7 +293,8 @@ fn f4_debug_shows_unparseable_sse_and_http_bodies() {
         } else {
             malformed.to_owned()
         };
-        let server = spawn_responses_server(vec![(status, body)]);
+        let server =
+            spawn_scripted_responses_server(vec![InitialSelection, Response(status, body)]);
         let config = write_config(root.path(), &server.base_url);
         let output = run_chat(root.path(), &config, "hello\n", &["--debug"]);
         assert!(!output.status.success());
@@ -297,7 +311,7 @@ fn f4_debug_bounds_http_error_capture_without_partial_body_output() {
     initialize_project(root.path());
     let body = json!({"error":{"message":format!("F4_OVERSIZED_BODY{}", "x".repeat(70 * 1024))}})
         .to_string();
-    let server = spawn_responses_server(vec![(500, body)]);
+    let server = spawn_scripted_responses_server(vec![InitialSelection, Response(500, body)]);
     let config = write_config(root.path(), &server.base_url);
     let output = run_chat(root.path(), &config, "hello\n", &["--debug"]);
     assert!(!output.status.success());
@@ -313,15 +327,16 @@ fn f4_debug_matches_actual_full_and_incremental_wire_and_paired_tool_output() {
     let root = TemporaryDirectory::new("f4-debug-wire");
     initialize_project(root.path());
     fs::write(root.path().join("fixture.txt"), "F4_TOOL_RESULT").unwrap();
-    let server = spawn_responses_server(vec![
-        (
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(
             200,
             tool_calls_response(
                 &[("f4-read", "read_file", json!({"path":"fixture.txt"}))],
                 "f4-tool",
             ),
         ),
-        (200, reasoning_response()),
+        Response(200, reasoning_response()),
     ]);
     let config = write_config(root.path(), &server.base_url);
     let output = run_chat(
@@ -336,11 +351,14 @@ fn f4_debug_matches_actual_full_and_incremental_wire_and_paired_tool_output() {
         String::from_utf8_lossy(&output.stderr)
     );
     let requests = debug_requests(&output.stderr);
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 3);
+    let selection = f2a_request_body(&server.requests, "F4 initial selection");
+    selector_candidates(&selection);
     let first = f2a_request_body(&server.requests, "F4 first request");
     let second = f2a_request_body(&server.requests, "F4 second request");
-    assert_request_content(&requests[0], &first);
-    assert_request_content(&requests[1], &second);
+    assert_request_content(&requests[0], &selection);
+    assert_request_content(&requests[1], &first);
+    assert_request_content(&requests[2], &second);
     let tools = first["tools"].as_array().unwrap();
     assert!(
         !tools.is_empty(),
@@ -360,7 +378,7 @@ fn f4_debug_matches_actual_full_and_incremental_wire_and_paired_tool_output() {
         }
     }
     assert_eq!(second["previous_response_id"], "f4-tool");
-    assert_ne!(requests[0].lines().next(), requests[1].lines().next());
+    assert_ne!(requests[1].lines().next(), requests[2].lines().next());
     let stderr = String::from_utf8_lossy(&output.stderr);
     for marker in [
         "F4_USER_PROMPT",
@@ -394,10 +412,12 @@ fn f4_large_continuation_rejection_preserves_full_fallback() {
         let root = TemporaryDirectory::new("f4-large-continuation");
         initialize_project(root.path());
         let body = json!({"error":{"code":"previous_response_not_found","message":format!("F4_LARGE_REJECTION{}", "x".repeat(70 * 1024))}}).to_string();
-        let server = spawn_responses_server(vec![
-            (200, text_response("F4_FIRST", "f4-first")),
-            (400, body),
-            (200, text_response("F4_RECOVERED", "f4-recovered")),
+        let server = spawn_scripted_responses_server(vec![
+            InitialSelection,
+            Response(200, text_response("F4_FIRST", "f4-first")),
+            ContinueSelection { usage: None },
+            Response(400, body),
+            Response(200, text_response("F4_RECOVERED", "f4-recovered")),
         ]);
         let config = write_config(root.path(), &server.base_url);
         let args = if debug { &["--debug"][..] } else { &[][..] };
@@ -408,7 +428,11 @@ fn f4_large_continuation_rejection_preserves_full_fallback() {
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(String::from_utf8_lossy(&output.stdout).contains("F4_RECOVERED"));
+        let initial = f2a_request_body(&server.requests, "initial selection");
+        selector_candidates(&initial);
         let first = f2a_request_body(&server.requests, "first Full request");
+        let selection = f2a_request_body(&server.requests, "continuation selection");
+        selector_candidates(&selection);
         let incremental = f2a_request_body(&server.requests, "rejected incremental request");
         let fallback = f2a_request_body(&server.requests, "Full fallback request");
         assert!(first.get("previous_response_id").is_none());
@@ -419,8 +443,12 @@ fn f4_large_continuation_rejection_preserves_full_fallback() {
             assert_eq!(stderr.matches("F4_LARGE_REJECTION").count(), 1);
             if debug {
                 let requests = debug_requests(&output.stderr);
-                assert_eq!(requests.len(), 3);
-                for (record, actual) in requests.iter().zip([first, incremental, fallback]) {
+                assert_eq!(requests.len(), 5);
+                for (record, actual) in
+                    requests
+                        .iter()
+                        .zip([initial, first, selection, incremental, fallback])
+                {
                     assert_request_content(record, &actual);
                 }
             }
@@ -434,7 +462,7 @@ fn f4_debug_reports_http_error_body_without_printing_credential() {
     let root = TemporaryDirectory::new("f4-debug-http-error");
     initialize_project(root.path());
     let body = json!({"error":{"message":"F4_HTTP_ERROR loopback-primary-secret", "api_key":"other-secret-value"}}).to_string();
-    let server = spawn_responses_server(vec![(500, body)]);
+    let server = spawn_scripted_responses_server(vec![InitialSelection, Response(500, body)]);
     let config = write_config(root.path(), &server.base_url);
     let output = run_chat(root.path(), &config, "hello\n", &["--debug"]);
     assert!(!output.status.success());
@@ -454,8 +482,10 @@ fn f4_debug_covers_both_image_routes_and_omits_image_bytes() {
         initialize_project(root.path());
         append_research_snapshot(&Project::discover(root.path()).unwrap(), "current");
         fs::write(root.path().join("screen.png"), png_bytes(16, 12)).unwrap();
-        let primary =
-            spawn_responses_server(vec![(200, text_response("F4_IMAGE_DONE", "f4-primary"))]);
+        let primary = spawn_scripted_responses_server(vec![
+            InitialSelection,
+            Response(200, text_response("F4_IMAGE_DONE", "f4-primary")),
+        ]);
         let vision = (!direct).then(|| {
             spawn_responses_server(vec![(
                 200,
@@ -480,14 +510,14 @@ fn f4_debug_covers_both_image_routes_and_omits_image_bytes() {
         let requests = debug_requests(&output.stderr);
         let roles: Vec<_> = requests
             .iter()
-            .map(|r| r.split_whitespace().next().unwrap())
+            .map(|r| r.split_once(" #").unwrap().0)
             .collect();
         assert_eq!(
             roles,
             if direct {
-                vec!["primary"]
+                vec!["task selection", "primary"]
             } else {
-                vec!["vision", "primary"]
+                vec!["vision", "task selection", "primary"]
             }
         );
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -498,9 +528,11 @@ fn f4_debug_covers_both_image_routes_and_omits_image_bytes() {
             assert!(stderr.contains("[debug Vision output · pending]"));
             assert!(stderr.contains("F4_IMAGE_OBSERVATION"));
         }
+        selector_candidates(&f2a_request_body(&primary.requests, "F4 image selection"));
+        let primary_wire = f2a_request_body(&primary.requests, "F4 image Primary wire");
         let wire = match &vision {
             Some(vision) => f2a_request_body(&vision.requests, "F4 Vision wire"),
-            None => f2a_request_body(&primary.requests, "F4 Direct wire"),
+            None => primary_wire,
         };
         assert!(wire.to_string().contains("data:image/png;base64,"));
         primary.join();
@@ -514,7 +546,10 @@ fn f4_debug_covers_both_image_routes_and_omits_image_bytes() {
 fn f4_debug_flag_works_in_all_builds() {
     let root = TemporaryDirectory::new("f4-debug-all-builds");
     initialize_project(root.path());
-    let server = spawn_responses_server(vec![(200, text_response("F4_ALL_BUILDS", "f4-all"))]);
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(200, text_response("F4_ALL_BUILDS", "f4-all")),
+    ]);
     let config = write_config(root.path(), &server.base_url);
     let output = run_chat(root.path(), &config, "hello\n/exit\n", &["--debug"]);
     assert!(
@@ -537,7 +572,7 @@ fn f4_reasoning_redaction_does_not_merge_distinct_original_items() {
         json!({"type":"response.output_item.done","item":{"type":"reasoning","content":[{"type":"reasoning_text","text":"[redacted]"}]}}),
         text_response("F4_FINAL_MARKER", "f4-redaction-equality")
     );
-    let server = spawn_responses_server(vec![(200, body)]);
+    let server = spawn_scripted_responses_server(vec![InitialSelection, Response(200, body)]);
     let config = write_config(root.path(), &server.base_url);
     let output = run_chat(root.path(), &config, "hello\n/exit\n", &[]);
     assert!(

@@ -23,3 +23,4 @@ pub(crate) use render::PublishedAuditBlob;
 /// v1 lacks renderer/Tool-plan binding, v2 lacks the delivery map, and v3 lacks
 /// independently reconstructible logical components. All remain readable.
 pub const REQUEST_AUDIT_MANIFEST_SCHEMA_VERSION: u16 = 4;
+pub(crate) const TASK_REQUEST_AUDIT_MANIFEST_SCHEMA_VERSION: u16 = 5;

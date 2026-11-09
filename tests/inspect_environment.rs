@@ -68,8 +68,9 @@ async fn inspect_environment_fixture_child() {
         ToolResultStatus::Succeeded,
         "{fixture}"
     );
+    // Serial libtest output may leave its test-name prefix on the current line.
     println!(
-        "ENV_RESULT={}",
+        "\nENV_RESULT={}",
         serde_json::to_string(&outcome.result.output).expect("environment output is JSON")
     );
 }

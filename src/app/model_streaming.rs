@@ -48,6 +48,8 @@ pub enum ModelStreamingError {
         "Compaction summary exceeds its byte limit: actual={actual} bytes, maximum={maximum} bytes (UTF-8)"
     )]
     CompactionSummaryTooLarge { actual: usize, maximum: usize },
+    #[error("task selection output is {actual} bytes, above the {maximum}-byte limit")]
+    TaskSelectionTooLarge { actual: usize, maximum: usize },
 }
 
 /// Application service for one provider-neutral streaming model request.

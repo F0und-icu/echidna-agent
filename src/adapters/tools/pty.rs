@@ -71,6 +71,20 @@ impl PtySessions {
             )
         })
     }
+
+    pub(super) fn live_processes(&self) -> Vec<(PtySessionId, PtySessionStatus)> {
+        lock_table(&self.sessions)
+            .entries
+            .iter()
+            .filter(|(_, entry)| {
+                matches!(
+                    entry.status,
+                    PtySessionStatus::Running | PtySessionStatus::Stopping
+                )
+            })
+            .map(|(id, entry)| (id.clone(), entry.status))
+            .collect()
+    }
 }
 
 #[derive(Default)]

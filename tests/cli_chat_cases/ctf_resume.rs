@@ -1,3 +1,7 @@
+use super::task_context::{
+    ScriptedResponse::{InitialSelection, Response},
+    selector_candidates, spawn_scripted_responses_server,
+};
 use super::*;
 use echidna::domain::context::{ProviderSessionId, ProviderSessionRef, ProviderSessionRole};
 use echidna::domain::model::ContentItem;
@@ -10,7 +14,10 @@ fn ctf_r0_clean_binary_paste_matches_durable_history_audit_and_actual_request() 
     fs::write(root.path().join("target.txt"), "synthetic target only").unwrap();
     initialize_project(root.path());
     assert!(session_ids(root.path()).is_empty());
-    let server = spawn_responses_server(vec![(200, text_response("recorded", "ctf-r0"))]);
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(200, text_response("recorded", "ctf-r0")),
+    ]);
     let config = write_config(harness.path(), &server.base_url);
     let task = "Inspect target.txt in the declared host environment.\n/phase verification\nDo not read WP, EXP, solutions or prior sessions.";
     let child = spawn_f2a_chat(
@@ -25,6 +32,8 @@ fn ctf_r0_clean_binary_paste_matches_durable_history_audit_and_actual_request() 
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    let selection = f2a_request_body(&server.requests, "CTF clean paste selection");
+    assert_eq!(selector_candidates(&selection)["input"]["text"], task);
     let request = f2a_request_body(&server.requests, "CTF clean paste");
     f2a_join_server(server, "CTF clean paste");
     let users: Vec<_> = request["input"]
@@ -40,8 +49,8 @@ fn ctf_r0_clean_binary_paste_matches_durable_history_audit_and_actual_request() 
     let state = reduced_session(&project, &session);
     assert_eq!(state.history().items()[0], ContentItem::user_text(task));
     assert_eq!(state.history().items().len(), 2);
-    assert_eq!(state.request_audits().len(), 1);
-    let audit = state.request_audits()[0]
+    assert_eq!(state.request_audits().len(), 2);
+    let audit = state.request_audits()[1]
         .reconstruct(|blob| {
             fs::read(
                 root.path()
@@ -152,9 +161,15 @@ fn ctf_r1_repeated_full_resume_repairs_wire_without_fabricating_durable_results(
         .join(session.as_str())
         .join("events.jsonl");
     let mut prefix = fs::read(&event_path).unwrap();
-    let server = spawn_responses_server(vec![
-        (200, text_response("first recovery", "ctf-r1-first")),
-        (200, text_response("second recovery", "ctf-r1-second")),
+    use super::task_context::{
+        ScriptedResponse::{ContinueSelection, InitialSelection, Response},
+        selector_candidates, spawn_scripted_responses_server,
+    };
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(200, text_response("first recovery", "ctf-r1-first")),
+        ContinueSelection { usage: None },
+        Response(200, text_response("second recovery", "ctf-r1-second")),
     ]);
     let config = write_config(harness.path(), &server.base_url);
     fs::write(
@@ -177,15 +192,34 @@ fn ctf_r1_repeated_full_resume_repairs_wire_without_fabricating_durable_results(
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+        selector_candidates(&f2a_request_body(
+            &server.requests,
+            "CTF Full Resume source selection",
+        ));
         let request = f2a_request_body(&server.requests, "CTF Full Resume");
         assert!(request.get("previous_response_id").is_none());
         let items = request["input"].as_array().unwrap();
-        assert_eq!(items[1]["type"], "function_call");
-        assert_eq!(items[1]["call_id"], "ctf-r1-open");
-        assert_eq!(items[2]["type"], "function_call_output");
-        assert_eq!(items[2]["call_id"], "ctf-r1-open");
-        assert!(items[2]["output"].as_str().unwrap().contains("unknown"));
-        assert!(json_contains_text(&items[3], "earlier failed resume"));
+        let call = items
+            .iter()
+            .position(|item| item["type"] == "function_call" && item["call_id"] == "ctf-r1-open")
+            .unwrap();
+        assert!(
+            items[..call]
+                .iter()
+                .any(|item| json_contains_text(item, "initial task"))
+        );
+        assert_eq!(items[call + 1]["type"], "function_call_output");
+        assert_eq!(items[call + 1]["call_id"], "ctf-r1-open");
+        assert!(
+            items[call + 1]["output"]
+                .as_str()
+                .unwrap()
+                .contains("unknown")
+        );
+        assert!(json_contains_text(
+            &items[call + 2],
+            "earlier failed resume"
+        ));
         assert!(json_contains_text(items.last().unwrap(), turn));
         assert_eq!(
             items
@@ -278,10 +312,14 @@ fn resume_uses_atomic_recorded_result_without_replaying_or_inventing_history() {
             .join(".echidna/sessions/known-outcome/events.jsonl");
         let prefix = fs::read(&path).unwrap();
         if complete_outcome {
-            let server = spawn_responses_server(vec![(
-                200,
-                text_response("reported known value", "known-resume"),
-            )]);
+            use super::task_context::{
+                ScriptedResponse::{InitialSelection, Response},
+                selector_candidates, spawn_scripted_responses_server,
+            };
+            let server = spawn_scripted_responses_server(vec![
+                InitialSelection,
+                Response(200, text_response("reported known value", "known-resume")),
+            ]);
             let config = write_config(harness.path(), &server.base_url);
             let output = f2a_wait_child(
                 spawn_f2a_chat(
@@ -297,6 +335,10 @@ fn resume_uses_atomic_recorded_result_without_replaying_or_inventing_history() {
                 "{}",
                 String::from_utf8_lossy(&output.stderr)
             );
+            selector_candidates(&f2a_request_body(
+                &server.requests,
+                "known durable source selection",
+            ));
             let request = f2a_request_body(&server.requests, "known durable result");
             let outputs = request["input"]
                 .as_array()

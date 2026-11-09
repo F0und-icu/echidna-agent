@@ -1,4 +1,4 @@
-//! Actual input sources in an isolated PTY, without another whole-library include.
+//! Actual input sources in an isolated PTY through the shared private harness.
 use std::io::{Read, Write};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 
-pub use echidna::app;
+use crate::{app, terminal_console};
 
 macro_rules! console_eprintln {
     ($($arg:tt)*) => {{
@@ -15,12 +15,10 @@ macro_rules! console_eprintln {
     }};
 }
 
-#[allow(dead_code)]
-#[path = "../src/cli_chat/input.rs"]
+// Exercise the private input owner in the PTY probe without widening CLI visibility.
+#[allow(dead_code, clippy::duplicate_mod)]
+#[path = "../../src/cli_chat/input.rs"]
 mod input;
-#[allow(dead_code)]
-#[path = "../src/terminal_console.rs"]
-mod terminal_console;
 
 #[test]
 fn subprocess_terminal_input_reader_probe() {
@@ -66,7 +64,10 @@ fn subprocess_terminal_input_reader_probe() {
                 .unwrap();
                 assert!(cancellation.is_cancelled());
                 assert!(!closed);
-                assert_eq!(pending.as_deref(), Some("ab中文!🙂"));
+                assert_eq!(
+                    pending.as_ref().map(|input| input.text.as_str()),
+                    Some("ab中文!🙂")
+                );
                 assert!(
                     tokio::time::timeout(Duration::from_millis(50), lines.next_line())
                         .await
@@ -102,7 +103,7 @@ impl Probe {
         let mut command = CommandBuilder::new(std::env::current_exe().unwrap());
         command.args([
             "--exact",
-            "subprocess_terminal_input_reader_probe",
+            "terminal_input::subprocess_terminal_input_reader_probe",
             "--nocapture",
         ]);
         command.env("ECHIDNA_TERMINAL_INPUT_PROBE", mode);

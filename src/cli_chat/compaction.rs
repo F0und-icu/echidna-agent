@@ -70,17 +70,18 @@ impl<Provider: ModelProvider + ?Sized>
             };
             let no_admissions = self.request.budget.remaining() == Some(0);
             if let Some(needs_compaction) = needs_compaction
-                && (self.deferred || no_admissions)
+                && (self.deferred || no_admissions || active.task_selection_pending)
                 && self.composition.diagnostic_output_enabled()
             {
                 console_eprintln!(
                     "[debug context pressure] settled batch evaluated; threshold_reached={needs_compaction}; automatic handoff deferred for this Turn"
                 );
             }
-            if no_admissions {
+            if no_admissions || active.task_selection_pending {
                 return Ok(());
             }
-            if self.batches.is_multiple_of(16)
+            if !active.source_refresh_pending
+                && self.batches.is_multiple_of(16)
                 && crate::app::improvement::policy(self.binding.definition()).is_some()
             {
                 let mut accepted = None;
@@ -135,6 +136,11 @@ impl<Provider: ModelProvider + ?Sized>
                     })?;
                     match updated {
                         super::evolution::CheckpointOutcome::Applied(binding) => {
+                            self.session.publish_binding(&binding).map_err(|error| {
+                                crate::app::agent_loop::AgentLoopError::ToolBatchCompaction {
+                                    message: error.to_string(),
+                                }
+                            })?;
                             self.binding = *binding
                         }
                         super::evolution::CheckpointOutcome::Deferred { failed_handoff } => {
@@ -344,24 +350,45 @@ impl DurableChatSession {
             .context_budget
             .for_capabilities(request.composition.agent_profile().primary().capabilities())
             .map_err(crate::app::agent_loop::AgentLoopError::from)?;
-        let capture = agent.capture_compaction_context(
+        let protected = self.durable_state()?.current_protected_operator_context()?;
+        let capture = agent.capture_compaction_context_for_task(
             request.composition.compaction_provider().0,
             policy.compaction_reference_items(),
+            agent.has_task_context(),
+            Some(&protected),
         )?;
         let capture_bytes =
             serde_json::to_vec(&capture).map_err(|error| ChatError::CompactionSummarySource {
                 message: error.to_string(),
             })?;
-        let (source, goal, references, entries, contents, output_limit, capture_blob) =
+        let (source, goal, references, entries, contents, output_limit, capture_blob, selection_event) =
             self.with_projection(|projection, store, stream_id| {
                 let state = projection.state();
                 self.validate_protected_sources(state)?;
                 agent.validate_compaction_session(state)?;
+                match state.latest_task_context_selection() {
+                    Some((_, selection)) => {
+                        let bytes = self.artifacts.read_blob(&selection.capture_blob).map_err(|error| ChatError::CompactionSummarySource { message: format!("task capture read failed: {error}") })?;
+                        let task_capture: crate::domain::session::TaskContextCapture = serde_json::from_slice(&bytes)
+                            .map_err(|error| ChatError::CompactionSummarySource { message: format!("task capture is invalid: {error}") })?;
+                        let research_units = if task_capture.compile.research_enabled {
+                            let read = self.project_read(state)?;
+                            let end = read.events.partition_point(|event| event.sequence.get() <= selection.source.project_stream_watermark());
+                            let hash = crate::domain::session::SessionSourceIdentity::project_hash_for_events(&read.events[..end])?;
+                            if hash != selection.source.project_stream_hash() { return Err(ChatError::CompactionSummarySource { message: "selected Research source changed".to_owned() }); }
+                            state.task_research_units(&hash, &task_capture.compile, &read.events[..end], &read.references, &selection.selected_research)?
+                        } else { Vec::new() };
+                        let events = crate::adapters::project_event_store::read_existing_session_events(&self.project, &self.session_id)?;
+                        crate::app::agent_loop::verify_task_compaction_capture(state, selection, &events, &task_capture, &capture, &research_units)?;
+                    }
+                    None if capture.is_task_scoped() => return Err(ChatError::CompactionSummarySource { message: "task Compaction has no selected source".to_owned() }),
+                    None => {}
+                }
                 state
                     .ensure_completed_history()
                     .map_err(SessionError::from)?;
                 super::recovery::validate_runtime_history(state, agent)?;
-                let facts = load_session_compaction_facts(&self.project, state)
+                let facts = load_session_compaction_facts(&self.project, state, state.latest_task_context_selection().is_some())
                     .map_err(ChatError::CompactionFacts)?;
                 // Do not spend a model request when even the original local
                 // capacity/retention preflight proves no useful replacement fits.
@@ -377,14 +404,14 @@ impl DurableChatSession {
                     }
                     .map_err(ChatError::from)
                 })?;
-                let previous = state.latest_compaction().map(|value| value.summary());
-                let (mut goal, _) = crate::adapters::research_projection::continuation_text(
-                    &state
-                        .full_normalized_history()
-                        .map_err(SessionError::from)?,
-                    previous,
-                    policy,
-                )?;
+                let mut goal = if let Some((_, selected)) = state.latest_task_context_selection() {
+                    selected.task_revisions.first().ok_or(SessionError::CompactionResumableHistoryRequired)?.goal.clone()
+                } else {
+                    let previous = state.latest_compaction().map(|value| value.summary());
+                    crate::adapters::research_projection::continuation_text(
+                        &state.full_normalized_history().map_err(SessionError::from)?, previous, policy,
+                    )?.0
+                };
                 if !state.protected_operator_inputs()?.is_empty() {
                     goal = "The earlier operator request and constraints are retained verbatim in this context.".to_owned();
                 }
@@ -405,7 +432,7 @@ impl DurableChatSession {
                     event_id(self.project.project_id(), &self.session_id, sequence.get(), "compaction-context"), stream_id, sequence, occurred_at(),
                 )?;
                 projection.append(store, event).map_err(ChatError::from_session_append)?;
-                let facts = load_session_compaction_facts(&self.project, projection.state()).map_err(ChatError::CompactionFacts)?;
+                let facts = load_session_compaction_facts(&self.project, projection.state(), projection.state().latest_task_context_selection().is_some()).map_err(ChatError::CompactionFacts)?;
                 let source = facts.task_source()?.clone();
                 let events = crate::adapters::project_event_store::read_existing_session_events(
                     &self.project,
@@ -415,13 +442,15 @@ impl DurableChatSession {
                     crate::adapters::project_event_store::read_existing_research_events(
                         &self.project,
                     )?;
+                let selection_event = projection.state().latest_task_context_selection().map(|(id, _)| id.clone());
                 let (entries, contents) =
-                    crate::domain::session::CompactionSourcePlan::source_entries(
+                    crate::domain::session::CompactionSourcePlan::source_entries_for_selection(
                         &source,
                         &events,
                         &project_events,
+                        selection_event.as_ref(),
                     )?;
-                Ok((source, goal, references, entries, contents, output_limit, blob_id))
+                Ok((source, goal, references, entries, contents, output_limit, blob_id, selection_event))
             })?;
         let verify_capture = || -> Result<(), ChatError> {
             self.artifacts.read_blob(&capture_blob).map_err(|error| {
@@ -445,6 +474,7 @@ impl DurableChatSession {
                 &references,
                 &entries,
                 &contents,
+                selection_event.as_ref(),
                 policy.summary_bytes(),
                 output_limit,
             )
@@ -475,9 +505,13 @@ impl DurableChatSession {
 
             // The Writer lock freezes both Research and Session appenders while
             // these read-only facts and the new Compaction Event are composed.
-            let facts = load_session_compaction_facts(&self.project, projection.state())
-                .map_err(ChatError::CompactionFacts)?
-                .with_verified_graph(graph)?;
+            let facts = load_session_compaction_facts(
+                &self.project,
+                projection.state(),
+                projection.state().latest_task_context_selection().is_some(),
+            )
+            .map_err(ChatError::CompactionFacts)?
+            .with_verified_graph(graph)?;
             let (draft, compaction, reached_soft_target) = select_compaction(
                 projection.state(),
                 &facts,
@@ -562,14 +596,25 @@ fn select_compaction(
     let mut summary_too_large = None;
     let mut valid_candidate_seen = false;
     loop {
-        let draft = facts.compose_session_summary_draft(
-            &history,
-            state
-                .latest_compaction()
-                .map(|compaction| compaction.summary()),
-            references,
-            policy,
-        )?;
+        let draft = if let Some((_, selected)) = state.latest_task_context_selection()
+            && selection != CompactionSelection::SourceRefresh
+        {
+            let goal = &selected
+                .task_revisions
+                .first()
+                .ok_or(SessionError::CompactionResumableHistoryRequired)?
+                .goal;
+            facts.compose_selected_task_draft(goal, references)?
+        } else {
+            facts.compose_session_summary_draft(
+                &history,
+                state
+                    .latest_compaction()
+                    .map(|compaction| compaction.summary()),
+                references,
+                policy,
+            )?
+        };
         let mut draft = if selection == CompactionSelection::Preview {
             draft.with_preview_byte_limit(policy.summary_bytes())?
         } else {

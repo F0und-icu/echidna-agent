@@ -87,6 +87,11 @@ Optional `compaction_reasoning_effort = "high"` selects only the same primary
 model's isolated compaction scope. Omission inherits primary. The configured
 service must support that value; there is no silent downgrade.
 
+Optional `task_selection_reasoning_effort = "low"` under `[runtime]` selects only
+the same primary model's isolated task-context selection scope. Omission inherits
+primary. Main-task and compaction settings are unchanged; the service must support
+the selected value, with no automatic downgrade.
+
 Under `runtime.context_budget`, `_bps` uses **100 = 1%, 10000 = 100%**:
 
 | Fields | Denominator / purpose |

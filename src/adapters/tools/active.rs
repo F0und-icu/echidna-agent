@@ -86,6 +86,12 @@ impl ActiveProcessLeases {
             .then(|| active_id.clone())
         })
     }
+
+    pub(super) fn resources_for(&self, process_id: &ActiveProcessId) -> Option<Vec<ResourceKey>> {
+        lock_entries(&self.entries)
+            .get(process_id)
+            .map(|lease| lease.resource_keys.clone())
+    }
 }
 
 impl Drop for ActiveProcessLeaseGuard {

@@ -4,8 +4,8 @@
 //! hashes and durable Markdown replacement. Event ordering remains with the
 //! fixed Memory tools so that no filesystem helper becomes a transaction API.
 
-use std::fs;
-use std::io;
+use std::fs::{self, File};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
@@ -40,6 +40,169 @@ pub(crate) struct LocalProjectMemory<'project> {
 }
 
 impl<'project> LocalProjectMemory<'project> {
+    /// Enumerate the task-read vocabulary without retaining the directory or
+    /// imposing the separate Research Shadow candidate limit.
+    pub(crate) fn visit_context_paths(
+        &self,
+        mut visit: impl FnMut(MemoryPath) -> io::Result<()>,
+    ) -> Result<(), LocalProjectMemoryError> {
+        self.ensure_control_directory_existing()?;
+        if !self.validate_memory_root_existing()? {
+            return Ok(());
+        }
+        for name in ["decisions.md", "failed-paths.md"] {
+            let path = MemoryPath::parse(name).expect("fixed Memory path");
+            visit(path).map_err(|source| LocalProjectMemoryError::Read {
+                path: self.memory_root().join(name),
+                source,
+            })?;
+        }
+        let notes = self.memory_root().join("notes");
+        if validate_existing_directory(&notes)? {
+            for entry in
+                fs::read_dir(&notes).map_err(|source| LocalProjectMemoryError::Inspect {
+                    path: notes.clone(),
+                    source,
+                })?
+            {
+                let entry = entry.map_err(|source| LocalProjectMemoryError::Inspect {
+                    path: notes.clone(),
+                    source,
+                })?;
+                let entry_path = entry.path();
+                let metadata = fs::symlink_metadata(&entry_path).map_err(|source| {
+                    LocalProjectMemoryError::Inspect {
+                        path: entry_path.clone(),
+                        source,
+                    }
+                })?;
+                if metadata.file_type().is_symlink() {
+                    return Err(LocalProjectMemoryError::Symlink { path: entry_path });
+                }
+                if !metadata.is_file() {
+                    return Err(LocalProjectMemoryError::NotRegular { path: entry_path });
+                }
+                let name = entry.file_name().into_string().map_err(|_| {
+                    LocalProjectMemoryError::InvalidRetrievalPath {
+                        path: entry_path.display().to_string(),
+                    }
+                })?;
+                let path = MemoryPath::parse(format!("notes/{name}")).map_err(|_| {
+                    LocalProjectMemoryError::InvalidRetrievalPath {
+                        path: entry_path.display().to_string(),
+                    }
+                })?;
+                visit(path).map_err(|source| LocalProjectMemoryError::Read {
+                    path: entry_path,
+                    source,
+                })?;
+            }
+        }
+        visit(MemoryPath::parse("core.md").expect("fixed Memory path")).map_err(|source| {
+            LocalProjectMemoryError::Read {
+                path: self.memory_root().join("core.md"),
+                source,
+            }
+        })?;
+        Ok(())
+    }
+
+    /// Stream and validate the current exact Memory revision with bounded
+    /// working memory. The callback receives original, unescaped UTF-8 bytes.
+    pub(crate) fn visit_context_content(
+        &self,
+        path: &MemoryPath,
+        mut visit: impl FnMut(&[u8]) -> io::Result<()>,
+    ) -> Result<Option<(String, usize)>, LocalProjectMemoryError> {
+        self.ensure_control_directory_existing()?;
+        if !self.validate_memory_root_existing()? {
+            return Ok(None);
+        }
+        self.ensure_note_parent_existing(path)?;
+        let document_path = self.document_path(path);
+        let metadata = match fs::symlink_metadata(&document_path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(LocalProjectMemoryError::Symlink {
+                    path: document_path,
+                });
+            }
+            Ok(metadata) if !metadata.is_file() => {
+                return Err(LocalProjectMemoryError::NotRegular {
+                    path: document_path,
+                });
+            }
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => {
+                return Err(LocalProjectMemoryError::Inspect {
+                    path: document_path,
+                    source,
+                });
+            }
+        };
+        self.validate_size(path, metadata.len())?;
+        let mut file =
+            File::open(&document_path).map_err(|source| LocalProjectMemoryError::Read {
+                path: document_path.clone(),
+                source,
+            })?;
+        let mut hasher = blake3::Hasher::new();
+        let mut total = 0usize;
+        let mut pending = Vec::with_capacity(4);
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let count = file
+                .read(&mut buffer)
+                .map_err(|source| LocalProjectMemoryError::Read {
+                    path: document_path.clone(),
+                    source,
+                })?;
+            if count == 0 {
+                break;
+            }
+            total = total
+                .checked_add(count)
+                .ok_or_else(|| LocalProjectMemoryError::Read {
+                    path: document_path.clone(),
+                    source: io::Error::other("Memory document size overflow"),
+                })?;
+            if total as u64 > metadata.len() {
+                return Err(LocalProjectMemoryError::Read {
+                    path: document_path,
+                    source: io::Error::other("Memory document changed while reading"),
+                });
+            }
+            hasher.update(&buffer[..count]);
+            visit(&buffer[..count]).map_err(|source| LocalProjectMemoryError::Read {
+                path: document_path.clone(),
+                source,
+            })?;
+            pending.extend_from_slice(&buffer[..count]);
+            match std::str::from_utf8(&pending) {
+                Ok(_) => pending.clear(),
+                Err(error) if error.error_len().is_none() => {
+                    let valid = error.valid_up_to();
+                    pending.drain(..valid);
+                }
+                Err(error) => {
+                    return Err(LocalProjectMemoryError::Read {
+                        path: document_path,
+                        source: io::Error::new(io::ErrorKind::InvalidData, error),
+                    });
+                }
+            }
+        }
+        if total as u64 != metadata.len() || !pending.is_empty() {
+            return Err(LocalProjectMemoryError::Read {
+                path: document_path,
+                source: io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Memory document changed or ends in incomplete UTF-8",
+                ),
+            });
+        }
+        Ok(Some((hasher.finalize().to_hex().to_string(), total)))
+    }
     pub(crate) fn new(project: &'project Project) -> Self {
         Self::with_scope(project, MemoryScope::Project)
     }

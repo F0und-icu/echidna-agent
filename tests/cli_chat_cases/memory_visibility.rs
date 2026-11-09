@@ -1,3 +1,7 @@
+use super::task_context::{
+    ScriptedResponse::{InitialSelection, Response},
+    selector_candidates, spawn_scripted_responses_server,
+};
 use super::*;
 
 #[test]
@@ -24,10 +28,13 @@ fn memory_disabled_still_reports_independent_rsi_without_writes_or_extra_request
         .replace("memory_read = \"direct\"", "memory_read = \"hidden\"")
         .replace("memory_write = \"direct\"", "memory_write = \"hidden\"");
     fs::write(manifest, content).unwrap();
-    let server = spawn_responses_server(vec![(
-        200,
-        text_response("ORDINARY_TASK_DONE", "memory-rsi-visibility"),
-    )]);
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(
+            200,
+            text_response("ORDINARY_TASK_DONE", "memory-rsi-visibility"),
+        ),
+    ]);
     let config = write_config(root.path(), &server.base_url);
     let output = run_chat(
         root.path(),
@@ -68,9 +75,11 @@ fn memory_disabled_still_reports_independent_rsi_without_writes_or_extra_request
     assert!(!root.path().join(".echidna/memory").exists());
     let project = Project::discover(root.path()).unwrap();
     let state = reduced_session(&project, &session_id(root.path()));
-    assert_eq!(state.request_audits().len(), 1);
+    assert_eq!(state.request_audits().len(), 2);
     assert_eq!(state.execution_receipt_count(), 0);
     assert_eq!(state.history().items().len(), 2);
+    let selection = f2a_request_body(&server.requests, "memory visibility initial selection");
+    assert_eq!(selector_candidates(&selection)["input"]["text"], "hello");
     assert!(
         server
             .requests

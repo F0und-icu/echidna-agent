@@ -302,12 +302,30 @@ impl SessionSourceIdentity {
         project_events: &[EventEnvelope<Value>],
         last_sample: &EventId,
     ) -> Result<(), SessionError> {
+        let boundary = events.partition_point(|event| event.sequence <= self.watermark());
+        self.validate_graph_sampling_suffix_with_hashes(
+            events,
+            project_events,
+            last_sample,
+            &super::fingerprint_value(&&events[..boundary])?,
+            &super::fingerprint_value(&project_events)?,
+        )
+    }
+
+    pub(super) fn validate_graph_sampling_suffix_with_hashes(
+        &self,
+        events: &[EventEnvelope<Value>],
+        project_events: &[EventEnvelope<Value>],
+        last_sample: &EventId,
+        prefix_hash: &str,
+        project_hash: &str,
+    ) -> Result<(), SessionError> {
         use std::collections::BTreeSet;
         let boundary = events.partition_point(|event| event.sequence <= self.watermark());
-        self.validate_project_prefix(project_events)?;
+        self.validate_project_prefix_with_hash(project_events, project_hash)?;
         if events[..boundary].last().is_none_or(|event| {
             event.sequence != self.watermark() || &event.stream_id != self.stream_id()
-        }) || super::fingerprint_value(&&events[..boundary])? != self.stream_hash()
+        }) || prefix_hash != self.stream_hash()
         {
             return Err(super::task::invalid_task(
                 "Compaction graph source prefix changed",

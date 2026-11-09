@@ -169,6 +169,11 @@ impl DurableChatSession {
             .context_budget
             .for_capabilities(composition.agent_profile().primary().capabilities())
             .map_err(crate::app::agent_loop::AgentLoopError::from)?;
+        let context_reader = std::sync::Arc::new(super::context_read::ContextReadRuntime::new(
+            self,
+            window_policy.core_file_bytes(),
+            composition.diagnostic_output_enabled(),
+        )?);
         ToolRegistry::for_agent_with_mcp(
             self.project.root(),
             self.session_id.clone(),
@@ -179,6 +184,7 @@ impl DurableChatSession {
         .map(|tools| {
             tools
                 .with_project(&self.project)
+                .with_context_reader(context_reader)
                 .with_input_verification(self.binding.definition().rsi().is_some())
                 .with_automatic_verification(
                     self.binding

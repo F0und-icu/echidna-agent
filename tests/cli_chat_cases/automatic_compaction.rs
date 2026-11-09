@@ -1,6 +1,51 @@
 //! Auto-compaction samples explicit tool-free handoffs through the pinned Agent.
 
+use super::task_context::{
+    ScriptedResponse, selector_candidates, spawn_scripted_responses_server,
+    spawn_scripted_responses_server_with_wait,
+};
 use super::*;
+
+pub(super) fn continue_from_selected_summary(candidates: &Value) -> Value {
+    let tasks = candidates["tasks"].as_array().unwrap();
+    let summaries = candidates["context"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|unit| unit["ref"].as_str().unwrap().starts_with("summary:"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        summaries.len(),
+        1,
+        "followup explicitly chooses its source-bound summary"
+    );
+    let task = &summaries[0]["task_ref"];
+    assert!(task.is_string());
+    assert!(tasks.iter().any(|candidate| candidate["ref"] == *task));
+    json!({"relation":"continue","focus":{"kind":"existing","task_ref":task},
+        "related_task_refs":[],"required_context_refs":[summaries[0]["ref"]],"unresolved_references":[]})
+}
+
+fn assert_summary_expansion(initial: &Value, expanded: &Value) {
+    let initial = selector_candidates(initial);
+    let expanded = selector_candidates(expanded);
+    let summary = |candidates: Value| {
+        candidates["context"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|unit| unit["ref"].as_str().unwrap().starts_with("summary:"))
+            .unwrap()
+            .clone()
+    };
+    let initial = summary(initial);
+    let expanded = summary(expanded);
+    assert_eq!(initial["truncated"], true);
+    assert_eq!(initial["ref"], expanded["ref"]);
+    assert!(
+        expanded["excerpt"].as_str().unwrap().len() > initial["excerpt"].as_str().unwrap().len()
+    );
+}
 
 fn config(root: &std::path::Path, url: &str, enabled: Option<bool>) -> std::path::PathBuf {
     let path = write_config(root, url);
@@ -138,8 +183,9 @@ fn generic_auto_compaction_keeps_scoped_memory_persona_rsi_and_one_mcp_catalog()
                 })
             ),
         )]);
-        let server = spawn_responses_server(vec![
-            (
+        let server = spawn_scripted_responses_server(vec![
+            ScriptedResponse::InitialSelection,
+            ScriptedResponse::Response(
                 200,
                 m4_long_flow_tool_response(
                     "scoped-core",
@@ -151,21 +197,23 @@ fn generic_auto_compaction_keeps_scoped_memory_persona_rsi_and_one_mcp_catalog()
                     "auto-memory",
                 ),
             ),
-            (
+            ScriptedResponse::Response(
                 200,
                 reasoning_answer("Scoped memory saved; clerk task complete.").replace(
                     "volatile-only-reasoning",
                     &"volatile-only-reasoning ".repeat(18_000),
                 ),
             ),
-            (
+            ScriptedResponse::Response(
                 200,
                 compaction_summary_response(
                     "The scoped memory was saved and clerk notes completed.",
                     "auto-handoff",
                 ),
             ),
-            (200, text_response("NEXT-TASK-COMPLETE", "auto-next")),
+            ScriptedResponse::SelectionDecision(continue_from_selected_summary),
+            ScriptedResponse::SelectionDecision(continue_from_selected_summary),
+            ScriptedResponse::Response(200, text_response("NEXT-TASK-COMPLETE", "auto-next")),
         ]);
         let config = config(root.path(), &server.base_url, Some(true));
         fs::write(
@@ -193,7 +241,11 @@ fn generic_auto_compaction_keeps_scoped_memory_persona_rsi_and_one_mcp_catalog()
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let requests: Vec<_> = (0..4)
+        selector_candidates(&f2a_request_body(
+            &server.requests,
+            "initial task selection",
+        ));
+        let requests: Vec<_> = (0..6)
             .map(|_| request_body(&server.requests.recv_timeout(F2A_WAIT).unwrap()))
             .collect();
         assert!(server.requests.try_recv().is_err());
@@ -205,7 +257,7 @@ fn generic_auto_compaction_keeps_scoped_memory_persona_rsi_and_one_mcp_catalog()
             "no catalog rediscovery after reset"
         );
         mcp.join();
-        for request in [&requests[0], &requests[1], &requests[3]] {
+        for request in [&requests[0], &requests[1], &requests[5]] {
             assert!(
                 request["instructions"]
                     .as_str()
@@ -221,14 +273,15 @@ fn generic_auto_compaction_keeps_scoped_memory_persona_rsi_and_one_mcp_catalog()
             );
         }
         assert_handoff_request(&requests[2]);
+        assert_summary_expansion(&requests[3], &requests[4]);
         assert!(json_contains_text(
-            &requests[3]["input"],
+            &requests[5]["input"],
             "CLERK-AGENT-SCOPED-MEMORY"
         ));
-        assert!(json_contains_text(&requests[3]["input"], "second task"));
-        assert!(requests[3]["previous_response_id"].is_null());
-        assert!(!json_contains_type(&requests[3]["input"], "reasoning"));
-        assert!(!requests[3].to_string().contains("volatile-only-reasoning"));
+        assert!(json_contains_text(&requests[5]["input"], "second task"));
+        assert!(requests[5]["previous_response_id"].is_null());
+        assert!(!json_contains_type(&requests[5]["input"], "reasoning"));
+        assert!(!requests[5].to_string().contains("volatile-only-reasoning"));
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert_eq!(
             stdout
@@ -251,17 +304,29 @@ fn generic_auto_compaction_keeps_scoped_memory_persona_rsi_and_one_mcp_catalog()
         );
         let project = Project::discover(root.path()).unwrap();
         let state = reduced_session(&project, &session_id(root.path()));
-        assert_eq!(state.request_audits().len(), 4);
-        let audits = serde_json::to_value(state.request_audits()).unwrap();
+        assert_eq!(state.request_audits().len(), 7);
+        let audits = serde_json::to_value(&state.request_audits()[1..]).unwrap();
         assert_ne!(
             audits[2]["provider_session"], audits[1]["provider_session"],
             "summary has its own ProviderSession"
         );
         assert_eq!(
-            state.request_audits()[3].delivery().reason(),
+            state.request_audits()[6].delivery().reason(),
             echidna::domain::request_audit::RequestAuditDeliveryReason::Full(
                 echidna::domain::context::BaselineInvalidationReason::CompactionReset
             )
+        );
+        let compaction_event = events
+            .iter()
+            .find(|event| event["event_type"] == "session.compaction_created")
+            .expect("the completed-Turn compaction is durable");
+        let next_primary_audit = events
+            .iter()
+            .find(|event| event["event_id"] == state.request_audits()[6].audit_event_id().as_str())
+            .expect("the next Primary audit is durable");
+        assert!(
+            compaction_event["sequence"].as_u64().unwrap()
+                < next_primary_audit["sequence"].as_u64().unwrap()
         );
         assert_eq!(
             events
@@ -272,7 +337,7 @@ fn generic_auto_compaction_keeps_scoped_memory_persona_rsi_and_one_mcp_catalog()
             "only the actual local memory operation ran"
         );
         let summary = serde_json::to_value(state.latest_compaction().unwrap().summary()).unwrap();
-        assert_eq!(summary["schema_version"], 6);
+        assert_eq!(summary["schema_version"], 7);
         assert_eq!(
             summary["narrative"]["concise_progress"],
             "The scoped memory was saved and clerk notes completed."
@@ -284,7 +349,7 @@ fn generic_auto_compaction_keeps_scoped_memory_persona_rsi_and_one_mcp_catalog()
         assert_eq!(summary["model_sample_event_ref"], sample["event_id"]);
         assert_eq!(
             sample["payload"]["request_audit_event_id"],
-            state.request_audits()[2].audit_event_id().as_str()
+            state.request_audits()[3].audit_event_id().as_str()
         );
         assert_eq!(
             sample["payload"]["provider_session"],
@@ -321,23 +386,26 @@ fn oversized_completed_handoff_regenerates_and_adopts_only_the_valid_summary() {
     let root = TemporaryDirectory::new("auto-compaction-size-regeneration");
     initialize_project(root.path());
     let definition = definition(root.path(), false, None);
-    let server = spawn_responses_server(vec![
-        (
+    let server = spawn_scripted_responses_server(vec![
+        ScriptedResponse::InitialSelection,
+        ScriptedResponse::Response(
             200,
             reasoning_answer("PARENT-DONE").replace(
                 "volatile-only-reasoning",
                 &"parent-reasoning ".repeat(18_000),
             ),
         ),
-        (
+        ScriptedResponse::Response(
             200,
             compaction_summary_response(&"界".repeat(20_000), "oversized-summary"),
         ),
-        (
+        ScriptedResponse::Response(
             200,
             compaction_summary_response("REGENERATED-HANDOFF", "valid-summary"),
         ),
-        (200, text_response("FOLLOWUP-DONE", "followup")),
+        ScriptedResponse::SelectionDecision(continue_from_selected_summary),
+        ScriptedResponse::SelectionDecision(continue_from_selected_summary),
+        ScriptedResponse::Response(200, text_response("FOLLOWUP-DONE", "followup")),
     ]);
     let config = config(root.path(), &server.base_url, Some(true));
     fs::write(
@@ -359,7 +427,11 @@ fn oversized_completed_handoff_regenerates_and_adopts_only_the_valid_summary() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let requests = (0..4)
+    selector_candidates(&f2a_request_body(
+        &server.requests,
+        "initial task selection",
+    ));
+    let requests = (0..6)
         .map(|_| request_body(&server.requests.recv_timeout(F2A_WAIT).unwrap()))
         .collect::<Vec<_>>();
     assert_handoff_request(&requests[1]);
@@ -367,8 +439,9 @@ fn oversized_completed_handoff_regenerates_and_adopts_only_the_valid_summary() {
         requests[1], requests[2],
         "regeneration retains the exact prepared request"
     );
-    assert!(requests[3].to_string().contains("REGENERATED-HANDOFF"));
-    assert!(!requests[3].to_string().contains(&"界".repeat(100)));
+    assert_summary_expansion(&requests[3], &requests[4]);
+    assert!(requests[5].to_string().contains("REGENERATED-HANDOFF"));
+    assert!(!requests[5].to_string().contains(&"界".repeat(100)));
     assert!(server.requests.try_recv().is_err());
     server.join();
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -379,7 +452,7 @@ fn oversized_completed_handoff_regenerates_and_adopts_only_the_valid_summary() {
         "{stdout}"
     );
     assert!(
-        stdout.contains("[request budget] admitted=3 primary=3 vision=0"),
+        stdout.contains("[request budget] admitted=4 primary=4 vision=0"),
         "{stdout}"
     );
     assert!(
@@ -413,14 +486,21 @@ fn automatic_compaction_is_opt_in_and_low_pressure_retains_continuation() {
         let root = TemporaryDirectory::new("auto-opt-in");
         initialize_project(root.path());
         let definition = definition(root.path(), false, None);
-        let mut responses = vec![(
-            200,
-            reasoning_answer(&"notes ".repeat(if large { 35_000 } else { 1 })),
-        )];
+        let mut responses = vec![
+            ScriptedResponse::InitialSelection,
+            ScriptedResponse::Response(
+                200,
+                reasoning_answer(&"notes ".repeat(if large { 35_000 } else { 1 })),
+            ),
+        ];
         if !large {
-            responses.push((200, text_response("NEXT-LOW-PRESSURE", "low-next")));
+            responses.push(ScriptedResponse::ContinueSelection { usage: None });
+            responses.push(ScriptedResponse::Response(
+                200,
+                text_response("NEXT-LOW-PRESSURE", "low-next"),
+            ));
         }
-        let server = spawn_responses_server(responses);
+        let server = spawn_scripted_responses_server(responses);
         let config = config(root.path(), &server.base_url, enabled);
         let output = run_chat(
             root.path(),
@@ -437,8 +517,14 @@ fn automatic_compaction_is_opt_in_and_low_pressure_retains_continuation() {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+        selector_candidates(&f2a_request_body(
+            &server.requests,
+            "initial task selection",
+        ));
         server.requests.recv_timeout(F2A_WAIT).unwrap();
         if !large {
+            let selector = request_body(&server.requests.recv_timeout(F2A_WAIT).unwrap());
+            assert!(selector.get("tools").is_none());
             let next = request_body(&server.requests.recv_timeout(F2A_WAIT).unwrap());
             assert_eq!(
                 next["previous_response_id"], "auto-first",
@@ -495,7 +581,9 @@ fn long_tool_loop_compacts_settled_batches_without_replaying_or_losing_task() {
             response.push_str(&m4_long_flow_tool_response(
                 &format!("batch-{index}"),
                 "run_command",
-                json!({"argv":["/usr/bin/printf", "%s", "neutral-output ".repeat(2_000)]}),
+                json!({"argv":["/bin/sh", "-c",
+                    format!("printf '%s\\n' batch-{index} >> batch-count.txt; printf '%s' \"$1\""),
+                    "fixture", "neutral-output ".repeat(2_000)]}),
                 &format!("batch-response-{index}"),
             ));
             responses.push((200, response));
@@ -511,7 +599,15 @@ fn long_tool_loop_compacts_settled_batches_without_replaying_or_losing_task() {
         }
         responses.push((200, text_response("WORKING-SET-DONE", "batch-final")));
         let request_count = responses.len();
-        let server = spawn_responses_server(responses);
+        let server = spawn_scripted_responses_server(
+            std::iter::once(ScriptedResponse::InitialSelection)
+                .chain(
+                    responses
+                        .into_iter()
+                        .map(|(status, body)| ScriptedResponse::Response(status, body)),
+                )
+                .collect(),
+        );
         let config = config(root.path(), &server.base_url, Some(enabled));
         fs::write(
             &config,
@@ -543,6 +639,8 @@ fn long_tool_loop_compacts_settled_batches_without_replaying_or_losing_task() {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+        let initial_selection = f2a_request_body(&server.requests, "initial image task selection");
+        selector_candidates(&initial_selection);
         let requests: Vec<_> = (0..request_count)
             .map(|index| request_body(&server.requests.recv_timeout(F2A_WAIT).unwrap_or_else(|error| {
                 let stdout = String::from_utf8_lossy(&output.stdout);
@@ -555,6 +653,11 @@ fn long_tool_loop_compacts_settled_batches_without_replaying_or_losing_task() {
         assert!(server.requests.try_recv().is_err());
         server.join();
         assert!(String::from_utf8_lossy(&output.stdout).contains("WORKING-SET-DONE"));
+        assert_eq!(
+            fs::read_to_string(root.path().join("batch-count.txt")).unwrap(),
+            "batch-0\nbatch-1\nbatch-2\n",
+            "every real external mutation executes exactly once"
+        );
         for index in &handoff_indices {
             assert_handoff_request(&requests[*index]);
             assert!(!json_contains_type(&requests[*index]["input"], "reasoning"));
@@ -625,7 +728,7 @@ fn long_tool_loop_compacts_settled_batches_without_replaying_or_losing_task() {
             1,
             "no fabricated repeated user History"
         );
-        assert_eq!(state.request_audits().len(), request_count);
+        assert_eq!(state.request_audits().len(), request_count + 1);
         assert_eq!(
             events
                 .iter()
@@ -637,6 +740,7 @@ fn long_tool_loop_compacts_settled_batches_without_replaying_or_losing_task() {
         let resets: Vec<_> = state
             .request_audits()
             .iter()
+            .skip(1)
             .enumerate()
             .filter(|(_, audit)| {
                 audit.delivery().reason()
@@ -649,7 +753,14 @@ fn long_tool_loop_compacts_settled_batches_without_replaying_or_losing_task() {
         if enabled {
             assert!(
                 !resets.is_empty(),
-                "tool-batch pressure must trigger before completion"
+                "tool-batch pressure must trigger before completion (incremental={incremental}; compactions={}; delivery_reasons={:?}; stdout={})",
+                compactions(root.path()).len(),
+                state
+                    .request_audits()
+                    .iter()
+                    .map(|audit| audit.delivery().reason())
+                    .collect::<Vec<_>>(),
+                String::from_utf8_lossy(&output.stdout)
             );
             assert!(resets.iter().all(|index| *index > 0));
             assert_eq!(
@@ -658,6 +769,90 @@ fn long_tool_loop_compacts_settled_batches_without_replaying_or_losing_task() {
             );
             assert_eq!(resets.len(), 2);
             assert_eq!(compactions(root.path()).len(), 2);
+            if incremental {
+                let activation = events
+                    .iter()
+                    .find(|event| {
+                        event["event_type"] == "session.history_item_recorded"
+                            && event["payload"]["item"]["kind"] == "tool_result"
+                            && event["payload"]["item"]["result"]["call_id"] == "activate-command"
+                    })
+                    .expect("the current Turn has a durable tool activation");
+                assert!(
+                    compactions(root.path()).iter().any(|compaction| {
+                        !compaction["payload"]["retained_event_ids"]
+                            .as_array()
+                            .unwrap()
+                            .contains(&activation["event_id"])
+                    }),
+                    "the activated tool remains available after its source batch is compacted"
+                );
+            }
+            let first_compaction = compactions(root.path()).remove(0);
+            let summary = &first_compaction["payload"]["summary"];
+            let plan_path = root
+                .path()
+                .join(".echidna/artifacts/blobs/sha256")
+                .join(summary["source_plan_blob_id"].as_str().unwrap());
+            let plan: Value = serde_json::from_slice(&fs::read(plan_path).unwrap()).unwrap();
+            let entries = plan["entries"].as_array().unwrap();
+            let result = |call_id: &str| {
+                events
+                    .iter()
+                    .find(|event| {
+                        event["event_type"] == "session.history_item_recorded"
+                            && event["payload"]["item"]["kind"] == "tool_result"
+                            && event["payload"]["item"]["result"]["call_id"] == call_id
+                    })
+                    .unwrap()
+            };
+            let older = result("batch-0");
+            let latest = result("batch-1");
+            let selection = events
+                .iter()
+                .find(|event| event["event_id"] == summary["task_selection_event"])
+                .unwrap();
+            assert!(
+                !selection["payload"]["refresh_of"].is_null(),
+                "fixture must exercise a durable source refresh"
+            );
+            assert!(
+                older["sequence"].as_u64().unwrap() < selection["sequence"].as_u64().unwrap(),
+                "the earlier settled batch predates the refreshed selection"
+            );
+            for (event, protected) in [(older, false), (latest, true)] {
+                let entry = entries
+                    .iter()
+                    .find(|entry| {
+                        entry["source"]["kind"] == "history"
+                            && entry["source"]["id"] == event["event_id"]
+                    })
+                    .expect("actual batch source must be in the verified compaction plan");
+                assert_eq!(entry["protected_exact"], protected);
+            }
+            for compaction in compactions(root.path()) {
+                let payload = &compaction["payload"];
+                assert_eq!(payload["schema_version"], 7);
+                assert_eq!(payload["summary"]["schema_version"], 7);
+                assert!(
+                    !payload["summary"]["task_scope"]
+                        .as_array()
+                        .unwrap()
+                        .is_empty()
+                );
+                let retained = payload["retained_history"].as_array().unwrap();
+                let references = payload["retained_event_ids"].as_array().unwrap();
+                assert_eq!(retained.len(), references.len());
+                assert!(!references.is_empty());
+                for (item, reference) in retained.iter().zip(references) {
+                    let source = events
+                        .iter()
+                        .find(|event| event["event_id"] == *reference)
+                        .expect("retained input and complete batch have genuine History EventIds");
+                    assert_eq!(source["event_type"], "session.history_item_recorded");
+                    assert_eq!(source["payload"]["item"], *item);
+                }
+            }
             for index in resets {
                 assert!(!json_contains_type(&requests[index]["input"], "reasoning"));
                 assert!(handoff_indices.contains(&(index - 1)));
@@ -673,12 +868,29 @@ fn long_tool_loop_compacts_settled_batches_without_replaying_or_losing_task() {
         } else {
             assert!(compactions(root.path()).is_empty());
         }
+        let resumed = run_chat(
+            root.path(),
+            &config,
+            "/context\n/exit\n",
+            &["--resume", "latest"],
+        );
+        assert!(
+            resumed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&resumed.stderr)
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("batch-count.txt")).unwrap(),
+            "batch-0\nbatch-1\nbatch-2\n",
+            "Resume never repeats a compacted mutation"
+        );
         if !incremental {
             measured.push(
-                requests
-                    .iter()
-                    .map(|request| request.to_string().len())
-                    .sum::<usize>(),
+                initial_selection.to_string().len()
+                    + requests
+                        .iter()
+                        .map(|request| request.to_string().len())
+                        .sum::<usize>(),
             );
         }
     }
@@ -719,7 +931,15 @@ fn failed_tool_handoff_still_assesses_later_settled_batches_without_resampling()
         }
     }
     responses.push((200, text_response("WORKING-SET-DONE", "final")));
-    let server = spawn_responses_server(responses);
+    let server = spawn_scripted_responses_server(
+        std::iter::once(ScriptedResponse::InitialSelection)
+            .chain(
+                responses
+                    .into_iter()
+                    .map(|(status, body)| ScriptedResponse::Response(status, body)),
+            )
+            .collect(),
+    );
     let config = config(root.path(), &server.base_url, Some(true));
     fs::write(
         &config,
@@ -740,6 +960,10 @@ fn failed_tool_handoff_still_assesses_later_settled_batches_without_resampling()
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    selector_candidates(&f2a_request_body(
+        &server.requests,
+        "initial task selection",
+    ));
     let requests = (0..5)
         .map(|_| request_body(&server.requests.recv_timeout(F2A_WAIT).unwrap()))
         .collect::<Vec<_>>();
@@ -766,17 +990,21 @@ fn large_protected_task_allows_useful_reduction_but_defers_without_old_work() {
         let root = TemporaryDirectory::new("auto-large-active-task");
         initialize_project(root.path());
         let definition = definition(root.path(), false, None);
-        let mut responses = vec![(
-            200,
-            m4_long_flow_tool_response(
-                "first-large-task",
-                "run_command",
-                json!({"argv":["/usr/bin/printf", "%s", "neutral-output ".repeat(7_000)]}),
-                "large-task-first",
+        let mut responses = vec![
+            ScriptedResponse::NewSelection,
+            ScriptedResponse::NewSelection,
+            ScriptedResponse::Response(
+                200,
+                m4_long_flow_tool_response(
+                    "first-large-task",
+                    "run_command",
+                    json!({"argv":["/usr/bin/printf", "%s", "neutral-output ".repeat(7_000)]}),
+                    "large-task-first",
+                ),
             ),
-        )];
+        ];
         if earlier_work {
-            responses.push((
+            responses.push(ScriptedResponse::Response(
                 200,
                 m4_long_flow_tool_response(
                     "second-large-task",
@@ -785,7 +1013,7 @@ fn large_protected_task_allows_useful_reduction_but_defers_without_old_work() {
                     "large-task-second",
                 ),
             ));
-            responses.push((
+            responses.push(ScriptedResponse::Response(
                 200,
                 compaction_summary_response(
                     "The earlier command finished; keep the current task and latest output.",
@@ -793,9 +1021,13 @@ fn large_protected_task_allows_useful_reduction_but_defers_without_old_work() {
                 ),
             ));
         }
-        responses.push((200, text_response("LARGE-TASK-DONE", "large-task-final")));
+        responses.push(ScriptedResponse::Response(
+            200,
+            text_response("LARGE-TASK-DONE", "large-task-final"),
+        ));
         let request_count = responses.len();
-        let server = spawn_responses_server(responses);
+        // Bound fixture liveness separately from product latency.
+        let server = spawn_scripted_responses_server_with_wait(responses, Duration::from_secs(60));
         let config = config(root.path(), &server.base_url, Some(true));
         fs::write(
             &config,
@@ -827,8 +1059,8 @@ fn large_protected_task_allows_useful_reduction_but_defers_without_old_work() {
         let requests = (0..request_count)
             .map(|_| request_body(&server.requests.recv_timeout(F2A_WAIT).unwrap()))
             .collect::<Vec<_>>();
-        assert!(json_contains_text(&requests[0]["input"], &task));
-        assert_eq!(requests[1]["previous_response_id"], "large-task-first");
+        assert!(json_contains_text(&requests[2]["input"], &task));
+        assert_eq!(requests[3]["previous_response_id"], "large-task-first");
         server.join();
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
@@ -837,9 +1069,9 @@ fn large_protected_task_allows_useful_reduction_but_defers_without_old_work() {
         );
         assert!(stdout.contains("LARGE-TASK-DONE"));
         if earlier_work {
-            assert_handoff_request(&requests[2]);
-            assert!(requests[3]["previous_response_id"].is_null());
-            assert!(json_contains_text(&requests[3]["input"], &task));
+            assert_handoff_request(&requests[4]);
+            assert!(requests[5]["previous_response_id"].is_null());
+            assert!(json_contains_text(&requests[5]["input"], &task));
             assert!(stdout.contains("Automatic tool-batch compaction applied"));
             assert_eq!(compactions(root.path()).len(), 1);
         } else {
@@ -869,16 +1101,18 @@ fn completed_reasoning_delivery_alone_can_trigger_opted_in_compaction() {
         json!({"type":"response.output_item.done", "item":{"type":"reasoning", "content":[{"type":"reasoning_text", "text":"retained-reasoning ".repeat(18_000)}]}}),
         text_response("SHORT-FINAL", "large-reasoning")
     );
-    let server = spawn_responses_server(vec![
-        (200, first),
-        (
+    let server = spawn_scripted_responses_server(vec![
+        ScriptedResponse::InitialSelection,
+        ScriptedResponse::Response(200, first),
+        ScriptedResponse::Response(
             200,
             compaction_summary_response(
                 "The first task finished with a short final answer.",
                 "reasoning-handoff",
             ),
         ),
-        (200, text_response("NEXT-COMPLETE", "next-reasoning")),
+        ScriptedResponse::NewSelection,
+        ScriptedResponse::Response(200, text_response("NEXT-COMPLETE", "next-reasoning")),
     ]);
     let config = config(root.path(), &server.base_url, Some(true));
     fs::write(
@@ -900,10 +1134,16 @@ fn completed_reasoning_delivery_alone_can_trigger_opted_in_compaction() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    selector_candidates(&f2a_request_body(
+        &server.requests,
+        "initial task selection",
+    ));
     server.requests.recv_timeout(F2A_WAIT).unwrap();
     let handoff = request_body(&server.requests.recv_timeout(F2A_WAIT).unwrap());
     assert_handoff_request(&handoff);
     assert!(!handoff.to_string().contains("retained-reasoning"));
+    let selector = request_body(&server.requests.recv_timeout(F2A_WAIT).unwrap());
+    assert_eq!(selector_candidates(&selector)["input"]["text"], "next task");
     let next = request_body(&server.requests.recv_timeout(F2A_WAIT).unwrap());
     assert!(server.requests.try_recv().is_err());
     server.join();
@@ -937,8 +1177,9 @@ fn settled_batch_pressure_uses_core_written_by_short_command() {
         )
         .unwrap();
         let core_relative = core.strip_prefix(root.path()).unwrap().to_str().unwrap();
-        let server = spawn_responses_server(vec![
-            (
+        let server = spawn_scripted_responses_server(vec![
+            ScriptedResponse::InitialSelection,
+            ScriptedResponse::Response(
                 200,
                 m4_long_flow_tool_response(
                     "prior",
@@ -947,7 +1188,7 @@ fn settled_batch_pressure_uses_core_written_by_short_command() {
                     "prior-response",
                 ),
             ),
-            (
+            ScriptedResponse::Response(
                 200,
                 m4_long_flow_tool_response(
                     "write-core",
@@ -961,7 +1202,7 @@ fn settled_batch_pressure_uses_core_written_by_short_command() {
         fs::write(
             &config,
             format!(
-                "{}\nmodel_request_limit_per_turn = 2\n",
+                "{}\nmodel_request_limit_per_turn = 3\n",
                 fs::read_to_string(&config)
                     .unwrap()
                     .replace("context_window = 32768", "context_window = 272000")
@@ -975,6 +1216,10 @@ fn settled_batch_pressure_uses_core_written_by_short_command() {
             "Complete the task.\n/exit\n",
             &["--agent", definition.to_str().unwrap(), "--debug"],
         );
+        selector_candidates(&f2a_request_body(
+            &server.requests,
+            "initial task selection",
+        ));
         for _ in 0..2 {
             server.requests.recv_timeout(F2A_WAIT).unwrap();
         }
@@ -983,7 +1228,7 @@ fn settled_batch_pressure_uses_core_written_by_short_command() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(!output.status.success(), "{stderr}");
         assert!(
-            stderr.contains("per-Turn model-request limit of 2"),
+            stderr.contains("per-Turn model-request limit of 3"),
             "{stderr}"
         );
         let expected = format!(
@@ -1002,7 +1247,7 @@ fn settled_batch_pressure_uses_core_written_by_short_command() {
 
 #[test]
 #[cfg(debug_assertions)]
-fn tool_batch_does_not_compact_when_initial_vision_consumed_the_final_admission() {
+fn tool_batch_does_not_compact_when_vision_and_selection_use_shared_admission() {
     let root = TemporaryDirectory::new("auto-shared-budget-boundary");
     initialize_project(root.path());
     let definition = definition(root.path(), false, None);
@@ -1021,12 +1266,15 @@ fn tool_batch_does_not_compact_when_initial_vision_consumed_the_final_admission(
             "budget-primary"
         )
     );
-    let primary = spawn_responses_server(vec![(200, response)]);
+    let primary = spawn_scripted_responses_server(vec![
+        ScriptedResponse::InitialSelection,
+        ScriptedResponse::Response(200, response),
+    ]);
     let config = write_dual_config(root.path(), &primary.base_url, &vision.base_url);
     fs::write(
         &config,
         format!(
-            "{}\n[runtime]\nauto_compact = true\nmodel_request_limit_per_turn = 2\n",
+            "{}\n[runtime]\nauto_compact = true\nmodel_request_limit_per_turn = 3\n",
             fs::read_to_string(&config)
                 .unwrap()
                 .replace("context_window = 32768", "context_window = 1048576")
@@ -1040,6 +1288,10 @@ fn tool_batch_does_not_compact_when_initial_vision_consumed_the_final_admission(
         "/image screen.png\nComplete this task under the shared budget.\n/exit\n",
         &["--agent", definition.to_str().unwrap(), "--debug"],
     );
+    selector_candidates(&f2a_request_body(
+        &primary.requests,
+        "initial visual task selection",
+    ));
     primary.requests.recv_timeout(F2A_WAIT).unwrap();
     assert!(primary.requests.try_recv().is_err());
     primary.join();
@@ -1050,13 +1302,13 @@ fn tool_batch_does_not_compact_when_initial_vision_consumed_the_final_admission(
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("[debug context pressure] settled batch evaluated; threshold_reached=true; automatic handoff deferred for this Turn"), "{stderr}");
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("per-Turn model-request limit of 2"),
+        String::from_utf8_lossy(&output.stderr).contains("per-Turn model-request limit of 3"),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
     let project = Project::discover(root.path()).unwrap();
     let state = reduced_session(&project, &session_id(root.path()));
-    assert_eq!(state.request_audits().len(), 2);
+    assert_eq!(state.request_audits().len(), 3);
     assert_eq!(state.vision_observations().len(), 1);
     assert_eq!(
         session_events(root.path(), &session_id(root.path()))
@@ -1085,26 +1337,28 @@ fn automatic_compaction_samples_handoff_after_completed_rsi_diagnosis() {
             .replace("[rsi]", "[rsi]\nimprovement = true"),
     )
     .unwrap();
-    let server = spawn_responses_server(vec![
-        (
+    let server = spawn_scripted_responses_server(vec![
+        ScriptedResponse::InitialSelection,
+        ScriptedResponse::Response(
             200,
             text_response(&"summary ".repeat(9_000), "auto-before-diagnosis"),
         ),
-        (
+        ScriptedResponse::Response(
             200,
             text_response(
                 r#"{"decision":"no_change","reason":"No justified reusable improvement."}"#,
                 "auto-diagnosis-completed",
             ),
         ),
-        (
+        ScriptedResponse::Response(
             200,
             compaction_summary_response(
                 "The task finished; RSI diagnosed no justified reusable change.",
                 "auto-after-diagnosis-handoff",
             ),
         ),
-        (200, text_response("NEXT-AFTER-RSI", "auto-after-rsi")),
+        ScriptedResponse::NewSelection,
+        ScriptedResponse::Response(200, text_response("NEXT-AFTER-RSI", "auto-after-rsi")),
     ]);
     let config = config(root.path(), &server.base_url, Some(true));
     pressure_policy(&config, 5000, 3000);
@@ -1119,12 +1373,18 @@ fn automatic_compaction_samples_handoff_after_completed_rsi_diagnosis() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    selector_candidates(&f2a_request_body(
+        &server.requests,
+        "initial task selection",
+    ));
     let _primary = server.requests.recv_timeout(F2A_WAIT).unwrap();
     let diagnosis = request_body(&server.requests.recv_timeout(F2A_WAIT).unwrap());
     assert!(diagnosis.to_string().contains("RSI2 diagnosis"));
     assert!(diagnosis.get("tools").is_none());
     let handoff = request_body(&server.requests.recv_timeout(F2A_WAIT).unwrap());
     assert_handoff_request(&handoff);
+    let selector = request_body(&server.requests.recv_timeout(F2A_WAIT).unwrap());
+    assert!(selector.get("tools").is_none());
     let next = request_body(&server.requests.recv_timeout(F2A_WAIT).unwrap());
     assert!(next["previous_response_id"].is_null());
     assert!(!next.to_string().contains("auto-diagnosis-completed"));
@@ -1148,17 +1408,28 @@ fn automatic_compaction_samples_handoff_after_completed_rsi_diagnosis() {
     let state = reduced_session(&project, &session_id(root.path()));
     assert_eq!(
         state.request_audits().len(),
-        4,
-        "two ordinary requests, one RSI diagnosis and one explicit compaction sample"
+        6,
+        "two ordinary requests, one RSI diagnosis, one compaction and two task selections"
     );
     assert_eq!(
-        state.request_audits()[3].delivery().reason(),
+        state.request_audits()[5].delivery().reason(),
         echidna::domain::request_audit::RequestAuditDeliveryReason::Full(
             echidna::domain::context::BaselineInvalidationReason::CompactionReset
         )
     );
-    let audits = serde_json::to_value(state.request_audits()).unwrap();
+    let audits = serde_json::to_value(&state.request_audits()[1..]).unwrap();
     assert_ne!(audits[1]["provider_session"], audits[2]["provider_session"]);
+    assert_ne!(audits[4]["provider_session"], audits[0]["provider_session"]);
+    assert_ne!(audits[4]["provider_session"], audits[3]["provider_session"]);
+    let selected = events
+        .iter()
+        .rposition(|event| event["event_type"] == "session.task_context_selected")
+        .unwrap();
+    let main_audit = events
+        .iter()
+        .position(|event| event["event_id"] == state.request_audits()[5].audit_event_id().as_str())
+        .unwrap();
+    assert!(compacted < selected && selected < main_audit);
     let sampled = events
         .iter()
         .position(|event| event["event_type"] == "session.compaction_sample_recorded")
@@ -1185,12 +1456,15 @@ fn automatic_compaction_preserves_explicit_recovery_for_failed_and_budget_stoppe
                 json!({"type":"response.failed","response":{"error":{"code":"fixture","message":"auto-fixture-failure"}}})
             )
         };
-        let server = spawn_responses_server(vec![(200, response)]);
+        let server = spawn_scripted_responses_server(vec![
+            ScriptedResponse::InitialSelection,
+            ScriptedResponse::Response(200, response),
+        ]);
         let config = config(root.path(), &server.base_url, Some(true));
         fs::write(
             &config,
             format!(
-                "{}\nmodel_request_limit_per_turn = 1\n",
+                "{}\nmodel_request_limit_per_turn = 2\n",
                 fs::read_to_string(&config).unwrap()
             ),
         )
@@ -1202,6 +1476,10 @@ fn automatic_compaction_preserves_explicit_recovery_for_failed_and_budget_stoppe
             &["--agent", definition.to_str().unwrap()],
         );
         assert!(!output.status.success());
+        selector_candidates(&f2a_request_body(
+            &server.requests,
+            "initial task selection",
+        ));
         server.requests.recv_timeout(F2A_WAIT).unwrap();
         assert!(server.requests.try_recv().is_err());
         server.join();
@@ -1227,7 +1505,7 @@ fn automatic_compaction_skips_cancelled_turn() {
     let root = TemporaryDirectory::new("auto-cancelled-turn");
     initialize_project(root.path());
     let definition = definition(root.path(), false, None);
-    let server = spawn_pending_responses_server();
+    let server = spawn_pending_responses_server(true);
     let config = config(root.path(), &server.base_url, Some(true));
     let child = spawn_f2a_chat(
         root.path(),
@@ -1235,6 +1513,10 @@ fn automatic_compaction_skips_cancelled_turn() {
         "task\n/exit\n",
         &["--agent", definition.to_str().unwrap()],
     );
+    selector_candidates(&f2a_request_body(
+        &server.requests,
+        "initial task selection",
+    ));
     server.requests.recv_timeout(F2A_WAIT).unwrap();
     assert!(
         Command::new("/bin/kill")
@@ -1269,10 +1551,10 @@ fn automatic_compaction_skips_a_completed_boundary_cancelled_during_rsi_diagnosi
             .replace("[rsi]", "[rsi]\nimprovement = true"),
     )
     .unwrap();
-    let server = spawn_f2a_first_response_then_pending_server(text_response(
-        &"summary ".repeat(9_000),
-        "auto-before-diagnosis",
-    ));
+    let server = spawn_f2a_first_response_then_pending_server(
+        text_response(&"summary ".repeat(9_000), "auto-before-diagnosis"),
+        true,
+    );
     let config = config(root.path(), &server.base_url, Some(true));
     let child = spawn_f2a_chat(
         root.path(),
@@ -1282,6 +1564,10 @@ fn automatic_compaction_skips_a_completed_boundary_cancelled_during_rsi_diagnosi
     );
     let child_id = child.id();
     let waiter = thread::spawn(move || f2a_wait_child(child, "auto RSI boundary cancellation"));
+    selector_candidates(&f2a_request_body(
+        &server.requests,
+        "initial task selection",
+    ));
     let _primary = server.requests.recv_timeout(F2A_WAIT).unwrap();
     let diagnosis = request_body(&server.requests.recv_timeout(F2A_WAIT).unwrap());
     assert!(diagnosis.to_string().contains("RSI2 diagnosis"));
@@ -1307,7 +1593,7 @@ fn automatic_compaction_skips_a_completed_boundary_cancelled_during_rsi_diagnosi
 }
 
 #[test]
-fn automatic_compaction_visibly_defers_missing_research_prerequisite_and_no_reduction() {
+fn automatic_task_compaction_needs_no_fake_research_target_and_defers_no_reduction() {
     for (no_reduction, no_target) in [(false, false), (false, true), (true, false)] {
         let root = TemporaryDirectory::new("auto-prerequisite");
         initialize_project(root.path());
@@ -1334,12 +1620,39 @@ fn automatic_compaction_visibly_defers_missing_research_prerequisite_and_no_redu
         } else {
             "large completed notes ".repeat(10_000)
         };
-        let server =
-            spawn_responses_server(vec![(200, text_response(&response, "auto-prerequisite"))]);
+        let mut responses = vec![(200, text_response(&response, "auto-prerequisite"))];
+        if !no_reduction {
+            responses.push((200, compaction_summary_response(
+                "The ordinary task finished; no Research target or verified evidence was created.",
+                "task-without-research-handoff",
+            )));
+        }
+        let server = spawn_scripted_responses_server(
+            std::iter::once(ScriptedResponse::InitialSelection)
+                .chain(
+                    responses
+                        .into_iter()
+                        .map(|(status, body)| ScriptedResponse::Response(status, body)),
+                )
+                .collect(),
+        );
         let config = config(root.path(), &server.base_url, Some(true));
+        if !no_reduction {
+            fs::write(
+                &config,
+                fs::read_to_string(&config)
+                    .unwrap()
+                    .replace("context_window = 32768", "context_window = 272000"),
+            )
+            .unwrap();
+            pressure_policy(&config, 1000, 500);
+        }
         let definition = no_reduction.then(|| definition(root.path(), false, None));
         if let Some(definition) = &definition {
-            fs::write(definition.join("persona.md"), "stable ".repeat(2_800)).unwrap();
+            // Task-context now requires a source-bound receive-time fragment.
+            // Leave room for it in this near-capacity no-reduction fixture;
+            // the same 8192-token window and pressure policy still apply.
+            fs::write(definition.join("persona.md"), "stable ".repeat(2_784)).unwrap();
             let manifest = definition.join("agent.toml");
             fs::write(
                 &manifest,
@@ -1370,20 +1683,55 @@ fn automatic_compaction_visibly_defers_missing_research_prerequisite_and_no_redu
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        server.requests.recv_timeout(F2A_WAIT).unwrap();
+        selector_candidates(&f2a_request_body(
+            &server.requests,
+            "initial task selection",
+        ));
+        let primary = request_body(&server.requests.recv_timeout(F2A_WAIT).unwrap());
+        if no_reduction {
+            assert!(json_contains_text(&primary["input"], "receive-time anchor"));
+        }
+        if !no_reduction {
+            let handoff = request_body(&server.requests.recv_timeout(F2A_WAIT).unwrap_or_else(|error| {
+                let tail = |bytes: &[u8]| String::from_utf8_lossy(bytes).chars().rev().take(4000).collect::<String>().chars().rev().collect::<String>();
+                panic!("missing no-target handoff ({no_reduction}, {no_target}): {error}; stdout tail={} stderr tail={}", tail(&output.stdout), tail(&output.stderr));
+            }));
+            assert_handoff_request(&handoff);
+        }
         assert!(server.requests.try_recv().is_err());
         server.join();
         let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            stdout.contains(if no_reduction {
-                "no smaller usable next-Turn Context"
-            } else if no_target {
-                "the current Project has no TargetSnapshot"
-            } else {
-                "the Project Research stream is empty"
-            }),
-            "{stdout}"
-        );
-        assert!(compactions(root.path()).is_empty());
+        if no_reduction {
+            assert!(
+                stdout.contains("no smaller usable next-Turn Context"),
+                "{stdout}"
+            );
+            assert!(compactions(root.path()).is_empty());
+        } else {
+            assert!(
+                stdout.contains("Automatic completed-Turn compaction applied"),
+                "{stdout}"
+            );
+            let records = compactions(root.path());
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0]["payload"]["summary"]["schema_version"], 7);
+            assert!(records[0]["payload"]["summary"]["evidence_spine"].is_null());
+            let project = Project::discover(root.path()).unwrap();
+            let mut writer = project.open_writer().unwrap();
+            let store = writer.open_research(None).unwrap();
+            let project_events =
+                EventSource::read_events(&store, &ProjectEventStream::Research.stream_id())
+                    .unwrap();
+            assert_eq!(
+                project_events.len(),
+                usize::from(no_target),
+                "compaction never invents Research facts"
+            );
+            assert!(
+                project_events
+                    .iter()
+                    .all(|event| !event.event_type.as_str().contains("target_snapshot"))
+            );
+        }
     }
 }

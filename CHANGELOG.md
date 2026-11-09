@@ -5,6 +5,39 @@ changes remain available in Git history.
 
 ## Unreleased
 
+### Task-context selection repairs — 2026-11-08
+
+- Accept repeated known references, equivalent task scopes and valid overlapping
+  excerpts without rejecting the turn. Preserve requested superseded constraints
+  as historical context while applying the current correction; keep exact source
+  ranges through subsequent refresh and Resume. Conflicting scopes and invalid
+  sources or ranges still fail visibly.
+- Retain Provider-reported usage for completed selectors before decision
+  validation, including rejected decisions, without double counting accepted ones.
+  New completed-selector usage events require a compatible binary for Resume.
+- Add optional `runtime.task_selection_reasoning_effort`; omission inherits
+  primary, while an explicit value changes only the same model's isolated selector.
+  Main-task effort remains unchanged. No general latency improvement is claimed.
+
+### Automatic task context — 2026-11-05
+
+- Select relevant task history, constraints, progress and scoped Memory within
+  one complete Session record. Natural follow-ups, returns and cross-task
+  references use source-bound views; exclusions start a new Provider context.
+- Add read-only `context_read` for scoped search, exact source expansion and
+  task progress. In Chat, an omitted declaration defaults to Direct when its
+  Session reader is available; explicit Hidden remains terminal. Saved binding
+  bytes and historical requests retain their original meaning.
+- Isolate tool-free selection samples and account for every actual request in
+  the existing Turn budget. Retain actual usage, input receive time, source
+  revisions, durable selection and independent replay checks. Task changes do
+  not replay completed actions or bypass explicit failure recovery.
+- Preserve original instruction files and historical events. New task-context
+  Session events require the new binary. Routing accuracy and Live latency are
+  separate from offline mechanism tests; no general speedup is claimed.
+- Keep harness-generated diagnostics, Tool progress and capture/preview notices
+  in English while preserving original model and Tool content.
+
 ### General technical domain guidance — 2026-11-04
 
 - Make the persona branch's built-in Source/Web/Mobile/Binary guidance useful

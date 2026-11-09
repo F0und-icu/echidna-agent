@@ -21,6 +21,30 @@ pub struct OperatorInputRef {
     provenance: ContextProvenance,
 }
 
+impl OperatorInputRef {
+    pub(crate) fn event_id(&self) -> &EventId {
+        &self.event_id
+    }
+}
+
+/// Original source semantics, independent of how a History item is delivered.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct HistorySourceSemantics {
+    pub(crate) origin: ContextOrigin,
+    pub(crate) class: SemanticClass,
+    pub(crate) authority: AuthorityLevel,
+}
+
+impl HistorySourceSemantics {
+    fn from_provenance(value: &ContextProvenance) -> Self {
+        Self {
+            origin: value.origin(),
+            class: value.semantic_class(),
+            authority: value.authority_level(),
+        }
+    }
+}
+
 /// An accepted input references the original History facts rather than copying them.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -29,6 +53,8 @@ pub enum OperatorTurnBoundary {
         schema_version: u16,
         anchor: EventId,
         inputs: Vec<OperatorInputRef>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        received_at: Option<super::TaskInputTime>,
     },
     Completed {
         schema_version: u16,
@@ -36,6 +62,10 @@ pub enum OperatorTurnBoundary {
         final_audit_event_id: EventId,
         history_cutoff_event_id: EventId,
         closed_input_anchors: Vec<EventId>,
+    },
+    InitialSelectionCancelled {
+        schema_version: u16,
+        anchor: EventId,
     },
 }
 
@@ -53,6 +83,62 @@ pub(crate) struct ProtectedOperatorContext {
     pub(crate) detached_items: Vec<ContentItem>,
     pub(crate) detached_provenance: BTreeMap<usize, ContextProvenance>,
     pub(crate) retained_provenance: BTreeMap<usize, ContextProvenance>,
+}
+
+impl ProtectedOperatorContext {
+    pub(crate) fn all_without_active(
+        &self,
+        active: &BTreeMap<usize, ContextProvenance>,
+        history: &[ContentItem],
+    ) -> Result<(Vec<ContentItem>, BTreeMap<usize, ContextProvenance>), SessionError> {
+        let (mut items, mut provenance) = self.without_active(active);
+        let active_ids = active
+            .values()
+            .filter_map(|value| value.references().source_event_refs().last())
+            .collect::<BTreeSet<_>>();
+        for (index, source) in &self.retained_provenance {
+            if source
+                .references()
+                .source_event_refs()
+                .last()
+                .is_some_and(|id| active_ids.contains(id))
+            {
+                continue;
+            }
+            let item = history
+                .get(*index)
+                .ok_or_else(|| invalid("retained protected input is absent"))?;
+            provenance.insert(items.len(), source.clone());
+            items.push(item.clone());
+        }
+        Ok((items, provenance))
+    }
+
+    pub(crate) fn without_active(
+        &self,
+        active: &BTreeMap<usize, ContextProvenance>,
+    ) -> (Vec<ContentItem>, BTreeMap<usize, ContextProvenance>) {
+        let active_ids = active
+            .values()
+            .filter_map(|p| p.references().source_event_refs().last())
+            .collect::<BTreeSet<_>>();
+        let mut items = Vec::new();
+        let mut provenance = BTreeMap::new();
+        for (index, item) in self.detached_items.iter().enumerate() {
+            let source = &self.detached_provenance[&index];
+            if source
+                .references()
+                .source_event_refs()
+                .last()
+                .is_some_and(|id| active_ids.contains(id))
+            {
+                continue;
+            }
+            provenance.insert(items.len(), source.clone());
+            items.push(item.clone());
+        }
+        (items, provenance)
+    }
 }
 
 #[derive(Clone)]
@@ -110,13 +196,320 @@ fn invalid(message: impl Into<String>) -> SessionError {
     }
 }
 
+fn observation_text_may_match(
+    text: &str,
+    observation: &crate::domain::vision::VisionObservation,
+) -> Result<bool, SessionError> {
+    if !text.contains("\"observation_id\":") {
+        return Ok(false);
+    }
+    let id = serde_json::to_string(&observation.id).map_err(|error| invalid(error.to_string()))?;
+    Ok(text.contains(&format!("\"observation_id\":{id}")))
+}
+
 impl SessionState {
+    pub(crate) fn operator_inputs_for_anchor(
+        &self,
+        anchor: &EventId,
+    ) -> Result<Vec<ProtectedOperatorInput>, SessionError> {
+        let boundary = self.operator_boundaries.iter().find(|boundary| {
+            matches!(boundary, OperatorTurnBoundary::Accepted { anchor: id, .. } if id == anchor)
+        }).ok_or_else(|| invalid("selected operator input boundary is absent"))?;
+        let OperatorTurnBoundary::Accepted { inputs, .. } = boundary else {
+            unreachable!()
+        };
+        let provenance = boundary.input_provenance()?;
+        inputs
+            .iter()
+            .enumerate()
+            .map(|(index, input)| {
+                let item = self
+                    .history_items_with_event_ids()
+                    .find_map(|(id, item)| (id == &input.event_id).then_some(item))
+                    .ok_or_else(|| invalid("selected operator input History is absent"))?;
+                Ok(ProtectedOperatorInput {
+                    anchor: anchor.clone(),
+                    event_id: input.event_id.clone(),
+                    item: item.clone(),
+                    provenance: provenance[&index].clone(),
+                    legacy_vision_audit: None,
+                })
+            })
+            .collect()
+    }
+
+    /// Recover original source authority from accepted-input or Vision facts.
+    /// A legacy user-role History item without either remains unclassified.
+    pub(crate) fn history_source_semantics(
+        &self,
+        event_id: &EventId,
+        item: &ContentItem,
+    ) -> Result<HistorySourceSemantics, SessionError> {
+        Ok(self
+            .history_source_semantics_many(&[(event_id, item)])?
+            .remove(0))
+    }
+
+    /// Recover the already validated Vision references for a selected source.
+    pub(crate) fn history_vision_provenance(
+        &self,
+        event_id: &EventId,
+        item: &ContentItem,
+    ) -> Result<Option<ContextProvenance>, SessionError> {
+        if !matches!(
+            item,
+            ContentItem::ImageArtifact { .. }
+                | ContentItem::Text {
+                    role: MessageRole::User,
+                    ..
+                }
+        ) {
+            return Ok(None);
+        }
+        for boundary in &self.operator_boundaries {
+            if let OperatorTurnBoundary::Accepted { inputs, .. } = boundary
+                && let Some(index) = inputs.iter().position(|input| &input.event_id == event_id)
+            {
+                let provenance = boundary
+                    .input_provenance()?
+                    .remove(&index)
+                    .expect("accepted input provenance exists");
+                return Ok((matches!(item, ContentItem::ImageArtifact { .. })
+                    || provenance.semantic_class() == SemanticClass::ModelObservation)
+                    .then_some(provenance));
+            }
+        }
+        if self.vision_routes.is_empty() {
+            return Ok(None);
+        }
+        if let ContentItem::Text { text, .. } = item {
+            let mut possible = false;
+            for observation in &self.vision_observations {
+                if observation_text_may_match(text, observation)? {
+                    possible = true;
+                    break;
+                }
+            }
+            if !possible {
+                return Ok(None);
+            }
+        }
+        let wanted = BTreeSet::from([event_id]);
+        if let Some(input) = self
+            .followup_vision_inputs_matching(Some(&wanted))?
+            .into_iter()
+            .find(|input| &input.event_id == event_id)
+        {
+            return Ok(Some(input.provenance));
+        }
+        if let ContentItem::Text {
+            role: MessageRole::User,
+            text,
+        } = item
+        {
+            for observation in &self.vision_observations {
+                if observation_text_may_match(text, observation)?
+                    && observation
+                        .primary_context_text()
+                        .map_err(|error| invalid(error.to_string()))?
+                        == *text
+                {
+                    return self
+                        .recover_vision_provenance(event_id, item)
+                        .map(|(value, _)| Some(value));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Classify a selected batch together so accepted boundaries and Vision
+    /// follow-ups are traversed once rather than once per candidate.
+    pub(crate) fn history_source_semantics_many(
+        &self,
+        items: &[(&EventId, &ContentItem)],
+    ) -> Result<Vec<HistorySourceSemantics>, SessionError> {
+        let wanted = items.iter().map(|(id, _)| *id).collect::<BTreeSet<_>>();
+        let mut known = BTreeMap::new();
+        for boundary in &self.operator_boundaries {
+            if let OperatorTurnBoundary::Accepted { inputs, .. } = boundary {
+                for input in inputs
+                    .iter()
+                    .filter(|input| wanted.contains(&input.event_id))
+                {
+                    known.entry(input.event_id.clone()).or_insert_with(|| {
+                        HistorySourceSemantics::from_provenance(&input.provenance)
+                    });
+                }
+            }
+        }
+        let vision_wanted = items
+            .iter()
+            .filter_map(|(id, item)| {
+                (!known.contains_key(*id)
+                    && matches!(
+                        item,
+                        ContentItem::Text {
+                            role: MessageRole::User,
+                            ..
+                        } | ContentItem::ImageArtifact {
+                            role: MessageRole::User,
+                            ..
+                        }
+                    ))
+                .then_some(*id)
+            })
+            .collect::<BTreeSet<_>>();
+        let needs_vision = !self.vision_routes.is_empty() && !vision_wanted.is_empty();
+        if needs_vision {
+            for input in self.followup_vision_inputs_matching(Some(&vision_wanted))? {
+                known
+                    .entry(input.event_id)
+                    .or_insert_with(|| HistorySourceSemantics::from_provenance(&input.provenance));
+            }
+        }
+        items
+            .iter()
+            .map(|(event_id, item)| {
+                if let Some(semantic) = known.get(*event_id) {
+                    return Ok(*semantic);
+                }
+                if needs_vision
+                    && let ContentItem::Text {
+                        role: MessageRole::User,
+                        text,
+                    } = item
+                {
+                    for observation in &self.vision_observations {
+                        if observation_text_may_match(text, observation)?
+                            && observation
+                                .primary_context_text()
+                                .map_err(|error| invalid(error.to_string()))?
+                                == *text
+                        {
+                            let (provenance, _) = self.recover_vision_provenance(event_id, item)?;
+                            return Ok(HistorySourceSemantics::from_provenance(&provenance));
+                        }
+                    }
+                }
+                let (origin, class, authority) = match item {
+                    ContentItem::Text {
+                        role: MessageRole::User,
+                        ..
+                    } => (
+                        ContextOrigin::SessionProjection,
+                        SemanticClass::Conversation,
+                        AuthorityLevel::UnclassifiedLegacy,
+                    ),
+                    ContentItem::Text {
+                        role: MessageRole::Assistant,
+                        ..
+                    }
+                    | ContentItem::ToolCall { .. } => (
+                        ContextOrigin::ModelOutput,
+                        SemanticClass::ModelObservation,
+                        AuthorityLevel::ModelObservation,
+                    ),
+                    ContentItem::ToolResult { .. } => (
+                        ContextOrigin::ToolResult,
+                        SemanticClass::DerivedProjection,
+                        AuthorityLevel::DerivedNonEvidence,
+                    ),
+                    ContentItem::ImageArtifact { .. } => (
+                        ContextOrigin::ArtifactProjection,
+                        SemanticClass::AuthoritativeReference,
+                        AuthorityLevel::FactReference,
+                    ),
+                    _ => (
+                        ContextOrigin::SessionProjection,
+                        SemanticClass::Conversation,
+                        AuthorityLevel::UnclassifiedLegacy,
+                    ),
+                };
+                Ok(HistorySourceSemantics {
+                    origin,
+                    class,
+                    authority,
+                })
+            })
+            .collect()
+    }
+
+    pub(crate) fn task_input_time(
+        &self,
+        anchor: &EventId,
+    ) -> Result<(EventId, super::TaskInputTime), SessionError> {
+        self.operator_boundaries
+            .iter()
+            .zip(&self.operator_boundary_event_ids)
+            .rev()
+            .find_map(|(boundary, event_id)| match boundary {
+                OperatorTurnBoundary::Accepted {
+                    anchor: candidate,
+                    received_at: Some(time),
+                    ..
+                } if candidate == anchor => Some((event_id.clone(), time.clone())),
+                _ => None,
+            })
+            .ok_or_else(|| invalid("task input receive-time source is absent"))
+    }
+
+    pub(crate) fn task_input_provenance(
+        &self,
+        anchor: &EventId,
+    ) -> Result<BTreeMap<usize, ContextProvenance>, SessionError> {
+        self.operator_boundaries
+            .iter()
+            .rev()
+            .find(|boundary| {
+                matches!(boundary,
+            OperatorTurnBoundary::Accepted { anchor: candidate, .. } if candidate == anchor)
+            })
+            .ok_or_else(|| invalid("task input boundary is absent"))?
+            .input_provenance()
+    }
+
+    pub(crate) fn task_input_items(
+        &self,
+        anchor: &EventId,
+    ) -> Result<Vec<ContentItem>, SessionError> {
+        let boundary = self
+            .operator_boundaries
+            .iter()
+            .rev()
+            .find(|boundary| {
+                matches!(boundary,
+            OperatorTurnBoundary::Accepted { anchor: candidate, .. } if candidate == anchor)
+            })
+            .ok_or_else(|| invalid("task input boundary is absent"))?;
+        let OperatorTurnBoundary::Accepted { inputs, .. } = boundary else {
+            unreachable!()
+        };
+        inputs
+            .iter()
+            .map(|input| {
+                self.history_items_with_event_ids()
+                    .find(|(id, _)| *id == &input.event_id)
+                    .map(|(_, item)| item.clone())
+                    .ok_or_else(|| invalid("task input source is absent"))
+            })
+            .collect()
+    }
     /// Identify Vision Tool follow-ups from their actual paired `view_image`
     /// result, typed route and, for Secondary, durable Observation and audit.
     pub(crate) fn followup_vision_inputs(&self) -> Result<Vec<FollowupVisionInput>, SessionError> {
+        self.followup_vision_inputs_matching(None)
+    }
+
+    fn followup_vision_inputs_matching(
+        &self,
+        wanted: Option<&BTreeSet<&EventId>>,
+    ) -> Result<Vec<FollowupVisionInput>, SessionError> {
         use crate::domain::profile::VisionRoute;
         use crate::domain::vision::ViewImageSelection;
-        let accepted = self
+        // Accepted input references are validated as the ordered current History
+        // suffix when appended, so this iterator advances with History itself.
+        let mut accepted = self
             .operator_boundaries
             .iter()
             .filter_map(|boundary| match boundary {
@@ -124,12 +517,103 @@ impl SessionState {
                 _ => None,
             })
             .flatten()
-            .map(|input| input.event_id.clone())
-            .collect::<BTreeSet<_>>();
-        let history = self.history_items_with_event_ids().collect::<Vec<_>>();
+            .map(|input| &input.event_id)
+            .peekable();
+        let wanted_positions = wanted.map(|ids| {
+            self.history_event_ids
+                .iter()
+                .enumerate()
+                .filter_map(|(index, id)| ids.contains(id).then_some(index))
+                .collect::<BTreeSet<_>>()
+        });
+        enum WantedSource<'a> {
+            Text(&'a crate::domain::artifacts::ArtifactId),
+            Image(&'a crate::domain::artifacts::ArtifactId),
+            None,
+            Ambiguous,
+        }
+        let mut wanted_sources = Vec::new();
+        if let Some(positions) = &wanted_positions {
+            for &index in positions {
+                let source = match &self.history.items()[index] {
+                    ContentItem::ImageArtifact { artifact_id, .. } => {
+                        WantedSource::Image(artifact_id)
+                    }
+                    ContentItem::Text { text, .. } => {
+                        if text.matches("\"observation_id\":").take(2).count() > 1 {
+                            WantedSource::Ambiguous
+                        } else {
+                            let mut source = None;
+                            for observation in &self.vision_observations {
+                                if observation_text_may_match(text, observation)? {
+                                    source = Some(&observation.source_artifact_id);
+                                    break;
+                                }
+                            }
+                            source.map_or(WantedSource::None, WantedSource::Text)
+                        }
+                    }
+                    _ => WantedSource::None,
+                };
+                wanted_sources.push((index, source, None::<usize>));
+            }
+            let mut prior_accepted = self
+                .operator_boundaries
+                .iter()
+                .filter_map(|boundary| match boundary {
+                    OperatorTurnBoundary::Accepted { inputs, .. } => Some(inputs.as_slice()),
+                    _ => None,
+                })
+                .flatten()
+                .map(|input| &input.event_id)
+                .peekable();
+            for (index, (event_id, item)) in self.history_items_with_event_ids().enumerate() {
+                if prior_accepted.peek().is_some_and(|id| *id == event_id) {
+                    prior_accepted.next();
+                    for (target, _, floor) in &mut wanted_sources {
+                        if *target > index {
+                            *floor = None;
+                        }
+                    }
+                    continue;
+                }
+                let ContentItem::ToolResult { result } = item else {
+                    continue;
+                };
+                let selection = ViewImageSelection::from_tool_result(result);
+                for (target, source, floor) in &mut wanted_sources {
+                    if *target <= index || floor.is_some() {
+                        continue;
+                    }
+                    let possible = match &selection {
+                        Err(_) => true,
+                        Ok(None) => false,
+                        Ok(Some(selection)) => match source {
+                            WantedSource::Text(id) => *id == &selection.source_artifact_id,
+                            WantedSource::Image(id) => *id == &selection.delivery_artifact_id,
+                            WantedSource::None => false,
+                            WantedSource::Ambiguous => true,
+                        },
+                    };
+                    if possible {
+                        *floor = Some(index);
+                    }
+                }
+            }
+        }
+        let next_accepted = |start: usize, id: Option<&&EventId>| {
+            id.map_or(self.history_event_ids.len(), |id| {
+                start
+                    + self.history_event_ids[start..]
+                        .iter()
+                        .position(|candidate| candidate == *id)
+                        .expect("accepted input is present in History")
+            })
+        };
+        let mut segment_end = next_accepted(0, accepted.peek());
         let mut start = 0usize;
         let mut followups = Vec::new();
-        for (index, (event_id, item)) in history.iter().enumerate() {
+        for (index, (event_id, item)) in self.history_items_with_event_ids().enumerate() {
             if !matches!(
                 item,
                 ContentItem::Text {
@@ -142,15 +626,44 @@ impl SessionState {
             ) {
                 continue;
             }
-            if accepted.contains(*event_id) {
+            if accepted.peek().is_some_and(|id| *id == event_id) {
+                accepted.next();
+                start = index + 1;
+                segment_end = next_accepted(start, accepted.peek());
+                continue;
+            }
+            // An accepted input resets the previous start unconditionally.
+            // Unselected segments therefore cannot affect a selected item.
+            if wanted_positions
+                .as_ref()
+                .is_some_and(|positions| positions.range(index..segment_end).next().is_none())
+            {
+                continue;
+            }
+            if wanted_positions
+                .as_ref()
+                .is_some_and(|positions| !positions.contains(&index))
+                && wanted_sources
+                    .iter()
+                    .filter(|(target, _, _)| *target > index && *target < segment_end)
+                    .all(|(_, _, floor)| floor.is_none_or(|floor| floor >= index))
+            {
+                // No earlier result can match any later requested item before
+                // the next accepted input resets this start. A malformed result
+                // is treated as potentially relevant and reaches the original
+                // matching path, where its error remains visible.
                 start = index + 1;
                 continue;
             }
             let history_sequence = self.history_event_sequences[index];
-            let mut matches = Vec::new();
+            let mut matched = None;
+            let mut ambiguous = false;
             let mut selection_seen = false;
-            for (result_index, (_, result_item)) in
-                history.iter().enumerate().take(index).skip(start)
+            for (result_index, (_, result_item)) in self
+                .history_items_with_event_ids()
+                .enumerate()
+                .take(index)
+                .skip(start)
             {
                 let ContentItem::ToolResult { result } = result_item else {
                     continue;
@@ -165,19 +678,20 @@ impl SessionState {
                         artifact_id == &selection.delivery_artifact_id
                     }
                     ContentItem::Text { text, .. } => {
-                        self.vision_observations
-                            .iter()
-                            .try_fold(false, |found, observation| {
-                                let value = observation
+                        let mut found = false;
+                        for observation in &self.vision_observations {
+                            if observation.source_artifact_id == selection.source_artifact_id
+                                && observation_text_may_match(text, observation)?
+                                && observation
                                     .primary_context_text()
-                                    .map_err(|error| invalid(error.to_string()))?;
-                                Ok::<_, SessionError>(
-                                    found
-                                        || observation.source_artifact_id
-                                            == selection.source_artifact_id
-                                            && &value == text,
-                                )
-                            })?
+                                    .map_err(|error| invalid(error.to_string()))?
+                                    == *text
+                            {
+                                found = true;
+                                break;
+                            }
+                        }
+                        found
                     }
                     _ => false,
                 };
@@ -220,7 +734,7 @@ impl SessionState {
                                 continue;
                             }
                             let provenance = crate::domain::vision::VisionRouteRecord::primary_direct_provenance(selection.source_artifact_id.clone(), selection.delivery_artifact_id.clone(), route.route_event_id.clone()).map_err(|error| invalid(error.to_string()))?;
-                            matches.push((provenance, None));
+                            ambiguous |= matched.replace((provenance, None)).is_some();
                         }
                         ContentItem::Text { text, .. }
                             if route.route == VisionRoute::SecondaryTool =>
@@ -239,6 +753,7 @@ impl SessionState {
                                         geometry.delivery_artifact_id
                                             != selection.delivery_artifact_id
                                     })
+                                    || !observation_text_may_match(text, observation)?
                                     || observation
                                         .primary_context_text()
                                         .map_err(|error| invalid(error.to_string()))?
@@ -269,23 +784,26 @@ impl SessionState {
                                 let provenance = observation
                                     .primary_context_provenance(observation_id.clone())
                                     .map_err(|error| invalid(error.to_string()))?;
-                                matches.push((
-                                    provenance,
-                                    Some(observation.raw_observation_blob_id.clone()),
-                                ));
+                                ambiguous |= matched
+                                    .replace((
+                                        provenance,
+                                        Some(observation.raw_observation_blob_id.clone()),
+                                    ))
+                                    .is_some();
                             }
                         }
                         _ => {}
                     }
                 }
             }
-            if matches.len() == 1 {
-                let (provenance, observation_blob) = matches.pop().expect("one matched follow-up");
-                followups.push(FollowupVisionInput {
-                    event_id: (*event_id).clone(),
-                    provenance,
-                    observation_blob,
-                });
+            if let Some((provenance, observation_blob)) = matched.filter(|_| !ambiguous) {
+                if wanted.is_none_or(|ids| ids.contains(event_id)) {
+                    followups.push(FollowupVisionInput {
+                        event_id: event_id.clone(),
+                        provenance,
+                        observation_blob,
+                    });
+                }
             } else if selection_seen {
                 return Err(invalid(
                     "Vision follow-up source is ambiguous or inconsistent",
@@ -456,7 +974,8 @@ impl SessionState {
             .position(|id| id == event_id)
             .ok_or_else(|| invalid("Vision History event is absent"))?;
         let history_sequence = self.history_event_sequences[index];
-        let mut candidates = Vec::new();
+        let mut candidate = None;
+        let mut ambiguous = false;
         for (route, route_sequence) in self.vision_routes.iter().zip(&self.vision_route_sequences) {
             if *route_sequence >= history_sequence || route.source_artifact_ids.len() != 1 {
                 continue;
@@ -482,14 +1001,14 @@ impl SessionState {
                         })
                         .count();
                     if receipts == 1 {
-                        candidates.push(
+                        ambiguous |= candidate.replace(
                             crate::domain::vision::VisionRouteRecord::primary_direct_provenance(
                                 source.clone(),
                                 artifact_id.clone(),
                                 route.route_event_id.clone(),
                             )
                             .map_err(|error| invalid(error.to_string()))?,
-                        );
+                        ).is_some();
                     }
                 }
                 ContentItem::Text { text, .. } if route.route == VisionRoute::SecondaryTool => {
@@ -501,6 +1020,7 @@ impl SessionState {
                         if observation.route_event_id != route.route_event_id
                             || &observation.source_artifact_id != source
                             || *observation_sequence >= history_sequence
+                            || !observation_text_may_match(text, observation)?
                             || observation
                                 .primary_context_text()
                                 .map_err(|error| invalid(error.to_string()))?
@@ -520,23 +1040,22 @@ impl SessionState {
                         if *route_sequence < audit_sequence
                             && audit_sequence < *observation_sequence
                         {
-                            candidates.push(
-                                observation
-                                    .primary_context_provenance(observation_id.clone())
-                                    .map_err(|error| invalid(error.to_string()))?,
-                            );
+                            ambiguous |= candidate
+                                .replace(
+                                    observation
+                                        .primary_context_provenance(observation_id.clone())
+                                        .map_err(|error| invalid(error.to_string()))?,
+                                )
+                                .is_some();
                         }
                     }
                 }
                 _ => {}
             }
         }
-        if candidates.len() != 1 {
-            return Err(invalid(
-                "unaccepted Vision input source is ambiguous or absent",
-            ));
-        }
-        Ok(candidates.pop().expect("one Vision input source"))
+        candidate
+            .filter(|_| !ambiguous)
+            .ok_or_else(|| invalid("unaccepted Vision input source is ambiguous or absent"))
     }
 
     fn recover_vision_provenance(
@@ -773,6 +1292,30 @@ impl SessionState {
         }))
     }
 
+    pub(crate) fn cancelled_initial_inputs(&self) -> BTreeSet<&EventId> {
+        let anchors = self
+            .operator_boundaries
+            .iter()
+            .filter_map(|boundary| match boundary {
+                OperatorTurnBoundary::InitialSelectionCancelled { anchor, .. } => Some(anchor),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        self.operator_boundaries
+            .iter()
+            .filter_map(|boundary| match boundary {
+                OperatorTurnBoundary::Accepted { anchor, inputs, .. }
+                    if anchors.contains(anchor) =>
+                {
+                    Some(inputs)
+                }
+                _ => None,
+            })
+            .flatten()
+            .map(|input| &input.event_id)
+            .collect()
+    }
+
     /// Reconstruct input facts from the original History; legacy inputs remain
     /// unclassified until their original delivery provenance can be verified.
     pub(crate) fn protected_operator_inputs(
@@ -792,6 +1335,9 @@ impl SessionState {
                     closed_input_anchors,
                     ..
                 } => Some(closed_input_anchors.as_slice()),
+                OperatorTurnBoundary::InitialSelectionCancelled { anchor, .. } => {
+                    Some(std::slice::from_ref(anchor))
+                }
                 _ => None,
             })
             .flatten()
@@ -1126,6 +1672,7 @@ impl SessionState {
         &self,
         items: &[ContentItem],
         provenance: &BTreeMap<usize, ContextProvenance>,
+        received_at: super::TaskInputTime,
     ) -> Result<OperatorTurnBoundary, SessionError> {
         let start = self
             .history
@@ -1157,9 +1704,10 @@ impl SessionState {
             })
             .collect::<Result<Vec<_>, SessionError>>()?;
         let boundary = OperatorTurnBoundary::Accepted {
-            schema_version: 1,
+            schema_version: 2,
             anchor: inputs[0].event_id.clone(),
             inputs,
+            received_at: Some(received_at),
         };
         validate_accepted(
             self,
@@ -1170,6 +1718,62 @@ impl SessionState {
         )?;
         Ok(boundary)
     }
+}
+
+fn validate_initial_selection_cancelled(
+    state: &SessionState,
+    boundary: &OperatorTurnBoundary,
+) -> Result<(), SessionError> {
+    let OperatorTurnBoundary::InitialSelectionCancelled {
+        schema_version,
+        anchor,
+    } = boundary
+    else {
+        return Err(invalid("expected initial selector cancellation"));
+    };
+    let Some(OperatorTurnBoundary::Accepted {
+        anchor: accepted,
+        inputs,
+        ..
+    }) = state.operator_boundaries.last()
+    else {
+        return Err(invalid(
+            "selector cancellation has no latest accepted input",
+        ));
+    };
+    if *schema_version != 1
+        || accepted != anchor
+        || !state.history_event_ids.ends_with(
+            &inputs
+                .iter()
+                .map(|input| input.event_id.clone())
+                .collect::<Vec<_>>(),
+        )
+        || state
+            .task_context_selections
+            .iter()
+            .any(|(_, selection)| &selection.input_ref == anchor)
+    {
+        return Err(invalid(
+            "selector cancellation does not match an unsettled initial input",
+        ));
+    }
+    let last_input = inputs.last().expect("accepted input is nonempty");
+    let position = state
+        .history_event_ids
+        .iter()
+        .position(|id| id == &last_input.event_id)
+        .ok_or_else(|| invalid("selector cancellation input is absent"))?;
+    let sequence = state.history_event_sequences[position];
+    if state
+        .request_audits
+        .iter()
+        .zip(&state.request_audit_sequences)
+        .any(|(audit, observed)| *observed > sequence && audit.sampling_step_id().is_some())
+    {
+        return Err(invalid("selector cancellation follows a main request"));
+    }
+    Ok(())
 }
 
 fn validate_completed(
@@ -1255,6 +1859,9 @@ fn completion_anchors(
                 closed_input_anchors,
                 ..
             } => Some(closed_input_anchors.as_slice()),
+            OperatorTurnBoundary::InitialSelectionCancelled { anchor, .. } => {
+                Some(std::slice::from_ref(anchor))
+            }
             _ => None,
         })
         .flatten()
@@ -1332,6 +1939,9 @@ pub(super) fn apply(
             validate_accepted(state, &boundary, previous_sequence)?
         }
         OperatorTurnBoundary::Completed { .. } => validate_completed(state, &boundary)?,
+        OperatorTurnBoundary::InitialSelectionCancelled { .. } => {
+            validate_initial_selection_cancelled(state, &boundary)?
+        }
     }
     state.operator_boundaries.push(boundary);
     Ok(())
@@ -1346,6 +1956,7 @@ fn validate_accepted(
         schema_version,
         anchor,
         inputs,
+        received_at,
     } = boundary
     else {
         return Err(invalid("expected accepted operator boundary"));
@@ -1356,7 +1967,8 @@ fn validate_accepted(
         .len()
         .checked_sub(inputs.len())
         .ok_or_else(|| invalid("operator input references missing History"))?;
-    if *schema_version != 1
+    if !matches!((*schema_version, received_at), (1, None) | (2, Some(_)))
+        || received_at.as_ref().is_some_and(|time| !time.validate())
         || inputs.is_empty()
         || anchor != &inputs[0].event_id
         || state.operator_boundaries.iter().any(|old| match old {
@@ -1365,7 +1977,8 @@ fn validate_accepted(
             } => previous
                 .iter()
                 .any(|item| inputs.iter().any(|input| input.event_id == item.event_id)),
-            OperatorTurnBoundary::Completed { .. } => false,
+            OperatorTurnBoundary::Completed { .. }
+            | OperatorTurnBoundary::InitialSelectionCancelled { .. } => false,
         })
     {
         return Err(invalid("invalid or duplicate accepted operator input"));

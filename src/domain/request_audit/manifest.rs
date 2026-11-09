@@ -18,6 +18,7 @@ use crate::domain::tools::{ResolvedToolPlan, ResolvedToolPlanFingerprint};
 use super::components::{SemanticHash, validate_component_layout};
 use super::{
     REQUEST_AUDIT_MANIFEST_SCHEMA_VERSION, RequestAuditComponentReference, RequestAuditError,
+    TASK_REQUEST_AUDIT_MANIFEST_SCHEMA_VERSION,
 };
 
 /// The project and Session Event stream which jointly own one audit fact.
@@ -204,6 +205,7 @@ impl RequestAuditDelivery {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RequestAuditAttempt {
     pub(super) sampling_step_id: Option<String>,
+    pub(super) persist_sampling_step_id: bool,
     pub(super) improvement_scope: Option<crate::domain::context::ProviderSessionRef>,
     pub(super) provider_session: Option<crate::domain::context::ProviderSessionRef>,
     pub(super) binding: RequestAuditBinding,
@@ -244,6 +246,7 @@ impl RequestAuditAttempt {
         delivery.validate_attempt_input_relationship(&full_logical_input, &delivered_input)?;
         Ok(Self {
             sampling_step_id: None,
+            persist_sampling_step_id: false,
             binding: context.binding.clone(),
             improvement_scope: None,
             provider_session: None,
@@ -267,6 +270,11 @@ impl RequestAuditAttempt {
 
     pub(crate) fn sampling_step_id(&self) -> Option<&str> {
         self.sampling_step_id.as_deref()
+    }
+
+    pub(crate) fn retain_sampling_step_id(mut self) -> Self {
+        self.persist_sampling_step_id = true;
+        self
     }
 
     pub(crate) fn bind_improvement_scope(
@@ -438,6 +446,8 @@ impl RequestAuditCapabilityMapping {
 #[serde(deny_unknown_fields)]
 pub struct RequestAuditManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) sampling_step_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) improvement_scope: Option<crate::domain::context::ProviderSessionRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) provider_session: Option<crate::domain::context::ProviderSessionRef>,
@@ -465,6 +475,9 @@ pub struct RequestAuditManifest {
 }
 
 impl RequestAuditManifest {
+    pub(crate) fn sampling_step_id(&self) -> Option<&str> {
+        self.sampling_step_id.as_deref()
+    }
     /// A physical retry has a fresh audit identity and identical request facts.
     pub(crate) fn repeats_request(&self, original: &Self) -> bool {
         let mut repeated = self.clone();
@@ -551,7 +564,10 @@ impl RequestAuditManifest {
     pub fn validate(&self) -> Result<(), RequestAuditError> {
         if !matches!(
             self.schema_version,
-            1 | 2 | 3 | REQUEST_AUDIT_MANIFEST_SCHEMA_VERSION
+            1 | 2
+                | 3
+                | REQUEST_AUDIT_MANIFEST_SCHEMA_VERSION
+                | TASK_REQUEST_AUDIT_MANIFEST_SCHEMA_VERSION
         ) {
             return Err(RequestAuditError::UnsupportedManifestSchema {
                 schema_version: self.schema_version,
@@ -566,7 +582,9 @@ impl RequestAuditManifest {
             (1, None, None, None) => {}
             (2, Some(renderer), Some(fingerprint), None)
             | (
-                3 | REQUEST_AUDIT_MANIFEST_SCHEMA_VERSION,
+                3
+                | REQUEST_AUDIT_MANIFEST_SCHEMA_VERSION
+                | TASK_REQUEST_AUDIT_MANIFEST_SCHEMA_VERSION,
                 Some(renderer),
                 Some(fingerprint),
                 Some(_),
@@ -576,6 +594,11 @@ impl RequestAuditManifest {
                     .as_str()
                     .bytes()
                     .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')) => {}
+            _ => return Err(RequestAuditError::SamplingIdentityMismatch),
+        }
+        match (self.schema_version, self.sampling_step_id.as_deref()) {
+            (5, Some(step)) if !step.trim().is_empty() && self.provider_session.is_some() => {}
+            (1..=4, None) => {}
             _ => return Err(RequestAuditError::SamplingIdentityMismatch),
         }
         if self.audit_event_id.as_str().trim().is_empty() {
@@ -617,7 +640,11 @@ impl RequestAuditManifest {
             &self.full_logical_components,
             &self.full_context_delivery_map,
         ) {
-            (REQUEST_AUDIT_MANIFEST_SCHEMA_VERSION, Some(components), Some(map)) => {
+            (
+                REQUEST_AUDIT_MANIFEST_SCHEMA_VERSION | TASK_REQUEST_AUDIT_MANIFEST_SCHEMA_VERSION,
+                Some(components),
+                Some(map),
+            ) => {
                 validate_component_layout(components)?;
                 map.validate_intrinsic().map_err(|error| {
                     RequestAuditError::ContextDeliveryMap {

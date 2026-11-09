@@ -17,6 +17,13 @@ pub(crate) use improvement::{
 mod output_capture;
 mod recovery;
 mod request_audit;
+mod task_context_sample;
+mod task_delivery_replay;
+pub(crate) use task_context_sample::{
+    TaskSelectionSampleOutput, compile_captured_task_context, compile_following_task_context,
+    compile_selection, verify_task_compaction_capture,
+};
+pub(crate) use task_delivery_replay::TaskDeliveryReplay;
 
 pub(crate) use compaction::{CompactionFit, ToolBatchContext};
 pub(crate) use context_state::CurrentContextState;
@@ -29,6 +36,88 @@ pub(crate) trait ToolBatchStage<Provider: ModelProvider + ?Sized, Tools: ToolExe
         agent: &'call mut AgentLoop<'provider, 'tools, Provider, Tools>,
         active: &'call ToolBatchContext<'_>,
     ) -> Pin<Box<dyn Future<Output = Result<(), AgentLoopError>> + 'call>>;
+}
+
+/// The fixed durable source/adoption stage for normal Chat. Model sampling
+/// remains inside the one AgentLoop and is not a second execution runtime.
+pub(crate) trait TaskContextStage {
+    fn control_directory(&self) -> &'static str;
+    fn current_protected_context(
+        &mut self,
+    ) -> Result<crate::domain::session::ProtectedOperatorContext, AgentLoopError>;
+    fn prepare(
+        &mut self,
+        capture: crate::domain::session::CompactionContextCapture,
+        compile: crate::domain::session::TaskCompileCapture,
+        input: &EventId,
+        expansion: Option<crate::domain::task_context::TaskSelectionDecision>,
+        source_refresh: bool,
+    ) -> Result<TaskContextPrepared, AgentLoopError>;
+    fn record_attempt(&mut self, attempt: RequestAuditAttempt) -> Result<EventId, AgentLoopError>;
+    fn record_completed_usage(
+        &mut self,
+        capture: &EventId,
+        audit: &EventId,
+        scope: &crate::domain::context::ProviderSessionRef,
+        usage: crate::domain::model::ModelUsage,
+    ) -> Result<(), AgentLoopError>;
+    fn selection_provider(&self) -> (std::sync::Arc<dyn ModelProvider>, Option<AgentModelProfile>);
+    fn record_sample(
+        &mut self,
+        prepared: &TaskContextPrepared,
+        scope: &crate::domain::context::ProviderSessionRef,
+        sample: &TaskSelectionSampleOutput,
+    ) -> Result<EventId, AgentLoopError>;
+    fn selection(
+        &mut self,
+        prepared: &TaskContextPrepared,
+        sample_event_id: Option<EventId>,
+        decision: crate::domain::task_context::TaskSelectionDecision,
+    ) -> Result<TaskSelectionMaterial, AgentLoopError>;
+    fn refresh_decision(
+        &mut self,
+        prepared: &TaskContextPrepared,
+    ) -> Result<TaskRefreshDecision, AgentLoopError>;
+    fn commit(
+        &mut self,
+        selection: crate::domain::session::TaskContextSelected,
+    ) -> Result<(), AgentLoopError>;
+}
+
+pub(crate) struct TaskRefreshDecision {
+    pub(crate) prior_event_id: EventId,
+    pub(crate) prior: crate::domain::session::TaskContextSelected,
+    pub(crate) decision: crate::domain::task_context::TaskSelectionDecision,
+}
+
+pub(crate) struct TaskSelectionMaterial {
+    pub(crate) selection: crate::domain::session::TaskContextSelected,
+    pub(crate) history: Vec<crate::domain::session::TaskResumeHistoryItem>,
+    pub(crate) constraints: Vec<(crate::domain::task_context::ConstraintRange, String)>,
+    pub(crate) excerpts: Vec<crate::domain::task_context::SourceExcerpt>,
+    pub(crate) progress: Vec<crate::domain::session::TaskProgressSource>,
+    pub(crate) research_units: Vec<crate::domain::task_context_research::ResearchTaskUnit>,
+    pub(crate) memory: Vec<crate::domain::session::TaskMemoryDocument>,
+}
+
+pub(crate) struct TaskResumeMaterial {
+    pub(crate) selection: crate::domain::session::TaskContextSelected,
+    pub(crate) history: Vec<crate::domain::session::TaskResumeHistoryItem>,
+    pub(crate) constraints: Vec<(crate::domain::task_context::ConstraintRange, String)>,
+    pub(crate) excerpts: Vec<crate::domain::task_context::SourceExcerpt>,
+    pub(crate) progress: Vec<crate::domain::session::TaskProgressSource>,
+    pub(crate) research_units: Vec<crate::domain::task_context_research::ResearchTaskUnit>,
+    pub(crate) memory: Vec<crate::domain::session::TaskMemoryDocument>,
+}
+
+pub(crate) struct TaskContextPrepared {
+    pub(crate) source: crate::domain::session::SessionSourceIdentity,
+    pub(crate) capture_event_id: EventId,
+    pub(crate) capture_blob: crate::domain::artifacts::BlobId,
+    pub(crate) input_ref: EventId,
+    pub(crate) candidates: crate::domain::task_context::SelectionCandidates,
+    pub(crate) samples_used: usize,
+    pub(crate) expansion: Option<crate::domain::task_context::TaskSelectionDecision>,
 }
 
 use std::collections::BTreeMap;
@@ -195,6 +284,7 @@ pub(crate) enum ChatDurabilityCheckpoint<'a> {
     ModelSampleRejected {
         diagnostic: &'a crate::domain::model::ToolArgumentDiagnostic,
         corrections_used: u8,
+        sampling_step_id: &'a str,
     },
     ArgumentCorrectionReset,
     History(&'a [ContentItem]),
@@ -207,6 +297,7 @@ pub(crate) enum ChatDurabilityCheckpoint<'a> {
         step_id: &'a str,
         previous_step_id: Option<&'a str>,
         provider_session: &'a crate::domain::context::ProviderSessionRef,
+        server_output_items: &'a [ContentItem],
     },
     ExecutionReceipt(&'a ToolExecutionOutcome),
     Subcommand(&'a crate::domain::tools::SubcommandCheckpoint),
@@ -238,6 +329,7 @@ pub(crate) struct CliRuntimeStages<'a> {
     tool_start: &'a mut ToolExecutionStartStage<'a>,
     durability: &'a mut ChatDurabilityStage<'a>,
     context_refresh: &'a mut ContextRefreshStage<'a>,
+    task_context: Option<&'a mut dyn TaskContextStage>,
 }
 
 impl<'a> CliRuntimeStages<'a> {
@@ -256,7 +348,13 @@ impl<'a> CliRuntimeStages<'a> {
             tool_start,
             durability,
             context_refresh,
+            task_context: None,
         }
+    }
+
+    pub(crate) fn with_task_context(mut self, stage: &'a mut dyn TaskContextStage) -> Self {
+        self.task_context = Some(stage);
+        self
     }
 }
 
@@ -267,6 +365,7 @@ struct StreamingStages<'a> {
     record_execution: Option<&'a mut ToolExecutionReceiptStage<'a>>,
     durability: Option<&'a mut ChatDurabilityStage<'a>>,
     context_refresh: Option<&'a mut ContextRefreshStage<'a>>,
+    task_context: Option<&'a mut dyn TaskContextStage>,
 }
 
 impl StreamingStages<'_> {
@@ -278,6 +377,7 @@ impl StreamingStages<'_> {
             record_execution: None,
             durability: None,
             context_refresh: None,
+            task_context: None,
         }
     }
 }
@@ -325,6 +425,18 @@ pub struct AgentLoop<'provider, 'tools, Provider: ?Sized, Tools: ?Sized> {
     active_tool_exposure_plan: ToolExposurePlan,
     committed_delivery: Option<CommittedPrimaryDelivery>,
     history_provenance: BTreeMap<usize, ContextProvenance>,
+    selected_history: Option<context_state::SelectedHistory>,
+    selected_core_memory: Option<crate::domain::context::ContextFragment>,
+    selected_core_source: Option<crate::domain::context::ContextFragmentId>,
+    selected_project_snapshot: Option<String>,
+    research_revision: Option<String>,
+    selected_research_revision: Option<String>,
+    memory_revision: Option<String>,
+    selected_memory_revision: Option<String>,
+    selected_live_processes: Option<Vec<crate::domain::tools::LiveProcessObservation>>,
+    selected_task_id: Option<String>,
+    selected_summary: Option<String>,
+    selected_constraints: context_state::TaskFragments,
     protected_input: crate::domain::session::ProtectedOperatorContext,
     bound_session_stream: Option<StreamId>,
     applied_compaction: Option<AppliedCompaction>,
@@ -417,6 +529,18 @@ where
             active_tool_exposure_plan,
             committed_delivery: None,
             history_provenance: BTreeMap::new(),
+            selected_history: None,
+            selected_core_memory: None,
+            selected_core_source: None,
+            selected_project_snapshot: None,
+            research_revision: None,
+            selected_research_revision: None,
+            memory_revision: None,
+            selected_memory_revision: None,
+            selected_live_processes: None,
+            selected_task_id: None,
+            selected_summary: None,
+            selected_constraints: context_state::TaskFragments::default(),
             protected_input: Default::default(),
             bound_session_stream: None,
             applied_compaction: None,
@@ -497,6 +621,16 @@ where
             .map(|compaction| compaction.summary().clone());
         self.pending_session_summary = None;
         self.applied_compaction = applied_compaction;
+        self.selected_history = None;
+        self.selected_core_memory = None;
+        self.selected_core_source = None;
+        self.selected_project_snapshot = None;
+        self.selected_research_revision = None;
+        self.selected_memory_revision = None;
+        self.selected_live_processes = None;
+        self.selected_task_id = None;
+        self.selected_summary = None;
+        self.selected_constraints = context_state::TaskFragments::default();
         let mut composition = self
             .pending_prompt_composition
             .take()
@@ -571,6 +705,10 @@ where
         self.world_state = Some(world_state);
     }
 
+    pub(crate) fn has_task_context(&self) -> bool {
+        self.selected_history.is_some()
+    }
+
     /// Supplies the current derived Project Snapshot for the fixed Context
     /// slot. Request-audit/Diff persistence remains outside this Slice.
     pub fn with_project_snapshot(mut self, project_snapshot: ProjectSnapshotContext) -> Self {
@@ -593,9 +731,33 @@ where
     ) -> Result<(), AgentLoopError> {
         self.apply_pending_configuration()?;
         self.world_state = current.world_state().cloned();
+        self.research_revision = current.research_revision().map(str::to_owned);
+        self.memory_revision = current.memory_revision().map(str::to_owned);
         self.project_snapshot = Some(current.project_snapshot().clone());
         self.project_memory_core = current.project_memory_core().cloned();
         Ok(())
+    }
+
+    fn selected_task_scope_source_changed(&self) -> bool {
+        self.selected_history.is_some()
+            && (self
+                .project_memory_core
+                .as_ref()
+                .map(|fragment| fragment.id())
+                != self.selected_core_source.as_ref()
+                || self.research_revision != self.selected_research_revision
+                || self.memory_revision != self.selected_memory_revision
+                || self.tools.live_processes().as_ref() != self.selected_live_processes.as_ref())
+    }
+
+    fn selected_task_common_source_changed(&self) -> bool {
+        self.selected_task_scope_source_changed()
+            || (self.selected_history.is_some()
+                && self
+                    .project_snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.snapshot_hash())
+                    != self.selected_project_snapshot.as_deref())
     }
 
     /// Replaces the local candidate for the next Compaction. It does not
@@ -759,6 +921,7 @@ where
                 record_execution: Some(record_execution),
                 durability: None,
                 context_refresh: None,
+                task_context: None,
             },
             None,
         )
@@ -798,6 +961,7 @@ where
                 record_execution: None,
                 durability: Some(stages.durability),
                 context_refresh: Some(stages.context_refresh),
+                task_context: stages.task_context,
             },
             tool_batch,
         )
@@ -822,6 +986,7 @@ where
             mut record_execution,
             mut durability,
             mut context_refresh,
+            mut task_context,
         } = stages;
         let request_budget = request_budget
             .unwrap_or_else(|| Arc::new(ModelRequestBudget::new(DEFAULT_MODEL_REQUEST_LIMIT)));
@@ -874,6 +1039,48 @@ where
         let unactivated_tool_plan = self
             .tools
             .resolve_tool_plan(&self.active_tool_exposure_plan, &deferred_activations)?;
+        let mut selected_plan_hash = None;
+        let current_input_ref = input_provenance
+            .get(&0)
+            .and_then(|provenance| provenance.references().source_event_refs().last())
+            .cloned();
+        if let Some(stage) = task_context.as_deref_mut() {
+            if let Some(refresh) = context_refresh.as_deref_mut() {
+                self.refresh_current_context(refresh()?)?;
+            }
+            let (audit_context, _) = audit.as_ref().ok_or(AgentLoopError::ContextStateMismatch)?;
+            selected_plan_hash = Some(
+                match self
+                    .select_task_context(task_context_sample::SelectionBoundary {
+                        stage,
+                        input_ref: current_input_ref
+                            .as_ref()
+                            .ok_or(AgentLoopError::ContextStateMismatch)?,
+                        input_provenance: &input_provenance,
+                        turn_history_start,
+                        detached_input: None,
+                        tool_plan: &unactivated_tool_plan,
+                        correction_feedback: &[],
+                        request_budget: &request_budget,
+                        cancellation: cancellation.clone(),
+                        audit_context,
+                        source_refresh: false,
+                    })
+                    .await
+                {
+                    Ok(hash) => hash,
+                    Err(AgentLoopError::TaskSelectionCancelled) => {
+                        return Ok(AgentTurnOutcome::InitialSelectionCancelled {
+                            model_requests: request_budget.counts().primary,
+                            anchor: current_input_ref
+                                .clone()
+                                .ok_or(AgentLoopError::ContextStateMismatch)?,
+                        });
+                    }
+                    Err(error) => return Err(error),
+                },
+            );
+        }
         let mut executions = Vec::new();
         let mut corrections_used = self.consecutive_argument_corrections;
         let mut correction_feedback = Vec::new();
@@ -893,7 +1100,9 @@ where
                     executions,
                 });
             }
-            if let Some(refresh) = context_refresh.as_deref_mut() {
+            if (request_index != 0 || task_context.is_none())
+                && let Some(refresh) = context_refresh.as_deref_mut()
+            {
                 self.refresh_current_context(refresh()?)?;
             }
             self.history.ensure_all_tool_calls_paired()?;
@@ -903,6 +1112,44 @@ where
                 self.tools
                     .resolve_tool_plan(&self.active_tool_exposure_plan, &deferred_activations)?
             };
+            let tool_specs = resolved_tool_plan.advertised_specs();
+            if self.selected_task_common_source_changed() {
+                let stage = task_context
+                    .as_deref_mut()
+                    .ok_or(AgentLoopError::TaskContextSourceChanged)?;
+                let (audit_context, _) =
+                    audit.as_ref().ok_or(AgentLoopError::ContextStateMismatch)?;
+                selected_plan_hash = Some(
+                    match self
+                        .select_task_context(task_context_sample::SelectionBoundary {
+                            stage,
+                            input_ref: current_input_ref
+                                .as_ref()
+                                .ok_or(AgentLoopError::ContextStateMismatch)?,
+                            input_provenance: &input_provenance,
+                            turn_history_start,
+                            detached_input: detached_input
+                                .then_some((original_input.as_slice(), &input_provenance)),
+                            tool_plan: &resolved_tool_plan,
+                            correction_feedback: &correction_feedback,
+                            request_budget: &request_budget,
+                            cancellation: cancellation.clone(),
+                            audit_context,
+                            source_refresh: true,
+                        })
+                        .await
+                    {
+                        Ok(hash) => hash,
+                        Err(AgentLoopError::TaskSelectionCancelled) => {
+                            return Ok(AgentTurnOutcome::Cancelled {
+                                model_requests: request_budget.counts().primary,
+                                executions,
+                            });
+                        }
+                        Err(error) => return Err(error),
+                    },
+                );
+            }
             let expired_plan = (!turn_has_committed_sample)
                 .then_some(())
                 .and_then(|_| {
@@ -911,7 +1158,6 @@ where
                         .map(|state| &state.unactivated_tool_plan)
                 })
                 .filter(|prior| *prior == &resolved_tool_plan);
-            let tool_specs = resolved_tool_plan.advertised_specs();
             let turn = TurnContext::new(
                 turn_id.clone(),
                 self.model.clone(),
@@ -920,16 +1166,37 @@ where
                 capabilities.context_window,
                 tool_specs,
             )?;
-            let protected = self.protected_without_active(&input_provenance);
+            let protected = self.protected_without_active(&input_provenance)?;
             let (plan, cache_summary) =
                 context_state::compile_context(context_state::ContextCompilationInput {
                     prompt_composition: &self.prompt_composition,
-                    world_state: self.world_state.as_ref(),
+                    frozen_base_fragments: None,
+                    world_state: if self.selected_history.is_some() {
+                        None
+                    } else {
+                        self.world_state.as_ref()
+                    },
                     project_snapshot: self.project_snapshot.as_ref(),
-                    project_memory_core: self.project_memory_core.as_ref(),
-                    session_summary: self.session_summary.as_ref(),
+                    project_memory_core: if self.selected_history.is_some() {
+                        self.selected_core_memory.as_ref()
+                    } else {
+                        self.project_memory_core.as_ref()
+                    },
+                    session_summary: if self.selected_history.is_some() {
+                        context_state::selected_summary(
+                            self.session_summary.as_ref(),
+                            self.selected_summary.as_deref(),
+                        )?
+                    } else {
+                        self.session_summary.as_ref()
+                    },
                     history: self.history.items(),
                     history_provenance: &self.history_provenance,
+                    selected_history: self.selected_history.as_ref(),
+                    selected_constraints: &self.selected_constraints.for_history(
+                        self.selected_history.as_ref(),
+                        &[&input_provenance, &protected.1],
+                    ),
                     protected_input: Some((&protected.0, &protected.1)),
                     turn_history_start,
                     detached_input: detached_input
@@ -946,6 +1213,11 @@ where
                     correction_feedback: &correction_feedback,
                     capacity_breakdown: None,
                 })?;
+            if let Some(expected) = selected_plan_hash.take()
+                && expected != plan.context_fingerprint()
+            {
+                return Err(AgentLoopError::ContextStateMismatch);
+            }
             let sampling_step = SamplingStepPlan::new(
                 format!("{}:step:{request_index}", turn_id),
                 TurnConfigurationSnapshot::new(
@@ -965,134 +1237,45 @@ where
             let plan = sampling_step.context_plan();
             let full_input = plan.model_input();
             let full_delivery_map = plan.delivery_map().clone();
-            let full_snapshot = StepSnapshot::capture_with_renderer(
-                &turn,
-                request_index,
-                &full_input,
-                &capabilities,
-                sampling_step.prompt_renderer(),
-                InternalRequestMetadata::default(),
-            )?;
-            let full_assessment = self
-                .provider_session
-                .assess_delivery(&full_snapshot, capabilities.incremental_input);
-            let retains_reasoning = self
-                .committed_delivery
-                .as_ref()
-                .map(|state| &state.input)
-                .is_some_and(|input| {
-                    input.content_items.iter().any(|item| {
-                        matches!(
-                            item,
-                            ContentItem::Reasoning { .. } | ContentItem::OpaqueContinuation { .. }
-                        )
-                    })
-                });
             let (mut delivery_input, mut delivery_map, mut snapshot, assessment) =
-                if retains_reasoning
-                    || matches!(
-                        full_assessment,
-                        BaselineAssessment::FullRequest {
-                            reason: BaselineInvalidationReason::InputNotAppendOnly
-                        }
-                    )
-                {
-                    match context_state::state_diff_delivery_input(
-                        context_state::StateDiffDeliveryInput {
-                            correction_feedback: &correction_feedback,
-                            step_id: sampling_step.step_id(),
-                            full_input: &full_input,
-                            full_delivery_map: &full_delivery_map,
-                            current_plan: plan,
-                            planner: &self.context_planner,
-                            budget: context_budget,
-                            committed_delivery: self.committed_delivery.as_ref(),
-                            world_state: self.world_state.as_ref(),
-                            project_snapshot: self.project_snapshot.as_ref(),
-                            project_memory_core: self.project_memory_core.as_ref(),
-                            history: self.history.items(),
-                            history_provenance: &self.history_provenance,
-                            turn_history_start,
-                        },
-                    )? {
-                        Some((candidate_input, candidate_map)) => {
-                            let candidate_snapshot = StepSnapshot::capture_with_renderer(
-                                &turn,
-                                request_index,
-                                &candidate_input,
-                                &capabilities,
-                                sampling_step.prompt_renderer(),
-                                InternalRequestMetadata::default(),
-                            )?;
-                            let candidate_assessment = self.provider_session.assess_delivery(
-                                &candidate_snapshot,
-                                capabilities.incremental_input,
-                            );
-                            match candidate_assessment {
-                                BaselineAssessment::AppendOnlyCandidate { .. } => (
-                                    candidate_input,
-                                    candidate_map,
-                                    candidate_snapshot,
-                                    candidate_assessment,
-                                ),
-                                BaselineAssessment::FullRequest { reason }
-                                    if reason.permits_full_input_relationship(
-                                        &full_input,
-                                        &candidate_input,
-                                    ) && (reason
-                                        != BaselineInvalidationReason::ToolsChanged
-                                        || candidate_input.is_reasoning_replay_of(&full_input)
-                                        || ((!deferred_activations.names().is_empty()
-                                            || expired_plan.is_some())
-                                            && self
-                                                .committed_delivery
-                                                .as_ref()
-                                                .map(|state| &state.input)
-                                                .is_some_and(|previous| {
-                                                    self.provider_session
-                                                        .tool_change_preserves_delivery(
-                                                            &candidate_snapshot,
-                                                            previous,
-                                                            &candidate_input,
-                                                            expired_plan,
-                                                        )
-                                                }))) =>
-                                {
-                                    (
-                                        candidate_input,
-                                        candidate_map,
-                                        candidate_snapshot,
-                                        candidate_assessment,
-                                    )
-                                }
-                                BaselineAssessment::FullRequest { reason } if retains_reasoning => {
-                                    return Err(AgentLoopError::ProviderContinuationUnavailable {
-                                        reason: ContinuationRejection::BaselineRejected { reason },
-                                    });
-                                }
-                                _ => (
-                                    full_input.clone(),
-                                    full_delivery_map.clone(),
-                                    full_snapshot,
-                                    full_assessment,
-                                ),
-                            }
-                        }
-                        None => (
-                            full_input.clone(),
-                            full_delivery_map.clone(),
-                            full_snapshot,
-                            full_assessment,
+                context_state::choose_delivery(context_state::DeliveryChoiceInput {
+                    state_diff: context_state::StateDiffDeliveryInput {
+                        correction_feedback: &correction_feedback,
+                        selected_constraints: &self.selected_constraints.for_history(
+                            self.selected_history.as_ref(),
+                            &[&input_provenance, &protected.1],
                         ),
-                    }
-                } else {
-                    (
-                        full_input.clone(),
-                        full_delivery_map.clone(),
-                        full_snapshot,
-                        full_assessment,
-                    )
-                };
+                        step_id: sampling_step.step_id(),
+                        full_input: &full_input,
+                        full_delivery_map: &full_delivery_map,
+                        current_plan: plan,
+                        planner: &self.context_planner,
+                        budget: context_budget,
+                        committed_delivery: self.committed_delivery.as_ref(),
+                        world_state: if self.selected_history.is_some() {
+                            None
+                        } else {
+                            self.world_state.as_ref()
+                        },
+                        project_snapshot: self.project_snapshot.as_ref(),
+                        project_memory_core: if self.selected_history.is_some() {
+                            self.selected_core_memory.as_ref()
+                        } else {
+                            self.project_memory_core.as_ref()
+                        },
+                        history: self.history.items(),
+                        history_provenance: &self.history_provenance,
+                        turn_history_start,
+                    },
+                    provider_session: &self.provider_session,
+                    turn: &turn,
+                    request_index,
+                    capabilities: &capabilities,
+                    renderer: sampling_step.prompt_renderer(),
+                    activation_or_expiry: !deferred_activations.names().is_empty()
+                        || expired_plan.is_some(),
+                    expired_plan,
+                })?;
             self.last_baseline_assessment = Some(assessment.clone());
             let (request, request_delivery_map) =
                 self.request_for_assessment(&delivery_input, &delivery_map, &assessment)?;
@@ -1210,6 +1393,7 @@ where
                         stage(ChatDurabilityCheckpoint::ModelSampleRejected {
                             diagnostic: &diagnostic,
                             corrections_used,
+                            sampling_step_id: sampling_step.step_id(),
                         })?;
                     }
                     if corrections_used
@@ -1284,9 +1468,17 @@ where
                 map: delivery_map,
                 unactivated_tool_plan: unactivated_tool_plan.clone(),
                 history_len: self.history.items().len(),
-                world_state: self.world_state.clone(),
+                world_state: if self.selected_history.is_some() {
+                    None
+                } else {
+                    self.world_state.clone()
+                },
                 project_snapshot: self.project_snapshot.clone(),
-                project_memory_core: self.project_memory_core.clone(),
+                project_memory_core: if self.selected_history.is_some() {
+                    self.selected_core_memory.clone()
+                } else {
+                    self.project_memory_core.clone()
+                },
                 context_manifest: plan.full_logical_manifest().clone(),
             });
             self.last_successful_context = Some(ContextInspection {
@@ -1310,6 +1502,7 @@ where
                     step_id: sampling_step.step_id(),
                     previous_step_id: previous_step_id.as_deref(),
                     provider_session: self.provider_session.reference(),
+                    server_output_items: &server_output_items,
                 })?;
             }
 
@@ -1382,6 +1575,10 @@ where
                 let tool_plan = self
                     .tools
                     .resolve_tool_plan(&self.active_tool_exposure_plan, &deferred_activations)?;
+                let selected_source_changed = self.selected_task_scope_source_changed();
+                // This settled batch follows a committed Primary sample. Compact
+                // its already verified selection before freezing changed sources;
+                // the next Primary must first match the refreshed selection.
                 let active = ToolBatchContext {
                     turn_id: &turn_id,
                     history_end: self.history.items().len(),
@@ -1390,6 +1587,9 @@ where
                     input_provenance: &input_provenance,
                     detached: detached_input,
                     tool_specs: tool_plan.advertised_specs(),
+                    task_selection_pending: selected_plan_hash.is_some(),
+                    source_refresh_pending: selected_source_changed
+                        && request_budget.remaining() != Some(0),
                 };
                 stage.apply(self, &active).await?;
                 if self.applied_compaction != before {
@@ -1406,6 +1606,46 @@ where
                             |(index, provenance)| (turn_history_start + index, provenance.clone()),
                         ));
                     }
+                }
+                if !cancellation.is_cancelled()
+                    && self.selected_task_scope_source_changed()
+                    && request_budget.remaining() != Some(0)
+                {
+                    let task_stage = task_context
+                        .as_deref_mut()
+                        .ok_or(AgentLoopError::TaskContextSourceChanged)?;
+                    let (audit_context, _) =
+                        audit.as_ref().ok_or(AgentLoopError::ContextStateMismatch)?;
+                    selected_plan_hash = Some(
+                        match self
+                            .select_task_context(task_context_sample::SelectionBoundary {
+                                stage: task_stage,
+                                input_ref: current_input_ref
+                                    .as_ref()
+                                    .ok_or(AgentLoopError::ContextStateMismatch)?,
+                                input_provenance: &input_provenance,
+                                turn_history_start,
+                                detached_input: detached_input
+                                    .then_some((original_input.as_slice(), &input_provenance)),
+                                tool_plan: &tool_plan,
+                                correction_feedback: &correction_feedback,
+                                request_budget: &request_budget,
+                                cancellation: cancellation.clone(),
+                                audit_context,
+                                source_refresh: true,
+                            })
+                            .await
+                        {
+                            Ok(hash) => hash,
+                            Err(AgentLoopError::TaskSelectionCancelled) => {
+                                return Ok(AgentTurnOutcome::Cancelled {
+                                    model_requests: request_budget.counts().primary,
+                                    executions,
+                                });
+                            }
+                            Err(error) => return Err(error),
+                        },
+                    );
                 }
             }
         }
@@ -1552,17 +1792,18 @@ where
         full_delivery_map: &ContextDeliveryMap,
         assessment: &BaselineAssessment,
     ) -> Result<(ModelRequest, ContextDeliveryMap), AgentLoopError> {
-        full_delivery_map.validate_against(full_input)?;
+        let (projected, projected_map) =
+            context_state::project_delivery(full_input, full_delivery_map, assessment)?;
         Ok(match assessment {
             BaselineAssessment::FullRequest { .. } => (
-                ModelRequest::full(full_input.clone()).with_opaque_continuation_scope(
+                ModelRequest::full(projected).with_opaque_continuation_scope(
                     OpaqueContinuationScope::for_provider_session(
                         self.provider_session.reference(),
                     ),
                 ),
-                full_delivery_map.clone(),
+                projected_map,
             ),
-            BaselineAssessment::AppendOnlyCandidate { delta_items } => {
+            BaselineAssessment::AppendOnlyCandidate { .. } => {
                 let continuation = self
                     .committed_delivery
                     .as_ref()
@@ -1570,16 +1811,14 @@ where
                     .filter(|stored| stored.session == *self.provider_session.reference())
                     .map(|stored| stored.response_id.clone())
                     .ok_or(AgentLoopError::ContinuationIdentityMissing)?;
-                let mut delta = full_input.clone();
-                delta.content_items = delta_items.clone();
-                let delivery_map = full_delivery_map.for_incremental_delta(full_input, &delta)?;
                 (
-                    ModelRequest::incremental(delta, continuation).with_opaque_continuation_scope(
-                        OpaqueContinuationScope::for_provider_session(
-                            self.provider_session.reference(),
+                    ModelRequest::incremental(projected, continuation)
+                        .with_opaque_continuation_scope(
+                            OpaqueContinuationScope::for_provider_session(
+                                self.provider_session.reference(),
+                            ),
                         ),
-                    ),
-                    delivery_map,
+                    projected_map,
                 )
             }
         })
@@ -1705,6 +1944,10 @@ pub enum AgentTurnOutcome {
         model_requests: usize,
         executions: Vec<ToolExecutionOutcome>,
     },
+    InitialSelectionCancelled {
+        model_requests: usize,
+        anchor: EventId,
+    },
 }
 
 /// Why a completed provider delivery cannot accompany the current logical
@@ -1796,6 +2039,12 @@ pub enum AgentLoopError {
     CompactionSummaryRejected { reason: String },
     #[error("Compaction summary cancelled; parent delivery retained")]
     CompactionCancelled,
+    #[error("task context selection rejected: {reason}")]
+    TaskSelectionRejected { reason: String },
+    #[error("task context selection cancelled; prior delivery retained")]
+    TaskSelectionCancelled,
+    #[error("Core Memory changed after task selection; a fresh durable selection is required")]
+    TaskContextSourceChanged,
     #[error("Execution Receipt commit failed: {message}")]
     ExecutionReceiptCommit { message: String },
     #[error("assistant text presentation failed: {message}")]

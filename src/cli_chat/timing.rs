@@ -39,3 +39,98 @@ impl TurnTiming {
         }
     }
 }
+
+pub(super) fn task_index_work(enabled: bool, stats: &super::task_index::TaskIndexStats) {
+    if enabled {
+        console_eprintln!(
+            "[debug timing] phase=task_index source_rows={} source_prefix_bytes={} source_verification_bytes={} source_index_read_bytes={} source_index_text_write_bytes={} source_index_hash_write_bytes={} source_index_record_write_bytes={} posting_rows_read={} posting_bytes_read={} posting_rows_written={} posting_bytes_written={} cache_rows_written={} cache_bytes_written={} proof_nodes_read={} proof_bytes_read={} proof_nodes_written={} proof_bytes_written={} card_rows_read={} card_bytes_read={} task_ref_rows_read={} task_ref_bytes_read={} anchor_rows_read={} anchor_bytes_read={} semantics_rows_read={} semantics_bytes_read={} cards_written={} anchors_written={} navigation_stage_read_bytes={} navigation_stage_write_bytes={} metadata_rebuilt={}",
+            stats.source_rows,
+            stats.source_prefix_bytes,
+            stats.source_verification_bytes,
+            stats.source_index_read_bytes,
+            stats.source_index_text_write_bytes,
+            stats.source_index_hash_write_bytes,
+            stats.source_index_record_write_bytes,
+            stats.posting_rows_read,
+            stats.posting_bytes_read,
+            stats.posting_rows_written,
+            stats.posting_bytes_written,
+            stats.cache_rows_written,
+            stats.cache_bytes_written,
+            stats.proof_nodes_read,
+            stats.proof_bytes_read,
+            stats.proof_nodes_written,
+            stats.proof_bytes_written,
+            stats.card_rows_read,
+            stats.card_bytes_read,
+            stats.task_ref_rows_read,
+            stats.task_ref_bytes_read,
+            stats.anchor_rows_read,
+            stats.anchor_bytes_read,
+            stats.semantics_rows_read,
+            stats.semantics_bytes_read,
+            stats.cards_written,
+            stats.anchors_written,
+            stats.navigation_stage_read_bytes,
+            stats.navigation_stage_write_bytes,
+            stats.metadata_rebuilt,
+        );
+    }
+}
+
+pub(super) struct ContextReadWork {
+    pub(super) scan_bytes: usize,
+    pub(super) records: usize,
+    pub(super) rank_window_checks: usize,
+    pub(super) retrieval_source_window_bytes: usize,
+    pub(super) retrieval_index_source_bytes: usize,
+    pub(super) retrieval_needle_scan_bytes: usize,
+    pub(super) retrieval_candidate_anchors: usize,
+    pub(super) retrieval_local_gram_probes: usize,
+    pub(super) retrieval_window_gram_probes: usize,
+    pub(super) retrieval_rank_window_bytes: usize,
+    pub(super) source_verification_bytes: usize,
+    pub(super) source_materialization_read_bytes: usize,
+    pub(super) source_materialization_write_bytes: usize,
+    pub(super) source_index_scan_bytes: usize,
+    pub(super) source_index_text_write_bytes: usize,
+    pub(super) source_index_hash_write_bytes: usize,
+    pub(super) source_index_record_write_bytes: usize,
+    pub(super) auxiliary_preparation_memory_read_bytes: usize,
+    pub(super) auxiliary_preparation_write_bytes: usize,
+    pub(super) indexed_events: usize,
+    pub(super) indexed_bytes: usize,
+    pub(super) initial_indexed_events: usize,
+    pub(super) initial_indexed_bytes: usize,
+}
+
+pub(super) fn context_read_work(enabled: bool, work: &ContextReadWork) {
+    if enabled {
+        console_eprintln!(
+            "[debug timing] phase=context_read scan_bytes={} records={} rank_window_checks={} retrieval_source_window_bytes={} retrieval_index_source_bytes={} retrieval_needle_scan_bytes={} retrieval_candidate_anchors={} retrieval_local_gram_probes={} retrieval_window_gram_probes={} retrieval_rank_window_bytes={} source_verification_bytes={} source_materialization_read_bytes={} source_materialization_write_bytes={} source_index_scan_bytes={} source_index_text_write_bytes={} source_index_hash_write_bytes={} source_index_record_write_bytes={} auxiliary_preparation_memory_read_bytes={} auxiliary_preparation_write_bytes={} indexed_events={} indexed_bytes={} initial_indexed_events={} initial_indexed_bytes={}",
+            work.scan_bytes,
+            work.records,
+            work.rank_window_checks,
+            work.retrieval_source_window_bytes,
+            work.retrieval_index_source_bytes,
+            work.retrieval_needle_scan_bytes,
+            work.retrieval_candidate_anchors,
+            work.retrieval_local_gram_probes,
+            work.retrieval_window_gram_probes,
+            work.retrieval_rank_window_bytes,
+            work.source_verification_bytes,
+            work.source_materialization_read_bytes,
+            work.source_materialization_write_bytes,
+            work.source_index_scan_bytes,
+            work.source_index_text_write_bytes,
+            work.source_index_hash_write_bytes,
+            work.source_index_record_write_bytes,
+            work.auxiliary_preparation_memory_read_bytes,
+            work.auxiliary_preparation_write_bytes,
+            work.indexed_events,
+            work.indexed_bytes,
+            work.initial_indexed_events,
+            work.initial_indexed_bytes
+        );
+    }
+}

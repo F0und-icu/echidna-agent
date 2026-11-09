@@ -25,6 +25,10 @@ pub(crate) struct ToolBatchContext<'a> {
         &'a std::collections::BTreeMap<usize, crate::domain::context::ContextProvenance>,
     pub(super) detached: bool,
     pub(super) tool_specs: &'a [crate::domain::tools::ToolSpec],
+    /// A freshly selected plan has not yet been sent as its first main request.
+    pub(crate) task_selection_pending: bool,
+    /// Current sources changed after the verified selection and need refresh.
+    pub(crate) source_refresh_pending: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -71,29 +75,21 @@ where
     pub(super) fn protected_without_active(
         &self,
         active: &std::collections::BTreeMap<usize, crate::domain::context::ContextProvenance>,
-    ) -> (
-        Vec<ContentItem>,
-        std::collections::BTreeMap<usize, crate::domain::context::ContextProvenance>,
-    ) {
-        let active_ids = active
-            .values()
-            .filter_map(|p| p.references().source_event_refs().last())
-            .collect::<std::collections::BTreeSet<_>>();
-        let mut items = Vec::new();
-        let mut provenance = std::collections::BTreeMap::new();
-        for (index, item) in self.protected_input.detached_items.iter().enumerate() {
-            let p = &self.protected_input.detached_provenance[&index];
-            if p.references()
-                .source_event_refs()
-                .last()
-                .is_some_and(|id| active_ids.contains(id))
-            {
-                continue;
-            }
-            provenance.insert(items.len(), p.clone());
-            items.push(item.clone());
+    ) -> Result<
+        (
+            Vec<ContentItem>,
+            std::collections::BTreeMap<usize, crate::domain::context::ContextProvenance>,
+        ),
+        AgentLoopError,
+    > {
+        if let Some(selected) = &self.selected_history {
+            let all = self
+                .protected_input
+                .all_without_active(active, self.history.items())?;
+            Ok(selected.without_selected_protected(&all))
+        } else {
+            Ok(self.protected_input.without_active(active))
         }
-        (items, provenance)
     }
 
     pub(crate) fn delivery_input_estimate(&self) -> Result<Option<u32>, AgentLoopError> {
@@ -141,15 +137,38 @@ where
         use crate::domain::context::ContextPlannerError;
         let capabilities = self.provider.capabilities();
         let budget = self.context_planner.default_budget(&capabilities)?;
-        let protected = self.protected_without_active(active.input_provenance);
+        let protected = self.protected_without_active(active.input_provenance)?;
+        let current_core =
+            if self.selected_history.is_some() && !self.selected_task_scope_source_changed() {
+                self.selected_core_memory.as_ref()
+            } else {
+                self.project_memory_core.as_ref()
+            };
         match context_state::compile_context(context_state::ContextCompilationInput {
             prompt_composition: &self.prompt_composition,
-            world_state: self.world_state.as_ref(),
+            frozen_base_fragments: None,
+            world_state: if self.selected_history.is_some() {
+                None
+            } else {
+                self.world_state.as_ref()
+            },
             project_snapshot: self.project_snapshot.as_ref(),
-            project_memory_core: self.project_memory_core.as_ref(),
-            session_summary: self.session_summary.as_ref(),
+            project_memory_core: current_core,
+            session_summary: if self.selected_history.is_some() {
+                context_state::selected_summary(
+                    self.session_summary.as_ref(),
+                    self.selected_summary.as_deref(),
+                )?
+            } else {
+                self.session_summary.as_ref()
+            },
             history: self.history.items(),
             history_provenance: &self.history_provenance,
+            selected_history: self.selected_history.as_ref(),
+            selected_constraints: &self.selected_constraints.for_history(
+                self.selected_history.as_ref(),
+                &[active.input_provenance, &protected.1],
+            ),
             protected_input: Some((&protected.0, &protected.1)),
             turn_history_start: active.history_start,
             detached_input: active
@@ -225,6 +244,11 @@ where
         };
         let capabilities = self.provider.capabilities();
         let budget = self.context_planner.default_budget(&capabilities)?;
+        let selected_history = self
+            .selected_history
+            .as_ref()
+            .map(|selected| selected.retained_for_compaction(candidate))
+            .transpose()?;
         let active_ids = active
             .input_provenance
             .values()
@@ -247,12 +271,26 @@ where
         let candidate =
             match context_state::compile_context(context_state::ContextCompilationInput {
                 prompt_composition: prompt,
-                world_state: self.world_state.as_ref(),
+                frozen_base_fragments: None,
+                world_state: if self.selected_history.is_some() {
+                    None
+                } else {
+                    self.world_state.as_ref()
+                },
                 project_snapshot: self.project_snapshot.as_ref(),
-                project_memory_core: self.project_memory_core.as_ref(),
+                project_memory_core: if self.selected_history.is_some() {
+                    self.selected_core_memory.as_ref()
+                } else {
+                    self.project_memory_core.as_ref()
+                },
                 session_summary: Some(candidate.summary()),
                 history: retained,
                 history_provenance: &protected.retained_provenance,
+                selected_history: selected_history.as_ref(),
+                selected_constraints: &self.selected_constraints.for_history(
+                    selected_history.as_ref(),
+                    &[active.input_provenance, &protected_provenance],
+                ),
                 protected_input: Some((&protected_items, &protected_provenance)),
                 turn_history_start: start,
                 detached_input: detached
@@ -329,9 +367,17 @@ where
     > {
         self.compile_compaction_context(
             self.history.items(),
-            self.session_summary.as_ref(),
+            if self.selected_history.is_some() {
+                context_state::selected_summary(
+                    self.session_summary.as_ref(),
+                    self.selected_summary.as_deref(),
+                )?
+            } else {
+                self.session_summary.as_ref()
+            },
             &self.protected_input,
             true,
+            None,
         )
     }
 
@@ -359,6 +405,7 @@ where
             Some(compaction.summary()),
             protected,
             false,
+            Some(compaction),
         ) {
             Ok(Ok(plan)) => plan,
             Ok(Err(_)) => return Ok(None),
@@ -404,6 +451,7 @@ where
         summary: Option<&SessionSummary>,
         protected: &crate::domain::session::ProtectedOperatorContext,
         collect_breakdown: bool,
+        candidate: Option<&SessionCompaction>,
     ) -> Result<
         Result<
             crate::domain::context::ContextPlan,
@@ -416,6 +464,10 @@ where
     > {
         use crate::domain::context::ContextPlannerError;
         let capabilities = self.provider.capabilities();
+        let selected_history = match (self.selected_history.as_ref(), candidate) {
+            (Some(selected), Some(candidate)) => Some(selected.retained_for_compaction(candidate)?),
+            _ => None,
+        };
         let budget = self.context_planner.default_budget(&capabilities)?;
         let prompt = self
             .pending_prompt_composition
@@ -426,42 +478,47 @@ where
             .tools
             .resolve_tool_plan(&exposure, &DeferredActivationSet::default())?;
         let mut history = items.to_vec();
-        let (turn_history_start, detached_input, protected_input) =
-            if let Some(index) = protected.retained_provenance.keys().next_back() {
-                (
-                    *index,
-                    None,
-                    Some((
-                        &protected.detached_items[..],
-                        &protected.detached_provenance,
-                    )),
-                )
-            } else if !protected.detached_items.is_empty() {
-                (
-                    history.len(),
-                    Some((
-                        &protected.detached_items[..],
-                        &protected.detached_provenance,
-                    )),
-                    None,
-                )
-            } else {
-                history.push(ContentItem::user_text("Continue."));
-                (items.len(), None, None)
-            };
+        let selected = selected_history.as_ref().or(self.selected_history.as_ref());
+        let preview = context_state::preview_operator_context(&mut history, protected, selected)?;
         let mut breakdown = None;
         match context_state::compile_context(context_state::ContextCompilationInput {
             correction_feedback: &[],
             prompt_composition: prompt,
-            world_state: self.world_state.as_ref(),
+            frozen_base_fragments: None,
+            world_state: if self.selected_history.is_some() {
+                None
+            } else {
+                self.world_state.as_ref()
+            },
             project_snapshot: self.project_snapshot.as_ref(),
-            project_memory_core: self.project_memory_core.as_ref(),
+            project_memory_core: if self.selected_history.is_some() {
+                self.selected_core_memory.as_ref()
+            } else {
+                self.project_memory_core.as_ref()
+            },
             session_summary: summary,
             history: &history,
             history_provenance: &protected.retained_provenance,
-            protected_input,
-            turn_history_start,
-            detached_input,
+            selected_history: selected,
+            selected_constraints: &self.selected_constraints.for_history(
+                selected,
+                &[
+                    &preview.active_provenance,
+                    preview
+                        .protected
+                        .as_ref()
+                        .map_or(&preview.active_provenance, |(_, provenance)| provenance),
+                ],
+            ),
+            protected_input: preview
+                .protected
+                .as_ref()
+                .map(|(items, provenance)| (items.as_slice(), provenance)),
+            turn_history_start: preview.turn_history_start,
+            detached_input: preview
+                .detached
+                .as_ref()
+                .map(|(items, provenance)| (items.as_slice(), provenance)),
             planner: &self.context_planner,
             cache: None,
             budget,
@@ -537,6 +594,15 @@ where
         }
         let normalized_items = session.compaction_source_history()?;
         let history = ConversationHistory::from_complete_content_items(&normalized_items)?;
+        if compaction.summary().schema_version() == 7 {
+            self.selected_history = self
+                .selected_history
+                .as_ref()
+                .map(|selected| selected.retained_for_compaction(compaction))
+                .transpose()
+                .map_err(|_| AgentLoopConfigurationError::CompactionRequired)?;
+            self.selected_summary = Some(format!("summary:{}", compaction.summary().fingerprint()));
+        }
         self.history = history;
         self.protected_input = session.current_protected_operator_context()?;
         self.history_provenance = self.protected_input.retained_provenance.clone();

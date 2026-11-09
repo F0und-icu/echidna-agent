@@ -22,6 +22,17 @@ pub(super) struct ConsecutiveRejectionPayload {
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+pub(super) struct ConsecutiveRejectionV3Payload {
+    pub(super) schema_version: u16,
+    pub(super) request_audit_event_id: EventId,
+    pub(super) diagnostic: ToolArgumentDiagnostic,
+    pub(super) corrections_used: u8,
+    pub(super) reset_anchor: Option<EventId>,
+    pub(super) sampling_step_id: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct CorrectionResetPayload {
     pub(super) schema_version: u16,
     pub(super) accepted_request_audit_event_id: EventId,
@@ -51,6 +62,7 @@ pub(super) fn reject(
     audit_id: EventId,
     used: u8,
     anchor: Option<EventId>,
+    sampling_step_id: Option<&str>,
 ) -> Result<(), SessionError> {
     state.ensure_completed_history()?;
     let invalid = || SessionError::InvalidModelSampleRejection;
@@ -72,6 +84,10 @@ pub(super) fn reject(
         || expected != Some(used)
         || anchor != state.correction_reset_anchor
         || audit.audit_event_id() != &audit_id
+        || audit
+            .sampling_step_id()
+            .zip(sampling_step_id)
+            .is_some_and(|(actual, rejected)| actual != rejected)
         || audit.provider_session() != Some(provider)
         || audit.improvement_scope().is_some()
         || state.history.items().len() != state.latest_audit_history_len

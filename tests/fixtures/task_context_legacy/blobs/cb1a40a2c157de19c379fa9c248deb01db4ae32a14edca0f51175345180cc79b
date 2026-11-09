@@ -1,0 +1,1 @@
+{"call":{"arguments":{"artifact_id":"artifact-followup","event_id":"followup-image-event","occurred_at":"2026-09-12T00:00:00Z","source_path":"screen.png","target_snapshot_id":"snapshot-legacy-followup-source","toolchain_fingerprint":"fixture"},"call_id":"followup-call","name":"view_image"},"kind":"tool_call"}

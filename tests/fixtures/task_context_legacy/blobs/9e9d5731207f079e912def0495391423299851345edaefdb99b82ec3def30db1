@@ -1,0 +1,1 @@
+{"call":{"arguments":{"path":"current.txt"},"call_id":"latest-read","name":"read_file"},"kind":"tool_call"}

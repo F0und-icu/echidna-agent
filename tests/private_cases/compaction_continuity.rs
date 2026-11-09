@@ -99,6 +99,195 @@ fn result(id: &str, status: ToolResultStatus) -> ContentItem {
 }
 
 #[test]
+fn compaction_preview_includes_each_unclosed_operator_source_once() {
+    use crate::domain::context::ContextProvenance;
+    use crate::domain::session::{SessionReducer, TaskInputTime, TimeZoneObservation};
+    let provider = MockModelProvider::new(MockModelFixture {
+        capabilities: capabilities(),
+        events: Vec::new(),
+        completion: ModelResponseCompletion::without_response_id(),
+    });
+    let tools = ToolRegistry::for_project(".");
+    let first_provider = ProviderSession::new(
+        ProviderSessionId::new("preview-first"),
+        ProviderSessionRole::Primary,
+        0,
+    );
+    let resumed_provider = ProviderSession::new(
+        ProviderSessionId::new("preview-resumed"),
+        ProviderSessionRole::Primary,
+        1,
+    );
+    let envelope = |event: SessionEvent, sequence: u64| {
+        event
+            .into_envelope(
+                EventId::new(format!("preview-{sequence}")),
+                StreamId::new("session:preview"),
+                EventSequence::new(sequence),
+                OccurredAt::new("unix:1793894401.123456789"),
+            )
+            .unwrap()
+    };
+    let reducer = SessionReducer;
+    let mut events = vec![envelope(
+        SessionEvent::Started {
+            primary_provider_session: first_provider.reference().clone(),
+        },
+        1,
+    )];
+    let mut state = reducer.reduce(events.clone()).unwrap();
+    for (index, text) in ["EARLIER-UNCLOSED-INPUT", "LATER-UNCLOSED-INPUT"]
+        .into_iter()
+        .enumerate()
+    {
+        let sequence = 2 + index as u64 * 2;
+        let item = ContentItem::user_text(text);
+        let recorded = envelope(
+            SessionEvent::HistoryItemRecorded { item: item.clone() },
+            sequence,
+        );
+        reducer.apply(&mut state, recorded.clone()).unwrap();
+        events.push(recorded);
+        let provenance = BTreeMap::from([(0, ContextProvenance::operator_input(text).unwrap())]);
+        let boundary = state
+            .accepted_operator_input(
+                &[item],
+                &provenance,
+                TaskInputTime {
+                    unix_seconds: 1_793_894_401,
+                    nanoseconds: 0,
+                    timezone: TimeZoneObservation::Unknown,
+                },
+            )
+            .unwrap();
+        let accepted = envelope(
+            SessionEvent::OperatorTurnBoundaryRecorded { boundary },
+            sequence + 1,
+        );
+        reducer.apply(&mut state, accepted.clone()).unwrap();
+        events.push(accepted);
+    }
+    let resumed = envelope(
+        SessionEvent::Resumed {
+            primary_provider_session: resumed_provider.reference().clone(),
+        },
+        6,
+    );
+    reducer.apply(&mut state, resumed.clone()).unwrap();
+    events.push(resumed);
+    assert_eq!(
+        state
+            .current_protected_operator_context()
+            .unwrap()
+            .retained_provenance
+            .len(),
+        2
+    );
+    let mut agent = AgentLoop::new(&provider, &tools);
+    agent
+        .resume_from_session(&state, resumed_provider.clone(), None)
+        .unwrap();
+    let legacy_plan = agent
+        .fresh_compaction_context_diagnostic()
+        .unwrap()
+        .unwrap();
+    use crate::domain::artifacts::BlobId;
+    use crate::domain::session::TaskContextSelected;
+    let (source, _) =
+        SessionSourceIdentity::from_events(ProjectId::new("preview"), &events, &[]).unwrap();
+    let source_hash = source.stream_hash().to_owned();
+    let decision = serde_json::from_value(
+        json!({"relation":"new", "focus":{"kind":"new_from_input", "input_ref":"preview-4"},
+        "related_task_refs":[], "required_context_refs":[], "unresolved_references":[]}),
+    )
+    .unwrap();
+    // The task delivery projection excludes the older input; it is still a
+    // real, unclosed Session source and must enter through protected input.
+    let selection = TaskContextSelected {
+        schema_version: 1,
+        request_proof_version: 1,
+        source,
+        capture_event_id: EventId::new("fixture-capture"),
+        capture_blob: BlobId::new("0".repeat(64)).unwrap(),
+        input_ref: EventId::new("preview-4"),
+        input_boundary_event_id: EventId::new("preview-5"),
+        input_time: TaskInputTime {
+            unix_seconds: 1_793_894_401,
+            nanoseconds: 0,
+            timezone: TimeZoneObservation::Unknown,
+        },
+        sample_event_id: None,
+        refresh_of: None,
+        decision,
+        selected_history: Vec::new(),
+        selected_excerpts: Vec::new(),
+        selected_core: Vec::new(),
+        selected_research: Vec::new(),
+        selected_memory: Vec::new(),
+        selected_summary: None,
+        core_scopes: Vec::new(),
+        constraint_revisions: Vec::new(),
+        selected_constraints: Vec::new(),
+        unresolved_gaps: Vec::new(),
+        live_processes: Vec::new(),
+        task_revisions: Vec::new(),
+        policy_version: 1,
+        binding_digest: "0".repeat(64),
+        provider_session: resumed_provider.reference().clone(),
+        planned_context_hash: "0".repeat(64),
+    };
+    agent
+        .restore_task_context_for_compaction(
+            crate::app::agent_loop::TaskResumeMaterial {
+                selection,
+                history: Vec::new(),
+                constraints: Vec::new(),
+                excerpts: Vec::new(),
+                progress: Vec::new(),
+                research_units: Vec::new(),
+                memory: Vec::new(),
+            },
+            None,
+            None,
+            &source_hash,
+        )
+        .unwrap();
+    let selected_plan = agent
+        .fresh_compaction_context_diagnostic()
+        .unwrap()
+        .unwrap();
+    for (mode, plan) in [("legacy", legacy_plan), ("task-selected", selected_plan)] {
+        let input = plan.model_input();
+        for text in ["EARLIER-UNCLOSED-INPUT", "LATER-UNCLOSED-INPUT"] {
+            assert_eq!(
+                input
+                    .content_items
+                    .iter()
+                    .filter(|item| **item == ContentItem::user_text(text))
+                    .count(),
+                1,
+                "{mode}"
+            );
+        }
+        let map = serde_json::to_value(plan.delivery_map()).unwrap();
+        for id in ["preview-2", "preview-4"] {
+            assert!(
+                map["content_items"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(
+                        |entry| entry["provenance"]["references"]["source_event_refs"]
+                            .as_array()
+                            .is_some_and(|refs| refs.iter().any(|reference| reference == id))
+                    ),
+                "{mode}"
+            );
+        }
+    }
+}
+
+#[test]
 fn latest_batch_floor_keeps_parallel_calls_interleaved_prose_and_failed_results() {
     let history = vec![
         ContentItem::user_text("task"),
@@ -153,6 +342,126 @@ fn task_reference_selection_uses_durable_order_instead_of_nonmonotonic_ids() {
     assert_eq!(
         selected["history_event_refs"],
         json!(["m-latest", "a-second"])
+    );
+}
+
+#[test]
+fn genuine_proof5_replays_two_handoffs_with_summary_ancestry_and_physical_retry() {
+    use crate::adapters::artifact_store::LocalArtifactStore;
+    use crate::adapters::project_event_store::Project;
+    use crate::app::session::SessionProjection;
+    use crate::domain::research::ResearchReferenceCatalog;
+    use crate::ports::artifact::ArtifactStore;
+    use sha2::{Digest, Sha256};
+
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/task_context_proof_v5_compaction");
+    let manifest_bytes = std::fs::read(fixture.join("manifest.json")).unwrap();
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&manifest_bytes)),
+        "ba254beaa8e143e9d3a0f93f07ba030e2143847b853e8815b7f6bc32c9cd48af"
+    );
+    let manifest: Value = serde_json::from_slice(&manifest_bytes).unwrap();
+    assert_eq!(manifest["source_candidate"], "C46g");
+    assert_eq!(
+        manifest["binary_sha256"],
+        "08f6f3bf21dfc8b6815936cf36d1152e7b3ea676a420ce2b0e479f6be84650f4"
+    );
+    let root = crate::support::TemporaryDirectory::new("proof5-compaction-ancestry");
+    let project = Project::initialize(root.path()).unwrap();
+    let store = LocalArtifactStore::for_project(&project);
+    let mut event_bytes = None;
+    for (relative, hash) in manifest["files"].as_object().unwrap() {
+        let hash = hash.as_str().unwrap();
+        let bytes = std::fs::read(fixture.join("blobs").join(hash)).unwrap();
+        assert_eq!(format!("{:x}", Sha256::digest(&bytes)), hash);
+        if relative.starts_with(".echidna/artifacts/blobs/sha256/") {
+            assert_eq!(store.publish_bytes(&bytes).unwrap().blob_id.as_str(), hash);
+        } else if relative.ends_with("/events.jsonl") {
+            event_bytes = Some(bytes);
+        } else if relative == "effect-count.txt" {
+            assert_eq!(bytes, b"1\n2\n");
+        }
+    }
+    let event_bytes = event_bytes.unwrap();
+    assert_eq!(event_bytes.len(), 1_307_042);
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&event_bytes)),
+        "ef7d3b1e1b6b3eeb97f41ee991bc0e108da243ebcf0aada8e89fb0d811f2bde4"
+    );
+    let events = std::str::from_utf8(&event_bytes)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<EventEnvelope<Value>>(line).unwrap())
+        .collect::<Vec<_>>();
+    let selections = events
+        .iter()
+        .filter(|event| event.event_type.as_str() == "session.task_context_selected")
+        .collect::<Vec<_>>();
+    assert_eq!(selections.len(), 4);
+    assert!(
+        selections
+            .iter()
+            .all(|event| event.payload["request_proof_version"] == 5)
+    );
+    let summaries = events
+        .iter()
+        .filter(|event| event.event_type.as_str() == "session.compaction_created")
+        .map(|event| &event.payload["summary"])
+        .collect::<Vec<_>>();
+    assert_eq!(summaries.len(), 2);
+    assert_eq!(
+        summaries[0]["task_references"]["execution_receipt_refs"],
+        manifest["summary_receipts"][0]
+    );
+    assert_eq!(
+        summaries[1]["task_references"]["execution_receipt_refs"],
+        manifest["summary_receipts"][1]
+    );
+    let plan_hash = summaries[1]["source_plan_blob_id"].as_str().unwrap();
+    let plan: Value =
+        serde_json::from_slice(&std::fs::read(fixture.join("blobs").join(plan_hash)).unwrap())
+            .unwrap();
+    assert!(
+        plan["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["source"]["kind"] == "summary"
+                && entry["source"]["id"] == summaries[0]["fingerprint"])
+    );
+    let capture = events
+        .iter()
+        .position(|event| event.event_type.as_str() == "session.compaction_context_captured")
+        .unwrap();
+    let sample = events
+        .iter()
+        .position(|event| event.event_type.as_str() == "session.compaction_sample_recorded")
+        .unwrap();
+    assert_eq!(
+        events[capture..sample]
+            .iter()
+            .filter(|event| event.event_type.as_str() == "session.request_audit_recorded")
+            .count(),
+        2
+    );
+    let projection = SessionProjection::replay_project_verified(
+        ProjectId::new(manifest["project_id"].as_str().unwrap()),
+        &events,
+        &[],
+        || Ok(ResearchReferenceCatalog::default()),
+        &store,
+    )
+    .expect("genuine proof5 keeps its original graph derivation");
+    assert_eq!(projection.state().execution_receipt_count(), 2);
+    assert_eq!(
+        projection
+            .state()
+            .latest_compaction()
+            .unwrap()
+            .summary()
+            .fingerprint(),
+        summaries[1]["fingerprint"].as_str().unwrap()
     );
 }
 
@@ -625,6 +934,14 @@ fn canonical_many_prefixes_match_full_hashes_without_reserializing_archived_bodi
         started.elapsed()
     );
     assert_eq!(count.load(Ordering::Relaxed), items.len());
+    let mut incremental = crate::domain::canonical_json::CanonicalArrayHasher::new();
+    for (index, item) in items.iter().enumerate() {
+        if let Some(expected) = hashes.get(&index) {
+            assert_eq!(&incremental.finish(), expected);
+        }
+        incremental.push(item).unwrap();
+    }
+    assert_eq!(incremental.finish(), hashes[&items.len()]);
     for length in lengths {
         assert_eq!(
             hashes[&length],
@@ -855,7 +1172,7 @@ async fn audit_append_failure_stops_summary_before_dispatch_without_replacing_pa
     assert!(agent.history().items().is_empty());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn historical_v5_is_valid_after_later_history_but_cannot_authorize_a_fresh_summary() {
     use crate::adapters::project_event_store::Project;
     use crate::adapters::session_compaction::{
@@ -992,7 +1309,7 @@ async fn historical_v5_is_valid_after_later_history_but_cannot_authorize_a_fresh
         }
     }
     let state = SessionReducer.reduce(events.clone()).unwrap();
-    let facts = load_session_compaction_facts(&project, &state).unwrap();
+    let facts = load_session_compaction_facts(&project, &state, false).unwrap();
     let draft = facts
         .compose_session_summary_draft(
             state.history().items(),
@@ -1045,7 +1362,7 @@ async fn historical_v5_is_valid_after_later_history_but_cannot_authorize_a_fresh
         )
         .unwrap();
     let state = SessionReducer.reduce(events).unwrap();
-    let facts = load_session_compaction_facts(&project, &state).unwrap();
+    let facts = load_session_compaction_facts(&project, &state, false).unwrap();
     let stale = facts
         .compose_session_summary_draft(
             state.history().items(),
@@ -1067,7 +1384,44 @@ async fn historical_v5_is_valid_after_later_history_but_cannot_authorize_a_fresh
         "{error}"
     );
     let config = root.path().join("provider.toml");
-    std::fs::write(&config, crate::provider_config::fixture()).unwrap();
+    fn selector_candidates(value: &Value) -> Option<Value> {
+        match value {
+            Value::String(text) => text
+                .strip_prefix("TASK_CONTEXT_CANDIDATES_V1\n")
+                .map(|text| serde_json::from_str(text).unwrap()),
+            Value::Array(values) => values.iter().find_map(selector_candidates),
+            Value::Object(values) => values.values().find_map(selector_candidates),
+            _ => None,
+        }
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/v1", listener.local_addr().unwrap());
+    let selector_server = tokio::spawn(async move {
+        use crate::rsi_subscription_continuation::continuation_regression::{
+            completed, read_request,
+        };
+        use tokio::io::AsyncWriteExt;
+        for index in 0..2 {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_request(&mut socket).await;
+            let candidates = selector_candidates(&request).expect("real selector request");
+            let decision = json!({"relation":"new", "focus":{"kind":"new_from_input", "input_ref":candidates["input"]["ref"]},
+                "related_task_refs":[], "required_context_refs":[], "unresolved_references":[]}).to_string();
+            let body = completed(
+                &format!("oversized-selector-{index}"),
+                Vec::new(),
+                Some(&decision),
+            );
+            socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).as_bytes()).await.unwrap();
+            socket.write_all(body.as_bytes()).await.unwrap();
+            socket.shutdown().await.unwrap();
+        }
+    });
+    std::fs::write(
+        &config,
+        crate::provider_config::fixture().replace("http://127.0.0.1:1/v1", &url),
+    )
+    .unwrap();
     let chat = |input: &str| {
         let mut child = Command::new(env!("CARGO_BIN_EXE_echidna"))
             .current_dir(root.path())
@@ -1094,6 +1448,7 @@ async fn historical_v5_is_valid_after_later_history_but_cannot_authorize_a_fresh
         child.wait_with_output().unwrap()
     };
     let stopped = chat(&format!("{}\n/exit\n", "PROTECTED-OVERSIZED-".repeat(6000)));
+    selector_server.await.unwrap();
     assert!(
         !stopped.status.success(),
         "{}",

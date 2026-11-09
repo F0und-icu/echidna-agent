@@ -1,3 +1,8 @@
+use super::task_context::{
+    ScriptedResponse::{InitialSelection, Response},
+    selector_candidates, spawn_scripted_responses_server,
+    spawn_scripted_responses_server_with_wait,
+};
 use super::*;
 
 fn stop_held_pipe_descendant(root: &std::path::Path) {
@@ -36,25 +41,31 @@ fn ctf_r3b1_real_executor_deadline_preserves_acknowledged_children() {
     let root = TemporaryDirectory::new("r3b1-timeout");
     let harness = TemporaryDirectory::new("r3b1-timeout-provider");
     initialize_project(root.path());
-    let server = spawn_responses_server(vec![
-        (
-            200,
-            m4_long_flow_tool_response(
-                "timeout-batch",
-                "run_commands",
-                json!({"mode":"serial","commands":[
-                    {"argv":["sh","-c","printf x >> first; printf RETAINED_BEFORE_TIMEOUT"]},
-                    {"argv":["sh","-c","printf x > second; exec sleep 125"]},
-                    {"argv":["sh","-c","printf x > third"]}
-                ]}),
-                "timeout-response",
+    // The main follow-up arrives after the real 120s executor deadline. Match
+    // the existing child deadline instead of the ordinary 15s request wait.
+    let server = spawn_scripted_responses_server_with_wait(
+        vec![
+            InitialSelection,
+            Response(
+                200,
+                m4_long_flow_tool_response(
+                    "timeout-batch",
+                    "run_commands",
+                    json!({"mode":"serial","commands":[
+                        {"argv":["sh","-c","printf x >> first; printf RETAINED_BEFORE_TIMEOUT"]},
+                        {"argv":["sh","-c","printf x > second; exec sleep 125"]},
+                        {"argv":["sh","-c","printf x > third"]}
+                    ]}),
+                    "timeout-response",
+                ),
             ),
-        ),
-        (
-            200,
-            text_response("known child; others unknown", "timeout-final"),
-        ),
-    ]);
+            Response(
+                200,
+                text_response("known child; others unknown", "timeout-final"),
+            ),
+        ],
+        Duration::from_secs(140),
+    );
     let config = write_config(harness.path(), &server.base_url);
     // Exercise the real catalog's 120s deadline rather than adding a test-only
     // timeout setting or exposing the private durability path publicly.
@@ -70,14 +81,15 @@ fn ctf_r3b1_real_executor_deadline_preserves_acknowledged_children() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("· run_commands · 取消 · 原因 tool_timeout"),
+        stderr.contains("· run_commands · cancelled · reason tool_timeout"),
         "{stderr}"
     );
-    assert!(stderr.contains("deadline 配置"), "{stderr}");
+    assert!(stderr.contains("configured deadline"), "{stderr}");
     assert!(
-        stderr.contains("总耗时") && stderr.contains("含保存"),
+        stderr.contains("elapsed") && stderr.contains("including persistence"),
         "{stderr}"
     );
+    selector_candidates(&f2a_request_body(&server.requests, "timeout selection"));
     let _ = f2a_request_body(&server.requests, "timeout first");
     let request = f2a_request_body(&server.requests, "timeout followup");
     f2a_join_server(server, "timeout");
@@ -114,19 +126,22 @@ fn ctf_r3b1_session_append_failure_does_not_ack_or_launch_the_next_child() {
     let root = TemporaryDirectory::new("r3b1-event-failure");
     let harness = TemporaryDirectory::new("r3b1-event-provider");
     initialize_project(root.path());
-    let server = spawn_responses_server(vec![(
-        200,
-        m4_long_flow_tool_response(
-            "event-failure",
-            "run_commands",
-            json!({"mode":"serial","commands":[
-                {"argv":["sh","-c","printf FIRST"]},
-                {"argv":["sh","-c","chmod 400 .echidna/sessions/*/events.jsonl; printf SECOND"]},
-                {"argv":["sh","-c","printf x > forbidden-next"]}
-            ]}),
-            "event-failure-response",
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(
+            200,
+            m4_long_flow_tool_response(
+                "event-failure",
+                "run_commands",
+                json!({"mode":"serial","commands":[
+                    {"argv":["sh","-c","printf FIRST"]},
+                    {"argv":["sh","-c","chmod 400 .echidna/sessions/*/events.jsonl; printf SECOND"]},
+                    {"argv":["sh","-c","printf x > forbidden-next"]}
+                ]}),
+                "event-failure-response",
+            ),
         ),
-    )]);
+    ]);
     let config = write_config(harness.path(), &server.base_url);
     let output = f2a_wait_child(
         spawn_f2a_chat(root.path(), &config, "run once\n/exit\n", &[]),
@@ -143,6 +158,10 @@ fn ctf_r3b1_session_append_failure_does_not_ack_or_launch_the_next_child() {
     .unwrap();
     assert!(!output.status.success());
     assert!(!root.path().join("forbidden-next").exists());
+    selector_candidates(&f2a_request_body(
+        &server.requests,
+        "event failure selection",
+    ));
     let _ = f2a_request_body(&server.requests, "event failure");
     f2a_join_server(server, "event failure");
     let events = session_events(root.path(), &session);
@@ -170,20 +189,27 @@ fn ctf_r3b1_completed_child_survives_killed_batch_and_resume_without_rerun() {
         let root = TemporaryDirectory::new("r3b1-killed-batch");
         let harness = TemporaryDirectory::new("r3b1-provider");
         initialize_project(root.path());
-        let server = spawn_responses_server(vec![(
-            200,
-            m4_long_flow_tool_response(
-                "partial-batch",
-                "run_commands",
-                json!({"mode":mode,"commands":[
-                    {"argv":["sh","-c","printf CHILD_OUTPUT; printf x >> first-count"],"resources":[{"kind":"output","path":"first-count"}]},
-                    {"argv":["sh","-c","printf x > second-start; sleep 5"],"resources":[{"kind":"output","path":"second-start"}]}
-                ]}),
-                "partial-response",
+        let server = spawn_scripted_responses_server(vec![
+            InitialSelection,
+            Response(
+                200,
+                m4_long_flow_tool_response(
+                    "partial-batch",
+                    "run_commands",
+                    json!({"mode":mode,"commands":[
+                        {"argv":["sh","-c","printf CHILD_OUTPUT; printf x >> first-count"],"resources":[{"kind":"output","path":"first-count"}]},
+                        {"argv":["sh","-c","printf x > second-start; sleep 5"],"resources":[{"kind":"output","path":"second-start"}]}
+                    ]}),
+                    "partial-response",
+                ),
             ),
-        )]);
+        ]);
         let config = write_config(harness.path(), &server.base_url);
         let mut child = spawn_f2a_chat(root.path(), &config, "run the bounded batch\n", &[]);
+        selector_candidates(&f2a_request_body(
+            &server.requests,
+            "R3b1 initial selection",
+        ));
         let _ = f2a_request_body(&server.requests, "R3b1 first request");
         f2a_join_server(server, "R3b1 first request");
         let session = session_id(root.path());
@@ -260,10 +286,14 @@ fn ctf_r3b1_completed_child_survives_killed_batch_and_resume_without_rerun() {
             b"CHILD_OUTPUT"
         );
 
-        let resumed = spawn_responses_server(vec![(
-            200,
-            text_response("KNOWN CHILD RETAINED; PARENT UNKNOWN", "resumed"),
-        )]);
+        use super::task_context::ScriptedResponse::ContinueSelection;
+        let resumed = spawn_scripted_responses_server(vec![
+            ContinueSelection { usage: None },
+            Response(
+                200,
+                text_response("KNOWN CHILD RETAINED; PARENT UNKNOWN", "resumed"),
+            ),
+        ]);
         let config = write_config(harness.path(), &resumed.base_url);
         let output = f2a_wait_child(
             spawn_f2a_chat(
@@ -279,6 +309,10 @@ fn ctf_r3b1_completed_child_survives_killed_batch_and_resume_without_rerun() {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+        selector_candidates(&f2a_request_body(
+            &resumed.requests,
+            "R3b1 resumed source selection",
+        ));
         let request = f2a_request_body(&resumed.requests, "R3b1 resumed request");
         f2a_join_server(resumed, "R3b1 resumed request");
         assert!(request.to_string().contains("CHILD_OUTPUT"));
@@ -312,19 +346,22 @@ fn ctf_r3b1_failed_publication_stops_before_next_serial_child_and_preserves_prio
             vec![b'x'; bytes.len()],
         )
         .unwrap();
-        let server = spawn_responses_server(vec![(
-            200,
-            m4_long_flow_tool_response(
-                "failing-batch",
-                "run_commands",
-                json!({"mode":"serial","commands":[
-                    {"argv":["sh","-c","printf x >> first; printf FIRST"]},
-                    {"argv":["sh","-c","printf x >> second; printf SECOND"]},
-                    {"argv":["sh","-c","printf x >> third"]}
-                ]}),
-                "failure",
+        let server = spawn_scripted_responses_server(vec![
+            InitialSelection,
+            Response(
+                200,
+                m4_long_flow_tool_response(
+                    "failing-batch",
+                    "run_commands",
+                    json!({"mode":"serial","commands":[
+                        {"argv":["sh","-c","printf x >> first; printf FIRST"]},
+                        {"argv":["sh","-c","printf x >> second; printf SECOND"]},
+                        {"argv":["sh","-c","printf x >> third"]}
+                    ]}),
+                    "failure",
+                ),
             ),
-        )]);
+        ]);
         let config = write_config(harness.path(), &server.base_url);
         let output = f2a_wait_child(
             spawn_f2a_chat(root.path(), &config, "run once\n/exit\n", &[]),
@@ -332,6 +369,7 @@ fn ctf_r3b1_failed_publication_stops_before_next_serial_child_and_preserves_prio
         );
         assert!(!output.status.success());
         assert!(String::from_utf8_lossy(&output.stderr).contains("Tool output persistence failed"));
+        selector_candidates(&f2a_request_body(&server.requests, "failure selection"));
         let _ = f2a_request_body(&server.requests, "failure");
         f2a_join_server(server, "failure");
         assert_eq!(fs::read(root.path().join("first")).unwrap(), b"x");
@@ -357,8 +395,9 @@ fn ctf_r3b1_completed_batch_has_ordered_parent_and_individual_durable_children()
         let root = TemporaryDirectory::new("r3b1-completed");
         let harness = TemporaryDirectory::new("r3b1-completed-provider");
         initialize_project(root.path());
-        let server = spawn_responses_server(vec![
-            (
+        let server = spawn_scripted_responses_server(vec![
+            InitialSelection,
+            Response(
                 200,
                 m4_long_flow_tool_response(
                     "children",
@@ -370,7 +409,7 @@ fn ctf_r3b1_completed_batch_has_ordered_parent_and_individual_durable_children()
                     "batch-completed",
                 ),
             ),
-            (200, text_response("done", "batch-final")),
+            Response(200, text_response("done", "batch-final")),
         ]);
         let config = write_config(harness.path(), &server.base_url);
         let output = f2a_wait_child(
@@ -382,6 +421,10 @@ fn ctf_r3b1_completed_batch_has_ordered_parent_and_individual_durable_children()
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+        selector_candidates(&f2a_request_body(
+            &server.requests,
+            "completed batch selection",
+        ));
         let _ = f2a_request_body(&server.requests, "first");
         let request = f2a_request_body(&server.requests, "second");
         f2a_join_server(server, "complete");
@@ -426,8 +469,9 @@ fn ec_k4_incomplete_batch_child_checkpoints_before_parent_receipt_in_serial_and_
         let root = TemporaryDirectory::new("ec-k4-incomplete-batch");
         let harness = TemporaryDirectory::new("ec-k4-incomplete-batch-provider");
         initialize_project(root.path());
-        let server = spawn_responses_server(vec![
-            (
+        let server = spawn_scripted_responses_server(vec![
+            InitialSelection,
+            Response(
                 200,
                 m4_long_flow_tool_response(
                     "incomplete-batch",
@@ -439,7 +483,7 @@ fn ec_k4_incomplete_batch_child_checkpoints_before_parent_receipt_in_serial_and_
                     "incomplete-batch-response",
                 ),
             ),
-            (
+            Response(
                 200,
                 text_response("batch complete", "incomplete-batch-final"),
             ),
@@ -455,6 +499,10 @@ fn ec_k4_incomplete_batch_child_checkpoints_before_parent_receipt_in_serial_and_
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+        selector_candidates(&f2a_request_body(
+            &server.requests,
+            "EC-K4 incomplete batch selection",
+        ));
         let _ = f2a_request_body(&server.requests, "EC-K4 incomplete batch tool call");
         let result = f2a_request_body(&server.requests, "EC-K4 incomplete batch result");
         f2a_join_server(server, "EC-K4 incomplete batch");
@@ -519,15 +567,18 @@ fn ec_k4_incomplete_batch_capture_publication_failure_is_fatal_before_parent_rec
         b"CONFLICTED",
     )
     .unwrap();
-    let server = spawn_responses_server(vec![(
-        200,
-        m4_long_flow_tool_response(
-            "incomplete-batch-publication",
-            "run_commands",
-            json!({"mode":"serial","commands":[held_pipe_command("held-output")]}),
-            "incomplete-batch-publication-response",
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(
+            200,
+            m4_long_flow_tool_response(
+                "incomplete-batch-publication",
+                "run_commands",
+                json!({"mode":"serial","commands":[held_pipe_command("held-output")]}),
+                "incomplete-batch-publication-response",
+            ),
         ),
-    )]);
+    ]);
     let config = write_config(harness.path(), &server.base_url);
     let output = f2a_wait_child(
         spawn_f2a_chat(root.path(), &config, "run incomplete batch\n/exit\n", &[]),
@@ -540,6 +591,10 @@ fn ec_k4_incomplete_batch_capture_publication_failure_is_fatal_before_parent_rec
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    selector_candidates(&f2a_request_body(
+        &server.requests,
+        "EC-K4 publication selection",
+    ));
     let _ = f2a_request_body(
         &server.requests,
         "EC-K4 incomplete batch publication failure",

@@ -16,6 +16,7 @@ mod argument_correction;
 mod checkpoint_binding;
 mod model_delivery;
 mod operator_boundary;
+mod task_context;
 
 use super::agent_definition::AgentDefinitionBinding;
 use super::context::{ProviderSessionId, ProviderSessionRef, ProviderSessionRole};
@@ -52,7 +53,7 @@ const EXECUTION_OUTCOME_RECORDED_EVENT_TYPE: &str = "tool.execution_outcome_reco
 const SUBCOMMAND_CHECKPOINT_EVENT_TYPE: &str = "tool.subcommand_checkpointed";
 const CACHE_HIT_EVENT_TYPE: &str = "tool.result_cache_hit";
 const STREAM_RECOVERED_EVENT_TYPE: &str = "StreamRecovered";
-const HISTORY_ITEM_RECORDED_EVENT_TYPE: &str = "session.history_item_recorded";
+pub(crate) const HISTORY_ITEM_RECORDED_EVENT_TYPE: &str = "session.history_item_recorded";
 const MODEL_SAMPLE_REJECTED_EVENT_TYPE: &str = "model.sample_rejected";
 const MODEL_USAGE_RECORDED_EVENT_TYPE: &str = "model.usage_recorded";
 pub(super) const COMPACTION_CREATED_EVENT_TYPE: &str = "session.compaction_created";
@@ -66,20 +67,40 @@ pub(super) const CURRENT_SESSION_PAYLOAD_SCHEMA_VERSION: u16 = 1;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct CompactionContextCapturedPayload {
+struct ContextCapturedPayload {
     schema_version: u16,
     blob_id: crate::domain::artifacts::BlobId,
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaskSelectionUsagePayload {
+    schema_version: u16,
+    capture_event_id: EventId,
+    request_audit_event_id: EventId,
+    provider_session: ProviderSessionRef,
+    usage: ModelUsage,
+}
+
 mod compaction;
 mod improvement;
+pub use super::task_context::{TaskInputTime, TimeZoneObservation};
 pub use improvement::ImprovementActivity;
 pub(crate) use improvement::{ImprovementFact, ImprovementStage, scoped_call_id};
 pub use model_delivery::ModelDeliveryCommitted;
-pub(crate) use operator_boundary::ProtectedOperatorContext;
+pub(crate) use operator_boundary::{HistorySourceSemantics, ProtectedOperatorContext};
 pub use operator_boundary::{OperatorInputRef, OperatorTurnBoundary};
+pub(crate) use task_context::TaskNavigationAccess;
+pub(crate) use task_context::TaskNavigationIndex;
+pub(crate) use task_context::TaskProgressSource;
+pub(crate) use task_context::TaskResumeHistoryItem;
+pub(crate) use task_context::{TASK_CANDIDATE_POLICY_VERSION, TASK_REQUEST_PROOF_VERSION};
+pub(crate) use task_context::{TaskCardSource, TaskNavigationChange, TaskNavigationCursor};
+pub(crate) use task_context::{TaskCompileCapture, TaskContextCapture, TaskMemoryDocument};
+pub use task_context::{TaskContextSelected, TaskSelectionSample};
 
 pub(crate) use compaction::VerifiedCompactionGraph;
+pub(crate) use compaction::{CapturedFragment, capture_fragments, restore_fragments};
 pub(crate) use compaction::{
     CompactionContextCapture, CompactionSourceEntry, CompactionSourceNode,
     CompactionSourceNodeInput, CompactionSourcePlan, CompactionSourceRange,
@@ -114,6 +135,21 @@ pub enum SessionLifecycle {
 /// the Tool domain's `ExecutionReceipt` rather than defining a Session copy.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionEvent {
+    TaskContextCaptured {
+        blob_id: crate::domain::artifacts::BlobId,
+    },
+    TaskSelectionSampleRecorded {
+        sample: TaskSelectionSample,
+    },
+    TaskSelectionUsageRecorded {
+        capture_event_id: EventId,
+        request_audit_event_id: EventId,
+        provider_session: ProviderSessionRef,
+        usage: ModelUsage,
+    },
+    TaskContextSelected {
+        selection: TaskContextSelected,
+    },
     CompactionContextCaptured {
         blob_id: crate::domain::artifacts::BlobId,
     },
@@ -164,6 +200,13 @@ pub enum SessionEvent {
         diagnostic: ToolArgumentDiagnostic,
         corrections_used: u8,
         reset_anchor: Option<EventId>,
+    },
+    ConsecutiveModelSampleRejectedV3 {
+        request_audit_event_id: EventId,
+        diagnostic: ToolArgumentDiagnostic,
+        corrections_used: u8,
+        reset_anchor: Option<EventId>,
+        sampling_step_id: String,
     },
     ModelArgumentCorrectionReset {
         accepted_request_audit_event_id: EventId,
@@ -241,6 +284,14 @@ impl SessionEvent {
 
     fn event_type(&self) -> EventType {
         match self {
+            Self::TaskContextCaptured { .. } => EventType::new("session.task_context_captured"),
+            Self::TaskSelectionSampleRecorded { .. } => {
+                EventType::new("session.task_selection_sample_recorded")
+            }
+            Self::TaskSelectionUsageRecorded { .. } => {
+                EventType::new("session.task_selection_usage_recorded")
+            }
+            Self::TaskContextSelected { .. } => EventType::new("session.task_context_selected"),
             Self::CompactionContextCaptured { .. } => {
                 EventType::new("session.compaction_context_captured")
             }
@@ -268,7 +319,8 @@ impl SessionEvent {
                 EventType::new("session.agent_definition_checkpoint_applied")
             }
             Self::ModelSampleRejected { .. } => EventType::new(MODEL_SAMPLE_REJECTED_EVENT_TYPE),
-            Self::ConsecutiveModelSampleRejected { .. } => {
+            Self::ConsecutiveModelSampleRejected { .. }
+            | Self::ConsecutiveModelSampleRejectedV3 { .. } => {
                 EventType::new(MODEL_SAMPLE_REJECTED_EVENT_TYPE)
             }
             Self::ModelArgumentCorrectionReset { .. } => {
@@ -300,8 +352,26 @@ impl SessionEvent {
 
     fn encode_payload(&self, event_type: &EventType) -> Result<Value, SessionError> {
         let payload = match self {
+            Self::TaskContextCaptured { blob_id } => serde_json::to_value(ContextCapturedPayload {
+                schema_version: 1,
+                blob_id: blob_id.clone(),
+            }),
+            Self::TaskSelectionSampleRecorded { sample } => serde_json::to_value(sample),
+            Self::TaskSelectionUsageRecorded {
+                capture_event_id,
+                request_audit_event_id,
+                provider_session,
+                usage,
+            } => serde_json::to_value(TaskSelectionUsagePayload {
+                schema_version: 1,
+                capture_event_id: capture_event_id.clone(),
+                request_audit_event_id: request_audit_event_id.clone(),
+                provider_session: provider_session.clone(),
+                usage: *usage,
+            }),
+            Self::TaskContextSelected { selection } => serde_json::to_value(selection),
             Self::CompactionContextCaptured { blob_id } => {
-                serde_json::to_value(CompactionContextCapturedPayload {
+                serde_json::to_value(ContextCapturedPayload {
                     schema_version: 1,
                     blob_id: blob_id.clone(),
                 })
@@ -377,6 +447,20 @@ impl SessionEvent {
                 corrections_used: *corrections_used,
                 reset_anchor: reset_anchor.clone(),
             }),
+            Self::ConsecutiveModelSampleRejectedV3 {
+                request_audit_event_id,
+                diagnostic,
+                corrections_used,
+                reset_anchor,
+                sampling_step_id,
+            } => serde_json::to_value(argument_correction::ConsecutiveRejectionV3Payload {
+                schema_version: 3,
+                request_audit_event_id: request_audit_event_id.clone(),
+                diagnostic: *diagnostic,
+                corrections_used: *corrections_used,
+                reset_anchor: reset_anchor.clone(),
+                sampling_step_id: sampling_step_id.clone(),
+            }),
             Self::ModelArgumentCorrectionReset {
                 accepted_request_audit_event_id,
                 prior_rejection_audit_event_id,
@@ -432,6 +516,39 @@ impl SessionEvent {
 
     pub(crate) fn decode(event_type: &EventType, payload: Value) -> Result<Self, SessionError> {
         match event_type.as_str() {
+            "session.task_context_captured" => {
+                let captured: ContextCapturedPayload = decode_strict_payload(event_type, payload)?;
+                require_current_payload_schema(event_type, captured.schema_version)?;
+                Ok(Self::TaskContextCaptured {
+                    blob_id: captured.blob_id,
+                })
+            }
+            "session.task_selection_sample_recorded" => {
+                let sample: TaskSelectionSample = decode_strict_payload(event_type, payload)?;
+                require_current_payload_schema(event_type, sample.schema_version)?;
+                Ok(Self::TaskSelectionSampleRecorded { sample })
+            }
+            "session.task_selection_usage_recorded" => {
+                let payload: TaskSelectionUsagePayload =
+                    decode_strict_payload(event_type, payload)?;
+                require_current_payload_schema(event_type, payload.schema_version)?;
+                Ok(Self::TaskSelectionUsageRecorded {
+                    capture_event_id: payload.capture_event_id,
+                    request_audit_event_id: payload.request_audit_event_id,
+                    provider_session: payload.provider_session,
+                    usage: payload.usage,
+                })
+            }
+            "session.task_context_selected" => {
+                let selection: TaskContextSelected = decode_strict_payload(event_type, payload)?;
+                require_current_payload_schema(event_type, selection.schema_version)?;
+                if selection.request_proof_version > task_context::TASK_REQUEST_PROOF_VERSION {
+                    return Err(SessionError::TaskContext {
+                        message: "unknown task request proof version".to_owned(),
+                    });
+                }
+                Ok(Self::TaskContextSelected { selection })
+            }
             "session.model_delivery_committed" => {
                 let delivery: ModelDeliveryCommitted = decode_strict_payload(event_type, payload)?;
                 Ok(Self::ModelDeliveryCommitted { delivery })
@@ -476,6 +593,20 @@ impl SessionEvent {
                 }
             }
             MODEL_SAMPLE_REJECTED_EVENT_TYPE => {
+                if payload.get("schema_version").and_then(Value::as_u64) == Some(3) {
+                    let payload: argument_correction::ConsecutiveRejectionV3Payload =
+                        decode_strict_payload(event_type, payload)?;
+                    if payload.sampling_step_id.trim().is_empty() {
+                        return Err(SessionError::InvalidModelSampleRejection);
+                    }
+                    return Ok(Self::ConsecutiveModelSampleRejectedV3 {
+                        request_audit_event_id: payload.request_audit_event_id,
+                        diagnostic: payload.diagnostic,
+                        corrections_used: payload.corrections_used,
+                        reset_anchor: payload.reset_anchor,
+                        sampling_step_id: payload.sampling_step_id,
+                    });
+                }
                 if payload.get("schema_version").and_then(Value::as_u64) == Some(2) {
                     let payload: argument_correction::ConsecutiveRejectionPayload =
                         decode_strict_payload(event_type, payload)?;
@@ -588,8 +719,7 @@ impl SessionEvent {
                 })
             }
             "session.compaction_context_captured" => {
-                let captured: CompactionContextCapturedPayload =
-                    decode_strict_payload(event_type, payload)?;
+                let captured: ContextCapturedPayload = decode_strict_payload(event_type, payload)?;
                 require_current_payload_schema(event_type, captured.schema_version)?;
                 crate::domain::artifacts::BlobId::new(captured.blob_id.as_str()).map_err(
                     |error| SessionError::MalformedPayload {
@@ -681,6 +811,10 @@ impl SessionEvent {
 /// The pure Session state reconstructed from one ordered Session stream.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionState {
+    task_context_captures: Vec<(EventId, EventSequence, crate::domain::artifacts::BlobId)>,
+    task_selection_samples: Vec<(EventId, TaskSelectionSample)>,
+    task_context_selections: Vec<(EventId, TaskContextSelected)>,
+    task_compacted_selection: Option<(EventId, Vec<EventId>, String)>,
     improvement_records: Vec<improvement::ImprovementRecord>,
     agent_definition_binding: Option<AgentDefinitionBinding>,
     event_state: State,
@@ -691,7 +825,10 @@ pub struct SessionState {
     history: ConversationHistory,
     history_event_ids: Vec<EventId>,
     history_event_sequences: Vec<EventSequence>,
+    history_event_times: Vec<OccurredAt>,
+    task_navigation: TaskNavigationIndex,
     operator_boundaries: Vec<OperatorTurnBoundary>,
+    operator_boundary_event_ids: Vec<EventId>,
     model_deliveries: Vec<ModelDeliveryCommitted>,
     recovered_history_item_count: usize,
     recovered_history_start: Option<usize>,
@@ -722,6 +859,10 @@ pub struct SessionState {
 impl Default for SessionState {
     fn default() -> Self {
         Self {
+            task_context_captures: Vec::new(),
+            task_selection_samples: Vec::new(),
+            task_context_selections: Vec::new(),
+            task_compacted_selection: None,
             improvement_records: Vec::new(),
             agent_definition_binding: None,
             event_state: State::default(),
@@ -732,7 +873,10 @@ impl Default for SessionState {
             history: ConversationHistory::default(),
             history_event_ids: Vec::new(),
             history_event_sequences: Vec::new(),
+            history_event_times: Vec::new(),
+            task_navigation: TaskNavigationIndex::default(),
             operator_boundaries: Vec::new(),
+            operator_boundary_event_ids: Vec::new(),
             model_deliveries: Vec::new(),
             recovered_history_item_count: 0,
             recovered_history_start: None,
@@ -806,6 +950,34 @@ impl SessionState {
         self.normalize_items(self.history.items())
     }
 
+    /// Match each normalized item to its original History Event when one
+    /// exists. Synthesized recovery results have no History Event identity.
+    pub(crate) fn normalized_history_event_ids(
+        &self,
+    ) -> Result<Vec<Option<EventId>>, SessionError> {
+        let history = self.history_items_with_event_ids().collect::<Vec<_>>();
+        let normalized = self.full_normalized_history()?;
+        let mut cursor = history.len();
+        let mut ids = Vec::with_capacity(normalized.len());
+        for item in normalized.iter().rev() {
+            if let Some(index) = history[..cursor]
+                .iter()
+                .rposition(|(_, original)| *original == item)
+            {
+                ids.push(Some(history[index].0.clone()));
+                cursor = index;
+            } else if matches!(item, ContentItem::ToolResult { .. }) {
+                ids.push(None);
+            } else {
+                return Err(SessionError::CompactionContextProvenance {
+                    message: "normalized History item has no original Event".to_owned(),
+                });
+            }
+        }
+        ids.reverse();
+        Ok(ids)
+    }
+
     fn normalize_items(&self, items: &[ContentItem]) -> Result<Vec<ContentItem>, HistoryError> {
         let results = self
             .execution_receipts
@@ -873,7 +1045,7 @@ impl SessionState {
     /// Event identities, without duplicating the stored ContentItems.
     pub(crate) fn history_items_with_event_ids(
         &self,
-    ) -> impl DoubleEndedIterator<Item = (&EventId, &ContentItem)> {
+    ) -> impl DoubleEndedIterator<Item = (&EventId, &ContentItem)> + Clone {
         self.history_event_ids.iter().zip(self.history.items())
     }
 
@@ -919,12 +1091,20 @@ impl SessionState {
                 message: "task references must bind this exact Session prefix".to_owned(),
             });
         }
+        let normalized = self.full_normalized_history()?;
+        let summary = SessionSummary::from_draft(summary, revision, validation)?;
+        let needs_event_ids = summary.schema_version() == 7
+            || (summary.is_preview() && self.latest_task_context_selection().is_some());
+        let ids = needs_event_ids
+            .then(|| self.normalized_history_event_ids())
+            .transpose()?;
         SessionCompaction::from_history(
             &self.history,
-            &self.full_normalized_history()?,
-            SessionSummary::from_draft(summary, revision, validation)?,
+            &normalized,
+            summary,
             source_event_sequence,
             requested_recent_items,
+            ids.as_deref(),
         )
     }
 
@@ -1058,6 +1238,7 @@ impl SessionReducer {
         let stream_id = event.stream_id.clone();
         let sequence = event.sequence;
         let event_id = event.event_id.clone();
+        let occurred_at = event.occurred_at.clone();
         let source_event_sequence = state
             .stream_id()
             .and_then(|stream_id| state.event_state.last_sequence_for(stream_id));
@@ -1076,7 +1257,13 @@ impl SessionReducer {
         }
         require_next_sequence(source_event_sequence, &stream_id, sequence)?;
         state.stream_id = Some(stream_id);
-        apply_session_event(state, session_event, source_event_sequence, &event_id)?;
+        apply_session_event(
+            state,
+            session_event,
+            source_event_sequence,
+            &event_id,
+            &occurred_at,
+        )?;
         Ok(outcome)
     }
 }
@@ -1166,8 +1353,73 @@ fn apply_session_event(
     event: SessionEvent,
     source_event_sequence: Option<EventSequence>,
     event_id: &EventId,
+    occurred_at: &OccurredAt,
 ) -> Result<(), SessionError> {
     match event {
+        SessionEvent::TaskContextCaptured { blob_id } => {
+            require_transition(
+                state.lifecycle,
+                "session.task_context_captured",
+                SessionLifecycle::Active,
+            )?;
+            state.ensure_completed_history()?;
+            let previous = source_event_sequence.expect("active Session has a preceding sequence");
+            state.task_context_captures.push((
+                event_id.clone(),
+                EventSequence::new(previous.get() + 1),
+                blob_id,
+            ));
+        }
+        SessionEvent::TaskSelectionSampleRecorded { sample } => {
+            require_transition(
+                state.lifecycle,
+                "session.task_selection_sample_recorded",
+                SessionLifecycle::Active,
+            )?;
+            task_context::apply_sample(state, sample, event_id)?;
+        }
+        SessionEvent::TaskSelectionUsageRecorded {
+            capture_event_id,
+            request_audit_event_id,
+            provider_session,
+            usage,
+        } => {
+            require_transition(
+                state.lifecycle,
+                "session.task_selection_usage_recorded",
+                SessionLifecycle::Active,
+            )?;
+            usage.validate()?;
+            let invalid = || SessionError::InvalidModelUsageReference {
+                request_audit_event_id: request_audit_event_id.clone(),
+            };
+            let audit = state.request_audits.last().ok_or_else(invalid)?;
+            let expected_prefix = format!("task-selection:{capture_event_id}:");
+            if state.task_context_captures.last().is_none_or(|(id, _, _)| id != &capture_event_id)
+                || provider_session.role != ProviderSessionRole::Primary
+                || provider_session.generation != 0
+                || !matches!(provider_session.id.to_string().strip_prefix(&expected_prefix), Some("0" | "1"))
+                || state.primary_provider_session.as_ref() == Some(&provider_session)
+                || audit.audit_event_id() != &request_audit_event_id
+                || audit.provider_session() != Some(&provider_session)
+                || audit.improvement_scope().is_some()
+                || audit.delivery().mode() != crate::domain::request_audit::RequestAuditDeliveryMode::Full
+                || audit.context_delivery_map().is_none()
+                || audit.components().iter().any(|component| component.source() == crate::domain::request_audit::RequestAuditComponentSource::RenderedToolSpec)
+                || state.model_usage.contains_key(&request_audit_event_id)
+            {
+                return Err(invalid());
+            }
+            state.model_usage.insert(request_audit_event_id, usage);
+        }
+        SessionEvent::TaskContextSelected { selection } => {
+            require_transition(
+                state.lifecycle,
+                "session.task_context_selected",
+                SessionLifecycle::Active,
+            )?;
+            task_context::apply_selection(state, selection, event_id)?;
+        }
         SessionEvent::CompactionContextCaptured { .. } => {
             require_transition(
                 state.lifecycle,
@@ -1191,6 +1443,7 @@ fn apply_session_event(
                 SessionLifecycle::Active,
             )?;
             operator_boundary::apply(state, boundary, source_event_sequence)?;
+            state.operator_boundary_event_ids.push(event_id.clone());
         }
         SessionEvent::CompactionSampleRecorded { sample } => {
             require_transition(
@@ -1277,6 +1530,10 @@ fn apply_session_event(
                 }
                 (ProviderSessionRole::Primary, None) => {
                     state.primary_provider_session.as_ref() == Some(&provider_session)
+                        || state.task_selection_samples.iter().any(|(_, sample)| {
+                            sample.audit_event_id == request_audit_event_id
+                                && sample.provider_session == provider_session
+                        })
                         || state.compaction_samples.iter().any(|(_, _, sample)| {
                             sample.audit_event_id() == &request_audit_event_id
                                 && sample.provider_session() == &provider_session
@@ -1496,7 +1753,7 @@ fn apply_session_event(
                 } else {
                     SessionEvent::ExecutionReceiptRecorded { receipt }
                 };
-                apply_session_event(state, fact, source_event_sequence, event_id)?;
+                apply_session_event(state, fact, source_event_sequence, event_id, occurred_at)?;
                 state
                     .execution_receipts
                     .last_mut()
@@ -1576,6 +1833,11 @@ fn apply_session_event(
             }
             state.history.append_content_item(item)?;
             state.history_event_ids.push(event_id.clone());
+            state.history_event_times.push(occurred_at.clone());
+            let index = state.history.items().len() - 1;
+            state
+                .task_navigation
+                .append(index, &state.history.items()[index]);
             state.history_event_sequences.push(EventSequence::new(
                 source_event_sequence.map_or(1, |sequence| sequence.get() + 1),
             ));
@@ -1610,9 +1872,16 @@ fn apply_session_event(
                 || compaction.retained_from_normalized_history_index() > normalized_history.len()
                 || compaction.retained_history()
                     != &normalized_history[compaction.retained_from_normalized_history_index()..]
-                || (compaction.summary().schema_version() == 6
+                || (matches!(compaction.summary().schema_version(), 6 | 7)
                     && compaction.retained_history().len()
                         < state.latest_uncompleted_batch_items()?)
+            {
+                return Err(SessionError::CompactionRetentionMismatch);
+            }
+            if compaction.summary().schema_version() == 7
+                && compaction.retained_event_ids()
+                    != &state.normalized_history_event_ids()?
+                        [compaction.retained_from_normalized_history_index()..]
             {
                 return Err(SessionError::CompactionRetentionMismatch);
             }
@@ -1625,6 +1894,7 @@ fn apply_session_event(
                     received: compaction.summary().revision(),
                 });
             }
+            task_context::apply_task_compaction(state, &compaction)?;
             state.latest_compaction = Some(compaction);
             state.recovered_history_start = None;
         }
@@ -1639,6 +1909,25 @@ fn apply_session_event(
                 request_audit_event_id,
                 corrections_used,
                 reset_anchor,
+                None,
+            )?;
+        }
+        SessionEvent::ConsecutiveModelSampleRejectedV3 {
+            request_audit_event_id,
+            corrections_used,
+            reset_anchor,
+            sampling_step_id,
+            ..
+        } => {
+            if sampling_step_id.trim().is_empty() {
+                return Err(SessionError::InvalidModelSampleRejection);
+            }
+            argument_correction::reject(
+                state,
+                request_audit_event_id,
+                corrections_used,
+                reset_anchor,
+                Some(&sampling_step_id),
             )?;
         }
         SessionEvent::ModelArgumentCorrectionReset {
@@ -2186,6 +2475,8 @@ impl ResearchPhaseSelectedPayload {
 /// Explicit Session schema, stream, payload and transition failures.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum SessionError {
+    #[error("task context: {message}")]
+    TaskContext { message: String },
     #[error(
         "model usage must reference one accepted request with the same ProviderSession: `{request_audit_event_id}`"
     )]

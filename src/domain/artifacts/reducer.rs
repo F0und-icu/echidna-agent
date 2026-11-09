@@ -17,7 +17,7 @@ pub enum ArtifactError {
 }
 
 /// The deterministic Lineage projection derived from Artifact Events.
-#[derive(Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub(crate) struct ArtifactState {
     records: BTreeMap<ArtifactId, ArtifactRecord>,
 }

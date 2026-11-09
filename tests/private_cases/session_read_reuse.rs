@@ -80,6 +80,79 @@ fn receipt(id: &str) -> SessionEvent {
 }
 
 #[test]
+fn project_research_cache_reuses_exact_prefix_and_rejects_rewritten_history() {
+    use crate::domain::artifacts::BlobId;
+    use crate::domain::events::EventType;
+    use crate::domain::memory::{MemoryEvent, MemoryPath, MemoryRevision, MemoryScope};
+    use crate::domain::research::ResearchEvent;
+    let root = TemporaryDirectory::new("research-projection-frontier");
+    let project = Project::initialize(root.path()).unwrap();
+    let mut cache = SessionReceiptCatalogCache::default();
+    let empty = ProjectReadContext::load(&project, &mut cache, None).unwrap();
+    let warm = ProjectReadContext::load(&project, &mut cache, None).unwrap();
+    assert!(std::ptr::eq(empty.research_state(), warm.research_state()));
+    assert_eq!(warm.research_state().applied_event_count(), 0);
+    drop((empty, warm));
+    let memory = ResearchEvent::Memory(MemoryEvent::Changed(MemoryRevision {
+        scope: MemoryScope::Project,
+        path: MemoryPath::parse("decisions.md").unwrap(),
+        old_hash: None,
+        new_hash: Some("a".repeat(64)),
+        old_blob_id: None,
+        new_blob_id: Some(BlobId::new("b".repeat(64)).unwrap()),
+        diff_blob_id: Some(BlobId::new("c".repeat(64)).unwrap()),
+    }));
+    let mut writer = project.open_writer().unwrap();
+    let mut store = writer.open_research(None).unwrap();
+    let envelope = EventEnvelope::current(
+        EventId::new("cache-original"),
+        ProjectEventStream::Research.stream_id(),
+        store.next_sequence().unwrap(),
+        OccurredAt::new("2026-10-26T00:00:00Z"),
+        EventType::new(memory.event_type().as_str()),
+        memory.encode_payload().unwrap(),
+    );
+    store.append_event(&envelope).unwrap();
+    drop(store);
+    drop(writer);
+    let appended = ProjectReadContext::load(&project, &mut cache, None).unwrap();
+    assert_eq!(appended.research_state().applied_event_count(), 1);
+    let unchanged = ProjectReadContext::load(&project, &mut cache, None).unwrap();
+    assert!(std::ptr::eq(
+        appended.research_state(),
+        unchanged.research_state()
+    ));
+    let path = project.research_stream_path_existing().unwrap();
+    let original = fs::read_to_string(&path).unwrap();
+    let tampered = original.replace("cache-original", "cache-modified");
+    assert_ne!(tampered, original);
+    fs::write(&path, tampered).unwrap();
+    let error = ProjectReadContext::load(&project, &mut cache, None)
+        .err()
+        .expect("rewritten prefix must be rejected");
+    assert!(
+        error.contains("validated Project stream prefix changed"),
+        "{error}"
+    );
+    fs::write(&path, &original).unwrap();
+    ProjectReadContext::load(&project, &mut cache, None).unwrap();
+    let reformatted = original.replacen("\":", "\": ", 1);
+    assert_ne!(reformatted, original);
+    assert_eq!(
+        serde_json::from_str::<Value>(&original).unwrap(),
+        serde_json::from_str::<Value>(&reformatted).unwrap()
+    );
+    fs::write(&path, reformatted).unwrap();
+    let error = ProjectReadContext::load(&project, &mut cache, None)
+        .err()
+        .expect("reformatted prefix bytes must be rejected");
+    assert!(
+        error.contains("validated Project stream prefix changed"),
+        "{error}"
+    );
+}
+
+#[test]
 fn locked_current_reuse_and_warm_peer_cache_preserve_strict_byte_validation() {
     for change in [
         "receipt_rewrite",
@@ -124,7 +197,6 @@ fn locked_current_reuse_and_warm_peer_cache_preserve_strict_byte_validation() {
             ProjectReadContext::load(&project, &mut cache, Some((&current_id, &current))).unwrap();
         assert_eq!(warm.receipt_digest, original_digest);
         assert_eq!(warm.references.execution_receipts().count(), 2);
-        warm.research_state().unwrap();
 
         if change.ends_with("append") {
             push(
@@ -254,7 +326,7 @@ async fn append_compaction(
     let sample_id = events.last().unwrap().event_id.clone();
     persist(project, "current", &events[previous_len..]);
     let state = SessionReducer.reduce(events.clone()).unwrap();
-    let facts = load_session_compaction_facts(project, &state).unwrap();
+    let facts = load_session_compaction_facts(project, &state, false).unwrap();
     let draft = facts
         .compose_session_summary_draft(
             state.history().items(),
@@ -332,6 +404,7 @@ async fn strict_replay_captures_only_latest_v5_prefix_and_reuses_exact_validatio
         project.project_id().clone(),
         &events,
         &[],
+        || Ok(crate::domain::research::ResearchReferenceCatalog::default()),
         &crate::adapters::artifact_store::LocalArtifactStore::for_project(&project),
     )
     .unwrap();
@@ -372,7 +445,7 @@ async fn strict_replay_captures_only_latest_v5_prefix_and_reuses_exact_validatio
                 .unwrap();
         }
     }
-    let baseline = load_session_compaction_facts(&project, projection.state()).unwrap();
+    let baseline = load_session_compaction_facts(&project, projection.state(), false).unwrap();
     let cached = load_session_compaction_facts_from_read(
         &project,
         projection.state(),
@@ -414,6 +487,7 @@ async fn strict_replay_captures_only_latest_v5_prefix_and_reuses_exact_validatio
                 project.project_id().clone(),
                 &changed,
                 &[],
+                || Ok(crate::domain::research::ResearchReferenceCatalog::default()),
                 &crate::adapters::artifact_store::LocalArtifactStore::for_project(&project),
             )
             .is_err(),

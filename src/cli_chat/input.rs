@@ -12,10 +12,68 @@ use tokio::io::{AsyncBufReadExt, BufReader, Lines, Stdin};
 use tokio::sync::mpsc;
 
 use crate::app::cancellation::AgentCancellation;
+use crate::app::input_time::{ReceivedInput, capture_input, queue_input};
+use crate::ports::input_clock::{InputClock, InputClockError};
 use crate::terminal_console::{Edit, InputMode, Terminal, TerminalEditor};
 
+struct SystemInputClock;
+
+impl InputClock for SystemInputClock {
+    fn now(&self) -> Result<crate::domain::session::TaskInputTime, InputClockError> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(InputClockError::new)?;
+        let seconds = i64::try_from(now.as_secs()).map_err(InputClockError::new)?;
+        Ok(crate::domain::session::TaskInputTime {
+            unix_seconds: seconds,
+            nanoseconds: now.subsec_nanos(),
+            timezone: host_timezone(seconds),
+        })
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn host_timezone(seconds: i64) -> crate::domain::session::TimeZoneObservation {
+    use crate::domain::session::TimeZoneObservation;
+    #[cfg(target_pointer_width = "64")]
+    let stamp = seconds as libc::time_t;
+    #[cfg(target_pointer_width = "32")]
+    let Ok(stamp) = libc::time_t::try_from(seconds) else {
+        return TimeZoneObservation::Unknown;
+    };
+    let mut result = std::mem::MaybeUninit::<libc::tm>::uninit();
+    // localtime_r writes into our own tm and observes the host's configured
+    // timezone for this exact instant without changing process environment.
+    let converted = unsafe { libc::localtime_r(&stamp, result.as_mut_ptr()) };
+    if converted.is_null() {
+        return TimeZoneObservation::Unknown;
+    }
+    let result = unsafe { result.assume_init() };
+    let Ok(offset_seconds) = i32::try_from(result.tm_gmtoff) else {
+        return TimeZoneObservation::Unknown;
+    };
+    let name = if result.tm_zone.is_null() {
+        None
+    } else {
+        unsafe { std::ffi::CStr::from_ptr(result.tm_zone) }
+            .to_str()
+            .ok()
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+    };
+    TimeZoneObservation::HostSystem {
+        offset_seconds,
+        name,
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn host_timezone(_seconds: i64) -> crate::domain::session::TimeZoneObservation {
+    crate::domain::session::TimeZoneObservation::Unknown
+}
+
 pub(super) enum ChatInput {
-    Lines(Lines<BufReader<Stdin>>),
+    Lines(Lines<BufReader<Stdin>>, Arc<dyn InputClock>),
     Terminal {
         // Join the only input reader before the terminal restoration guard.
         reader: TerminalReader,
@@ -25,20 +83,25 @@ pub(super) enum ChatInput {
 
 impl ChatInput {
     pub(super) fn new() -> io::Result<Self> {
+        let clock: Arc<dyn InputClock> = Arc::new(SystemInputClock);
+        Self::with_clock(clock)
+    }
+
+    fn with_clock(clock: Arc<dyn InputClock>) -> io::Result<Self> {
         Ok(match Terminal::start()? {
             Some((terminal, editor)) => Self::Terminal {
-                reader: TerminalReader::start(editor)?,
+                reader: TerminalReader::start(editor, clock)?,
                 terminal,
             },
-            None => Self::Lines(BufReader::new(tokio::io::stdin()).lines()),
+            None => Self::Lines(BufReader::new(tokio::io::stdin()).lines(), clock),
         })
     }
 
     pub(super) fn prompt(&self, mode: InputMode) -> io::Result<()> {
         match self {
             Self::Terminal { terminal, .. } => terminal.mode(mode),
-            Self::Lines(_) if mode == InputMode::Processing => Ok(()),
-            Self::Lines(_) => {
+            Self::Lines(..) if mode == InputMode::Processing => Ok(()),
+            Self::Lines(..) => {
                 use std::io::Write;
                 write!(io::stdout(), "{}", mode.prompt())?;
                 io::stdout().flush()
@@ -58,12 +121,16 @@ impl ChatInput {
         Ok(())
     }
 
-    pub(super) async fn next_line(&mut self) -> io::Result<Option<String>> {
+    pub(super) async fn next_line(&mut self) -> io::Result<Option<ReceivedInput>> {
         let Self::Terminal { terminal, reader } = self else {
-            let Self::Lines(lines) = self else {
+            let Self::Lines(lines, clock) = self else {
                 unreachable!()
             };
-            return lines.next_line().await;
+            return lines
+                .next_line()
+                .await?
+                .map(|line| capture_input(line, clock.as_ref()))
+                .transpose();
         };
         loop {
             let line = reader.received.recv().await.ok_or_else(|| {
@@ -72,7 +139,9 @@ impl ChatInput {
                     "terminal input reader stopped",
                 )
             })??;
-            if line.as_ref().is_some_and(|line| line.trim().is_empty())
+            if line
+                .as_ref()
+                .is_some_and(|line| line.text.trim().is_empty())
                 && terminal.input_mode()? != InputMode::Paste
             {
                 continue;
@@ -90,20 +159,20 @@ impl ChatInput {
 }
 
 pub(super) struct TerminalReader {
-    received: mpsc::Receiver<io::Result<Option<String>>>,
+    received: mpsc::Receiver<io::Result<Option<ReceivedInput>>>,
     stopping: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
 }
 
 impl TerminalReader {
-    fn start(editor: TerminalEditor) -> io::Result<Self> {
+    fn start(editor: TerminalEditor, clock: Arc<dyn InputClock>) -> io::Result<Self> {
         let (sender, received) = mpsc::channel(1);
         let stopping = Arc::new(AtomicBool::new(false));
         let worker_stopping = Arc::clone(&stopping);
         let worker = thread::Builder::new()
             .name("echidna-terminal-input".to_owned())
             .spawn(move || {
-                if let Err(error) = Self::read(editor, &sender, &worker_stopping) {
+                if let Err(error) = Self::read(editor, &sender, &worker_stopping, clock.as_ref()) {
                     // The receiver is closed only when the Chat itself exits.
                     let _ = sender.blocking_send(Err(error));
                 }
@@ -117,8 +186,9 @@ impl TerminalReader {
 
     fn read(
         editor: TerminalEditor,
-        sender: &mpsc::Sender<io::Result<Option<String>>>,
+        sender: &mpsc::Sender<io::Result<Option<ReceivedInput>>>,
         stopping: &AtomicBool,
+        clock: &dyn InputClock,
     ) -> io::Result<()> {
         while !stopping.load(Ordering::Acquire) {
             editor.drain_previews()?;
@@ -127,7 +197,7 @@ impl TerminalReader {
             }
             let message = match Self::apply(&editor, event::read()?)? {
                 ReaderEvent::Edited => continue,
-                ReaderEvent::Line(line) => Ok(Some(line)),
+                ReaderEvent::Line(line) => capture_input(line, clock).map(Some),
                 ReaderEvent::Rejected(error) => Err(error),
                 ReaderEvent::Eof => {
                     let _ = sender.blocking_send(Ok(None));
@@ -237,7 +307,7 @@ pub(super) async fn interruptible<F>(
     lines: &mut ChatInput,
     terminal: bool,
     closed: &mut bool,
-    pending: &mut Option<String>,
+    pending: &mut Option<ReceivedInput>,
 ) -> io::Result<F::Output>
 where
     F: Future,
@@ -256,11 +326,9 @@ where
             }
             line = lines.next_line(), if read_terminal => {
                 match line {
-                    Ok(Some(line)) if line.trim().is_empty() => continue,
+                    Ok(Some(line)) if line.text.trim().is_empty() => continue,
                     Ok(Some(line)) => {
-                        if line != "/stop" {
-                            *pending = Some(line);
-                        }
+                        queue_input(pending, line);
                         console_eprintln!("\n[interrupt requested] Waiting for the current operation to settle; no rollback or background-process stop is implied.");
                         cancellation.cancel();
                         return Ok(operation.await);
@@ -287,7 +355,7 @@ where
     }
 }
 
-pub(super) fn reject_pending(pending: &mut Option<String>) {
+pub(super) fn reject_pending(pending: &mut Option<ReceivedInput>) {
     if pending.take().is_some() {
         console_eprintln!(
             "[queued input not submitted or saved] Resolve the stop, then re-enter your instruction explicitly. No automatic retry."

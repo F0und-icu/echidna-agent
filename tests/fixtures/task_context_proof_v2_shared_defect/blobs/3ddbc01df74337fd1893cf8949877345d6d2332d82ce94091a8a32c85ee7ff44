@@ -1,0 +1,1 @@
+{"call":{"arguments":{"argv":["/bin/sh","-c","printf 'b\\n' >> attribution-count.txt; printf BETA_LATER_VALUE"]},"call_id":"shared-beta-result","name":"run_command"},"kind":"tool_call"}

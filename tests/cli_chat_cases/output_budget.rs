@@ -1,4 +1,8 @@
 //! Configured per-response ceilings are distinct from request admission or bills.
+use super::task_context::{
+    ScriptedResponse::{InitialSelection, NewSelection, Response},
+    selector_candidates, spawn_scripted_responses_server,
+};
 use super::*;
 
 #[test]
@@ -16,9 +20,11 @@ fn output_limit_incomplete_stops_atomically_and_requires_explicit_resume() {
         .iter()
         .map(|event| format!("data: {event}\n\n"))
         .collect();
-    let server = spawn_responses_server(vec![
-        (200, body),
-        (200, text_response("new task only", "after-explicit-resume")),
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(200, body),
+        NewSelection,
+        Response(200, text_response("new task only", "after-explicit-resume")),
     ]);
     let config = write_context_window_config(root.path(), &server.base_url, 131_072);
     fs::write(
@@ -47,9 +53,13 @@ fn output_limit_incomplete_stops_atomically_and_requires_explicit_resume() {
     assert!(stderr.contains("max_output_tokens"));
     assert!(!stderr.contains("protocol decoding failed"));
     assert!(String::from_utf8_lossy(&output.stdout).contains("Task input not accepted or saved"));
+    let initial_selection = f2a_request_body(&server.requests, "budget initial selection");
+    selector_candidates(&initial_selection);
     let first = f2a_request_body(&server.requests, "budget first request");
+    let selection = f2a_request_body(&server.requests, "budget resumed selection");
+    selector_candidates(&selection);
     let second = f2a_request_body(&server.requests, "budget explicit resumed request");
-    for request in [&first, &second] {
+    for request in [&initial_selection, &first, &selection, &second] {
         assert_eq!(request["max_output_tokens"], 8192);
         assert!(request.get("previous_response_id").is_none());
     }
@@ -61,7 +71,7 @@ fn output_limit_incomplete_stops_atomically_and_requires_explicit_resume() {
     let project = Project::discover(root.path()).unwrap();
     let state = reduced_session(&project, &session_id(root.path()));
     assert_eq!(state.execution_receipt_count(), 0);
-    assert_eq!(state.request_audits().len(), 2);
+    assert_eq!(state.request_audits().len(), 4);
     assert!(!root.path().join("must-not-exist.txt").exists());
     assert_eq!(state.history().ensure_all_tool_calls_paired(), Ok(()));
     assert_audits_reconstruct(root.path(), &state);
@@ -85,7 +95,10 @@ fn invalid_completed_item_status_body() -> String {
 fn protocol_status_failure_after_streamed_tool_remains_atomic_and_eof_requires_resume() {
     let root = TemporaryDirectory::new("response-protocol-stop-eof");
     initialize_project(root.path());
-    let server = spawn_responses_server(vec![(200, invalid_completed_item_status_body())]);
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(200, invalid_completed_item_status_body()),
+    ]);
     let config = write_context_window_config(root.path(), &server.base_url, 131_072);
 
     let output = run_chat(
@@ -111,6 +124,10 @@ fn protocol_status_failure_after_streamed_tool_remains_atomic_and_eof_requires_r
     );
     assert!(stdout.contains("EOF received;"), "{stdout}");
 
+    selector_candidates(&f2a_request_body(
+        &server.requests,
+        "protocol failure initial selection",
+    ));
     let request = f2a_request_body(&server.requests, "protocol failure request");
     assert!(
         request
@@ -133,7 +150,10 @@ fn protocol_status_failure_after_streamed_tool_remains_atomic_and_eof_requires_r
 fn protocol_status_failure_resume_then_eof_does_not_replay_sample_or_tool() {
     let root = TemporaryDirectory::new("response-protocol-stop-resume-eof");
     initialize_project(root.path());
-    let server = spawn_responses_server(vec![(200, invalid_completed_item_status_body())]);
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(200, invalid_completed_item_status_body()),
+    ]);
     let config = write_context_window_config(root.path(), &server.base_url, 131_072);
 
     let output = run_chat(
@@ -158,6 +178,10 @@ fn protocol_status_failure_resume_then_eof_does_not_replay_sample_or_tool() {
     );
     assert!(stdout.contains("EOF received;"), "{stdout}");
 
+    selector_candidates(&f2a_request_body(
+        &server.requests,
+        "protocol resumed initial selection",
+    ));
     let _ = f2a_request_body(&server.requests, "protocol resumed request");
     assert!(server.requests.try_recv().is_err());
     server.join();

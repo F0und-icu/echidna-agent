@@ -1,0 +1,1 @@
+{"call":{"arguments":{"argv":["/bin/sh","-c","printf 'a\\n' >> attribution-count.txt; printf 'A_ONLY_VALUE'"]},"call_id":"independent-alpha","name":"run_command"},"kind":"tool_call"}

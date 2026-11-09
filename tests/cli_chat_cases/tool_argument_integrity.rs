@@ -1,4 +1,8 @@
 //! Ordinary document fixtures; no model requests or security task execution.
+use super::task_context::{
+    ScriptedResponse::{InitialSelection, Response},
+    selector_candidates, spawn_scripted_responses_server,
+};
 use super::*;
 
 #[test]
@@ -28,7 +32,9 @@ fn malformed_arguments_reject_the_whole_sample_without_writes_or_payload_disclos
             .iter()
             .map(|event| format!("data: {event}\n\n"))
             .collect();
-        let server = spawn_responses_server(vec![(200, body); 3]);
+        let mut steps = vec![InitialSelection];
+        steps.extend((0..3).map(|_| Response(200, body.clone())));
+        let server = spawn_scripted_responses_server(steps);
         let config = write_config(root.path(), &server.base_url);
         let extra = if debug { vec!["--debug"] } else { vec![] };
         let output = run_chat(
@@ -68,7 +74,7 @@ fn malformed_arguments_reject_the_whole_sample_without_writes_or_payload_disclos
         let project = Project::discover(root.path()).unwrap();
         let state = reduced_session(&project, &session_id(root.path()));
         assert_eq!(state.execution_receipt_count(), 0);
-        assert_eq!(state.request_audits().len(), 3);
+        assert_eq!(state.request_audits().len(), 4);
         let rejections: Vec<_> = session_events(root.path(), &session_id(root.path()))
             .into_iter()
             .filter(|event| event["event_type"] == "model.sample_rejected")
@@ -78,7 +84,7 @@ fn malformed_arguments_reject_the_whole_sample_without_writes_or_payload_disclos
             assert_eq!(rejection["payload"]["corrections_used"], index);
             assert_eq!(
                 rejection["payload"]["request_audit_event_id"],
-                state.request_audits()[index].audit_event_id().as_str()
+                state.request_audits()[index + 1].audit_event_id().as_str()
             );
         }
         assert!(stderr.contains("argument corrections exhausted"));
@@ -89,6 +95,11 @@ fn malformed_arguments_reject_the_whole_sample_without_writes_or_payload_disclos
             )]
         );
         assert!(!root.path().join("must-not-exist.txt").exists());
+        let selection = f2a_request_body(&server.requests, "malformed arguments initial selection");
+        assert_eq!(
+            selector_candidates(&selection)["input"]["text"],
+            "Write an ordinary note."
+        );
         for _ in 0..3 {
             server
                 .requests
@@ -109,8 +120,9 @@ fn long_json_escaped_file_content_round_trips_through_wire_tool_and_durable_hist
         "中文 😀 quote=\"; path=C:\\notes\\new; regex=\\d+; tab=\t; line=\nWPEof\n".repeat(200);
     assert!(content.len() > 9_194);
     let arguments = json!({"path":"note.txt","content":content,"expected_hash":null});
-    let server = spawn_responses_server(vec![
-        (
+    let server = spawn_scripted_responses_server(vec![
+        InitialSelection,
+        Response(
             200,
             m4_long_flow_tool_response(
                 "long-write",
@@ -119,7 +131,7 @@ fn long_json_escaped_file_content_round_trips_through_wire_tool_and_durable_hist
                 "long-write-response",
             ),
         ),
-        (
+        Response(
             200,
             text_response("ordinary note saved", "long-write-answer"),
         ),
@@ -148,6 +160,11 @@ fn long_json_escaped_file_content_round_trips_through_wire_tool_and_durable_hist
         if call.call_id.as_str() == "long-write" && call.arguments == arguments)));
     assert_eq!(state.history().ensure_all_tool_calls_paired(), Ok(()));
     assert_audits_reconstruct(root.path(), &state);
+    let selection = f2a_request_body(&server.requests, "file contract initial selection");
+    assert_eq!(
+        selector_candidates(&selection)["input"]["text"],
+        "Save the ordinary note."
+    );
     let request = f2a_request_body(&server.requests, "file contract wire");
     let tools = request["tools"].as_array().unwrap();
     let write = tools

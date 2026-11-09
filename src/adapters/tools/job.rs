@@ -58,6 +58,15 @@ impl BackgroundJobs {
             .values()
             .any(|entry| matches!(entry.status, JobStatus::Running | JobStatus::Stopping))
     }
+
+    pub(super) fn live_processes(&self) -> Vec<(JobId, JobStatus)> {
+        lock_table(&self.jobs)
+            .entries
+            .iter()
+            .filter(|(_, entry)| matches!(entry.status, JobStatus::Running | JobStatus::Stopping))
+            .map(|(id, entry)| (id.clone(), entry.status))
+            .collect()
+    }
 }
 
 #[derive(Default)]

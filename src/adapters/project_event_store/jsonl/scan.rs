@@ -10,6 +10,15 @@ use crate::domain::events::{
 
 use super::super::ProjectEventStoreError;
 
+pub(super) type SessionRecordObserver<'a> = dyn FnMut(
+        &EventEnvelope<Value>,
+        usize,
+        usize,
+        blake3::Hash,
+        &[u8],
+    ) -> Result<(), ProjectEventStoreError>
+    + 'a;
+
 pub(crate) enum StreamScan {
     Complete {
         events: Vec<EventEnvelope<Value>>,
@@ -80,9 +89,36 @@ pub(super) fn scan_stream_reader<Reader: BufRead + Seek>(
     path: &Path,
     expected_stream_id: &StreamId,
     registry: &EventUpcasterRegistry<Value>,
+    record_start: usize,
+    last_sequence: Option<EventSequence>,
+    validated_hash: &mut blake3::Hasher,
+) -> Result<StreamScan, ProjectEventStoreError> {
+    scan_stream_reader_observed(
+        reader,
+        path,
+        expected_stream_id,
+        registry,
+        record_start,
+        last_sequence,
+        validated_hash,
+        true,
+        None,
+    )
+}
+
+/// Stream validated records to a derived index without accumulating another
+/// full Event vector. The caller decides how to bind the index to its source.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn scan_stream_reader_observed<Reader: BufRead + Seek>(
+    reader: &mut Reader,
+    path: &Path,
+    expected_stream_id: &StreamId,
+    registry: &EventUpcasterRegistry<Value>,
     mut record_start: usize,
     mut last_sequence: Option<EventSequence>,
     validated_hash: &mut blake3::Hasher,
+    retain_events: bool,
+    mut observer: Option<&mut SessionRecordObserver<'_>>,
 ) -> Result<StreamScan, ProjectEventStoreError> {
     let mut events = Vec::new();
     let mut record = Vec::new();
@@ -107,7 +143,18 @@ pub(super) fn scan_stream_reader<Reader: BufRead + Seek>(
         match decode_record(body, expected_stream_id, last_sequence, registry) {
             Ok(event) if terminated => {
                 last_sequence = Some(event.sequence);
-                events.push(event);
+                if let Some(observer) = observer.as_mut() {
+                    observer(
+                        &event,
+                        record_start,
+                        record.len(),
+                        blake3::hash(&record),
+                        &record,
+                    )?;
+                }
+                if retain_events {
+                    events.push(event);
+                }
                 validated_hash.update(&record);
                 record_start += record.len();
             }

@@ -1,5 +1,9 @@
 //! Formal CLI geometry admission, without external Provider access.
 
+use super::task_context::{
+    ScriptedResponse::{InitialSelection, Response},
+    selector_candidates, spawn_scripted_responses_server,
+};
 use super::*;
 
 #[test]
@@ -14,10 +18,10 @@ fn f6a_original_and_resized_images_bind_exact_decoded_geometry() {
             200,
             vision_response("bounded observation", "vision-geometry"),
         )]);
-        let primary = spawn_responses_server(vec![(
-            200,
-            text_response("GEOMETRY_OK", "primary-geometry"),
-        )]);
+        let primary = spawn_scripted_responses_server(vec![
+            InitialSelection,
+            Response(200, text_response("GEOMETRY_OK", "primary-geometry")),
+        ]);
         let config = write_dual_config(root.path(), &primary.base_url, &vision.base_url);
         let output = run_chat(
             root.path(),
@@ -32,6 +36,10 @@ fn f6a_original_and_resized_images_bind_exact_decoded_geometry() {
         );
         let request = f2a_request_body(&vision.requests, "geometry Vision");
         f2a_join_server(vision, "geometry Vision");
+        selector_candidates(&f2a_request_body(
+            &primary.requests,
+            "geometry source selection",
+        ));
         let primary_request = f2a_request_body(&primary.requests, "geometry Primary");
         f2a_join_server(primary, "geometry Primary");
         let state = reduced_session(&project, &session_id(root.path()));

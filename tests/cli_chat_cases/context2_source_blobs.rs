@@ -14,62 +14,13 @@ fn legacy_omitted_followup_sources_are_verified_during_adoption_and_replay() {
     ] {
         let root = TemporaryDirectory::new("legacy-followup-source");
         let harness = TemporaryDirectory::new("legacy-followup-config");
-        initialize_project(root.path());
-        let project = Project::discover(root.path()).unwrap();
-        let target = append_research_snapshot(&project, "legacy-followup-source");
-        let png = png_bytes(8, 8);
-        fs::write(root.path().join("screen.png"), &png).unwrap();
-        let primary = spawn_responses_server(vec![
-            (
-                200,
-                text_response(&"Earlier preparation. ".repeat(900), "prepare"),
-            ),
-            (
-                200,
-                tool_calls_response(
-                    &[(
-                        "followup-call",
-                        "view_image",
-                        json!({"event_id":"followup-image-event", "occurred_at":"2026-09-12T00:00:00Z",
-                            "artifact_id":"artifact-followup", "source_path":"screen.png",
-                            "target_snapshot_id":"snapshot-legacy-followup-source", "toolchain_fingerprint":"fixture"}),
-                    )],
-                    "followup-response",
-                ),
-            ),
-            (200, text_response("Image inspected.", "image-final")),
-        ]);
-        let vision = secondary.then(|| {
-            spawn_responses_server(vec![(
-                200,
-                vision_response("original observation", "vision"),
-            )])
-        });
-        let config = if let Some(vision) = &vision {
-            write_dual_config(harness.path(), &primary.base_url, &vision.base_url)
-        } else {
-            write_direct_config(harness.path(), &primary.base_url)
-        };
-        let initial = run_chat(
+        let id = load_pre_task_context_fixture(
             root.path(),
-            &config,
-            "Prepare.\nInspect the image.\n/exit\n",
-            &["--domain", "mobile"],
+            if secondary { "secondary" } else { "direct" },
         );
-        assert!(
-            initial.status.success(),
-            "{}",
-            String::from_utf8_lossy(&initial.stderr)
-        );
-        for _ in 0..3 {
-            let _ = f2a_request_body(&primary.requests, "legacy followup Primary");
-        }
-        f2a_join_server(primary, "legacy followup Primary");
-        if let Some(vision) = vision {
-            let _ = f2a_request_body(&vision.requests, "legacy followup Vision");
-            f2a_join_server(vision, "legacy followup Vision");
-        }
-        let id = session_id(root.path());
+        let project = Project::discover(root.path()).unwrap();
+        let target = TargetSnapshotId::new("snapshot-legacy-followup-source");
+        let png = fs::read(root.path().join("screen.png")).unwrap();
         let mut legacy = session_events(root.path(), &id);
         let original_event_count = legacy.len();
         let blob_id = if audit_component {
@@ -305,7 +256,7 @@ read_file = "direct"
         let changed_blob = blob.clone();
         let fixture_root = root.path().to_path_buf();
         let thread = thread::spawn(move || {
-            let count = if stage == "after-adoption" { 5 } else { 4 };
+            let count = if stage == "after-adoption" { 6 } else { 5 };
             for index in 0..count {
                 let mut socket =
                     f3_context::accept_before_deadline(&listener, "source Blob request");
@@ -313,6 +264,16 @@ read_file = "direct"
                     .set_read_timeout(Some(Duration::from_secs(10)))
                     .unwrap();
                 let request = request_body(&read_http_request(&mut socket));
+                if index == 0 {
+                    let response = super::task_context::initial_selection_response(
+                        &request,
+                        "blob-initial-selection",
+                    );
+                    sender.send(request).unwrap();
+                    f3_context::write_sse_response(&mut socket, &response);
+                    continue;
+                }
+                let index = index - 1;
                 if index == 3 {
                     assert!(
                         request.get("tools").is_none(),
@@ -378,7 +339,8 @@ read_file = "direct"
         );
         thread.join().unwrap();
         let wires = requests.try_iter().collect::<Vec<_>>();
-        assert_eq!(wires.len(), if stage == "after-adoption" { 5 } else { 4 });
+        assert_eq!(wires.len(), if stage == "after-adoption" { 6 } else { 5 });
+        super::task_context::selector_candidates(&wires[0]);
         let id = session_id(root.path());
         let events = session_events(root.path(), &id);
         let compactions = events

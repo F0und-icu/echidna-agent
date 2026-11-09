@@ -1,4 +1,8 @@
 //! Recovery of the real History prefix immediately before input acceptance.
+use super::task_context::{
+    ScriptedResponse::{ContinueSelection, InitialSelection, Response},
+    selector_candidates, spawn_scripted_responses_server,
+};
 use super::*;
 
 #[test]
@@ -14,7 +18,11 @@ fn initial_vision_checkpoint_before_acceptance_resumes_without_claiming_delivery
             png_bytes(if derived { 2050 } else { 8 }, 8),
         )
         .unwrap();
-        let primary = spawn_responses_server(vec![(200, text_response("first answer", "first"))]);
+        let primary = spawn_scripted_responses_server(vec![
+            InitialSelection,
+            InitialSelection,
+            Response(200, text_response("first answer", "first")),
+        ]);
         let vision = secondary.then(|| {
             spawn_responses_server(vec![(200, vision_response("saved observation", "vision"))])
         });
@@ -34,6 +42,12 @@ fn initial_vision_checkpoint_before_acceptance_resumes_without_claiming_delivery
             "{}",
             String::from_utf8_lossy(&first.stderr)
         );
+        for _ in 0..2 {
+            selector_candidates(&f2a_request_body(
+                &primary.requests,
+                "initial source selection",
+            ));
+        }
         let _ = f2a_request_body(&primary.requests, "initial Primary");
         f2a_join_server(primary, "initial Primary");
         if let Some(vision) = vision {
@@ -83,8 +97,10 @@ fn initial_vision_checkpoint_before_acceptance_resumes_without_claiming_delivery
                 .collect::<String>(),
         )
         .unwrap();
-        let resumed_server =
-            spawn_responses_server(vec![(200, text_response("recovered", "recovered"))]);
+        let resumed_server = spawn_scripted_responses_server(vec![
+            InitialSelection,
+            Response(200, text_response("recovered", "recovered")),
+        ]);
         let resumed_config = if secondary {
             write_dual_config(
                 harness.path(),
@@ -106,6 +122,10 @@ fn initial_vision_checkpoint_before_acceptance_resumes_without_claiming_delivery
             String::from_utf8_lossy(&resumed.stdout),
             String::from_utf8_lossy(&resumed.stderr)
         );
+        selector_candidates(&f2a_request_body(
+            &resumed_server.requests,
+            "recovery source selection",
+        ));
         let wire = f2a_request_body(&resumed_server.requests, "recovered Primary");
         assert!(wire.to_string().contains("ORIGINAL-IMAGE-TASK"));
         if secondary {
@@ -137,12 +157,15 @@ fn unaccepted_initial_vision_survives_failed_and_successful_compaction() {
             png_bytes(if derived { 2050 } else { 8 }, 8),
         )
         .unwrap();
-        let primary = spawn_responses_server(vec![
-            (
+        let primary = spawn_scripted_responses_server(vec![
+            InitialSelection,
+            Response(
                 200,
                 text_response(&"Earlier completed work. ".repeat(1000), "earlier"),
             ),
-            (200, text_response("first image answer", "image-answer")),
+            ContinueSelection { usage: None },
+            ContinueSelection { usage: None },
+            Response(200, text_response("first image answer", "image-answer")),
         ]);
         let vision = secondary.then(|| {
             spawn_responses_server(vec![(
@@ -166,8 +189,11 @@ fn unaccepted_initial_vision_survives_failed_and_successful_compaction() {
             "{}",
             String::from_utf8_lossy(&first.stderr)
         );
-        for _ in 0..2 {
-            let _ = f2a_request_body(&primary.requests, "initial Primary");
+        for index in 0..5 {
+            let wire = f2a_request_body(&primary.requests, "initial Primary");
+            if [0, 2, 3].contains(&index) {
+                selector_candidates(&wire);
+            }
         }
         f2a_join_server(primary, "initial Primary");
         if let Some(vision) = vision {
@@ -267,10 +293,11 @@ fn unaccepted_initial_vision_survives_failed_and_successful_compaction() {
                 .any(|event| event["event_type"] == "session.compaction_created")
         );
 
-        let resumed_server = spawn_responses_server(vec![(
-            200,
-            text_response("recovered after compaction", "final"),
-        )]);
+        let resumed_server = spawn_scripted_responses_server(vec![
+            ContinueSelection { usage: None },
+            ContinueSelection { usage: None },
+            Response(200, text_response("recovered after compaction", "final")),
+        ]);
         let resumed_config = if secondary {
             write_dual_config(
                 harness.path(),
@@ -292,6 +319,12 @@ fn unaccepted_initial_vision_survives_failed_and_successful_compaction() {
             String::from_utf8_lossy(&resumed.stdout),
             String::from_utf8_lossy(&resumed.stderr)
         );
+        for _ in 0..2 {
+            selector_candidates(&f2a_request_body(
+                &resumed_server.requests,
+                "post-compaction selection",
+            ));
+        }
         let wire = f2a_request_body(&resumed_server.requests, "post-compaction Primary");
         assert!(wire.to_string().contains("ORIGINAL-IMAGE-COMPACTION-TASK"));
         assert!(wire.to_string().contains(if secondary {

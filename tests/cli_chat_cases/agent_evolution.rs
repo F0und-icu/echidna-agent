@@ -1,3 +1,6 @@
+use super::task_context::{
+    initial_selection_response, new_selection_response, selector_candidates,
+};
 use super::*;
 
 #[path = "agent_evolution/long_task.rs"]
@@ -142,42 +145,47 @@ fn rsi_retry_budget_exhaustion_closes_activity_without_executing_a_partial_probe
     let marker = root.path().join("partial-probe-must-not-run");
     let marker_for_response = marker.clone();
     let server = server(
-        move |step, request| match step {
-            0 => tool(
-                "main-failed",
-                "run_command",
-                json!({"argv":["/bin/sh","probe.sh","fail"]}),
-            ),
-            1 => tool(
-                "main-reference",
-                "run_command",
-                json!({"argv":["/bin/sh","probe.sh","good"],"code_inputs":["probe.sh"]}),
-            ),
-            2 => text_response("ORDINARY_TASK_COMPLETED", "ordinary-complete"),
-            3 => {
-                assert!(request.to_string().contains("RSI2 diagnosis"));
-                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"discarded incomplete diagnosis\"}\n\n".to_owned()
+        move |step, request| {
+            if step == 0 {
+                return initial_selection_response(request, "retry-initial-selection");
             }
-            4 => text_response(&improvement_candidate().to_string(), "diagnosis-recovered"),
-            5 => {
-                assert!(request.to_string().contains("Arm=Old"));
-                format!(
-                    "data: {}\n\n",
-                    json!({"type":"response.output_item.done","output_index":0,"item":{
-                        "type":"function_call","call_id":"partial-probe","name":"run_command",
-                        "arguments":json!({"argv":["/usr/bin/touch",marker_for_response]}).to_string()
-                    }})
-                )
+            match step - 1 {
+                0 => tool(
+                    "main-failed",
+                    "run_command",
+                    json!({"argv":["/bin/sh","probe.sh","fail"]}),
+                ),
+                1 => tool(
+                    "main-reference",
+                    "run_command",
+                    json!({"argv":["/bin/sh","probe.sh","good"],"code_inputs":["probe.sh"]}),
+                ),
+                2 => text_response("ORDINARY_TASK_COMPLETED", "ordinary-complete"),
+                3 => {
+                    assert!(request.to_string().contains("RSI2 diagnosis"));
+                    "data: {\"type\":\"response.output_text.delta\",\"delta\":\"discarded incomplete diagnosis\"}\n\n".to_owned()
+                }
+                4 => text_response(&improvement_candidate().to_string(), "diagnosis-recovered"),
+                5 => {
+                    assert!(request.to_string().contains("Arm=Old"));
+                    format!(
+                        "data: {}\n\n",
+                        json!({"type":"response.output_item.done","output_index":0,"item":{
+                            "type":"function_call","call_id":"partial-probe","name":"run_command",
+                            "arguments":json!({"argv":["/usr/bin/touch",marker_for_response]}).to_string()
+                        }})
+                    )
+                }
+                _ => unreachable!(),
             }
-            _ => unreachable!(),
         },
-        6,
+        7,
     );
     let config = write_config(root.path(), &server.base_url);
     fs::write(
         &config,
         format!(
-            "{}\n[runtime]\nmodel_request_limit_per_turn = 6\n",
+            "{}\n[runtime]\nmodel_request_limit_per_turn = 7\n",
             fs::read_to_string(&config).unwrap()
         ),
     )
@@ -194,10 +202,11 @@ fn rsi_retry_budget_exhaustion_closes_activity_without_executing_a_partial_probe
         String::from_utf8_lossy(&output.stderr)
     );
     let requests = server.requests.try_iter().collect::<Vec<_>>();
-    assert_eq!(requests.len(), 6);
+    assert_eq!(requests.len(), 7);
+    selector_candidates(&request_body(&requests[0]));
     assert_eq!(
-        request_body(&requests[3]),
         request_body(&requests[4]),
+        request_body(&requests[5]),
         "diagnosis retries keep exact logical request bytes"
     );
     server.join();
@@ -281,65 +290,71 @@ fn rsi2_reference_match_uses_actual_scoped_commands_and_only_adopts_a_local_gain
             6
         };
         let server = server(
-            move |step, request| match step {
-                0 => format!(
-                    "data: {}\n\n{}",
-                    json!({"type":"response.output_text.delta","delta":"Superseded neutral aggregation preparation. ".repeat(500)}),
-                    tool(
-                        "main-failed",
+            move |step, request| {
+                if step == 0 {
+                    return initial_selection_response(request, "contrast-initial-selection");
+                }
+                let step = step - 1;
+                match step {
+                    0 => format!(
+                        "data: {}\n\n{}",
+                        json!({"type":"response.output_text.delta","delta":"Superseded neutral aggregation preparation. ".repeat(500)}),
+                        tool(
+                            "main-failed",
+                            "run_command",
+                            json!({"argv":["/bin/sh","probe.sh","fail"]}),
+                        )
+                    ),
+                    1 => tool(
+                        "main-reference",
                         "run_command",
-                        json!({"argv":["/bin/sh","probe.sh","fail"]}),
-                    )
-                ),
-                1 => tool(
-                    "main-reference",
-                    "run_command",
-                    json!({"argv":["/bin/sh","probe.sh","good"],"code_inputs":["probe.sh"]}),
-                ),
-                2 => text_response("ORDINARY_TASK_COMPLETED", "main-done"),
-                3 => {
-                    assert!(request.to_string().contains("RSI2 diagnosis"));
-                    assert!(request.get("tools").is_none());
-                    let mut candidate = improvement_candidate();
-                    let text = match case {
+                        json!({"argv":["/bin/sh","probe.sh","good"],"code_inputs":["probe.sh"]}),
+                    ),
+                    2 => text_response("ORDINARY_TASK_COMPLETED", "main-done"),
+                    3 => {
+                        assert!(request.to_string().contains("RSI2 diagnosis"));
+                        assert!(request.get("tools").is_none());
+                        let mut candidate = improvement_candidate();
+                        let text = match case {
                     "no-change" => json!({"decision":"no_change","reason":"Temporary failure; no reusable change."}).to_string(),
                     "bad-json" => "not a candidate".to_owned(),
                     "empty-reason" => {candidate["reason"]=json!("");candidate.to_string()},
                     _ => candidate.to_string(),
                 };
-                    text_response(&text, "diagnosis-done")
+                        text_response(&text, "diagnosis-done")
+                    }
+                    4 | 5 => {
+                        assert!(request.to_string().contains("RSI2 reference_match probe"));
+                        assert!(request.get("previous_response_id").is_none());
+                        assert_eq!(request["tools"].as_array().unwrap().len(), 1);
+                        let mode = if case == "tie"
+                            || (case == "regression" && step == 4)
+                            || (step == 5 && case != "regression")
+                        {
+                            "good"
+                        } else {
+                            "bad"
+                        };
+                        let args = if case == "echo" && step == 5 {
+                            json!({"argv":["/usr/bin/printf","PASS\\n"]})
+                        } else if case == "mutated" && step == 5 {
+                            json!({"argv":["/bin/sh","-c","printf changed > probe.sh; printf '42\\n'"]})
+                        } else {
+                            json!({"argv":["/bin/sh","probe.sh",mode]})
+                        };
+                        tool("same-provider-call-id", "run_command", args)
+                    }
+                    6 if case == "gain" => {
+                        assert!(request.get("tools").is_none());
+                        compaction_summary_response(
+                            "main-failed failed; main-reference completed with the actual expected output. RSI accepted only the measured local gain.",
+                            "rsi-after-summary",
+                        )
+                    }
+                    _ => unreachable!(),
                 }
-                4 | 5 => {
-                    assert!(request.to_string().contains("RSI2 reference_match probe"));
-                    assert!(request.get("previous_response_id").is_none());
-                    assert_eq!(request["tools"].as_array().unwrap().len(), 1);
-                    let mode = if case == "tie"
-                        || (case == "regression" && step == 4)
-                        || (step == 5 && case != "regression")
-                    {
-                        "good"
-                    } else {
-                        "bad"
-                    };
-                    let args = if case == "echo" && step == 5 {
-                        json!({"argv":["/usr/bin/printf","PASS\\n"]})
-                    } else if case == "mutated" && step == 5 {
-                        json!({"argv":["/bin/sh","-c","printf changed > probe.sh; printf '42\\n'"]})
-                    } else {
-                        json!({"argv":["/bin/sh","probe.sh",mode]})
-                    };
-                    tool("same-provider-call-id", "run_command", args)
-                }
-                6 if case == "gain" => {
-                    assert!(request.get("tools").is_none());
-                    compaction_summary_response(
-                        "main-failed failed; main-reference completed with the actual expected output. RSI accepted only the measured local gain.",
-                        "rsi-after-summary",
-                    )
-                }
-                _ => unreachable!(),
             },
-            count,
+            count + 1,
         );
         let config = write_config(root.path(), &server.base_url);
         let input = if case == "gain" {
@@ -359,7 +374,8 @@ fn rsi2_reference_match_uses_actual_scoped_commands_and_only_adopts_a_local_gain
             String::from_utf8_lossy(&output.stderr)
         );
         let requests = server.requests.try_iter().collect::<Vec<_>>();
-        assert_eq!(requests.len(), count);
+        assert_eq!(requests.len(), count + 1);
+        selector_candidates(&request_body(&requests[0]));
         server.join();
         let events = session_events(root.path(), &session_id(root.path()));
         let original_session = session_id(root.path());
@@ -401,7 +417,7 @@ fn rsi2_reference_match_uses_actual_scoped_commands_and_only_adopts_a_local_gain
             })
             .collect::<Vec<_>>();
         assert_eq!(calls, vec!["main-failed", "main-reference"]);
-        assert_eq!(state.request_audits().len(), count);
+        assert_eq!(state.request_audits().len(), count + 1);
         assert_eq!(
             state.execution_receipt_count(),
             if count >= 6 { 4 } else { 2 }
@@ -456,7 +472,13 @@ fn rsi2_reference_match_uses_actual_scoped_commands_and_only_adopts_a_local_gain
                 ("JSONL conversion on fresh data.", false),
             ] {
                 let fresh_server = self::server(
-                    move |_, request| {
+                    move |step, request| {
+                        if step == 0 {
+                            return initial_selection_response(
+                                request,
+                                "experience-initial-selection",
+                            );
+                        }
                         assert_eq!(
                             request.to_string().contains("rsi_applicable_experience_v2"),
                             applicable
@@ -469,7 +491,7 @@ fn rsi2_reference_match_uses_actual_scoped_commands_and_only_adopts_a_local_gain
                         );
                         text_response("FRESH_DONE", "fresh-done")
                     },
-                    1,
+                    2,
                 );
                 let fresh_config = write_config(root.path(), &fresh_server.base_url);
                 let fresh = run_chat(
@@ -483,7 +505,9 @@ fn rsi2_reference_match_uses_actual_scoped_commands_and_only_adopts_a_local_gain
                     "{}",
                     String::from_utf8_lossy(&fresh.stderr)
                 );
-                assert_eq!(fresh_server.requests.try_iter().count(), 1);
+                let requests = fresh_server.requests.try_iter().collect::<Vec<_>>();
+                assert_eq!(requests.len(), 2);
+                selector_candidates(&request_body(&requests[0]));
                 fresh_server.join();
             }
             // A valid controlled compaction retaining no ordinary History
@@ -515,8 +539,12 @@ fn rsi2_reference_match_uses_actual_scoped_commands_and_only_adopts_a_local_gain
             )
             .unwrap();
             let resumed_server = self::server(
-                |_, _| text_response("AFTER_COMPACTION_DONE", "after-compaction"),
-                1,
+                |step, request| match step {
+                    0 => new_selection_response(request, "after-compaction-selection"),
+                    1 => text_response("AFTER_COMPACTION_DONE", "after-compaction"),
+                    _ => unreachable!(),
+                },
+                2,
             );
             let resumed_config = write_config(root.path(), &resumed_server.base_url);
             let resumed = run_chat(
@@ -530,7 +558,7 @@ fn rsi2_reference_match_uses_actual_scoped_commands_and_only_adopts_a_local_gain
                 "{}",
                 String::from_utf8_lossy(&resumed.stderr)
             );
-            assert_eq!(resumed_server.requests.try_iter().count(), 1);
+            assert_eq!(resumed_server.requests.try_iter().count(), 2);
             resumed_server.join();
             let resumed_events = session_events(root.path(), &original_session);
             assert_eq!(
@@ -567,20 +595,23 @@ fn rsi2_no_signal_and_insufficient_shared_budget_do_not_add_requests() {
             _ => 1,
         };
         let server = server(
-            move |step, _| {
-                match (case,step) {
+            move |step, request| {
+                if step == 0 {
+                    return initial_selection_response(request, "budget-initial-selection");
+                }
+                match (case,step - 1) {
             ("small-budget",0)=>tool("failed","run_command",json!({"argv":["/bin/sh","probe.sh","fail"]})),
             ("small-budget",1)=>tool("main-reference","run_command",json!({"argv":["/bin/sh","probe.sh","good"],"code_inputs":["probe.sh"]})),
             ("feedback" | "unlimited-feedback",1)=>text_response(&json!({"decision":"no_change","reason":"No trustworthy local contrast for this preference."}).to_string(),"no-change"),
             _=>text_response("DONE","completed"),
         }
             },
-            count,
+            count + 1,
         );
         let config = write_config(root.path(), &server.base_url);
         if case == "small-budget" {
             let mut content = fs::read_to_string(&config).unwrap();
-            content.push_str("\n[runtime]\nmodel_request_limit_per_turn = 5\n");
+            content.push_str("\n[runtime]\nmodel_request_limit_per_turn = 6\n");
             fs::write(&config, content).unwrap();
         }
         if case == "unlimited-feedback" {
@@ -604,7 +635,9 @@ fn rsi2_no_signal_and_insufficient_shared_budget_do_not_add_requests() {
             "{case}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert_eq!(server.requests.try_iter().count(), count);
+        let requests = server.requests.try_iter().collect::<Vec<_>>();
+        assert_eq!(requests.len(), count + 1);
+        selector_candidates(&request_body(&requests[0]));
         server.join();
         let events = session_events(root.path(), &session_id(root.path()));
         assert_eq!(
@@ -621,7 +654,7 @@ fn rsi2_no_signal_and_insufficient_shared_budget_do_not_add_requests() {
         if case == "unlimited-feedback" {
             assert!(
                 String::from_utf8_lossy(&output.stdout)
-                    .contains("admitted=2 primary=2 vision=0 remaining=unlimited limit=unlimited")
+                    .contains("admitted=3 primary=3 vision=0 remaining=unlimited limit=unlimited")
             );
             assert!(
                 !String::from_utf8_lossy(&output.stderr).contains("Fewer than 3 shared admissions")
@@ -791,8 +824,11 @@ fn rsi2_code_inputs_attests_actual_bytes_and_keeps_explicit_expected_digest_chec
         let definition = improvement_definition(root.path());
         fs::write(root.path().join("code.sh"), "printf verified").unwrap();
         let server = server(
-            move |step, _| {
+            move |step, request| {
                 if step == 0 {
+                    return initial_selection_response(request, "attestation-initial-selection");
+                }
+                if step == 1 {
                     let mut args = json!({"argv":["/bin/sh","code.sh"],"code_inputs":["code.sh"]});
                     if case == "expected-mismatch" {
                         args["verified_inputs"] =
@@ -807,11 +843,11 @@ fn rsi2_code_inputs_attests_actual_bytes_and_keeps_explicit_expected_digest_chec
                     text_response("DONE", "done")
                 }
             },
-            2,
+            3,
         );
         let config = write_config(root.path(), &server.base_url);
         let mut content = fs::read_to_string(&config).unwrap();
-        content.push_str("\n[runtime]\nmodel_request_limit_per_turn = 2\n");
+        content.push_str("\n[runtime]\nmodel_request_limit_per_turn = 3\n");
         fs::write(&config, content).unwrap();
         let output = run_chat(
             root.path(),
@@ -907,18 +943,24 @@ fn rsi2_attestation_rejects_special_and_oversized_inputs_before_command_without_
                 args["verified_inputs"] = json!([{"path":"input","blake3":digest}]);
             }
             let server = server(
-                move |step, _| {
+                move |step, request| {
                     if step == 0 {
+                        return initial_selection_response(
+                            request,
+                            "bounded-attestation-selection",
+                        );
+                    }
+                    if step == 1 {
                         tool("bounded-attestation", "run_command", args.clone())
                     } else {
                         text_response("DONE", "done")
                     }
                 },
-                2,
+                3,
             );
             let config = write_config(root.path(), &server.base_url);
             let mut content = fs::read_to_string(&config).unwrap();
-            content.push_str("\n[runtime]\nmodel_request_limit_per_turn = 2\n");
+            content.push_str("\n[runtime]\nmodel_request_limit_per_turn = 3\n");
             fs::write(&config, content).unwrap();
             let child = spawn_f2a_chat(
                 root.path(),
@@ -994,9 +1036,13 @@ fn rsi2_probes_preserve_actual_current_turn_deferred_availability_and_do_not_pro
             &format!("run_command = \"{exposure}\""),
         );
         fs::write(manifest, text).unwrap();
-        let count = if exposure == "deferred" { 8 } else { 3 };
+        let count = if exposure == "deferred" { 9 } else { 3 };
         let server = server(
             move |step, request| {
+                if step == 0 {
+                    return initial_selection_response(request, "exposure-initial-selection");
+                }
+                let step = step - 1;
                 let advertised = request["tools"]
                     .as_array()
                     .is_some_and(|tools| tools.iter().any(|tool| tool["name"] == "run_command"));
@@ -1054,7 +1100,8 @@ fn rsi2_probes_preserve_actual_current_turn_deferred_availability_and_do_not_pro
                             json!({"argv":["/bin/sh","probe.sh",if step==5 {"bad"}else {"good"}]}),
                         )
                     }
-                    7 => {
+                    7 => new_selection_response(request, "deferred-next-selection"),
+                    8 => {
                         assert!(
                             !advertised,
                             "RSI scope must not persist activation into the next operator Turn"
@@ -1064,7 +1111,7 @@ fn rsi2_probes_preserve_actual_current_turn_deferred_availability_and_do_not_pro
                     _ => unreachable!(),
                 }
             },
-            count,
+            count + 1,
         );
         let config = write_config(root.path(), &server.base_url);
         let input = if exposure == "deferred" {
@@ -1083,7 +1130,9 @@ fn rsi2_probes_preserve_actual_current_turn_deferred_availability_and_do_not_pro
             "{exposure}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert_eq!(server.requests.try_iter().count(), count);
+        let requests = server.requests.try_iter().collect::<Vec<_>>();
+        assert_eq!(requests.len(), count + 1);
+        selector_candidates(&request_body(&requests[0]));
         server.join();
         let events = session_events(root.path(), &session_id(root.path()));
         assert_eq!(
@@ -1165,7 +1214,7 @@ fn server(
     server_with_wait(respond, count, Duration::from_secs(25))
 }
 
-fn server_with_wait(
+pub(super) fn server_with_wait(
     mut respond: impl FnMut(usize, &Value) -> String + Send + 'static,
     count: usize,
     request_wait: Duration,
@@ -1339,6 +1388,13 @@ fn project_layout_chat_resume_preserves_legacy_rsi_artifacts_memory_and_catalog(
         let files = json!([{"path":"tools/answer.sh","blake3":blake3::hash(script.as_bytes()).to_hex().to_string()}]);
         let first = server(
             move |step, request| {
+                if step == 0 {
+                    return initial_selection_response(request, "layout-initial-selection");
+                }
+                let step = step - 1;
+                if step == 3 {
+                    return super::task_context::new_selection_response(request, "layout-new-task");
+                }
                 let (_, pending) = identity(request);
                 assert!(pending.starts_with(&format!("{control}/evolution/")));
                 match step {
@@ -1351,17 +1407,17 @@ fn project_layout_chat_resume_preserves_legacy_rsi_artifacts_memory_and_catalog(
                         candidate["persona"] = json!("PERSONA_LAYOUT");
                         candidate["tools"] = json!([{"name":"answer","description":"fixture arithmetic script","argv":["/bin/sh","tools/answer.sh"],"dependencies":["POSIX sh"],"files":files,"test_call_id":"layout-original"}]);
                     }),
-                    2 | 5 => text_response("LAYOUT_READY", &format!("layout-{step}")),
-                    3 => tool(
+                    2 | 6 => text_response("LAYOUT_READY", &format!("layout-{step}")),
+                    4 => tool(
                         "layout-memory-write",
                         "memory_write",
                         json!({"path":"core.md","content":"LAYOUT_MEMORY","expected_hash":null,"event_id":"layout-memory-write"}),
                     ),
-                    4 => tool("layout-inspect", "inspect_project", json!({})),
+                    5 => tool("layout-inspect", "inspect_project", json!({})),
                     _ => unreachable!(),
                 }
             },
-            6,
+            8,
         );
         let config = write_config(root.path(), &first.base_url);
         let output = run_chat(
@@ -1381,20 +1437,22 @@ fn project_layout_chat_resume_preserves_legacy_rsi_artifacts_memory_and_catalog(
             .map(|request| request_body(&request))
             .collect();
         first.join();
-        assert_eq!(requests.len(), 6);
+        assert_eq!(requests.len(), 8);
+        selector_candidates(&requests[0]);
+        super::task_context::selector_candidates(&requests[4]);
         assert!(
-            requests[2]["instructions"]
+            requests[3]["instructions"]
                 .as_str()
                 .unwrap()
                 .contains("PERSONA_ORIGINAL")
         );
         assert!(
-            requests[3]["instructions"]
+            requests[5]["instructions"]
                 .as_str()
                 .unwrap()
                 .contains("PERSONA_LAYOUT")
         );
-        let scripts = published_index(&requests[3]);
+        let scripts = published_index(&requests[5]);
         let published_path = scripts[0]["argv"][1].as_str().unwrap();
         assert!(published_path.starts_with(&format!("{control}/evolution/")));
         let script_bytes = fs::read(root.path().join(published_path)).unwrap();
@@ -1441,13 +1499,19 @@ fn project_layout_chat_resume_preserves_legacy_rsi_artifacts_memory_and_catalog(
         let tools = scripts[0].clone();
         let second = server(
             move |step, request| {
+                if step == 0 {
+                    return super::task_context::new_selection_response(
+                        request,
+                        "layout-resume-selection",
+                    );
+                }
                 assert!(
                     request["instructions"]
                         .as_str()
                         .unwrap()
                         .contains("PERSONA_LAYOUT")
                 );
-                match step {
+                match step - 1 {
                     0 => tool(
                         "layout-read-output",
                         "read_output",
@@ -1468,7 +1532,7 @@ fn project_layout_chat_resume_preserves_legacy_rsi_artifacts_memory_and_catalog(
                     _ => unreachable!(),
                 }
             },
-            5,
+            6,
         );
         let config = write_config(root.path(), &second.base_url);
         let output = run_chat(
@@ -1623,46 +1687,62 @@ fn rsi_direct_executable_bundle_preserves_helpers_and_does_not_mutate_old_modes(
     ]);
     let test_root = root.path().to_path_buf();
     let server = server(
-        move |step, request| match step {
-            0 | 5 => {
-                let argv = if step == 0 {
-                    json!(["tools/main.sh"])
-                } else {
-                    fs::set_permissions(
-                        test_root.join("tools/main.sh"),
-                        fs::Permissions::from_mode(0o600),
+        move |step, request| {
+            if step == 0 {
+                return initial_selection_response(request, "direct-initial-selection");
+            }
+            let step = step - 1;
+            // Each later input selects the current published binding without old task bodies.
+            let selection_steps = [3, 6, 10];
+            if selection_steps.contains(&step) {
+                return new_selection_response(request, &format!("direct-selection-{step}"));
+            }
+            let step = step
+                - selection_steps
+                    .iter()
+                    .filter(|index| **index < step)
+                    .count();
+            match step {
+                0 | 5 => {
+                    let argv = if step == 0 {
+                        json!(["tools/main.sh"])
+                    } else {
+                        fs::set_permissions(
+                            test_root.join("tools/main.sh"),
+                            fs::Permissions::from_mode(0o600),
+                        )
+                        .unwrap();
+                        json!(["/bin/sh", "tools/main.sh"])
+                    };
+                    tool(
+                        &format!("original-{step}"),
+                        "run_command",
+                        json!({"argv":argv,"verified_inputs":files}),
                     )
-                    .unwrap();
-                    json!(["/bin/sh", "tools/main.sh"])
-                };
-                tool(
-                    &format!("original-{step}"),
-                    "run_command",
-                    json!({"argv":argv,"verified_inputs":files}),
-                )
+                }
+                1 | 6 => queue(request, |candidate| {
+                    let direct = step == 1;
+                    candidate["tools"] = json!([{
+                        "name":"direct-helper", "description":"direct main invokes its executable helper",
+                        "argv":if direct {json!(["tools/main.sh"])} else {json!(["/bin/sh","tools/main.sh"])},
+                        "dependencies":["POSIX sh"],"files":files,
+                        "test_call_id":if direct {"original-0"} else {"original-5"},
+                    }]);
+                }),
+                3 | 8 => {
+                    let index = published_index(request);
+                    let record = &index[0];
+                    tool(
+                        &format!("published-{step}"),
+                        "run_command",
+                        json!({"argv":record["argv"],"verified_inputs":record["files"]}),
+                    )
+                }
+                2 | 4 | 7 | 9 => text_response("DONE", &format!("direct-{step}")),
+                _ => unreachable!(),
             }
-            1 | 6 => queue(request, |candidate| {
-                let direct = step == 1;
-                candidate["tools"] = json!([{
-                    "name":"direct-helper", "description":"direct main invokes its executable helper",
-                    "argv":if direct {json!(["tools/main.sh"])} else {json!(["/bin/sh","tools/main.sh"])},
-                    "dependencies":["POSIX sh"],"files":files,
-                    "test_call_id":if direct {"original-0"} else {"original-5"},
-                }]);
-            }),
-            3 | 8 => {
-                let index = published_index(request);
-                let record = &index[0];
-                tool(
-                    &format!("published-{step}"),
-                    "run_command",
-                    json!({"argv":record["argv"],"verified_inputs":record["files"]}),
-                )
-            }
-            2 | 4 | 7 | 9 => text_response("DONE", &format!("direct-{step}")),
-            _ => unreachable!(),
         },
-        10,
+        14,
     );
     let config = write_config(root.path(), &server.base_url);
     let output = run_chat(
@@ -1682,9 +1762,12 @@ fn rsi_direct_executable_bundle_preserves_helpers_and_does_not_mutate_old_modes(
         .map(|request| request_body(&request))
         .collect();
     server.join();
-    assert_eq!(requests.len(), 10);
-    let first = published_index(&requests[3]);
-    let second = published_index(&requests[8]);
+    assert_eq!(requests.len(), 14);
+    for index in [0, 4, 7, 11] {
+        super::task_context::selector_candidates(&requests[index]);
+    }
+    let first = published_index(&requests[5]);
+    let second = published_index(&requests[12]);
     let first_main = first[0]["argv"][0].as_str().unwrap();
     let second_main = second[0]["argv"][1].as_str().unwrap();
     assert_ne!(
@@ -1778,7 +1861,10 @@ fn verify_size_rejection_and_fresh_selection(
         assert!(path.unwrap().metadata().unwrap().len() <= 1024 * 1024);
     }
     let server = server(
-        |_, request| {
+        |step, request| {
+            if step == 0 {
+                return initial_selection_response(request, "head-initial-selection");
+            }
             assert!(
                 request["instructions"]
                     .as_str()
@@ -1787,7 +1873,7 @@ fn verify_size_rejection_and_fresh_selection(
             );
             text_response("FRESH_SELECTION_USABLE", "fresh-after-rejection")
         },
-        1,
+        2,
     );
     let config = write_context_window_config(root, &server.base_url, 2_097_152);
     let output = run_chat(
@@ -1822,26 +1908,31 @@ fn rsi_direct_entrypoint_that_loses_execution_after_its_test_is_rejected() {
     let files = json!([{"path":"tools/tool.sh","blake3":blake3::hash(script.as_bytes()).to_hex().to_string()}]);
     let test_root = root.path().to_path_buf();
     let server = server(
-        move |step, request| match step {
-            0 => tool(
-                "direct-test",
-                "run_command",
-                json!({"argv":["tools/tool.sh"],"verified_inputs":files}),
-            ),
-            1 => {
-                fs::set_permissions(
-                    test_root.join("tools/tool.sh"),
-                    fs::Permissions::from_mode(0o600),
-                )
-                .unwrap();
-                queue(request, |candidate| {
-                    candidate["tools"] = json!([{"name":"changed-mode","description":"direct mode changed after real test", "argv":["tools/tool.sh"],"dependencies":["POSIX sh"],"files":files,"test_call_id":"direct-test"}]);
-                })
+        move |step, request| {
+            if step == 0 {
+                return initial_selection_response(request, "mode-initial-selection");
             }
-            2 => text_response("DONE", "changed-mode-done"),
-            _ => unreachable!(),
+            match step - 1 {
+                0 => tool(
+                    "direct-test",
+                    "run_command",
+                    json!({"argv":["tools/tool.sh"],"verified_inputs":files}),
+                ),
+                1 => {
+                    fs::set_permissions(
+                        test_root.join("tools/tool.sh"),
+                        fs::Permissions::from_mode(0o600),
+                    )
+                    .unwrap();
+                    queue(request, |candidate| {
+                        candidate["tools"] = json!([{"name":"changed-mode","description":"direct mode changed after real test", "argv":["tools/tool.sh"],"dependencies":["POSIX sh"],"files":files,"test_call_id":"direct-test"}]);
+                    })
+                }
+                2 => text_response("DONE", "changed-mode-done"),
+                _ => unreachable!(),
+            }
         },
-        3,
+        4,
     );
     let config = write_config(root.path(), &server.base_url);
     let output = run_chat(
@@ -1879,6 +1970,19 @@ fn rsi_encoded_revision_limit_rejects_cumulative_script_growth_before_publicatio
     let server = server_with_wait(
         move |step, request| {
             if step == 0 {
+                return initial_selection_response(request, "cumulative-initial-selection");
+            }
+            let step = step - 1;
+            let selection_steps = [3, 6, 9, 12, 15];
+            if selection_steps.contains(&step) {
+                return new_selection_response(request, &format!("cumulative-selection-{step}"));
+            }
+            let step = step
+                - selection_steps
+                    .iter()
+                    .filter(|index| **index < step)
+                    .count();
+            if step == 0 {
                 return tool(
                     "large-argv-test",
                     "run_command",
@@ -1897,7 +2001,7 @@ fn rsi_encoded_revision_limit_rejects_cumulative_script_growth_before_publicatio
             }
             text_response("DONE", &format!("cumulative-{step}"))
         },
-        12,
+        18,
         Duration::from_secs(90),
     );
     let config = write_context_window_config(root.path(), &server.base_url, 2_097_152);
@@ -1921,8 +2025,11 @@ fn rsi_encoded_revision_limit_rejects_cumulative_script_growth_before_publicatio
         .map(|request| request_body(&request))
         .collect();
     server.join();
-    assert_eq!(requests.len(), 12);
-    assert_eq!(published_index(&requests[11]).as_array().unwrap().len(), 8);
+    assert_eq!(requests.len(), 18);
+    for index in [0, 4, 7, 10, 13, 16] {
+        super::task_context::selector_candidates(&requests[index]);
+    }
+    assert_eq!(published_index(&requests[17]).as_array().unwrap().len(), 8);
     verify_size_rejection_and_fresh_selection(root.path(), &definition, 4);
 }
 
@@ -1942,26 +2049,36 @@ fn rsi_encoded_revision_limit_counts_json_escaping_and_retains_the_previous_bind
     )
     .unwrap();
     let server = server(
-        |step, request| match step {
-            0 => queue(request, |candidate| {
-                candidate["persona"] = json!(format!("ESCAPED_PERSONA{}", "\0".repeat(50000)));
-                assert!(candidate.to_string().len() < 320 * 1024);
-            }),
-            2 => queue(request, |candidate| {
-                candidate["methods"] =
-                    json!([format!("REJECTED_ESCAPED_METHOD{}", "\0".repeat(20000))]);
-                assert!(candidate.to_string().len() < 320 * 1024);
-            }),
-            4 => {
-                let prompt = request["instructions"].as_str().unwrap();
-                assert!(prompt.contains("ESCAPED_PERSONA"));
-                assert!(!prompt.contains("REJECTED_ESCAPED_METHOD"));
-                text_response("OLD_HEAD_USABLE", "escaped-probe")
+        |step, request| {
+            if step == 0 {
+                return initial_selection_response(request, "escaping-initial-selection");
             }
-            1 | 3 => text_response("DONE", &format!("escaping-{step}")),
-            _ => unreachable!(),
+            let step = step - 1;
+            if [2, 5].contains(&step) {
+                return new_selection_response(request, &format!("escaping-selection-{step}"));
+            }
+            let step = step - [2, 5].iter().filter(|index| **index < step).count();
+            match step {
+                0 => queue(request, |candidate| {
+                    candidate["persona"] = json!(format!("ESCAPED_PERSONA{}", "\0".repeat(50000)));
+                    assert!(candidate.to_string().len() < 320 * 1024);
+                }),
+                2 => queue(request, |candidate| {
+                    candidate["methods"] =
+                        json!([format!("REJECTED_ESCAPED_METHOD{}", "\0".repeat(20000))]);
+                    assert!(candidate.to_string().len() < 320 * 1024);
+                }),
+                4 => {
+                    let prompt = request["instructions"].as_str().unwrap();
+                    assert!(prompt.contains("ESCAPED_PERSONA"));
+                    assert!(!prompt.contains("REJECTED_ESCAPED_METHOD"));
+                    text_response("OLD_HEAD_USABLE", "escaped-probe")
+                }
+                1 | 3 => text_response("DONE", &format!("escaping-{step}")),
+                _ => unreachable!(),
+            }
         },
-        5,
+        8,
     );
     let config = write_context_window_config(root.path(), &server.base_url, 2_097_152);
     let output = run_chat(
@@ -1988,39 +2105,45 @@ fn rsi_pins_the_current_turn_and_applies_persona_and_method_replacement_next_tur
     initialize_project(root.path());
     let definition = definition(root.path(), true);
     let server = server(
-        |step, request| match step {
-            0 => {
-                assert!(
-                    request["instructions"]
-                        .as_str()
-                        .unwrap()
-                        .contains("FIXED_OPERATOR_RULE")
-                );
-                queue(request, |candidate| {
-                    candidate["persona"] = json!("PERSONA_EVOLVED");
-                    candidate["methods"] = json!([]);
-                })
+        |step, request| {
+            if step == 0 {
+                return initial_selection_response(request, "pinned-initial-selection");
             }
-            1 => {
-                assert!(
-                    request["instructions"]
-                        .as_str()
-                        .unwrap()
-                        .contains("PERSONA_ORIGINAL")
-                );
-                text_response("FIRST_DONE", "first-rsi")
+            match step - 1 {
+                0 => {
+                    assert!(
+                        request["instructions"]
+                            .as_str()
+                            .unwrap()
+                            .contains("FIXED_OPERATOR_RULE")
+                    );
+                    queue(request, |candidate| {
+                        candidate["persona"] = json!("PERSONA_EVOLVED");
+                        candidate["methods"] = json!([]);
+                    })
+                }
+                1 => {
+                    assert!(
+                        request["instructions"]
+                            .as_str()
+                            .unwrap()
+                            .contains("PERSONA_ORIGINAL")
+                    );
+                    text_response("FIRST_DONE", "first-rsi")
+                }
+                2 => new_selection_response(request, "new-preference-selection"),
+                3 => {
+                    let text = request["instructions"].as_str().unwrap();
+                    assert!(text.contains("PERSONA_EVOLVED"));
+                    assert!(text.contains("FIXED_OPERATOR_RULE"));
+                    assert!(!text.contains("Clarity method"));
+                    assert!(request.get("previous_response_id").is_none());
+                    text_response("SECOND_DONE", "second-rsi")
+                }
+                _ => unreachable!(),
             }
-            2 => {
-                let text = request["instructions"].as_str().unwrap();
-                assert!(text.contains("PERSONA_EVOLVED"));
-                assert!(text.contains("FIXED_OPERATOR_RULE"));
-                assert!(!text.contains("Clarity method"));
-                assert!(request.get("previous_response_id").is_none());
-                text_response("SECOND_DONE", "second-rsi")
-            }
-            _ => unreachable!(),
         },
-        3,
+        5,
     );
     let config = write_config(root.path(), &server.base_url);
     let output = run_chat(
@@ -2036,7 +2159,9 @@ fn rsi_pins_the_current_turn_and_applies_persona_and_method_replacement_next_tur
     );
     assert!(String::from_utf8_lossy(&output.stderr).contains("[RSI applied]"));
     let requests: Vec<_> = server.requests.try_iter().collect();
-    assert_eq!(requests.len(), 3);
+    assert_eq!(requests.len(), 5);
+    selector_candidates(&request_body(&requests[0]));
+    super::task_context::selector_candidates(&request_body(&requests[3]));
     server.join();
     let events = session_events(root.path(), &session_id(root.path()));
     let transitions: Vec<_> = events
@@ -2070,13 +2195,16 @@ fn rsi_disabled_keeps_legacy_instructions_and_does_not_initialize_a_queue() {
     initialize_project(root.path());
     let definition = definition(root.path(), false);
     let server = server(
-        |_, request| {
+        |step, request| {
+            if step == 0 {
+                return initial_selection_response(request, "disabled-initial-selection");
+            }
             let text = request["instructions"].as_str().unwrap();
             assert!(!text.contains("RSI protocol"));
             assert!(text.contains("PERSONA_ORIGINAL"));
             text_response("OFF", "off-rsi")
         },
-        1,
+        2,
     );
     let config = write_config(root.path(), &server.base_url);
     let output = run_chat(
@@ -2108,7 +2236,10 @@ fn rsi_rejects_foreign_stale_unknown_and_oversized_candidates_without_consumptio
         let definition = definition(root.path(), true);
         let test_root = root.path().to_path_buf();
         let server = server(
-            move |_, request| {
+            move |step, request| {
+                if step == 0 {
+                    return initial_selection_response(request, "rejected-initial-selection");
+                }
                 let (mut candidate, path) = identity(request);
                 candidate["persona"] = json!("PERSONA_EVOLVED");
                 match case {
@@ -2122,7 +2253,7 @@ fn rsi_rejects_foreign_stale_unknown_and_oversized_candidates_without_consumptio
                 fs::write(test_root.join(path), candidate.to_string()).unwrap();
                 text_response("DONE", "reject-rsi")
             },
-            1,
+            2,
         );
         let config = write_config(root.path(), &server.base_url);
         let output = run_chat(
@@ -2164,6 +2295,9 @@ fn rsi_stopped_turn_keeps_candidate_until_an_explicit_resume_and_normal_completi
     let first = server(
         |step, request| {
             if step == 0 {
+                return initial_selection_response(request, "stopped-initial-selection");
+            }
+            if step == 1 {
                 queue(request, |candidate| {
                     candidate["persona"] = json!("PERSONA_EVOLVED")
                 })
@@ -2171,7 +2305,7 @@ fn rsi_stopped_turn_keeps_candidate_until_an_explicit_resume_and_normal_completi
                 "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"fixture stop\"}}}\n\n".to_owned()
             }
         },
-        2,
+        3,
     );
     let config = write_config(root.path(), &first.base_url);
     let output = run_chat(
@@ -2186,7 +2320,10 @@ fn rsi_stopped_turn_keeps_candidate_until_an_explicit_resume_and_normal_completi
     assert_eq!(seed["digest"], seed["base_source_digest"]);
     let session = session_id(root.path());
     let resumed = server(
-        |_, request| {
+        |step, request| {
+            if step == 0 {
+                return new_selection_response(request, "recovered-selection");
+            }
             assert!(
                 request["instructions"]
                     .as_str()
@@ -2195,7 +2332,7 @@ fn rsi_stopped_turn_keeps_candidate_until_an_explicit_resume_and_normal_completi
             );
             text_response("RECOVERED", "rsi-recovered")
         },
-        1,
+        2,
     );
     let config = write_config(root.path(), &resumed.base_url);
     let output = run_chat(
@@ -2215,23 +2352,103 @@ fn rsi_stopped_turn_keeps_candidate_until_an_explicit_resume_and_normal_completi
 
 #[test]
 fn rsi_running_job_defers_a_pending_candidate() {
+    struct FixtureJob(std::path::PathBuf);
+
+    impl Drop for FixtureJob {
+        fn drop(&mut self) {
+            let cleanup = || -> Result<(), String> {
+                let pid = match fs::read_to_string(&self.0) {
+                    Ok(value) => value,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                    Err(error) => return Err(format!("fixture PID read failed: {error}")),
+                };
+                let pid = pid
+                    .trim()
+                    .parse::<u32>()
+                    .map_err(|error| format!("invalid fixture PID: {error}"))?;
+                if pid <= 1 {
+                    return Err("invalid fixture PID".to_owned());
+                }
+                let result = Command::new("/bin/kill")
+                    .args(["-TERM", &pid.to_string()])
+                    .output()
+                    .map_err(|error| format!("fixture cleanup failed: {error}"))?;
+                if result.status.success()
+                    || String::from_utf8_lossy(&result.stderr).contains("No such process")
+                {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "fixture cleanup failed: {}",
+                        String::from_utf8_lossy(&result.stderr)
+                    ))
+                }
+            };
+            if let Err(error) = cleanup() {
+                if std::thread::panicking() {
+                    eprintln!("{error}");
+                } else {
+                    panic!("{error}");
+                }
+            }
+        }
+    }
+
     let root = TemporaryDirectory::new("rsi-active-job");
+    let markers = TemporaryDirectory::new("rsi-active-job-markers");
+    let pid_path = markers.path().join("job.pid");
+    let _cleanup = FixtureJob(pid_path.clone());
     initialize_project(root.path());
     let definition = definition(root.path(), true);
+    let server_pid_path = pid_path.clone();
     let server = server(
-        |step, request| match step {
-            0 => queue(request, |candidate| {
-                candidate["persona"] = json!("PERSONA_EVOLVED")
-            }),
-            1 => tool(
-                "rsi-live-job",
-                "start_job",
-                json!({"argv":["/bin/sleep","1"]}),
-            ),
-            2 => text_response("BACKGROUND_STARTED", "rsi-background"),
-            _ => unreachable!(),
+        move |step, request| {
+            if step == 0 {
+                return initial_selection_response(request, "job-initial-selection");
+            }
+            match step - 1 {
+                0 => queue(request, |candidate| {
+                    candidate["persona"] = json!("PERSONA_EVOLVED")
+                }),
+                1 => tool(
+                    "rsi-live-job",
+                    "start_job",
+                    json!({"argv":["/bin/sh","-c","printf '%s\\n' \"$$\" > \"$1\"; IFS= read -r ignored", "fixture", server_pid_path]}),
+                ),
+                2 => {
+                    let result =
+                        super::task_context_paging::delivered_result(request, "rsi-live-job");
+                    assert_eq!(result["status"], "succeeded", "{result}");
+                    assert_eq!(result["output"]["status"], "running", "{result}");
+                    let deadline = Instant::now() + Duration::from_secs(5);
+                    let pid = loop {
+                        if let Ok(value) = fs::read_to_string(&server_pid_path)
+                            && let Ok(pid) = value.trim().parse::<u32>()
+                            && pid > 1
+                        {
+                            break pid;
+                        }
+                        assert!(
+                            Instant::now() < deadline,
+                            "fixture Job did not record its PID"
+                        );
+                        thread::sleep(Duration::from_millis(5));
+                    };
+                    let alive = Command::new("/bin/kill")
+                        .args(["-0", &pid.to_string()])
+                        .output()
+                        .unwrap();
+                    assert!(
+                        alive.status.success(),
+                        "fixture Job is not running before final response: {}",
+                        String::from_utf8_lossy(&alive.stderr)
+                    );
+                    text_response("BACKGROUND_STARTED", "rsi-background")
+                }
+                _ => unreachable!(),
+            }
         },
-        3,
+        4,
     );
     let config = write_config(root.path(), &server.base_url);
     let output = run_chat(
@@ -2258,30 +2475,40 @@ fn rsi_rollback_is_a_new_revision_and_preserves_original_snapshots() {
     let definition = definition(root.path(), true);
     let mut seed = String::new();
     let server = server(
-        move |step, request| match step {
-            0 => {
-                seed = identity(request).0["parent_digest"]
-                    .as_str()
-                    .unwrap()
-                    .to_owned();
-                queue(request, |candidate| {
-                    candidate["persona"] = json!("PERSONA_EVOLVED")
-                })
+        move |step, request| {
+            if step == 0 {
+                return initial_selection_response(request, "rollback-initial-selection");
             }
-            1 | 3 => text_response("DONE", &format!("rollback-{step}")),
-            2 => queue(request, |candidate| candidate["rollback_to"] = json!(seed)),
-            4 => {
-                assert!(
-                    request["instructions"]
+            let step = step - 1;
+            if [2, 5].contains(&step) {
+                return new_selection_response(request, &format!("rollback-selection-{step}"));
+            }
+            let step = step - [2, 5].iter().filter(|index| **index < step).count();
+            match step {
+                0 => {
+                    seed = identity(request).0["parent_digest"]
                         .as_str()
                         .unwrap()
-                        .contains("PERSONA_ORIGINAL")
-                );
-                text_response("ROLLED_BACK", "rollback-final")
+                        .to_owned();
+                    queue(request, |candidate| {
+                        candidate["persona"] = json!("PERSONA_EVOLVED")
+                    })
+                }
+                1 | 3 => text_response("DONE", &format!("rollback-{step}")),
+                2 => queue(request, |candidate| candidate["rollback_to"] = json!(seed)),
+                4 => {
+                    assert!(
+                        request["instructions"]
+                            .as_str()
+                            .unwrap()
+                            .contains("PERSONA_ORIGINAL")
+                    );
+                    text_response("ROLLED_BACK", "rollback-final")
+                }
+                _ => unreachable!(),
             }
-            _ => unreachable!(),
         },
-        5,
+        8,
     );
     let config = write_config(root.path(), &server.base_url);
     let output = run_chat(
@@ -2324,7 +2551,10 @@ fn rsi_new_sessions_bind_current_personal_project_snapshots_and_relocated_source
     let definition = definition(root.path(), true);
     fs::write(root.path().join("personal.md"), "PERSONAL_OLD").unwrap();
     let first = server(
-        |_, request| {
+        |step, request| {
+            if step == 0 {
+                return initial_selection_response(request, "personal-old-selection");
+            }
             assert!(
                 request["instructions"]
                     .as_str()
@@ -2333,7 +2563,7 @@ fn rsi_new_sessions_bind_current_personal_project_snapshots_and_relocated_source
             );
             text_response("OLD", "personal-old")
         },
-        1,
+        2,
     );
     let config = write_config(root.path(), &first.base_url);
     fs::write(
@@ -2357,7 +2587,10 @@ fn rsi_new_sessions_bind_current_personal_project_snapshots_and_relocated_source
     fs::rename(&definition, &moved).unwrap();
     fs::write(root.path().join("personal.md"), "PERSONAL_NEW").unwrap();
     let second = server(
-        |_, request| {
+        |step, request| {
+            if step == 0 {
+                return initial_selection_response(request, "personal-new-selection");
+            }
             assert!(
                 request["instructions"]
                     .as_str()
@@ -2366,7 +2599,7 @@ fn rsi_new_sessions_bind_current_personal_project_snapshots_and_relocated_source
             );
             text_response("NEW", "personal-new")
         },
-        1,
+        2,
     );
     let config = write_config(root.path(), &second.base_url);
     fs::write(
@@ -2391,13 +2624,16 @@ fn rsi_new_sessions_bind_current_personal_project_snapshots_and_relocated_source
     second.join();
     assert!(!String::from_utf8_lossy(&output.stdout).contains("reload rejected"));
     let resumed = server(
-        |_, request| {
+        |step, request| {
+            if step == 0 {
+                return new_selection_response(request, "personal-resume-selection");
+            }
             let text = request["instructions"].as_str().unwrap();
             assert!(text.contains("PERSONAL_OLD"));
             assert!(!text.contains("PERSONAL_NEW"));
             text_response("PINNED", "personal-resume")
         },
-        1,
+        2,
     );
     let config = write_config(root.path(), &resumed.base_url);
     let output = run_chat(
@@ -2424,49 +2660,60 @@ fn rsi_script_publication_requires_tested_bytes_and_reuses_a_complete_helper_bun
         let files = json!([{"path":"tools/main.sh","blake3":blake3::hash(main.as_bytes()).to_hex().to_string()},{"path":"tools/helper.sh","blake3":blake3::hash(helper.as_bytes()).to_hex().to_string()}]);
         let test_root = root.path().to_path_buf();
         let server = server(
-            move |step, request| match step {
-                0 => {
-                    let mut arguments = json!({"argv":["/bin/sh","tools/main.sh"]});
-                    if case != "unattested" {
-                        arguments["verified_inputs"] = files.clone();
-                    }
-                    if case == "cwd" {
-                        arguments["cwd"] = json!(test_root.to_str().unwrap());
-                    }
-                    tool("script-test", "run_command", arguments)
+            move |step, request| {
+                if step == 0 {
+                    return initial_selection_response(request, "script-initial-selection");
                 }
-                1 => {
-                    if case == "changed" {
-                        fs::write(test_root.join("tools/helper.sh"), "VALUE=wrong").unwrap();
+                let step = step - 1;
+                if step == 3 {
+                    assert_eq!(case, "valid");
+                    return new_selection_response(request, "script-reuse-selection");
+                }
+                let step = step - usize::from(step > 3);
+                match step {
+                    0 => {
+                        let mut arguments = json!({"argv":["/bin/sh","tools/main.sh"]});
+                        if case != "unattested" {
+                            arguments["verified_inputs"] = files.clone();
+                        }
+                        if case == "cwd" {
+                            arguments["cwd"] = json!(test_root.to_str().unwrap());
+                        }
+                        tool("script-test", "run_command", arguments)
                     }
-                    queue(request, |candidate| {
-                        candidate["tools"] = json!([{"name":"fixture-helper","description":"prints the verified fixture value","argv":["/bin/sh","tools/main.sh"],"dependencies":["POSIX sh"],"files":files,"test_call_id":"script-test"}]);
-                    })
+                    1 => {
+                        if case == "changed" {
+                            fs::write(test_root.join("tools/helper.sh"), "VALUE=wrong").unwrap();
+                        }
+                        queue(request, |candidate| {
+                            candidate["tools"] = json!([{"name":"fixture-helper","description":"prints the verified fixture value","argv":["/bin/sh","tools/main.sh"],"dependencies":["POSIX sh"],"files":files,"test_call_id":"script-test"}]);
+                        })
+                    }
+                    2 | 4 => text_response("SCRIPT_DONE", &format!("script-{step}")),
+                    3 => {
+                        let instructions = request["instructions"].as_str().unwrap();
+                        let index: Value = serde_json::from_str(
+                            instructions
+                                .split("Published ordinary script index: ")
+                                .nth(1)
+                                .unwrap()
+                                .lines()
+                                .next()
+                                .unwrap(),
+                        )
+                        .unwrap();
+                        let script = &index[0];
+                        assert_eq!(script["name"], "fixture-helper");
+                        tool(
+                            "script-reuse",
+                            "run_command",
+                            json!({"argv":script["argv"],"verified_inputs":script["files"]}),
+                        )
+                    }
+                    _ => unreachable!(),
                 }
-                2 | 4 => text_response("SCRIPT_DONE", &format!("script-{step}")),
-                3 => {
-                    let instructions = request["instructions"].as_str().unwrap();
-                    let index: Value = serde_json::from_str(
-                        instructions
-                            .split("Published ordinary script index: ")
-                            .nth(1)
-                            .unwrap()
-                            .lines()
-                            .next()
-                            .unwrap(),
-                    )
-                    .unwrap();
-                    let script = &index[0];
-                    assert_eq!(script["name"], "fixture-helper");
-                    tool(
-                        "script-reuse",
-                        "run_command",
-                        json!({"argv":script["argv"],"verified_inputs":script["files"]}),
-                    )
-                }
-                _ => unreachable!(),
             },
-            if case == "valid" { 5 } else { 3 },
+            if case == "valid" { 7 } else { 4 },
         );
         let config = write_config(root.path(), &server.base_url);
         let output = run_chat(
@@ -2591,6 +2838,9 @@ fn rsi_explicit_reconciliation_repairs_a_pointer_behind_a_durable_binding_withou
     let server = server(
         |step, request| {
             if step == 0 {
+                return initial_selection_response(request, "reconcile-initial-selection");
+            }
+            if step == 1 {
                 queue(request, |candidate| {
                     candidate["persona"] = json!("PERSONA_EVOLVED")
                 })
@@ -2598,7 +2848,7 @@ fn rsi_explicit_reconciliation_repairs_a_pointer_behind_a_durable_binding_withou
                 text_response("DONE", "reconcile-done")
             }
         },
-        2,
+        3,
     );
     let config = write_config(root.path(), &server.base_url);
     let output = run_chat(
@@ -2640,7 +2890,7 @@ fn rsi_explicit_reconciliation_repairs_a_pointer_behind_a_durable_binding_withou
     assert_eq!(active(root.path()), published);
     let project = Project::discover(root.path()).unwrap();
     let state = reduced_session(&project, &session);
-    assert_eq!(state.request_audits().len(), 2);
+    assert_eq!(state.request_audits().len(), 3);
     assert_eq!(state.execution_receipt_count(), 1);
 }
 
@@ -2653,8 +2903,11 @@ fn rsi_verified_command_inputs_bind_pre_post_bytes_and_leave_default_results_unc
         fs::write(root.path().join("tool.sh"), "printf verified").unwrap();
         let digest = blake3::hash(b"printf verified").to_hex().to_string();
         let server = server(
-            move |step, _| {
+            move |step, request| {
                 if step == 0 {
+                    return initial_selection_response(request, "verified-initial-selection");
+                }
+                if step == 1 {
                     let mut args = json!({"argv":["/bin/sh","tool.sh"]});
                     if case != "default" {
                         args["verified_inputs"] = json!([{"path":"tool.sh","blake3":if case == "before-mismatch" { "0".repeat(64) } else { digest.clone() }}]);
@@ -2670,7 +2923,7 @@ fn rsi_verified_command_inputs_bind_pre_post_bytes_and_leave_default_results_unc
                     text_response("VERIFICATION_DONE", "verification-done")
                 }
             },
-            2,
+            3,
         );
         let config = write_config(root.path(), &server.base_url);
         let output = run_chat(
@@ -2736,6 +2989,9 @@ fn rsi_verified_inputs_match_batch_schema_and_off_bindings_reject_the_unadvertis
         let server = server(
             move |step, request| {
                 if step == 0 {
+                    return initial_selection_response(request, "batch-initial-selection");
+                }
+                if step == 1 {
                     let spec = request["tools"]
                         .as_array()
                         .unwrap()
@@ -2757,7 +3013,7 @@ fn rsi_verified_inputs_match_batch_schema_and_off_bindings_reject_the_unadvertis
                     text_response("BATCH_DONE", "batch-done")
                 }
             },
-            2,
+            3,
         );
         let config = write_config(root.path(), &server.base_url);
         let output = run_chat(
@@ -2806,7 +3062,10 @@ fn rsi_reload_cannot_switch_the_immutable_catalog_capability_in_an_existing_sess
         let manifest = definition.join("agent.toml");
         let source = fs::read_to_string(&manifest).unwrap();
         let server = server(
-            move |_, _| {
+            move |step, request| {
+                if step == 0 {
+                    return initial_selection_response(request, "capability-initial-selection");
+                }
                 let changed = if enabled {
                     source.split("[rsi]").next().unwrap().to_owned()
                 } else {
@@ -2815,7 +3074,7 @@ fn rsi_reload_cannot_switch_the_immutable_catalog_capability_in_an_existing_sess
                 fs::write(&manifest, changed).unwrap();
                 text_response("DONE", "capability-done")
             },
-            1,
+            2,
         );
         let config = write_config(root.path(), &server.base_url);
         let output = run_chat(

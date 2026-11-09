@@ -16,9 +16,9 @@ use serde_json::Value;
 
 use super::{SessionError, SessionSourceIdentity, fingerprint_value, task::invalid_task};
 
-fn artifact_blobs(
+fn artifact_records(
     events: &[EventEnvelope<Value>],
-) -> Result<BTreeMap<ArtifactId, BlobId>, SessionError> {
+) -> Result<BTreeMap<ArtifactId, crate::domain::artifacts::ArtifactRecord>, SessionError> {
     let mut artifacts = BTreeMap::new();
     for event in events {
         if matches!(
@@ -39,7 +39,7 @@ fn artifact_blobs(
             let record = artifact.record();
             if record.created_by_event_id != event.event_id
                 || artifacts
-                    .insert(record.id.clone(), record.blob_id.clone())
+                    .insert(record.id.clone(), record.clone())
                     .is_some()
             {
                 return Err(invalid_task(
@@ -51,11 +51,24 @@ fn artifact_blobs(
     Ok(artifacts)
 }
 
+pub(super) fn session_artifact_refs(
+    events: &[EventEnvelope<Value>],
+    stream: &crate::domain::events::StreamId,
+) -> Result<BTreeSet<ArtifactId>, SessionError> {
+    let session = stream
+        .as_str()
+        .strip_prefix("session:")
+        .ok_or_else(|| invalid_task("Compaction source has no Session identity"))?;
+    Ok(artifact_records(events)?.into_iter().filter_map(|(id, record)| {
+        matches!(&record.scope, crate::domain::artifacts::ArtifactScope::Session { session_id } if session_id.as_str() == session).then_some(id)
+    }).collect())
+}
+
 pub(super) fn required_source_blobs(
     state: &SessionState,
     project_events: &[EventEnvelope<Value>],
 ) -> Result<Vec<BlobId>, SessionError> {
-    let artifacts = artifact_blobs(project_events)?;
+    let artifacts = artifact_records(project_events)?;
     let mut required_artifacts = BTreeSet::new();
     for input in state.protected_operator_inputs()? {
         required_artifacts.extend(
@@ -76,6 +89,7 @@ pub(super) fn required_source_blobs(
                 .ok_or_else(|| {
                     invalid_task("protected source Artifact is absent from the Project prefix")
                 })?
+                .blob_id
                 .clone(),
         );
     }
@@ -119,6 +133,8 @@ pub(crate) struct CompactionSourceEntry {
     artifact_refs: Vec<crate::domain::artifacts::ArtifactId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     blob_refs: Vec<BlobId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    receipt_event_refs: Vec<EventId>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -145,6 +161,7 @@ impl CompactionSourceEntry {
             tool: None,
             artifact_refs: Vec::new(),
             blob_refs: Vec::new(),
+            receipt_event_refs: Vec::new(),
         })
     }
 }
@@ -185,6 +202,8 @@ pub(crate) struct CompactionSourceNode {
 pub(crate) struct CompactionSourcePlan {
     schema_version: u16,
     source: SessionSourceIdentity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    task_selection_event: Option<EventId>,
     entries: Vec<CompactionSourceEntry>,
     nodes: Vec<CompactionSourceNode>,
 }
@@ -221,6 +240,15 @@ impl CompactionSourcePlan {
         events: &[EventEnvelope<Value>],
         project_events: &[EventEnvelope<Value>],
     ) -> Result<(Vec<CompactionSourceEntry>, Vec<String>), SessionError> {
+        Self::source_entries_for_selection(source, events, project_events, None)
+    }
+
+    pub(crate) fn source_entries_for_selection(
+        source: &SessionSourceIdentity,
+        events: &[EventEnvelope<Value>],
+        project_events: &[EventEnvelope<Value>],
+        selection_event: Option<&EventId>,
+    ) -> Result<(Vec<CompactionSourceEntry>, Vec<String>), SessionError> {
         let (actual, state) = SessionSourceIdentity::from_events(
             source.project_id().clone(),
             events,
@@ -229,8 +257,59 @@ impl CompactionSourcePlan {
         if &actual != source {
             return Err(invalid_task("compaction source prefix mismatch"));
         }
+        Self::source_entries_from_validated_state(&state, events, project_events, selection_event)
+    }
+
+    fn source_entries_from_validated_state(
+        state: &SessionState,
+        events: &[EventEnvelope<Value>],
+        project_events: &[EventEnvelope<Value>],
+        selection_event: Option<&EventId>,
+    ) -> Result<(Vec<CompactionSourceEntry>, Vec<String>), SessionError> {
         let normalized = state.full_normalized_history()?;
-        let active = state.compaction_source_history()?;
+        let selection = match selection_event {
+            Some(expected) => {
+                let (id, selection) = state
+                    .latest_task_context_selection()
+                    .ok_or_else(|| invalid_task("task Compaction has no selection"))?;
+                if id != expected {
+                    return Err(invalid_task("task Compaction selection is not current"));
+                }
+                Some(selection)
+            }
+            None => None,
+        };
+        let prior_task_compaction = selection.and_then(|selection| {
+            let task_id = selection
+                .task_revisions
+                .first()
+                .map(|revision| revision.task_id.as_str())?;
+            let scope = selection
+                .task_revisions
+                .iter()
+                .map(|revision| revision.task_id.as_str())
+                .chain(
+                    selection
+                        .decision
+                        .related_task_refs
+                        .iter()
+                        .map(String::as_str),
+                )
+                .collect::<BTreeSet<_>>();
+            state.latest_compaction().filter(|compaction| {
+                compaction.summary().selected_task_id() == Some(task_id)
+                    && compaction
+                        .summary()
+                        .task_scope()
+                        .iter()
+                        .all(|id| scope.contains(id.as_str()))
+            })
+        });
+        let active = if selection.is_some() {
+            normalized.clone()
+        } else {
+            state.compaction_source_history()?
+        };
         let start = normalized
             .len()
             .checked_sub(active.len())
@@ -238,8 +317,12 @@ impl CompactionSourcePlan {
         if normalized[start..] != active {
             return Err(invalid_task("active History is not a normalized suffix"));
         }
-        let identities = normalized_source_identities(&state, events)?;
+        let identities = normalized_source_identities(state, events)?;
         let protected = state.protected_operator_inputs()?;
+        let selected_inputs = selection
+            .map(|selection| state.operator_inputs_for_anchor(&selection.input_ref))
+            .transpose()?
+            .unwrap_or_default();
         let followups = state.followup_vision_inputs()?;
         let active_ids = identities[start..].iter().cloned().collect::<BTreeSet<_>>();
         let protected_ids = protected
@@ -253,7 +336,14 @@ impl CompactionSourcePlan {
             contents.push(content);
             Ok(())
         };
-        if let Some(summary) = state.latest_compaction().map(|value| value.summary()) {
+        let previous_summary = if selection.is_some() {
+            prior_task_compaction.map(|compaction| compaction.summary())
+        } else {
+            state
+                .latest_compaction()
+                .map(|compaction| compaction.summary())
+        };
+        if let Some(summary) = previous_summary {
             push(
                 CompactionSourceKind::Summary(summary.fingerprint().to_owned()),
                 serde_json::to_string(&summary.model_projection()?)
@@ -282,6 +372,108 @@ impl CompactionSourcePlan {
                 exact,
             )?;
         }
+        if let Some(selection) = selection {
+            let mut wanted = selection
+                .selected_history
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            wanted.insert(selection.input_ref.clone());
+            wanted.extend(selected_inputs.iter().map(|input| input.event_id.clone()));
+            // A deterministic source refresh can move the capture watermark
+            // past completed batches without starting a new operator Turn.
+            // Keep the full current-Turn suffix eligible for the existing
+            // protected-batch and pairing rules.
+            let suffix_after = if selection.has_complete_request_proof() {
+                state
+                    .history_items_with_event_ids()
+                    .zip(&state.history_event_sequences)
+                    .find_map(|((id, _), sequence)| {
+                        (id == &selection.input_ref).then_some(*sequence)
+                    })
+                    .ok_or_else(|| invalid_task("selected operator input source is absent"))?
+            } else {
+                selection.source.watermark()
+            };
+            wanted.extend(
+                state
+                    .history_items_with_event_ids()
+                    .zip(&state.history_event_sequences)
+                    .filter(|(_, sequence)| **sequence > suffix_after)
+                    .map(|((id, _), _)| id.clone()),
+            );
+            if let Some(prior) = prior_task_compaction {
+                if selection.request_proof_version >= 4 {
+                    for id in prior.summary().summarized_history() {
+                        wanted.remove(id);
+                    }
+                } else {
+                    for (index, (id, _)) in state.history_items_with_event_ids().enumerate() {
+                        if index < prior.source_history_item_count() {
+                            wanted.remove(id);
+                        }
+                    }
+                }
+            }
+            let mut selected = entries
+                .iter()
+                .map(|entry| {
+                    entry.protected_exact
+                        || match &entry.source {
+                            CompactionSourceKind::History(id) => wanted.contains(id),
+                            CompactionSourceKind::RecoveryMarker { call_event_id, .. } => {
+                                wanted.contains(call_event_id)
+                            }
+                            CompactionSourceKind::Summary(_) => true,
+                            _ => false,
+                        }
+                })
+                .collect::<Vec<_>>();
+            let calls = entries
+                .iter()
+                .zip(&contents)
+                .zip(&selected)
+                .filter_map(|((_, content), selected)| {
+                    if !selected {
+                        return None;
+                    }
+                    match serde_json::from_str::<ContentItem>(content).ok()? {
+                        ContentItem::ToolCall { call } => Some(call.call_id),
+                        ContentItem::ToolResult { result } => Some(result.call_id),
+                        _ => None,
+                    }
+                })
+                .collect::<BTreeSet<_>>();
+            for ((chosen, entry), content) in selected.iter_mut().zip(&entries).zip(&contents) {
+                if *chosen
+                    || matches!(
+                        entry.source,
+                        CompactionSourceKind::Summary(_) | CompactionSourceKind::Blob(_)
+                    )
+                {
+                    continue;
+                }
+                *chosen = match serde_json::from_str::<ContentItem>(content)
+                    .map_err(|error| invalid_task(error.to_string()))?
+                {
+                    ContentItem::ToolCall { call } => calls.contains(&call.call_id),
+                    ContentItem::ToolResult { result } => calls.contains(&result.call_id),
+                    _ => false,
+                };
+            }
+            let mut index = 0;
+            entries.retain(|_| {
+                let keep = selected[index];
+                index += 1;
+                keep
+            });
+            let mut index = 0;
+            contents.retain(|_| {
+                let keep = selected[index];
+                index += 1;
+                keep
+            });
+        }
         for (entry, content) in entries.iter_mut().zip(&contents) {
             if matches!(
                 entry.source,
@@ -295,11 +487,49 @@ impl CompactionSourcePlan {
                 entry.artifact_refs.push(artifact_id.clone());
             }
             if let CompactionSourceKind::History(id) = &entry.source
-                && let Some(input) = protected.iter().find(|input| &input.event_id == id)
+                && let Some(input) = protected
+                    .iter()
+                    .chain(&selected_inputs)
+                    .find(|input| &input.event_id == id)
             {
                 entry
                     .artifact_refs
                     .extend_from_slice(input.provenance.references().artifact_refs());
+                let refs = input.provenance.references();
+                for (route, sequence) in state
+                    .vision_routes
+                    .iter()
+                    .zip(&state.vision_route_sequences)
+                {
+                    if selection.is_none()
+                        || !refs.source_event_refs().contains(&route.route_event_id)
+                    {
+                        continue;
+                    }
+                    let receipts = state
+                        .execution_receipts()
+                        .iter()
+                        .filter(|record| {
+                            record.sequence < *sequence
+                                && record.result.is_none()
+                                && record.receipt.status
+                                    == crate::domain::tools::ToolResultStatus::Succeeded
+                                && route
+                                    .source_artifact_ids
+                                    .iter()
+                                    .all(|id| record.receipt.output_artifact_ids.contains(id))
+                                && record
+                                    .receipt
+                                    .output_artifact_ids
+                                    .iter()
+                                    .all(|id| refs.artifact_refs().contains(id))
+                        })
+                        .collect::<Vec<_>>();
+                    if receipts.len() != 1 {
+                        return Err(invalid_task("Vision input has no unique intake Receipt"));
+                    }
+                    entry.receipt_event_refs.push(receipts[0].event_id.clone());
+                }
             }
             if let CompactionSourceKind::History(id) = &entry.source
                 && let Some(input) = followups.iter().find(|input| &input.event_id == id)
@@ -370,16 +600,19 @@ impl CompactionSourcePlan {
             entry.blob_refs.sort();
             entry.blob_refs.dedup();
         }
-        let artifacts = artifact_blobs(project_events)?;
+        let artifacts = artifact_records(project_events)?;
         for entry in &mut entries {
             for id in &entry.artifact_refs {
                 let blob = artifacts.get(id).ok_or_else(|| {
                     invalid_task("source Artifact is absent from the Project prefix")
                 })?;
-                entry.blob_refs.push(blob.clone());
+                entry.blob_refs.push(blob.blob_id.clone());
             }
             if let CompactionSourceKind::History(id) = &entry.source
-                && let Some(input) = protected.iter().find(|input| &input.event_id == id)
+                && let Some(input) = protected
+                    .iter()
+                    .chain(&selected_inputs)
+                    .find(|input| &input.event_id == id)
                 && input.provenance.semantic_class()
                     == crate::domain::context::SemanticClass::ModelObservation
             {
@@ -412,11 +645,67 @@ impl CompactionSourcePlan {
         let plan = Self {
             schema_version: 1,
             source,
+            task_selection_event: None,
             entries,
             nodes,
         };
         plan.validate(contents)?;
         Ok(plan)
+    }
+
+    pub(crate) fn with_task_selection(
+        mut self,
+        event: EventId,
+        contents: &[String],
+    ) -> Result<Self, SessionError> {
+        self.schema_version = 2;
+        self.task_selection_event = Some(event);
+        self.validate(contents)?;
+        Ok(self)
+    }
+
+    pub(crate) fn task_selection_event(&self) -> Option<&EventId> {
+        self.task_selection_event.as_ref()
+    }
+
+    pub(super) fn task_fact_references(
+        &self,
+    ) -> (
+        Vec<EventId>,
+        Vec<crate::domain::research::ExecutionReceiptId>,
+        Vec<ArtifactId>,
+    ) {
+        let mut history = Vec::new();
+        let mut receipts = BTreeSet::new();
+        let mut artifacts = BTreeSet::new();
+        for entry in &self.entries {
+            if let CompactionSourceKind::History(id) = &entry.source {
+                history.push(id.clone());
+            }
+            if let Some(tool) = &entry.tool {
+                receipts.extend(
+                    tool.receipt_event_refs
+                        .iter()
+                        .map(|id| crate::domain::research::ExecutionReceiptId::new(id.as_str())),
+                );
+            }
+            artifacts.extend(entry.artifact_refs.iter().cloned());
+            receipts.extend(
+                entry
+                    .receipt_event_refs
+                    .iter()
+                    .map(|id| crate::domain::research::ExecutionReceiptId::new(id.as_str())),
+            );
+        }
+        (
+            history,
+            receipts.into_iter().collect(),
+            artifacts.into_iter().collect(),
+        )
+    }
+
+    pub(super) fn source_blob_references(&self) -> impl Iterator<Item = &BlobId> {
+        self.entries.iter().flat_map(|entry| &entry.blob_refs)
     }
 
     pub(crate) fn source(&self) -> &SessionSourceIdentity {
@@ -536,6 +825,17 @@ impl CompactionSourcePlan {
                 "compaction plan does not bind the exact source prefix",
             ));
         }
+        let (expected_entries, expected_contents) = Self::source_entries_from_validated_state(
+            &state,
+            events,
+            project_events,
+            self.task_selection_event(),
+        )?;
+        if self.entries != expected_entries || contents != expected_contents {
+            return Err(invalid_task(
+                "Compaction source plan does not exactly cover the derived source manifest",
+            ));
+        }
         let history = state.history_items_with_event_ids().collect::<Vec<_>>();
         let normalized = state.full_normalized_history()?;
         let active = state.compaction_source_history()?;
@@ -574,6 +874,12 @@ impl CompactionSourcePlan {
             .zip(active.iter().map(serde_json::to_string))
             .enumerate()
         {
+            if self.task_selection_event.is_some()
+                && position < batch_start
+                && !matches!(kind, CompactionSourceKind::History(id) if protected_ids.contains(id))
+            {
+                continue;
+            }
             let content = content.map_err(|error| invalid_task(error.to_string()))?;
             let index = self
                 .entries
@@ -660,7 +966,8 @@ impl CompactionSourcePlan {
                 }
             }
         }
-        if let Some(summary) = state.latest_compaction().map(|value| value.summary())
+        if self.task_selection_event.is_none()
+            && let Some(summary) = state.latest_compaction().map(|value| value.summary())
             && !self.entries.iter().any(|entry| {
                 entry.source == CompactionSourceKind::Summary(summary.fingerprint().to_owned())
             })
@@ -673,7 +980,11 @@ impl CompactionSourcePlan {
     /// Rechecked with the exact loaded source bytes on both adoption and replay.
     pub(crate) fn validate(&self, contents: &[String]) -> Result<(), SessionError> {
         self.source.validate()?;
-        if self.schema_version != 1 || self.entries.len() != contents.len() || self.nodes.is_empty()
+        if !matches!(
+            (self.schema_version, self.task_selection_event.is_some()),
+            (1, false) | (2, true)
+        ) || self.entries.len() != contents.len()
+            || self.nodes.is_empty()
         {
             return Err(invalid_task("invalid compaction source plan shape"));
         }
@@ -852,12 +1163,11 @@ fn normalized_source_identities(
     state.ensure_completed_history()?;
     let history = state.history_items_with_event_ids().collect::<Vec<_>>();
     let normalized = state.full_normalized_history()?;
-    let mut cursor = history.len();
+    let ids = state.normalized_history_event_ids()?;
     let mut sources = Vec::with_capacity(normalized.len());
-    for item in normalized.iter().rev() {
-        if let Some(index) = history[..cursor].iter().rposition(|(_, old)| *old == item) {
-            sources.push(CompactionSourceKind::History(history[index].0.clone()));
-            cursor = index;
+    for (item, id) in normalized.iter().rev().zip(ids.iter().rev()) {
+        if let Some(id) = id {
+            sources.push(CompactionSourceKind::History(id.clone()));
             continue;
         }
         let ContentItem::ToolResult { result } = item else {
