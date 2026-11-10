@@ -252,14 +252,14 @@ fn multi_objective_results_remain_unattributed_until_exact_source_selection() {
         events
             .iter()
             .filter(|event| event["event_type"] == "session.task_context_selected")
-            .all(|event| event["payload"]["request_proof_version"] == 8)
+            .all(|event| event["payload"]["request_proof_version"] == 9)
     );
     let mut unsupported = events;
     let selection = unsupported
         .iter_mut()
         .find(|event| event["event_type"] == "session.task_context_selected")
         .unwrap();
-    selection["payload"]["request_proof_version"] = json!(9);
+    selection["payload"]["request_proof_version"] = json!(10);
     let envelopes = unsupported
         .into_iter()
         .map(|event| serde_json::from_value::<EventEnvelope<Value>>(event).unwrap())

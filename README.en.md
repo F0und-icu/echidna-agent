@@ -190,8 +190,9 @@ Explicit historical audit retains full verification. Resume never retries old
 inputs or tools and never resolves unknown execution effects by assumption.
 Active conversations reuse the Session projection and incrementally batch index
 updates with in-memory counts. Harness-owned history is treated as append-only;
-old prefixes are not reread to detect manual rewrites. Retrieval scope and
-context-selection policy stay unchanged.
+old prefixes are not reread to detect manual rewrites. Task cards and active
+constraints include selectable excerpts of their original History sources;
+ranked retrieval results and historical replay remain available.
 
 ### Optional self-improvement
 

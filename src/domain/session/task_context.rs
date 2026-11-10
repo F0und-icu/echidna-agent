@@ -18,8 +18,8 @@ const TASK_SELECTION_INPUT_BYTES: usize = 16 * 1024;
 fn is_zero(value: &u8) -> bool {
     *value == 0
 }
-pub(crate) const TASK_CANDIDATE_POLICY_VERSION: u16 = 4;
-pub(crate) const TASK_REQUEST_PROOF_VERSION: u8 = 8;
+pub(crate) const TASK_CANDIDATE_POLICY_VERSION: u16 = 5;
+pub(crate) const TASK_REQUEST_PROOF_VERSION: u8 = 9;
 type PostingReader<'a> =
     dyn Fn(bool, &str, usize, usize) -> Result<(Vec<usize>, bool), SessionError> + 'a;
 type NavigationReader<'a> =
@@ -3257,6 +3257,26 @@ impl SessionState {
             if incomplete {
                 gaps.push(
                     "Task posting coverage is bounded; other matches require expansion".to_owned(),
+                );
+            }
+            if candidate_policy_version >= 5 {
+                // Supplied cards and constraints expose these exact History IDs.
+                // Make them selectable without replacing ranked result candidates.
+                let mut anchors = tasks
+                    .values()
+                    .map(|task| task.source_ref.clone())
+                    .collect::<std::collections::BTreeSet<_>>();
+                anchors.extend(
+                    self.active_task_constraints()?
+                        .into_values()
+                        .map(|constraint| constraint.range.source_event_id.to_string()),
+                );
+                selected.extend(
+                    history_ids[..input_index]
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, id)| anchors.contains(id.as_str()))
+                        .map(|(index, _)| index),
                 );
             }
             let omitted = input_index - selected.len();

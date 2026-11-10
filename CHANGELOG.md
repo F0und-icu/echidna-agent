@@ -5,6 +5,15 @@ changes remain available in Git history.
 
 ## Unreleased
 
+### Selectable task sources — 2026-11-11
+
+- Include bounded original History excerpts for sources referenced by supplied
+  task cards and active constraints, even when ranked retrieval omits them.
+  Selecting these references can now proceed through the existing expansion
+  flow without an unknown-candidate rejection.
+- Preserve earlier candidate policies for historical replay and retain rejection
+  of references that do not identify available sources.
+
 ### Task preparation efficiency — 2026-11-10
 
 - Batch disposable task postings and keep their counts in memory, removing

@@ -739,6 +739,134 @@ fn legacy_large_task_progress_is_bounded_and_preserves_original_source() {
 }
 
 #[test]
+fn task_source_anchor_closure_preserves_old_policy_and_bounded_original_text() {
+    let mut state = SessionReducer
+        .reduce([event(
+            SessionEvent::Started {
+                primary_provider_session: ProviderSession::new(
+                    ProviderSessionId::new("anchor-policy"),
+                    ProviderSessionRole::Primary,
+                    0,
+                )
+                .reference()
+                .clone(),
+            },
+            1,
+        )])
+        .unwrap();
+    let original = format!("ARCHIVED-ZEBRA {}", "x".repeat(2048));
+    let items = std::iter::once(ContentItem::user_text(&original))
+        .chain((0..530).map(|index| ContentItem::assistant_text(format!("filler-{index}"))))
+        .chain(std::iter::once(ContentItem::user_text("量子纠缠实验")));
+    let mut sequence = 2;
+    let mut input = EventId::new("unused");
+    for item in items {
+        input = EventId::new(format!("clock-{sequence}"));
+        SessionReducer
+            .apply(
+                &mut state,
+                event(
+                    SessionEvent::HistoryItemRecorded { item: item.clone() },
+                    sequence,
+                ),
+            )
+            .unwrap();
+        sequence += 1;
+        if let ContentItem::Text {
+            role: crate::domain::model::MessageRole::User,
+            text,
+        } = &item
+        {
+            let provenance =
+                BTreeMap::from([(0, ContextProvenance::operator_input(text).unwrap())]);
+            let boundary = state
+                .accepted_operator_input(&[item], &provenance, time(1_793_894_401))
+                .unwrap();
+            SessionReducer
+                .apply(
+                    &mut state,
+                    event(
+                        SessionEvent::OperatorTurnBoundaryRecorded { boundary },
+                        sequence,
+                    ),
+                )
+                .unwrap();
+            sequence += 1;
+        }
+    }
+    let capabilities = crate::domain::model::ModelCapabilities {
+        text_input: true,
+        image_input: false,
+        streaming: true,
+        tool_call: true,
+        structured_output: false,
+        incremental_input: false,
+        usage_reporting: false,
+        context_window: 272_000,
+        max_output_tokens: None,
+        reasoning_effort: None,
+        capability_mapping_version: crate::domain::model::CapabilityMappingVersion::new(1),
+    };
+    let common = crate::domain::session::CompactionContextCapture::new_task(
+        capabilities,
+        crate::domain::context::ContextPlanner::current().budget_policy(),
+        1,
+        Vec::new(),
+    );
+    let candidates = |policy| {
+        state
+            .task_selection_candidates_with_capture(
+                "anchor-policy",
+                &input,
+                &common,
+                &[],
+                0,
+                &[],
+                None,
+                false,
+                policy,
+                &crate::app::context_read::history_navigation_excerpt,
+            )
+            .unwrap()
+    };
+    let old = candidates(4);
+    let current = candidates(5);
+    assert_eq!(old.tasks, current.tasks);
+    assert_eq!(old.tasks[0].source_ref, "clock-2");
+    assert!(!old.context.iter().any(|c| c.reference == "clock-2"));
+    assert_eq!(current.context.len(), old.context.len() + 1);
+    assert_eq!(
+        &current.context[1..],
+        old.context.as_slice(),
+        "ranked candidates are not displaced"
+    );
+    let anchor = &current.context[0];
+    assert_eq!(anchor.reference, "clock-2");
+    assert_eq!(anchor.source_event_ref.as_deref(), Some("clock-2"));
+    assert_eq!(anchor.excerpt, original[..1024]);
+    assert!(anchor.truncated);
+    assert_eq!(anchor.source_origin, Some(ContextOrigin::OperatorInput));
+    assert_eq!(
+        anchor.source_authority,
+        Some(AuthorityLevel::OperatorAssertion)
+    );
+    let mut decision: crate::domain::task_context::TaskSelectionDecision =
+        serde_json::from_value(serde_json::json!({
+            "relation":"continue", "focus":{"kind":"existing","task_ref":old.tasks[0].reference},
+            "related_task_refs":[], "required_context_refs":["clock-2"], "unresolved_references":[]
+        }))
+        .unwrap();
+    assert!(old.validate_decision(&decision).is_err());
+    current.validate_decision(&decision).unwrap();
+    decision
+        .required_context_refs
+        .push("missing-source".to_owned());
+    assert!(
+        matches!(current.validate_decision(&decision), Err(crate::domain::task_context::TaskSelectionError::UnknownReference { reference }) if reference == "missing-source")
+    );
+}
+
+#[test]
 fn task_cards_are_bounded_and_query_recalls_an_old_legacy_task() {
     let mut state = SessionReducer
         .reduce([event(

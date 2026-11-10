@@ -204,7 +204,7 @@ mod durability {
         let projection = SessionProjection::replay(events.clone()).unwrap();
         assert_source(&projection, &events);
         let wanted = vec![events[1].event_id.clone(), events[2].event_id.clone()];
-        for version in 0..=8 {
+        for version in 0..=crate::domain::session::TASK_REQUEST_PROOF_VERSION {
             let full = projection
                 .state()
                 .task_resume_history(&wanted, events.iter(), version)

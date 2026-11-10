@@ -10,6 +10,133 @@ use super::task_context_paging::{
 use super::*;
 
 #[test]
+fn task_card_source_outside_retrieval_survives_selection_expansion_and_resume() {
+    const SOURCE: &str = "ARCHIVED-ZEBRA: retain the original measurement and only give advice.";
+    const LATER_INPUT: &str = "For that objective, only give advice.";
+    let root = TemporaryDirectory::new("task-source-anchor");
+    initialize_project(root.path());
+    let agent = definition(root.path(), None);
+    let server = spawn_scripted_responses_server(vec![
+        ScriptedResponse::InitialSelection,
+        ScriptedResponse::Response(200, text_response("Recorded.", "anchor-recorded")),
+        ScriptedResponse::SelectionDecision(|candidates| {
+            json!({
+                "relation":"continue", "focus":{"kind":"existing","task_ref":candidates["tasks"][0]["ref"]},
+                "related_task_refs":[], "required_context_refs":[], "unresolved_references":[],
+                "constraint_updates":[{"source_ref":candidates["input"]["ref"], "start_byte":0,
+                    "end_byte":LATER_INPUT.len(), "scope":{"kind":"current_task"}, "supersedes":null}]
+            })
+        }),
+        ScriptedResponse::Response(200, text_response("Noted.", "anchor-continued")),
+    ]);
+    let config = write_context_window_config(root.path(), &server.base_url, 272_000);
+    let created = run_chat(
+        root.path(),
+        &config,
+        &format!("{SOURCE}\n{LATER_INPUT}\n/exit\n"),
+        &["--agent", agent.to_str().unwrap()],
+    );
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    server.join();
+    let session = session_id(root.path());
+    let project = Project::discover(root.path()).unwrap();
+    append_source_items(
+        &project,
+        &session,
+        (0..530)
+            .map(|index| {
+                echidna::domain::model::ContentItem::assistant_text(format!(
+                    "UNRELATED-FILLER-{index}"
+                ))
+            })
+            .collect(),
+    );
+    let server = paged_server(move |step, wire| {
+        if step < 2 {
+            let candidates = selector_candidates(wire);
+            let task = &candidates["tasks"][0];
+            let context = candidates["context"].as_array().unwrap();
+            let constraint = context
+                .iter()
+                .find(|c| c["constraint_range"].is_object())
+                .unwrap();
+            assert_ne!(constraint["source_event_ref"], task["source_ref"]);
+            assert_eq!(
+                context
+                    .iter()
+                    .filter(|c| c["ref"] == constraint["source_event_ref"])
+                    .count(),
+                1
+            );
+            assert_eq!(
+                context
+                    .iter()
+                    .filter(|c| c["ref"] == task["source_ref"])
+                    .count(),
+                1
+            );
+            assert!(
+                context.len() <= 515,
+                "ranked pool plus two sources and one constraint"
+            );
+            assert!(
+                candidates["gaps"]
+                    .to_string()
+                    .contains("older context candidates require expansion")
+            );
+            let decision = json!({
+                "relation":"continue", "focus":{"kind":"existing","task_ref":task["ref"]},
+                "related_task_refs":[], "required_context_refs":[task["source_ref"],constraint["source_event_ref"]],
+                "unresolved_references":if step == 0 { vec!["older context candidates require expansion"] } else { vec![] }
+            });
+            return (
+                text_response(&decision.to_string(), &format!("anchor-select-{step}")),
+                false,
+            );
+        }
+        assert_eq!(step, 2, "only one bounded expansion is allowed");
+        let delivered = wire["input"].to_string();
+        assert!(delivered.contains(SOURCE));
+        assert!(delivered.contains(LATER_INPUT));
+        assert!(!delivered.contains("UNRELATED-FILLER"));
+        (text_response("Source retained.", "anchor-final"), true)
+    });
+    let config = write_context_window_config(root.path(), &server.base_url, 272_000);
+    let output = run_chat(
+        root.path(),
+        &config,
+        "量子纠缠实验\n/exit\n",
+        &["--resume", "latest"],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    server.join();
+    let resumed = run_chat(root.path(), &config, "/exit\n", &["--resume", "latest"]);
+    assert!(
+        resumed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    let audited = Command::new(env!("CARGO_BIN_EXE_echidna"))
+        .current_dir(root.path())
+        .args(["session", "show", &session])
+        .output()
+        .unwrap();
+    assert!(
+        audited.status.success(),
+        "{}",
+        String::from_utf8_lossy(&audited.stderr)
+    );
+}
+
+#[test]
 fn task_index_recalls_old_source_and_updates_only_the_new_suffix() {
     let root = TemporaryDirectory::new("task-postings-incremental");
     initialize_project(root.path());

@@ -863,7 +863,9 @@ where
     if (selection.request_proof_version >= 4 && capture.schema_version != 2)
         || (selection.request_proof_version < 4 && capture.schema_version != 1)
         || capture.candidate_policy_version
-            != if selection.request_proof_version >= 7 {
+            != if selection.request_proof_version >= 9 {
+                5
+            } else if selection.request_proof_version >= 7 {
                 4
             } else if selection.request_proof_version >= 6 {
                 3

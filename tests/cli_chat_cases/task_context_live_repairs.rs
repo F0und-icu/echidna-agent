@@ -821,7 +821,7 @@ fn partial_excerpt_retains_complete_protected_constraint_and_resumes() {
         assert_eq!(selections.len(), if valid { 3 } else { 2 });
         if valid {
             let selected = selections[2];
-            assert_eq!(selected["payload"]["request_proof_version"], 8);
+            assert_eq!(selected["payload"]["request_proof_version"], 9);
             let range = &selected["payload"]["selected_excerpts"][0];
             let constraint = &selected["payload"]["selected_constraints"][0];
             assert_eq!(range["source_event_id"], constraint["source_event_id"]);
