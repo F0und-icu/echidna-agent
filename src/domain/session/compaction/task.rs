@@ -27,6 +27,29 @@ pub(crate) struct SessionSourceIdentity {
 }
 
 impl SessionSourceIdentity {
+    /// Identity of the current durable projection. The caller advances the
+    /// canonical digest with the same events accepted by its Session reducer.
+    pub(crate) fn from_tracked_prefix(
+        project_id: ProjectId,
+        state: &SessionState,
+        stream_hash: String,
+        project_events: &[EventEnvelope<Value>],
+    ) -> Result<Self, SessionError> {
+        Ok(Self {
+            project_id,
+            stream_id: state
+                .stream_id()
+                .ok_or(SessionError::CompactionSourceSequenceMissing)?
+                .clone(),
+            watermark: EventSequence::new(state.next_event_sequence()?.get() - 1),
+            stream_hash,
+            project_stream_watermark: project_events
+                .last()
+                .map_or(0, |event| event.sequence.get()),
+            project_stream_hash: Self::project_hash_for_events(project_events)?,
+        })
+    }
+
     pub(crate) fn project_hash_for_events(
         events: &[EventEnvelope<Value>],
     ) -> Result<String, SessionError> {

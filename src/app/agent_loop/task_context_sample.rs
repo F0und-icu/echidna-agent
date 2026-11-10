@@ -157,11 +157,12 @@ pub(crate) fn compile_selection(
 
 /// Independently rebuild the first Primary plan from the frozen external
 /// sources and the original Session prefix, never from RequestAudit bytes.
-pub(crate) fn compile_captured_task_context(
+pub(crate) fn compile_captured_task_context<'a>(
     state: &SessionState,
     capture: &crate::domain::session::TaskContextCapture,
     selection: &crate::domain::session::TaskContextSelected,
-    source_events: &[crate::domain::events::EventEnvelope<serde_json::Value>],
+    source_events: impl Iterator<Item = &'a crate::domain::events::EventEnvelope<serde_json::Value>>
+    + Clone,
     research_units: &[crate::domain::task_context_research::ResearchTaskUnit],
 ) -> Result<ContextPlan, AgentLoopError> {
     let compile = &capture.compile;
@@ -278,7 +279,7 @@ pub(crate) fn compile_captured_task_context(
     )?;
     let selected_history = state.task_resume_history(
         &rebuilt.selected_history,
-        source_events,
+        source_events.clone(),
         selection.request_proof_version,
     )?;
     let selected = context_state::SelectedHistory::from_resume(
@@ -348,12 +349,12 @@ pub(crate) fn compile_captured_task_context(
     let captured_feedback =
         crate::domain::session::restore_fragments(&compile.correction_feedback)?;
     let input_index = source_events
-        .iter()
+        .clone()
         .position(|event| event.event_id == selection.input_ref)
         .ok_or(AgentLoopError::ContextStateMismatch)?;
     let mut correction_feedback = Vec::new();
     let mut diagnostics = Vec::new();
-    for event in &source_events[input_index + 1..] {
+    for event in source_events.skip(input_index + 1) {
         match crate::domain::session::SessionEvent::decode(
             &event.event_type,
             event.payload.clone(),
@@ -534,7 +535,7 @@ pub(crate) fn compile_following_task_context(
     let mut selected = context_state::SelectedHistory::from_resume(
         &source.task_resume_history(
             &selection.selected_history,
-            events,
+            events.iter(),
             selection.request_proof_version,
         )?,
         selection.source.stream_hash(),
@@ -707,7 +708,7 @@ pub(crate) fn verify_task_compaction_capture(
     } else {
         state.task_resume_history(
             &selection.selected_history,
-            events,
+            events.iter(),
             selection.request_proof_version,
         )?
     };

@@ -35,6 +35,7 @@ pub(crate) fn canonical_array_hash(values: &[impl Serialize]) -> Result<String, 
 
 /// Incremental form of the same canonical array hash, for a single ordered
 /// replay. Snapshots close a cloned hasher and never mutate the prefix.
+#[derive(Clone)]
 pub(crate) struct CanonicalArrayHasher {
     hasher: blake3::Hasher,
     len: usize,

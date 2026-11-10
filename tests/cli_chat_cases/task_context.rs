@@ -2970,7 +2970,11 @@ fn task_context_main_replay_rejects_coherent_audit_forgery_against_unchanged_sou
         .expect("the forged audit is structurally valid and all its self-hashes match");
     write_events(&forged);
     let before = fs::read(&event_path).unwrap();
-    let rejected = run_chat(root.path(), &config, "/exit\n", &["--resume", "latest"]);
+    let rejected = Command::new(env!("CARGO_BIN_EXE_echidna"))
+        .current_dir(root.path())
+        .args(["session", "show", &session_id(root.path())])
+        .output()
+        .unwrap();
     assert!(!rejected.status.success());
     assert!(
         String::from_utf8_lossy(&rejected.stderr)

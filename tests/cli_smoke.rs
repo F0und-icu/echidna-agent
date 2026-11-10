@@ -172,7 +172,8 @@ fn m5_session_list_show_export_and_end_use_the_existing_durable_stream() {
         .unwrap();
     assert!(!resume.status.success());
     assert!(
-        String::from_utf8_lossy(&resume.stderr).contains("no strictly replayable Active Session")
+        String::from_utf8_lossy(&resume.stderr)
+            .contains("the current project has no Active Session")
     );
 }
 

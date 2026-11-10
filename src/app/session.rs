@@ -45,6 +45,9 @@ pub struct SessionProjection {
     state: SessionState,
     compaction_source: Option<crate::domain::session::TaskCompactionValidationFacts>,
     current_source: Option<crate::domain::session::SessionSourceIdentity>,
+    resume_source: Option<(crate::domain::session::SessionSourceIdentity, SessionState)>,
+    source_hash: crate::domain::canonical_json::CanonicalArrayHasher,
+    task_source_events: Vec<std::sync::Arc<EventEnvelope<serde_json::Value>>>,
 }
 
 struct TaskPlanReplay {
@@ -126,11 +129,72 @@ impl SessionProjection {
         project_id: crate::domain::project::ProjectId,
         events: &[EventEnvelope<serde_json::Value>],
         project_events: &[EventEnvelope<serde_json::Value>],
+        load_research_references: impl FnMut() -> Result<
+            crate::domain::research::ResearchReferenceCatalog,
+            SessionError,
+        >,
+        blobs: &Store,
+    ) -> Result<Self, SessionError>
+    where
+        Store::Error: std::fmt::Debug,
+    {
+        Self::replay_project(
+            project_id,
+            events,
+            project_events,
+            load_research_references,
+            blobs,
+            0,
+            false,
+        )
+    }
+
+    /// Restore current execution state without auditing every historical request.
+    /// The latest selection supplies the complete source for the current task.
+    pub(crate) fn replay_for_resume<Store: crate::ports::artifact::ArtifactStore>(
+        project_id: crate::domain::project::ProjectId,
+        events: &[EventEnvelope<serde_json::Value>],
+        project_events: &[EventEnvelope<serde_json::Value>],
+        load_research_references: impl FnMut() -> Result<
+            crate::domain::research::ResearchReferenceCatalog,
+            SessionError,
+        >,
+        blobs: &Store,
+    ) -> Result<Self, SessionError>
+    where
+        Store::Error: std::fmt::Debug,
+    {
+        let latest = events
+            .iter()
+            .rposition(|event| event.event_type.as_str() == "session.task_context_selected");
+        let start = latest.map_or(0, |end| {
+            events[..end]
+                .iter()
+                .rposition(|event| event.event_type.as_str() == "session.task_context_captured")
+                .unwrap_or(0)
+        });
+        Self::replay_project(
+            project_id,
+            events,
+            project_events,
+            load_research_references,
+            blobs,
+            start,
+            true,
+        )
+    }
+
+    fn replay_project<Store: crate::ports::artifact::ArtifactStore>(
+        project_id: crate::domain::project::ProjectId,
+        events: &[EventEnvelope<serde_json::Value>],
+        project_events: &[EventEnvelope<serde_json::Value>],
         mut load_research_references: impl FnMut() -> Result<
             crate::domain::research::ResearchReferenceCatalog,
             SessionError,
         >,
         blobs: &Store,
+        verify_from: usize,
+        recent_only: bool,
     ) -> Result<Self, SessionError>
     where
         Store::Error: std::fmt::Debug,
@@ -155,7 +219,7 @@ impl SessionProjection {
                 |state, event| {
                     if index != 0 {
                         prefix_hash.push(&events[index - 1]).map_err(|error| SessionError::TaskContext { message: format!("Session prefix hashing failed: {error}") })?;
-                        if let Some(pending) = &mut pending_task_plan
+                        if !recent_only && let Some(pending) = &mut pending_task_plan
                             && pending.selection.has_complete_request_proof()
                         {
                             match SessionEvent::decode(&events[index - 1].event_type, events[index - 1].payload.clone())? {
@@ -180,11 +244,13 @@ impl SessionProjection {
                     if let Some(id) = pending_capture.take() {
                         captured_source = Some((id, state.clone(), prefix_hash.finish()));
                     }
-                    verify_completed_event(state, event, blobs)?;
-                    if event.event_type.as_str() == "session.task_context_captured" {
+                    if !recent_only {
+                        verify_completed_event(state, event, blobs)?;
+                    }
+                    if index >= verify_from && event.event_type.as_str() == "session.task_context_captured" {
                         pending_capture = Some(event.event_id.clone());
                     }
-                    if let SessionEvent::TaskContextSelected { selection } =
+                    if index >= verify_from && event.event_type.as_str() == "session.task_context_selected" && let SessionEvent::TaskContextSelected { selection } =
                         SessionEvent::decode(&event.event_type, event.payload.clone())?
                     {
                         let research = state.agent_definition_binding().is_some_and(|binding| binding.definition().research().is_some());
@@ -207,7 +273,7 @@ impl SessionProjection {
                         } else { None };
                         pending_task_plan = Some(TaskPlanReplay { session: selection.provider_session.clone(), plan, requires_full, first: true, selection, source, capture, research_units, delivery });
                     }
-                    if let SessionEvent::RequestAuditRecorded { manifest } = SessionEvent::decode(&event.event_type, event.payload.clone())?
+                    if !recent_only && event.event_type.as_str() == "session.request_audit_recorded" && let SessionEvent::RequestAuditRecorded { manifest } = SessionEvent::decode(&event.event_type, event.payload.clone())?
                         && let Some(pending) = &mut pending_task_plan
                         && manifest.provider_session() == Some(&pending.session)
                         && manifest.improvement_scope().is_none()
@@ -248,7 +314,7 @@ impl SessionProjection {
                         }
                         pending.first = false;
                     }
-                    if let SessionEvent::ModelDeliveryCommitted { delivery } = SessionEvent::decode(&event.event_type, event.payload.clone())?
+                    if !recent_only && event.event_type.as_str() == "session.model_delivery_committed" && let SessionEvent::ModelDeliveryCommitted { delivery } = SessionEvent::decode(&event.event_type, event.payload.clone())?
                         && pending_task_plan.as_ref().is_some_and(|pending| {
                             state.request_audits().iter().any(|audit| audit.audit_event_id() == delivery.audit_event_id() && audit.provider_session() == Some(&pending.session))
                         })
@@ -268,7 +334,7 @@ impl SessionProjection {
                             pending.requires_full = false;
                         }
                     }
-                    if let SessionEvent::CompactionCreated { compaction } =
+                    if event.event_type.as_str() == "session.compaction_created" && let SessionEvent::CompactionCreated { compaction } =
                         SessionEvent::decode(&event.event_type, event.payload.clone())?
                         && compaction.summary().graph_reference().is_some()
                     {
@@ -327,11 +393,28 @@ impl SessionProjection {
                 })?;
         }
         verify_protected_vision_sources(&state, blobs)?;
+        if let Some(last) = events.last() {
+            prefix_hash
+                .push(last)
+                .map_err(|error| source_encoding_error(last, error))?;
+        }
         Ok(Self {
             reducer,
             state,
             compaction_source,
             current_source,
+            resume_source: if recent_only {
+                pending_task_plan.map(|pending| (pending.selection.source, pending.source))
+            } else {
+                None
+            },
+            source_hash: prefix_hash,
+            task_source_events: events
+                .iter()
+                .filter(|event| task_source_event(event))
+                .cloned()
+                .map(std::sync::Arc::new)
+                .collect(),
         })
     }
 
@@ -381,10 +464,24 @@ impl SessionProjection {
             return Ok(());
         }
         let mut state = self.state.clone();
+        let mut source_hash = self.source_hash.clone();
+        let mut source_events = Vec::new();
         for event in events {
-            self.apply_verified_event(&mut state, event, blobs)?;
+            let retained = task_source_event(&event).then(|| std::sync::Arc::new(event.clone()));
+            let mut next_hash = source_hash.clone();
+            next_hash
+                .push(&event)
+                .map_err(|error| source_encoding_error(&event, error))?;
+            if self.apply_verified_event(&mut state, event, blobs)?
+                != ApplyOutcome::DuplicateIgnored
+            {
+                source_hash = next_hash;
+                source_events.extend(retained);
+            }
         }
         self.state = state;
+        self.source_hash = source_hash;
+        self.task_source_events.extend(source_events);
         self.current_source = None;
         Ok(())
     }
@@ -394,7 +491,7 @@ impl SessionProjection {
         state: &mut SessionState,
         event: EventEnvelope<serde_json::Value>,
         blobs: &Store,
-    ) -> Result<(), SessionError>
+    ) -> Result<ApplyOutcome, SessionError>
     where
         Store::Error: std::fmt::Debug,
     {
@@ -415,8 +512,7 @@ impl SessionProjection {
                 message: "v6 Compaction requires project-aware replay".to_owned(),
             });
         }
-        self.reducer.apply_in_place(state, event)?;
-        Ok(())
+        self.reducer.apply_in_place(state, event)
     }
 
     /// Resolve and durably apply the original domain-then-phase boundary from
@@ -509,17 +605,54 @@ impl SessionProjection {
         Events: IntoIterator<Item = EventEnvelope<serde_json::Value>>,
     {
         let reducer = SessionReducer;
-        let state = reducer.reduce(events)?;
+        let events = events.into_iter().collect::<Vec<_>>();
+        let mut source_hash = crate::domain::canonical_json::CanonicalArrayHasher::new();
+        for event in &events {
+            source_hash
+                .push(event)
+                .map_err(|error| source_encoding_error(event, error))?;
+        }
+        let state = reducer.reduce(events.iter().cloned())?;
         Ok(Self {
             reducer,
             state,
             compaction_source: None,
             current_source: None,
+            resume_source: None,
+            source_hash,
+            task_source_events: events
+                .into_iter()
+                .filter(task_source_event)
+                .map(std::sync::Arc::new)
+                .collect(),
         })
+    }
+
+    pub(crate) fn task_source_identity(
+        &self,
+        project_id: crate::domain::project::ProjectId,
+        project_events: &[EventEnvelope<serde_json::Value>],
+    ) -> Result<crate::domain::session::SessionSourceIdentity, SessionError> {
+        crate::domain::session::SessionSourceIdentity::from_tracked_prefix(
+            project_id,
+            &self.state,
+            self.source_hash.finish(),
+            project_events,
+        )
+    }
+
+    pub(crate) fn task_source_events(&self) -> &[std::sync::Arc<EventEnvelope<serde_json::Value>>] {
+        &self.task_source_events
     }
 
     pub(crate) fn current_source(&self) -> Option<&crate::domain::session::SessionSourceIdentity> {
         self.current_source.as_ref()
+    }
+
+    pub(crate) fn take_resume_source(
+        &mut self,
+    ) -> Option<(crate::domain::session::SessionSourceIdentity, SessionState)> {
+        self.resume_source.take()
     }
 
     pub(crate) fn compaction_source_for(
@@ -571,12 +704,42 @@ impl SessionProjection {
     where
         S: EventSink<serde_json::Value>,
     {
+        let mut source_hash = self.source_hash.clone();
+        source_hash.push(&event).map_err(|error| {
+            AppendAfterDurableError::Session(source_encoding_error(&event, error))
+        })?;
+        let retained = task_source_event(&event).then(|| std::sync::Arc::new(event.clone()));
         let outcome = append_after_durable(&self.reducer, &mut self.state, sink, event)?;
         if outcome != ApplyOutcome::DuplicateIgnored {
             self.current_source = None;
+            self.source_hash = source_hash;
+            self.task_source_events.extend(retained);
         }
         Ok(outcome)
     }
+}
+
+fn source_encoding_error(
+    event: &EventEnvelope<serde_json::Value>,
+    error: serde_json::Error,
+) -> SessionError {
+    SessionError::PayloadEncode {
+        event_type: event.event_type.clone(),
+        message: error.to_string(),
+    }
+}
+
+/// Current-task compilation needs History IDs, recovery boundaries and argument
+/// feedback. Historical request/response payloads remain in their durable owner.
+fn task_source_event(event: &EventEnvelope<serde_json::Value>) -> bool {
+    matches!(
+        event.event_type.as_str(),
+        "session.history_item_recorded"
+            | "session.resumed"
+            | "session.agent_definition_applied"
+            | "session.compaction_created"
+            | "model.sample_rejected"
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -878,7 +1041,7 @@ where
         source_state,
         &capture,
         selection,
-        &events[..end],
+        events[..end].iter(),
         &research_units,
     )
     .map_err(|error| invalid(format!("primary task source compilation failed: {error}")))?;
@@ -900,6 +1063,9 @@ where
     Store::Error: std::fmt::Debug,
 {
     use crate::domain::session::{OperatorTurnBoundary, SessionEvent};
+    if event.event_type.as_str() != "session.operator_turn_boundary_recorded" {
+        return Ok(());
+    }
     if let SessionEvent::OperatorTurnBoundaryRecorded {
         boundary: boundary @ OperatorTurnBoundary::Completed { .. },
     } = SessionEvent::decode(&event.event_type, event.payload.clone())?

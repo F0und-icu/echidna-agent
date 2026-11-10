@@ -845,11 +845,18 @@ fn oversized_cold_record_continues_to_late_match_and_following_record() {
             .iter()
             .any(|line| counter(line, "source_materialization_write_bytes") >= 8 * 1024 * 1024)
     );
-    assert!(pages.iter().any(
-        |line| counter(line, "source_materialization_read_bytes") == 0
-            && counter(line, "source_verification_bytes")
-                == raw_len + raw_len.div_ceil(1024 * 1024) * 64
-    ));
+    assert!(
+        pages
+            .iter()
+            .any(|line| counter(line, "source_verification_bytes") >= raw_len)
+    );
+    assert!(
+        pages.iter().any(
+            |line| counter(line, "source_materialization_read_bytes") == 0
+                && counter(line, "source_verification_bytes") == 0
+        ),
+        "unchanged source pages should reuse their completed verification"
+    );
     selector_candidates(&f2a_request_body(&server.requests, "oversized selection"));
     let count = server.requests.try_iter().count();
     server.join();

@@ -1,14 +1,14 @@
-//! Disposable source-bound task navigation. All unbounded postings, cards and
-//! anchors live on disk; the hot state retains only cursors and 64 recent IDs.
+//! Disposable source-bound task navigation. Postings, cards and anchors
+//! live on disk; process-local counts and cursors support incremental access.
 
 use ring::rand::SecureRandom;
 use std::cell::Cell;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
-use super::task_posting_manifest::PostingManifest;
+use super::task_posting_lengths::PostingLengths;
 use super::{ChatError, DurableChatSession, context_read::index::ColdIndex};
 use crate::domain::session::{
     SessionError, SessionState, TaskCardSource, TaskNavigationAccess, TaskNavigationChange,
@@ -16,8 +16,9 @@ use crate::domain::session::{
 };
 use crate::domain::task_context::TaskCandidate;
 
-const ENTRY_BYTES: u64 = 40;
-const ANCHOR_BYTES: u64 = 48;
+const ENTRY_BYTES: u64 = 8;
+const ANCHOR_BYTES: u64 = 16;
+const POSTING_BATCH_ROWS: usize = 65_536;
 
 #[derive(Clone, Copy, Default)]
 pub(super) struct TaskIndexStats {
@@ -47,15 +48,13 @@ pub(super) struct TaskIndexStats {
     pub(super) navigation_stage_read_bytes: usize,
     pub(super) navigation_stage_write_bytes: usize,
     pub(super) metadata_rebuilt: bool,
-    pub(super) proof_nodes_read: usize,
-    pub(super) proof_bytes_read: usize,
-    pub(super) proof_nodes_written: usize,
-    pub(super) proof_bytes_written: usize,
+    pub(super) posting_keys: usize,
+    pub(super) posting_batch_peak_rows: usize,
+    pub(super) posting_batches: usize,
 }
 
 pub(super) struct TaskIndex {
     directory: PathBuf,
-    key: [u8; 32],
     source_identity: blake3::Hash,
     source_watermark: Option<blake3::Hash>,
     offset: u64,
@@ -69,7 +68,7 @@ pub(super) struct TaskIndex {
     last_anchor: Option<usize>,
     recent: VecDeque<usize>,
     stats: Cell<TaskIndexStats>,
-    manifest: PostingManifest,
+    manifest: PostingLengths,
 }
 
 impl Drop for TaskIndex {
@@ -111,10 +110,9 @@ impl TaskIndex {
         ] {
             fs::create_dir(directory.join(name))?;
         }
-        let manifest = PostingManifest::new(directory.join("proofs"), key)?;
+        let manifest = PostingLengths::default();
         Ok(Self {
             directory,
-            key,
             source_identity: identity,
             source_watermark: None,
             offset: 0,
@@ -140,11 +138,7 @@ impl TaskIndex {
 
     pub(super) fn stats(&self) -> TaskIndexStats {
         let mut stats = self.stats.get();
-        let proof = self.manifest.work();
-        stats.proof_nodes_read = proof.read_nodes;
-        stats.proof_bytes_read = proof.read_bytes;
-        stats.proof_nodes_written = proof.written_nodes;
-        stats.proof_bytes_written = proof.written_bytes;
+        stats.posting_keys = self.manifest.len();
         stats
     }
 
@@ -163,6 +157,8 @@ impl TaskIndex {
             });
             self.source_watermark = Some(watermark);
         }
+        let mut postings = BTreeMap::<[u8; 32], Vec<usize>>::new();
+        let mut batch_rows = 0;
         self.offset = source.visit_records(self.offset, |record| {
             if record.session != session.session_id.as_str() {
                 return Ok(());
@@ -185,27 +181,41 @@ impl TaskIndex {
                     .join(record.ordinal.to_string()),
             )?;
             file.write_all(&semantics)?;
-            let digest = ordinal_domain(b"semantics", record.ordinal);
-            file.write_all(&self.tag(digest, &semantics))?;
             self.measure(|stats| {
                 stats.cache_rows_written += 1;
-                stats.cache_bytes_written += semantics.len() + 32;
+                stats.cache_bytes_written += semantics.len();
             });
             for term in crate::domain::retrieval::task_posting_keys(&text) {
-                self.append_posting("history", blake3::hash(term.as_bytes()), record.ordinal)?;
+                postings
+                    .entry(*blake3::hash(term.as_bytes()).as_bytes())
+                    .or_default()
+                    .push(record.ordinal);
+                batch_rows += 1;
+                if batch_rows == POSTING_BATCH_ROWS {
+                    self.flush_postings(&mut postings)?;
+                    batch_rows = 0;
+                }
             }
             self.count += 1;
             self.last_reference = Some(record.reference);
             Ok(())
         })?;
-        Ok(())
+        self.flush_postings(&mut postings)
     }
 
-    fn tag(&self, domain: blake3::Hash, bytes: &[u8]) -> [u8; 32] {
-        let mut hash = blake3::Hasher::new_keyed(&self.key);
-        hash.update(domain.as_bytes());
-        hash.update(bytes);
-        *hash.finalize().as_bytes()
+    fn flush_postings(
+        &mut self,
+        postings: &mut BTreeMap<[u8; 32], Vec<usize>>,
+    ) -> Result<(), ChatError> {
+        let rows = postings.values().map(Vec::len).sum();
+        self.measure(|stats| {
+            stats.posting_batch_peak_rows = stats.posting_batch_peak_rows.max(rows);
+            stats.posting_batches += usize::from(rows != 0);
+        });
+        for (digest, ordinals) in std::mem::take(postings) {
+            self.append_postings("history", blake3::Hash::from_bytes(digest), &ordinals)?;
+        }
+        Ok(())
     }
 
     fn append_posting(
@@ -213,6 +223,15 @@ impl TaskIndex {
         directory: &str,
         digest: blake3::Hash,
         ordinal: usize,
+    ) -> Result<(), ChatError> {
+        self.append_postings(directory, digest, &[ordinal])
+    }
+
+    fn append_postings(
+        &mut self,
+        directory: &str,
+        digest: blake3::Hash,
+        ordinals: &[usize],
     ) -> Result<(), ChatError> {
         let path = self
             .directory
@@ -228,64 +247,33 @@ impl TaskIndex {
             options.create_new(true);
         }
         let mut file = options.open(path)?;
-        let length = file.metadata()?.len();
-        if length
-            != expected
-                .checked_mul(ENTRY_BYTES)
-                .ok_or_else(|| fail("task posting length overflow"))?
-        {
-            return Err(fail("task posting length changed"));
+        let mut bytes = Vec::with_capacity(ordinals.len() * ENTRY_BYTES as usize);
+        for ordinal in ordinals {
+            bytes.extend_from_slice(&(*ordinal as u64).to_le_bytes());
         }
-        let bytes = (ordinal as u64).to_le_bytes();
         file.write_all(&bytes)?;
-        file.write_all(&self.posting_tag(directory, digest, length / ENTRY_BYTES, &bytes))?;
-        self.measure(|stats| {
-            stats.posting_rows_written += 1;
-            stats.posting_bytes_written += ENTRY_BYTES as usize;
-        });
         self.manifest.set(
             directory,
             digest,
             expected
-                .checked_add(1)
+                .checked_add(ordinals.len() as u64)
                 .ok_or_else(|| fail("task posting count overflow"))?,
-        )?;
+        );
+        self.measure(|stats| {
+            stats.posting_rows_written += ordinals.len();
+            stats.posting_bytes_written += bytes.len();
+        });
         Ok(())
     }
 
-    fn posting_tag(
-        &self,
-        namespace: &str,
-        digest: blake3::Hash,
-        position: u64,
-        bytes: &[u8],
-    ) -> [u8; 32] {
-        let mut value = (namespace.len() as u64).to_le_bytes().to_vec();
-        value.extend_from_slice(namespace.as_bytes());
-        value.extend_from_slice(&position.to_le_bytes());
-        value.extend_from_slice(bytes);
-        self.tag(digest, &value)
-    }
-
-    fn ordinal(
-        &self,
-        file: &mut File,
-        namespace: &str,
-        digest: blake3::Hash,
-        position: u64,
-    ) -> Result<usize, ChatError> {
+    fn ordinal(&self, file: &mut File, position: u64) -> Result<usize, ChatError> {
         file.seek(SeekFrom::Start(position * ENTRY_BYTES))?;
         let mut ordinal = [0; 8];
-        let mut tag = [0; 32];
         file.read_exact(&mut ordinal)?;
-        file.read_exact(&mut tag)?;
         self.measure(|stats| {
             stats.posting_rows_read += 1;
             stats.posting_bytes_read += ENTRY_BYTES as usize;
         });
-        if tag != self.posting_tag(namespace, digest, position, &ordinal) {
-            return Err(fail("task posting changed"));
-        }
         usize::try_from(u64::from_le_bytes(ordinal)).map_err(fail)
     }
 
@@ -307,19 +295,12 @@ impl TaskIndex {
             return Ok((Vec::new(), false));
         };
         let mut file = File::open(path)?;
-        let length = file.metadata()?.len();
-        if length
-            != expected
-                .checked_mul(ENTRY_BYTES)
-                .ok_or_else(|| fail("task posting length overflow"))?
-        {
-            return Err(fail("task posting length changed"));
-        }
+        let length = expected * ENTRY_BYTES;
         let mut low = 0;
         let mut high = length / ENTRY_BYTES;
         while low < high {
             let middle = low + (high - low) / 2;
-            if self.ordinal(&mut file, directory, digest, middle)? < before {
+            if self.ordinal(&mut file, middle)? < before {
                 low = middle + 1;
             } else {
                 high = middle;
@@ -328,10 +309,7 @@ impl TaskIndex {
         let start = low.saturating_sub(limit as u64);
         let mut values = Vec::new();
         for position in start..low {
-            values.push(self.ordinal(&mut file, directory, digest, position)?);
-        }
-        if file.metadata()?.len() != length {
-            return Err(fail("task posting length changed during read"));
+            values.push(self.ordinal(&mut file, position)?);
         }
         Ok((values, start > 0))
     }
@@ -374,27 +352,19 @@ impl TaskIndex {
             return Err(fail("task card order changed"));
         }
         let header = source_header(source);
-        let card_bytes = serde_json::to_vec(card).map_err(fail)?;
-        let mut bytes = header.to_vec();
-        bytes.extend_from_slice(&card_bytes);
-        let domain = ordinal_domain(b"card", ordinal);
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(self.directory.join("card-data").join(ordinal.to_string()))?;
-        file.write_all(&bytes)?;
-        file.write_all(&self.tag(domain, &bytes))?;
+        file.write_all(&header)?;
         let mut reference = OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(self.directory.join("task-ref").join(ordinal.to_string()))?;
-        let mut reference_bytes = header.to_vec();
-        reference_bytes.extend_from_slice(card.reference.as_bytes());
-        reference.write_all(&reference_bytes)?;
-        reference.write_all(&self.tag(reference_domain(ordinal), &reference_bytes))?;
+        reference.write_all(&header)?;
         self.measure(|stats| {
             stats.cache_rows_written += 2;
-            stats.cache_bytes_written += bytes.len() + reference_bytes.len() + 64;
+            stats.cache_bytes_written += header.len() * 2;
         });
         self.append_posting("card-ref", blake3::hash(card.reference.as_bytes()), ordinal)?;
         self.append_posting("card-data", blake3::hash(b"card-order"), ordinal)?;
@@ -411,51 +381,24 @@ impl TaskIndex {
         let mut file = File::open(self.directory.join("card-data").join(ordinal.to_string()))?;
         let mut header = [0; 17];
         file.read_exact(&mut header)?;
-        let source = parse_source_header(header)?;
-        let id = state.task_id_from_source(source)?;
-        let card = state.task_card_from_source(&id, source)?;
-        let expected = serde_json::to_vec(&card).map_err(fail)?;
-        if file.metadata()?.len() != (17 + expected.len() + 32) as u64 {
-            return Err(fail("task card size changed"));
-        }
-        let mut value = vec![0; expected.len()];
-        let mut tag = [0; 32];
-        file.read_exact(&mut value)?;
-        file.read_exact(&mut tag)?;
         self.measure(|stats| {
             stats.card_rows_read += 1;
-            stats.card_bytes_read += 17 + value.len() + 32;
+            stats.card_bytes_read += header.len();
         });
-        let mut signed = header.to_vec();
-        signed.extend_from_slice(&value);
-        if value != expected || tag != self.tag(ordinal_domain(b"card", ordinal), &signed) {
-            return Err(fail("task card changed"));
-        }
-        Ok(card)
+        let source = parse_source_header(header)?;
+        let id = state.task_id_from_source(source)?;
+        Ok(state.task_card_from_source(&id, source)?)
     }
 
     fn task_ref(&self, state: &SessionState, ordinal: usize) -> Result<String, ChatError> {
         let mut file = File::open(self.directory.join("task-ref").join(ordinal.to_string()))?;
         let mut header = [0; 17];
         file.read_exact(&mut header)?;
-        let id = state.task_id_from_source(parse_source_header(header)?)?;
-        if file.metadata()?.len() != (17 + id.len() + 32) as u64 {
-            return Err(fail("task reference size changed"));
-        }
-        let mut value = vec![0; id.len()];
-        let mut tag = [0; 32];
-        file.read_exact(&mut value)?;
-        file.read_exact(&mut tag)?;
         self.measure(|stats| {
             stats.task_ref_rows_read += 1;
-            stats.task_ref_bytes_read += 17 + value.len() + 32;
+            stats.task_ref_bytes_read += header.len();
         });
-        let mut signed = header.to_vec();
-        signed.extend_from_slice(&value);
-        if value != id.as_bytes() || tag != self.tag(reference_domain(ordinal), &signed) {
-            return Err(fail("task reference changed"));
-        }
-        Ok(id)
+        Ok(state.task_id_from_source(parse_source_header(header)?)?)
     }
 
     fn append_anchor(&mut self, index: usize, task_id: &str) -> Result<(), ChatError> {
@@ -473,12 +416,6 @@ impl TaskIndex {
             .append(true)
             .open(self.directory.join("anchors"))?;
         file.write_all(&bytes)?;
-        file.write_all(&self.posting_tag(
-            "anchors",
-            blake3::hash(b"anchors"),
-            self.anchor_count as u64,
-            &bytes,
-        ))?;
         self.measure(|stats| {
             stats.cache_rows_written += 1;
             stats.cache_bytes_written += ANCHOR_BYTES as usize;
@@ -497,16 +434,11 @@ impl TaskIndex {
         }
         file.seek(SeekFrom::Start(position as u64 * ANCHOR_BYTES))?;
         let mut bytes = [0; 16];
-        let mut tag = [0; 32];
         file.read_exact(&mut bytes)?;
-        file.read_exact(&mut tag)?;
         self.measure(|stats| {
             stats.anchor_rows_read += 1;
             stats.anchor_bytes_read += ANCHOR_BYTES as usize;
         });
-        if tag != self.posting_tag("anchors", blake3::hash(b"anchors"), position as u64, &bytes) {
-            return Err(fail("task anchor changed"));
-        }
         let index = usize::try_from(u64::from_le_bytes(
             bytes[..8].try_into().expect("fixed width"),
         ))
@@ -557,15 +489,12 @@ impl TaskIndex {
 
     fn stage_state(&self, stage: &std::path::Path, index: usize) -> Result<(u64, bool), ChatError> {
         let mut file = File::open(stage.join("groups").join(index.to_string()))?;
-        if file.metadata()?.len() != 48 {
+        if file.metadata()?.len() != 16 {
             return Err(fail("navigation group length changed"));
         }
-        let mut bytes = [0; 48];
+        let mut bytes = [0; 16];
         file.read_exact(&mut bytes)?;
         self.measure(|stats| stats.navigation_stage_read_bytes += bytes.len());
-        if bytes[16..] != self.tag(ordinal_domain(b"navigation-group", index), &bytes[..16]) {
-            return Err(fail("navigation group changed"));
-        }
         let count = u64::from_le_bytes(bytes[..8].try_into().expect("fixed width"));
         let boundary = u64::from_le_bytes(bytes[8..16].try_into().expect("fixed width"));
         match boundary {
@@ -587,8 +516,7 @@ impl TaskIndex {
         bytes[8..].copy_from_slice(&u64::from(boundary).to_le_bytes());
         let mut file = File::create(stage.join("groups").join(index.to_string()))?;
         file.write_all(&bytes)?;
-        file.write_all(&self.tag(ordinal_domain(b"navigation-group", index), &bytes))?;
-        self.measure(|stats| stats.navigation_stage_write_bytes += 48);
+        self.measure(|stats| stats.navigation_stage_write_bytes += 16);
         Ok(())
     }
 
@@ -603,7 +531,7 @@ impl TaskIndex {
             fs::create_dir(self.directory.join(name))?;
         }
         for name in ["cards", "card-data", "card-ref", "anchor-post"] {
-            self.manifest.clear(name)?;
+            self.manifest.clear(name);
         }
         let anchor_path = self.directory.join("anchors");
         if anchor_path.exists() {
@@ -627,8 +555,7 @@ impl TaskIndex {
                     .join(blake3::hash(id.as_str().as_bytes()).to_hex().as_str()),
             )?;
             file.write_all(&bytes)?;
-            file.write_all(&self.tag(blake3::hash(id.as_str().as_bytes()), &bytes))?;
-            self.measure(|stats| stats.navigation_stage_write_bytes += 40);
+            self.measure(|stats| stats.navigation_stage_write_bytes += 8);
             self.write_stage_state(&stage, ordinal, 0, false)?;
         }
         let selection_count = Cell::new(0usize);
@@ -640,13 +567,10 @@ impl TaskIndex {
                 let mut file = File::open(stage.join("positions").join(digest.to_hex().as_str()))
                     .map_err(domain_error)?;
                 let mut bytes = [0; 8];
-                let mut tag = [0; 32];
                 file.read_exact(&mut bytes).map_err(domain_error)?;
-                file.read_exact(&mut tag).map_err(domain_error)?;
-                self.measure(|stats| stats.navigation_stage_read_bytes += 40);
+                self.measure(|stats| stats.navigation_stage_read_bytes += 8);
                 let ordinal = usize::try_from(u64::from_le_bytes(bytes)).map_err(domain_error)?;
-                if file.metadata().map_err(domain_error)?.len() != 40
-                    || tag != self.tag(digest, &bytes)
+                if file.metadata().map_err(domain_error)?.len() != 8
                     || state
                         .history_items_with_event_ids()
                         .nth(ordinal)
@@ -668,9 +592,7 @@ impl TaskIndex {
                 bytes[..8].copy_from_slice(&(selection as u64).to_le_bytes());
                 bytes[8..].copy_from_slice(&position.to_le_bytes());
                 file.write_all(&bytes).map_err(domain_error)?;
-                file.write_all(&self.tag(ordinal_domain(b"navigation-selection", index), &bytes))
-                    .map_err(domain_error)?;
-                self.measure(|stats| stats.navigation_stage_write_bytes += 48);
+                self.measure(|stats| stats.navigation_stage_write_bytes += 16);
                 let (count, boundary) = self.stage_state(&stage, index).map_err(domain_error)?;
                 self.write_stage_state(&stage, index, count + 1, boundary)
                     .map_err(domain_error)?;
@@ -697,20 +619,16 @@ impl TaskIndex {
             if count != 0 {
                 let mut file = File::open(path)?;
                 let length = file.metadata()?.len();
-                if length != count * 48 {
+                if length != count * 16 {
                     return Err(fail("navigation selection length changed"));
                 }
                 let mut slot = 0;
                 let mut anchor = None;
-                for position in (0..length).step_by(48) {
+                for position in (0..length).step_by(16) {
                     let mut bytes = [0; 16];
-                    let mut tag = [0; 32];
                     file.read_exact(&mut bytes)?;
-                    file.read_exact(&mut tag)?;
-                    self.measure(|stats| stats.navigation_stage_read_bytes += 48);
-                    if u64::from_le_bytes(bytes[8..].try_into().expect("fixed width")) != position
-                        || tag != self.tag(ordinal_domain(b"navigation-selection", index), &bytes)
-                    {
+                    self.measure(|stats| stats.navigation_stage_read_bytes += 16);
+                    if u64::from_le_bytes(bytes[8..].try_into().expect("fixed width")) != position {
                         return Err(fail("navigation selection changed"));
                     }
                     let selection = usize::try_from(u64::from_le_bytes(
@@ -816,17 +734,6 @@ impl TaskIndex {
     }
 }
 
-fn ordinal_domain(name: &[u8], ordinal: usize) -> blake3::Hash {
-    let mut hash = blake3::Hasher::new();
-    hash.update(name);
-    hash.update(&ordinal.to_le_bytes());
-    hash.finalize()
-}
-
-fn reference_domain(ordinal: usize) -> blake3::Hash {
-    ordinal_domain(b"task-ref", ordinal)
-}
-
 fn source_header(source: TaskCardSource) -> [u8; 17] {
     let mut bytes = [0; 17];
     match source {
@@ -923,23 +830,16 @@ impl TaskNavigationAccess for TaskIndexView<'_> {
             .join(index.to_string());
         let mut file = File::open(path).map_err(domain_error)?;
         let length = file.metadata().map_err(domain_error)?.len();
-        if !(32..=4096).contains(&length) {
+        if !(1..=4096).contains(&length) {
             return Err(domain_error("source semantics size changed"));
         }
         let mut bytes = vec![0; length as usize];
         file.read_exact(&mut bytes).map_err(domain_error)?;
-        if file.metadata().map_err(domain_error)?.len() != length {
-            return Err(domain_error("source semantics size changed during read"));
-        }
         self.index.measure(|stats| {
             stats.semantics_rows_read += 1;
             stats.semantics_bytes_read += bytes.len();
         });
-        let (data, tag) = bytes.split_at(bytes.len() - 32);
-        if tag != self.index.tag(ordinal_domain(b"semantics", index), data) {
-            return Err(domain_error("source semantics changed"));
-        }
-        let (origin, class, authority) = serde_json::from_slice(data).map_err(domain_error)?;
+        let (origin, class, authority) = serde_json::from_slice(&bytes).map_err(domain_error)?;
         Ok(Some(crate::domain::session::HistorySourceSemantics {
             origin,
             class,
@@ -997,7 +897,6 @@ pub(super) fn update<'a>(
         _ => TaskIndex::new(source.identity())?,
     };
     index.stats.set(TaskIndexStats::default());
-    index.manifest.reset_work();
     index.update(source, session)?;
     *cache = Some(index);
     Ok(cache)

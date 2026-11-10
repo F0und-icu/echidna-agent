@@ -97,17 +97,15 @@ fn task_epoch_carries_only_an_unconsumed_compaction_reset() {
     }
 }
 
-// Direct cache-corruption checks use the private owner without a production test API.
+// Ordinary posting counts are tested through their private owner.
 #[allow(clippy::duplicate_mod)]
-#[path = "../../src/cli_chat/task_posting_manifest.rs"]
-mod task_posting_manifest;
+#[path = "../../src/cli_chat/task_posting_lengths.rs"]
+mod task_posting_lengths;
 
 #[test]
-fn task_posting_proof_rejects_deleted_and_aligned_truncated_files() {
+fn task_posting_counts_preserve_namespaces_updates_and_incomplete_file_errors() {
     let root = crate::support::TemporaryDirectory::new("task-posting-proof");
-    let proof_path = root.path().join("proofs");
-    let mut proof =
-        task_posting_manifest::PostingManifest::new(proof_path.clone(), [7; 32]).unwrap();
+    let mut proof = task_posting_lengths::PostingLengths::default();
     for (index, namespace) in ["history", "cards", "anchor-post", "card-ref"]
         .into_iter()
         .enumerate()
@@ -116,14 +114,12 @@ fn task_posting_proof_rejects_deleted_and_aligned_truncated_files() {
         let other = blake3::hash(format!("absent-{index}").as_bytes());
         let file = root.path().join(format!("posting-{index}"));
         std::fs::write(&file, [0u8; 120]).unwrap();
-        proof.set(namespace, key, 3).unwrap();
+        proof.set(namespace, key, 3);
         assert_eq!(
             proof.verify_length(namespace, key, &file, 40).unwrap(),
             Some(3)
         );
-        proof.reset_work();
-        assert_eq!(proof.get(namespace, other).unwrap(), None);
-        assert!(proof.work().read_nodes <= 257);
+        assert_eq!(proof.get(namespace, other), None);
         std::fs::write(&file, [0u8; 80]).unwrap();
         assert!(
             proof.verify_length(namespace, key, &file, 40).is_err(),
@@ -137,25 +133,19 @@ fn task_posting_proof_rejects_deleted_and_aligned_truncated_files() {
     }
     for index in 0..64 {
         let key = blake3::hash(format!("additional-{index}").as_bytes());
-        proof.set("history", key, index + 1).unwrap();
+        proof.set("history", key, index + 1);
     }
     for index in 0..64 {
         let key = blake3::hash(format!("additional-{index}").as_bytes());
-        proof.reset_work();
-        assert_eq!(proof.get("history", key).unwrap(), Some(index + 1));
-        assert!(proof.work().read_nodes <= 257);
+        assert_eq!(proof.get("history", key), Some(index + 1));
     }
     let updated = blake3::hash(b"additional-0");
-    proof.set("history", updated, 99).unwrap();
-    assert_eq!(proof.get("history", updated).unwrap(), Some(99));
-    proof.clear("cards").unwrap();
-    assert_eq!(proof.get("cards", blake3::hash(b"term-1")).unwrap(), None);
-    let key = blake3::hash(b"term-0");
-    std::fs::remove_file(&proof_path).unwrap();
-    assert!(
-        proof.get("history", key).is_err(),
-        "missing proof node must be visible"
-    );
+    assert_eq!(proof.len(), 68);
+    proof.set("history", updated, 99);
+    assert_eq!(proof.get("history", updated), Some(99));
+    proof.clear("cards");
+    assert_eq!(proof.get("cards", blake3::hash(b"term-1")), None);
+    assert_eq!(proof.len(), 67);
 }
 
 #[test]

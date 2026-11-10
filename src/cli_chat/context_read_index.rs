@@ -162,6 +162,8 @@ impl Drop for Scratch {
 }
 
 pub(in crate::cli_chat) struct ColdIndex {
+    verified_record:
+        std::sync::Mutex<Option<(String, u64, crate::adapters::file_revision::FileRevision)>>,
     scratch: Arc<Scratch>,
     peers: Arc<PeerDirectory>,
     peer_count: usize,
@@ -180,7 +182,7 @@ pub(in crate::cli_chat) struct ColdIndex {
     preparation_text_bytes: usize,
     preparation_hash_bytes: usize,
     preparation_record_bytes: usize,
-    owners: Arc<std::sync::Mutex<super::super::task_posting_manifest::PostingManifest>>,
+    owners: Arc<std::sync::Mutex<super::super::task_posting_lengths::PostingLengths>>,
 }
 
 pub(super) struct ColdSearch {
@@ -331,11 +333,11 @@ fn owner_path(scratch: &Scratch, id: &str) -> PathBuf {
 fn read_call_owner(
     scratch: &Scratch,
     key: &[u8; 32],
-    manifest: &super::super::task_posting_manifest::PostingManifest,
+    manifest: &super::super::task_posting_lengths::PostingLengths,
     id: &str,
 ) -> Result<Option<CallOwner>, ChatError> {
     let path = owner_path(scratch, id);
-    let expected = manifest.get("artifact-owner", blake3::hash(id.as_bytes()))?;
+    let expected = manifest.get("artifact-owner", blake3::hash(id.as_bytes()));
     let bytes = match fs::read(&path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == io::ErrorKind::NotFound && expected.is_none() => {
@@ -358,7 +360,7 @@ fn read_call_owner(
 fn write_call_owner(
     scratch: &Scratch,
     key: &[u8; 32],
-    manifest: &mut super::super::task_posting_manifest::PostingManifest,
+    manifest: &mut super::super::task_posting_lengths::PostingLengths,
     id: &str,
     session: &str,
     record_end: usize,
@@ -388,7 +390,7 @@ fn write_call_owner(
         "artifact-owner",
         blake3::hash(id.as_bytes()),
         bytes.len() as u64,
-    )?;
+    );
     Ok(())
 }
 
@@ -906,6 +908,7 @@ impl ColdIndex {
             hashes.flush()?;
             let (peer_count, peer_manifest) = peer_manifest(&peers, &previous.nonce)?;
             Arc::new(Self {
+                verified_record: Default::default(),
                 scratch: Arc::clone(&previous.scratch),
                 peers,
                 peer_count,
@@ -945,7 +948,7 @@ impl ColdIndex {
         hashes: &mut File,
         scratch: &Scratch,
         key: &[u8; 32],
-        owners: &mut super::super::task_posting_manifest::PostingManifest,
+        owners: &mut super::super::task_posting_lengths::PostingLengths,
     ) -> Result<(PeerCheckpoint, bool), ChatError> {
         let previous_count = previous.map_or(0, |value| value.event_count);
         if previous_count > snapshot.events.len() {
@@ -1169,6 +1172,19 @@ impl ColdIndex {
         project: &crate::adapters::project_event_store::Project,
         record: &Record,
     ) -> Result<(usize, usize), ChatError> {
+        let path = project
+            .session_stream_path_existing(&crate::domain::events::StreamId::new(&record.session))?;
+        let revision = crate::adapters::file_revision::FileRevision::of(&fs::metadata(&path)?)?;
+        let key = (record.session.clone(), record.raw_offset, revision);
+        if self
+            .verified_record
+            .lock()
+            .map_err(|_| fail("source revision lock poisoned"))?
+            .as_ref()
+            == Some(&key)
+        {
+            return Ok((0, 0));
+        }
         let mut hashes = File::open(self.scratch.0.join("hashes"))?;
         let mut position = 0;
         let mut hash_bytes = 0;
@@ -1189,6 +1205,13 @@ impl ColdIndex {
             )?;
             position += actual.len();
         }
+        if crate::adapters::file_revision::FileRevision::of(&fs::metadata(&path)?)? != key.2 {
+            return Err(fail("context source changed during verification"));
+        }
+        *self
+            .verified_record
+            .lock()
+            .map_err(|_| fail("source revision lock poisoned"))? = Some(key);
         Ok((position, hash_bytes))
     }
 
@@ -1257,7 +1280,7 @@ impl ColdIndex {
             }
             if semantics_changed {
                 discarded = (
-                    length,
+                    length - previous.current_cursor.indexed_bytes(),
                     (text.stream_position()? - old_text) as usize,
                     (hashes.stream_position()? - old_hashes) as usize,
                     (records.stream_position()? - previous.index_len) as usize,
@@ -1275,6 +1298,7 @@ impl ColdIndex {
                 usize::try_from(cursor.indexed_events() - previous.current_cursor.indexed_events())
                     .map_err(fail)?;
             Ok(Some(Arc::new(Self {
+                verified_record: Default::default(),
                 scratch: Arc::clone(&previous.scratch),
                 peers: Arc::clone(&previous.peers),
                 peer_count: previous.peer_count,
@@ -1289,7 +1313,7 @@ impl ColdIndex {
                 indexed_bytes: length - previous.current_cursor.indexed_bytes(),
                 initial_indexed_events: previous.initial_indexed_events,
                 initial_indexed_bytes: previous.initial_indexed_bytes,
-                preparation_source_bytes: length,
+                preparation_source_bytes: length - previous.current_cursor.indexed_bytes(),
                 preparation_text_bytes: (text.stream_position()? - old_text) as usize,
                 preparation_hash_bytes: (hashes.stream_position()? - old_hashes) as usize,
                 preparation_record_bytes: (records.stream_position()? - previous.index_len)
@@ -1338,10 +1362,7 @@ impl ColdIndex {
         fs::create_dir(&peers.0)?;
         fs::create_dir(scratch.0.join("ordinals"))?;
         fs::create_dir(scratch.0.join("call-owners"))?;
-        let mut owners = super::super::task_posting_manifest::PostingManifest::new(
-            scratch.0.join("owner-proofs"),
-            nonce,
-        )?;
+        let mut owners = super::super::task_posting_lengths::PostingLengths::default();
         let mut records = File::create(scratch.0.join("records"))?;
         let mut text = File::create(scratch.0.join("text"))?;
         let mut hashes = File::create(scratch.0.join("hashes"))?;
@@ -1411,6 +1432,7 @@ impl ColdIndex {
             preparation_hash_bytes: hashes.stream_position()? as usize,
             preparation_record_bytes: index_len as usize,
             owners: Arc::new(std::sync::Mutex::new(owners)),
+            verified_record: Default::default(),
         })
     }
 
@@ -1427,7 +1449,7 @@ impl ColdIndex {
         hashes: &mut File,
         scratch: &Scratch,
         key: &[u8; 32],
-        owners: &mut super::super::task_posting_manifest::PostingManifest,
+        owners: &mut super::super::task_posting_lengths::PostingLengths,
         semantics_changed: &mut bool,
     ) -> Result<(usize, blake3::Hash), ChatError> {
         let mut history = state.history_items_with_event_ids().skip(start_history);

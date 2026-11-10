@@ -316,7 +316,7 @@ impl TaskContextStage for FixtureStage {
         )?;
         let history = state.task_resume_history(
             &selection.selected_history,
-            &facts.sink.0,
+            facts.sink.0.iter(),
             selection.request_proof_version,
         )?;
         Ok(TaskSelectionMaterial {
@@ -409,7 +409,7 @@ impl TaskContextStage for FixtureStage {
             state,
             capture,
             &selection,
-            events,
+            events.iter(),
             &[],
         )
         .map_err(|error| AgentLoopError::HistoryCheckpointCommit {

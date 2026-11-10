@@ -67,6 +67,168 @@ mod durability {
         (receipt, result)
     }
 
+    fn assert_source(projection: &SessionProjection, events: &[EventEnvelope<Value>]) {
+        let project = crate::domain::project::ProjectId::new("source-tracking");
+        let (expected, state) = crate::domain::session::SessionSourceIdentity::from_events(
+            project.clone(),
+            events,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            projection.task_source_identity(project, &[]).unwrap(),
+            expected
+        );
+        assert_eq!(projection.state(), &state);
+    }
+
+    #[test]
+    fn incremental_source_identity_matches_replay_and_failed_writes_are_atomic() {
+        struct Sink {
+            fail: bool,
+            events: Vec<EventEnvelope<Value>>,
+        }
+        impl EventSink<Value> for Sink {
+            type Error = &'static str;
+            fn append_event(&mut self, event: &EventEnvelope<Value>) -> Result<(), Self::Error> {
+                if self.fail {
+                    return Err("injected append failure");
+                }
+                self.events.push(event.clone());
+                Ok(())
+            }
+        }
+        let root = TemporaryDirectory::new("tracked-source");
+        let project = Project::initialize(root.path()).unwrap();
+        let blobs = crate::adapters::artifact_store::LocalArtifactStore::for_project(&project);
+        let mut sink = Sink {
+            fail: false,
+            events: vec![started()],
+        };
+        let mut projection = SessionProjection::replay(sink.events.clone()).unwrap();
+        assert_source(&projection, &sink.events);
+        for sequence in 2..6 {
+            let event = envelope(
+                SessionEvent::HistoryItemRecorded {
+                    item: ContentItem::user_text(format!("input-{sequence}")),
+                },
+                sequence,
+            );
+            sink.fail = true;
+            assert!(projection.append(&mut sink, event.clone()).is_err());
+            assert_source(&projection, &sink.events);
+            sink.fail = false;
+            projection.append(&mut sink, event.clone()).unwrap();
+            assert_source(&projection, &sink.events);
+            assert_eq!(
+                projection.append(&mut sink, event).unwrap(),
+                crate::domain::events::ApplyOutcome::DuplicateIgnored
+            );
+            assert_source(&projection, &sink.events);
+        }
+        let suffix = envelope(
+            SessionEvent::HistoryItemRecorded {
+                item: ContentItem::assistant_text("durable suffix"),
+            },
+            6,
+        );
+        projection
+            .ingest_durable_verified(vec![suffix.clone()], &blobs)
+            .unwrap();
+        sink.events.push(suffix.clone());
+        assert_source(&projection, &sink.events);
+        projection
+            .ingest_durable_verified(vec![suffix], &blobs)
+            .unwrap();
+        assert_source(&projection, &sink.events);
+        let invalid = envelope(
+            SessionEvent::HistoryItemRecorded {
+                item: ContentItem::ToolResult {
+                    result: outcome(&call("missing")).1,
+                },
+            },
+            8,
+        );
+        let valid = envelope(
+            SessionEvent::HistoryItemRecorded {
+                item: ContentItem::user_text("must not commit"),
+            },
+            7,
+        );
+        let retained = projection.task_source_events().to_vec();
+        assert!(
+            retained
+                .iter()
+                .zip(projection.task_source_events())
+                .all(|(copy, original)| std::sync::Arc::ptr_eq(copy, original)),
+            "prepared sources share immutable payloads"
+        );
+        assert!(
+            projection
+                .ingest_durable_verified(vec![valid, invalid], &blobs)
+                .is_err()
+        );
+        assert_source(&projection, &sink.events);
+        assert_eq!(projection.task_source_events(), retained);
+        let replay = SessionProjection::replay(sink.events.clone()).unwrap();
+        assert_source(&replay, &sink.events);
+        assert_eq!(projection.task_source_events(), replay.task_source_events());
+    }
+
+    #[test]
+    fn retained_task_events_preserve_recorded_and_unknown_tool_recovery() {
+        let mut events = vec![started()];
+        for id in ["known", "unknown"] {
+            events.push(envelope(
+                SessionEvent::HistoryItemRecorded {
+                    item: ContentItem::ToolCall { call: call(id) },
+                },
+                events.len() as u64 + 1,
+            ));
+        }
+        let (receipt, result) = outcome(&call("known"));
+        events.push(envelope(
+            SessionEvent::ExecutionOutcomeRecorded { receipt, result },
+            4,
+        ));
+        events.push(envelope(
+            SessionEvent::Resumed {
+                primary_provider_session: ProviderSessionRef {
+                    id: ProviderSessionId::new("durable-resumed"),
+                    role: ProviderSessionRole::Primary,
+                    generation: 2,
+                },
+            },
+            5,
+        ));
+        let projection = SessionProjection::replay(events.clone()).unwrap();
+        assert_source(&projection, &events);
+        let wanted = vec![events[1].event_id.clone(), events[2].event_id.clone()];
+        for version in 0..=8 {
+            let full = projection
+                .state()
+                .task_resume_history(&wanted, events.iter(), version)
+                .unwrap();
+            let retained = projection
+                .state()
+                .task_resume_history(
+                    &wanted,
+                    projection.task_source_events().iter().map(AsRef::as_ref),
+                    version,
+                )
+                .unwrap();
+            assert_eq!(full.len(), 4);
+            assert_eq!(retained.len(), full.len());
+            for (full, retained) in full.iter().zip(&retained) {
+                assert_eq!(full.item, retained.item);
+                assert_eq!(full.source_refs, retained.source_refs);
+                assert_eq!(full.semantics, retained.semantics);
+                assert_eq!(full.vision_references, retained.vision_references);
+            }
+        }
+        assert_eq!(projection.task_source_events().len(), 3);
+    }
+
     #[test]
     fn suffix_refresh_sees_independent_receipts_and_matches_full_replay() {
         let root = TemporaryDirectory::new("session-suffix");
@@ -131,8 +293,8 @@ mod durability {
     }
 
     #[test]
-    fn cursor_rejects_same_length_prefix_mutation_and_truncation() {
-        for truncate in [false, true] {
+    fn cursor_rejects_truncation_and_wrong_session_identity() {
+        for wrong_session in [false, true] {
             let root = TemporaryDirectory::new("session-prefix-change");
             let project = Project::initialize(root.path()).unwrap();
             let id = StreamId::new("durability");
@@ -146,14 +308,18 @@ mod durability {
                 .path()
                 .join(".echidna/sessions/durability/events.jsonl");
             let mut bytes = fs::read(&path).unwrap();
-            if truncate {
+            if !wrong_session {
                 bytes.pop();
-            } else {
-                let i = bytes.iter().position(|b| *b == b'2').unwrap();
-                bytes[i] = b'3';
             }
             fs::write(&path, &bytes).unwrap();
             let mut writer = project.open_writer().unwrap();
+            let id = if wrong_session {
+                let other = StreamId::new("different-session");
+                drop(writer.open_session_projection(other.clone(), None).unwrap());
+                other
+            } else {
+                id
+            };
             assert!(matches!(
                 writer.open_session_projection(id, Some(&cursor)),
                 Err(ProjectEventStoreError::ValidatedPrefixChanged { .. })
@@ -432,6 +598,45 @@ mod durability {
             ContentItem::ToolResult { result }
         );
         assert_eq!(state.history().items().len(), 1);
+    }
+
+    #[test]
+    fn open_writer_rejects_external_rewrite_before_its_next_append() {
+        for replace in [false, true] {
+            let root = TemporaryDirectory::new("open-writer-revision");
+            let project = Project::initialize(root.path()).unwrap();
+            let mut writer = project.open_writer().unwrap();
+            let (mut store, _) = writer
+                .open_session_projection(StreamId::new("durability"), None)
+                .unwrap();
+            store.append_event(&started()).unwrap();
+            let path = root
+                .path()
+                .join(".echidna/sessions/durability/events.jsonl");
+            let original = fs::read(&path).unwrap();
+            let changed = String::from_utf8(original.clone())
+                .unwrap()
+                .replace("durable-primary", "changed-primary");
+            assert_eq!(original.len(), changed.len());
+            if replace {
+                let replacement = path.with_extension("replacement");
+                fs::write(&replacement, &changed).unwrap();
+                fs::rename(replacement, &path).unwrap();
+            } else {
+                fs::write(&path, &changed).unwrap();
+            }
+            let next = envelope(
+                SessionEvent::HistoryItemRecorded {
+                    item: ContentItem::user_text("must not append"),
+                },
+                2,
+            );
+            assert!(matches!(
+                store.append_event(&next),
+                Err(ProjectEventStoreError::ValidatedPrefixChanged { .. })
+            ));
+            assert_eq!(fs::read(&path).unwrap(), changed.as_bytes());
+        }
     }
 
     #[test]

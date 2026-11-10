@@ -5,6 +5,7 @@ pub(crate) mod agent_evolution;
 pub mod artifact_store;
 pub mod credentials;
 pub(crate) mod file_diff;
+pub(crate) mod file_revision;
 pub mod fragment_cache;
 pub(crate) mod http_error_body;
 pub mod image;

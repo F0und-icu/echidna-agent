@@ -311,7 +311,11 @@ fn long_tool_turn_applies_verified_persona_or_methods_before_next_primary() {
                     .expect("checkpoint forgery is structurally coherent");
                 write_events(&forged);
                 let before = fs::read(&event_path).unwrap();
-                let rejected = run_chat(root.path(), &config, "/exit\n", &["--resume", "latest"]);
+                let rejected = Command::new(env!("CARGO_BIN_EXE_echidna"))
+                    .current_dir(root.path())
+                    .args(["session", "show", &session_id(root.path())])
+                    .output()
+                    .unwrap();
                 assert!(!rejected.status.success());
                 assert!(
                     String::from_utf8_lossy(&rejected.stderr)

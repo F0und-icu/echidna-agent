@@ -59,6 +59,8 @@ mod improvement_policy;
 #[path = "private_cases/argument_correction_checkpoint.rs"]
 mod argument_correction_checkpoint;
 
+#[path = "private_cases/runtime_integrity.rs"]
+mod runtime_integrity;
 #[path = "private_cases/session_read_reuse.rs"]
 mod session_read_reuse;
 #[path = "private_cases/task_cli_subscription_delivery.rs"]

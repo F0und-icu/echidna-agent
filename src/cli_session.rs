@@ -122,9 +122,6 @@ pub(crate) fn resolve_resume_target(
     }
 
     let mut latest: Option<(String, String)> = None;
-    let project_events =
-        crate::adapters::project_event_store::read_existing_research_events(project)
-            .map_err(|error| session_error(error.to_string()))?;
     for session_id in project.existing_session_ids()? {
         let events = read_existing_session_events(project, &session_id)
             .map_err(|error| session_error(error.to_string()))?;
@@ -134,21 +131,13 @@ pub(crate) fn resolve_resume_target(
             .ok_or_else(|| CliError::SessionOperation {
                 message: format!("Session `{session_id}` has no durable lifecycle Event"),
             })?;
-        let state = SessionProjection::replay_project_verified(
-            project.project_id().clone(),
-            &events,
-            &project_events,
-            || {
-                crate::adapters::research_projection::load_reference_catalog(project).map_err(
-                    |message| crate::domain::session::SessionError::TaskContext { message },
-                )
-            },
-            &crate::adapters::artifact_store::LocalArtifactStore::for_project(project),
-        )
-        .map_err(|error| session_error(error.to_string()))?
-        .state()
-        .clone();
-        if state.lifecycle() == SessionLifecycle::Active {
+        let lifecycle = events.iter().rev().find(|event| {
+            matches!(
+                event.event_type.as_str(),
+                "session.started" | "session.started_with_agent" | "session.ended"
+            )
+        });
+        if lifecycle.is_some_and(|event| event.event_type.as_str() != "session.ended") {
             let candidate = (activity, session_id.as_str().to_owned());
             if latest.as_ref().is_none_or(|current| candidate > *current) {
                 latest = Some(candidate);
@@ -158,7 +147,7 @@ pub(crate) fn resolve_resume_target(
     latest
         .map(|(_, session_id)| Some(session_id))
         .ok_or_else(|| CliError::SessionOperation {
-            message: "the current project has no strictly replayable Active Session".to_owned(),
+            message: "the current project has no Active Session".to_owned(),
         })
 }
 

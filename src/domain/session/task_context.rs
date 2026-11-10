@@ -1153,16 +1153,17 @@ impl SessionState {
         }
         let history = self.task_resume_history(
             &wanted.into_iter().collect::<Vec<_>>(),
-            events,
+            events.iter(),
             selection.request_proof_version,
         )?;
         Ok((history, summary))
     }
 
-    pub(crate) fn task_resume_history(
+    pub(crate) fn task_resume_history<'a>(
         &self,
         wanted: &[EventId],
-        events: &[crate::domain::events::EventEnvelope<serde_json::Value>],
+        events: impl Iterator<Item = &'a crate::domain::events::EventEnvelope<serde_json::Value>>
+        + Clone,
         proof_version: u8,
     ) -> Result<Vec<TaskResumeHistoryItem>, SessionError> {
         use crate::domain::model::ContentItem;
@@ -1270,11 +1271,11 @@ impl SessionState {
                     )
                 } else {
                     let call_index = events
-                        .iter()
+                        .clone()
                         .position(|event| &event.event_id == call_id)
                         .ok_or_else(|| invalid("resumed marker Call event is absent"))?;
                     let mut resumed = None;
-                    for event in &events[call_index + 1..] {
+                    for event in events.clone().skip(call_index + 1) {
                         if matches!(
                             super::SessionEvent::decode(&event.event_type, event.payload.clone())?,
                             super::SessionEvent::Resumed { .. }

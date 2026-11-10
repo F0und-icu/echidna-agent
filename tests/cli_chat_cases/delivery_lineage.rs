@@ -224,8 +224,8 @@ fn tool_incremental_retry_uses_only_accepted_baseline_and_requires_real_delivere
         "a logical anchor without actual chain delivery cannot be closed"
     );
 
-    // A valid stored chain must fail before Resume mutates the Session if a
-    // required original audit Blob is missing or its contents are corrupt.
+    // Explicit historical audit must reject a missing/corrupt original wire
+    // Blob without mutating the Session. Resume retires this Provider chain.
     let before = session_events(root.path(), &session);
     let required_id = audits[0]["payload"]["components"][0]["blob_id"]
         .as_str()
@@ -233,7 +233,14 @@ fn tool_incremental_retry_uses_only_accepted_baseline_and_requires_real_delivere
     let required_path = blob_directory.join(required_id);
     let original_blob = fs::read(&required_path).unwrap();
     fs::remove_file(&required_path).unwrap();
-    let missing = run_chat(root.path(), &config, "/exit\n", &["--resume", "latest"]);
+    let audit = || {
+        Command::new(env!("CARGO_BIN_EXE_echidna"))
+            .current_dir(root.path())
+            .args(["session", "show", &session])
+            .output()
+            .unwrap()
+    };
+    let missing = audit();
     assert!(!missing.status.success());
     let missing_error = String::from_utf8_lossy(&missing.stderr);
     assert!(
@@ -242,7 +249,7 @@ fn tool_incremental_retry_uses_only_accepted_baseline_and_requires_real_delivere
     );
     assert_eq!(session_events(root.path(), &session), before);
     fs::write(&required_path, b"corrupt audit blob").unwrap();
-    let corrupt = run_chat(root.path(), &config, "/exit\n", &["--resume", "latest"]);
+    let corrupt = audit();
     assert!(!corrupt.status.success());
     let corrupt_error = String::from_utf8_lossy(&corrupt.stderr);
     assert!(

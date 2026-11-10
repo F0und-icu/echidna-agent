@@ -113,13 +113,20 @@ fn incremental_actual_tool_result_substitution_fails_source_replay() {
         String::from_utf8_lossy(&isolated_valid.stderr)
     );
     fs::remove_file(blobs.join(&isolated_blob)).unwrap();
-    let missing = run_chat(root.path(), &config, "/exit\n", &["--resume", "latest"]);
+    let audit = || {
+        Command::new(env!("CARGO_BIN_EXE_echidna"))
+            .current_dir(root.path())
+            .args(["session", "show", &session])
+            .output()
+            .unwrap()
+    };
+    let missing = audit();
     assert!(
         !missing.status.success(),
         "missing actual-only Blob was accepted"
     );
     fs::write(blobs.join(&isolated_blob), b"corrupt").unwrap();
-    let corrupt = run_chat(root.path(), &config, "/exit\n", &["--resume", "latest"]);
+    let corrupt = audit();
     assert!(
         !corrupt.status.success(),
         "corrupt actual-only Blob was accepted"
@@ -198,7 +205,7 @@ fn incremental_actual_tool_result_substitution_fails_source_replay() {
         .expect("actual-only substitution passes structural replay");
     write_events(&forged);
     let before = fs::read(&event_path).unwrap();
-    let rejected = run_chat(root.path(), &config, "/exit\n", &["--resume", "latest"]);
+    let rejected = audit();
     assert!(
         !rejected.status.success(),
         "actual-only substitution was accepted"

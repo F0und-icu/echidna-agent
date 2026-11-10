@@ -1,5 +1,6 @@
 //! One read-only composition of Research facts with Project Session Receipt facts.
 
+use crate::adapters::file_revision::FileRevision;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
@@ -64,8 +65,8 @@ impl ProjectArtifactCatalog {
 }
 
 /// Ephemeral receipt-only cache for one interactive process. It is not a
-/// fact store: every Session entry is guarded by an exact JSONL byte digest
-/// and can be discarded/rebuilt from the existing authoritative streams.
+/// fact store: unchanged filesystem revisions reuse previously validated data.
+/// Changed files are read and validated from the authoritative streams.
 #[derive(Default)]
 pub(crate) struct SessionReceiptCatalogCache {
     sessions: BTreeMap<crate::domain::events::StreamId, CachedSessionReceipts>,
@@ -73,6 +74,8 @@ pub(crate) struct SessionReceiptCatalogCache {
 }
 
 struct CachedResearchProjection {
+    revision: FileRevision,
+    events: Vec<EventEnvelope<serde_json::Value>>,
     count: usize,
     byte_length: u64,
     byte_digest: String,
@@ -82,7 +85,7 @@ struct CachedResearchProjection {
 
 #[derive(Clone)]
 struct CachedSessionReceipts {
-    source_digest: String,
+    revision: FileRevision,
     receipts: Vec<(ExecutionReceiptId, crate::domain::tools::ExecutionReceipt)>,
 }
 
@@ -110,16 +113,16 @@ impl SessionReceiptCatalogCache {
             let path = project
                 .session_stream_path_existing(session_id)
                 .map_err(|error| error.to_string())?;
-            let before = session_source_digest(&path)?;
+            let before = source_revision(&path)?;
             let reuse = self
                 .sessions
                 .get(session_id)
-                .is_some_and(|cached| cached.source_digest == before);
+                .is_some_and(|cached| cached.revision == before);
             if reuse {
                 continue;
             }
             let receipts = load_session_receipts(project, session_id)?;
-            let after = session_source_digest(&path)?;
+            let after = source_revision(&path)?;
             if before != after {
                 return Err(format!(
                     "Session `{session_id}` changed while refreshing its receipt projection"
@@ -128,7 +131,7 @@ impl SessionReceiptCatalogCache {
             self.sessions.insert(
                 session_id.clone(),
                 CachedSessionReceipts {
-                    source_digest: after,
+                    revision: after,
                     receipts,
                 },
             );
@@ -182,6 +185,12 @@ fn session_source_digest(path: &std::path::Path) -> Result<String, String> {
     }
 }
 
+fn source_revision(path: &std::path::Path) -> Result<FileRevision, String> {
+    fs::metadata(path)
+        .and_then(|metadata| FileRevision::of(&metadata))
+        .map_err(|error| format!("inspect source revision: {error}"))
+}
+
 fn source_prefix_digest(path: &std::path::Path, mut remaining: u64) -> Result<String, String> {
     let mut file = fs::File::open(path)
         .map_err(|error| format!("read Event stream `{}`: {error}", path.display()))?;
@@ -220,24 +229,27 @@ impl ProjectReadContext {
         let path = project
             .research_stream_path_existing()
             .map_err(|error| error.to_string())?;
-        let before = session_source_digest(&path)?;
+        let before = source_revision(&path)?;
         let (references, receipt_digest) = cache.refresh_with_session(project, current)?;
-        let events = read_existing_research_events(project).map_err(|error| error.to_string())?;
-        let after = session_source_digest(&path)?;
-        if before != after {
+        if before != source_revision(&path)? {
             return Err("Project stream changed during projection read".to_owned());
         }
         if let Some(value) = &cache.research
-            && value.byte_digest == after
+            && value.revision == before
             && value.receipt_digest == receipt_digest
         {
             return Ok(Self {
-                events,
+                events: value.events.clone(),
                 references,
-                research_digest: after,
+                research_digest: value.byte_digest.clone(),
                 receipt_digest,
                 research: value.state.clone(),
             });
+        }
+        let events = read_existing_research_events(project).map_err(|error| error.to_string())?;
+        let after = session_source_digest(&path)?;
+        if before != source_revision(&path)? {
+            return Err("Project stream changed during projection read".to_owned());
         }
         let byte_length = fs::metadata(&path)
             .map_err(|error| format!("stat Event stream `{}`: {error}", path.display()))?
@@ -267,6 +279,8 @@ impl ProjectReadContext {
             ),
         };
         cache.research = Some(CachedResearchProjection {
+            revision: before,
+            events: events.clone(),
             count: events.len(),
             byte_length,
             byte_digest: after.clone(),

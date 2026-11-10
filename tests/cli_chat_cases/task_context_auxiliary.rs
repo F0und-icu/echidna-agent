@@ -162,8 +162,8 @@ fn rebuilt_navigation_streams_real_same_input_source_refreshes() {
 }
 
 #[test]
-fn task_posting_namespaces_reject_swapped_real_disk_rows() {
-    for tamper in [false, true] {
+fn task_posting_namespaces_keep_distinct_ordinals_and_reject_incomplete_rows() {
+    for incomplete in [false, true] {
         let root = TemporaryDirectory::new("task-posting-namespace-swap");
         initialize_project(root.path());
         let agent = definition(root.path(), None);
@@ -217,16 +217,15 @@ fn task_posting_namespaces_reject_swapped_real_disk_rows() {
                     let anchor = indexes[0].join("anchor-post").join(&digest);
                     let card_bytes = fs::read(&card).unwrap();
                     let anchor_bytes = fs::read(&anchor).unwrap();
-                    assert_eq!(card_bytes.len(), 40);
-                    assert_eq!(anchor_bytes.len(), 40);
+                    assert_eq!(card_bytes.len(), 8);
+                    assert_eq!(anchor_bytes.len(), 8);
                     assert_ne!(&card_bytes[..8], &anchor_bytes[..8]);
-                    if tamper {
-                        fs::write(card, anchor_bytes).unwrap();
-                        fs::write(anchor, card_bytes).unwrap();
+                    if incomplete {
+                        fs::write(card, &card_bytes[..7]).unwrap();
                     }
                     (
                         text_response("Target complete.", "swap-target-done"),
-                        tamper,
+                        incomplete,
                     )
                 }
                 4 => (new_selection_response(wire, "swap-select-next"), false),
@@ -264,9 +263,9 @@ fn task_posting_namespaces_reject_swapped_real_disk_rows() {
         let output = child.wait_with_output().unwrap();
         server.join();
         let stderr = String::from_utf8_lossy(&output.stderr);
-        if tamper {
+        if incomplete {
             assert!(!output.status.success(), "{stderr}");
-            assert!(stderr.contains("task posting changed"), "{stderr}");
+            assert!(stderr.contains("task posting length changed"), "{stderr}");
         } else {
             assert!(output.status.success(), "{stderr}");
             let resumed = run_chat(root.path(), &config, "/exit\n", &["--resume", "latest"]);
@@ -1184,7 +1183,8 @@ fn current_index_rebuild_counts_discarded_suffix_scan_and_writes() {
             .unwrap()
     };
     assert!(
-        counter(work[1], "source_index_read_bytes") >= 2 * observed.load(Ordering::SeqCst),
+        counter(work[1], "source_index_read_bytes")
+            >= 2 * observed.load(Ordering::SeqCst) - counter(work[0], "source_index_read_bytes"),
         "{}",
         work[1]
     );

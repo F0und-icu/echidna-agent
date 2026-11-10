@@ -43,7 +43,7 @@ impl TurnTiming {
 pub(super) fn task_index_work(enabled: bool, stats: &super::task_index::TaskIndexStats) {
     if enabled {
         console_eprintln!(
-            "[debug timing] phase=task_index source_rows={} source_prefix_bytes={} source_verification_bytes={} source_index_read_bytes={} source_index_text_write_bytes={} source_index_hash_write_bytes={} source_index_record_write_bytes={} posting_rows_read={} posting_bytes_read={} posting_rows_written={} posting_bytes_written={} cache_rows_written={} cache_bytes_written={} proof_nodes_read={} proof_bytes_read={} proof_nodes_written={} proof_bytes_written={} card_rows_read={} card_bytes_read={} task_ref_rows_read={} task_ref_bytes_read={} anchor_rows_read={} anchor_bytes_read={} semantics_rows_read={} semantics_bytes_read={} cards_written={} anchors_written={} navigation_stage_read_bytes={} navigation_stage_write_bytes={} metadata_rebuilt={}",
+            "[debug timing] phase=task_index source_rows={} source_prefix_bytes={} source_verification_bytes={} source_index_read_bytes={} source_index_text_write_bytes={} source_index_hash_write_bytes={} source_index_record_write_bytes={} posting_rows_read={} posting_bytes_read={} posting_rows_written={} posting_bytes_written={} cache_rows_written={} cache_bytes_written={} posting_keys={} posting_batch_peak_rows={} posting_batches={} card_rows_read={} card_bytes_read={} task_ref_rows_read={} task_ref_bytes_read={} anchor_rows_read={} anchor_bytes_read={} semantics_rows_read={} semantics_bytes_read={} cards_written={} anchors_written={} navigation_stage_read_bytes={} navigation_stage_write_bytes={} metadata_rebuilt={}",
             stats.source_rows,
             stats.source_prefix_bytes,
             stats.source_verification_bytes,
@@ -57,10 +57,9 @@ pub(super) fn task_index_work(enabled: bool, stats: &super::task_index::TaskInde
             stats.posting_bytes_written,
             stats.cache_rows_written,
             stats.cache_bytes_written,
-            stats.proof_nodes_read,
-            stats.proof_bytes_read,
-            stats.proof_nodes_written,
-            stats.proof_bytes_written,
+            stats.posting_keys,
+            stats.posting_batch_peak_rows,
+            stats.posting_batches,
             stats.card_rows_read,
             stats.card_bytes_read,
             stats.task_ref_rows_read,

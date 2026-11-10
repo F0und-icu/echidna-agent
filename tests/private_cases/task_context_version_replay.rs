@@ -286,7 +286,7 @@ fn proof_v4_rejects_source_coherent_forged_or_missing_feedback_even_with_matchin
         &source,
         &capture,
         &selection,
-        &events[..end],
+        events[..end].iter(),
         &[],
     )
     .unwrap();
@@ -384,7 +384,7 @@ fn proof_v4_rejects_source_coherent_forged_or_missing_feedback_even_with_matchin
                 &forged_state,
                 &forged,
                 &forged_selection,
-                &prefix,
+                prefix.iter(),
                 &[]
             )
             .is_err(),
@@ -508,6 +508,14 @@ fn replay_fixture(name: &str, candidate: &str, binary_hash: &str, version: u8) {
             .any(|event| event.payload["delivery"]["mode"] == "incremental")
     );
     let old_project = ProjectId::new(manifest["project_id"].as_str().unwrap());
+    let resumed = SessionProjection::replay_for_resume(
+        old_project.clone(),
+        &events,
+        &[],
+        || Ok(ResearchReferenceCatalog::default()),
+        &store,
+    )
+    .unwrap();
     let projection = SessionProjection::replay_project_verified(
         old_project,
         &events,
@@ -516,6 +524,11 @@ fn replay_fixture(name: &str, candidate: &str, binary_hash: &str, version: u8) {
         &store,
     )
     .unwrap();
+    assert_eq!(
+        resumed.state(),
+        projection.state(),
+        "bounded Resume preserves complete typed state"
+    );
     let mut saw_old_shared_progress = false;
     let mut saw_unresolved = false;
     for audit in projection.state().request_audits() {

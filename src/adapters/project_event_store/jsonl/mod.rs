@@ -19,14 +19,15 @@ use crate::ports::{EventSink, EventSource};
 
 use super::ProjectEventStoreError;
 use super::project::{Project, ProjectEventStream, ProjectWriter, create_directory};
+use crate::adapters::file_revision::FileRevision;
 use recovery::{RecoveryArtifact, persist_recovery_artifact, replace_stream_atomically};
 use scan::{SessionRecordObserver, StreamScan, next_sequence, scan_stream};
 
 pub(crate) use scan::scan_stream_bytes;
 
 /// Process-local proof of the bytes already reduced by one Session consumer.
-/// Reopening verifies these exact bytes, not file metadata, before reading a
-/// newly appended suffix. It is never a persisted authority or checkpoint.
+/// Unchanged files reuse verified bytes; external changes revalidate the prefix.
+/// It is never a persisted authority or checkpoint.
 #[derive(Clone)]
 pub(crate) struct SessionStreamCursor {
     path: PathBuf,
@@ -34,6 +35,7 @@ pub(crate) struct SessionStreamCursor {
     bytes: usize,
     hash: blake3::Hasher,
     last_sequence: Option<EventSequence>,
+    revision: FileRevision,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -101,7 +103,43 @@ fn verify_session_prefix(
             path: path.to_path_buf(),
         });
     }
-    verify_prefix_bytes(reader, path, cursor.bytes, cursor.hash.finalize())
+    let length = reader
+        .get_ref()
+        .metadata()
+        .map_err(|source| ProjectEventStoreError::Io {
+            operation: "inspect Session prefix length",
+            path: path.to_path_buf(),
+            source,
+        })?
+        .len();
+    if length < cursor.bytes as u64 {
+        return Err(ProjectEventStoreError::ValidatedPrefixChanged {
+            path: path.to_path_buf(),
+        });
+    }
+    // The live cursor tracks harness-owned append-only history. Only the new
+    // suffix needs scanning; explicit historical audit still reads original bytes.
+    reader
+        .seek(SeekFrom::Start(cursor.bytes as u64))
+        .map_err(|source| ProjectEventStoreError::Io {
+            operation: "seek Session suffix",
+            path: path.to_path_buf(),
+            source,
+        })?;
+    Ok(cursor.hash.clone())
+}
+
+fn file_revision(
+    file: &File,
+    path: &std::path::Path,
+) -> Result<FileRevision, ProjectEventStoreError> {
+    file.metadata()
+        .and_then(|metadata| FileRevision::of(&metadata))
+        .map_err(|source| ProjectEventStoreError::Io {
+            operation: "inspect Session file revision",
+            path: path.to_path_buf(),
+            source,
+        })
 }
 
 fn verify_prefix_bytes(
@@ -213,7 +251,7 @@ pub(crate) fn visit_session_records_after(
     if cursor.path != path || cursor.stream_id != stream_id {
         return Err(ProjectEventStoreError::ValidatedPrefixChanged { path });
     }
-    visit_session_records_after_checkpoint(
+    visit_session_suffix(
         project,
         session_id,
         &SessionStreamCheckpoint {
@@ -221,6 +259,7 @@ pub(crate) fn visit_session_records_after(
             hash: *cursor.hash.finalize().as_bytes(),
             last_sequence: cursor.last_sequence,
         },
+        Some(cursor),
         observer,
     )
 }
@@ -231,6 +270,16 @@ pub(crate) fn visit_session_records_after_checkpoint(
     checkpoint: &SessionStreamCheckpoint,
     observer: &mut SessionRecordObserver<'_>,
 ) -> Result<(usize, blake3::Hash), ProjectEventStoreError> {
+    visit_session_suffix(project, session_id, checkpoint, None, observer)
+}
+
+fn visit_session_suffix(
+    project: &Project,
+    session_id: &StreamId,
+    checkpoint: &SessionStreamCheckpoint,
+    cursor: Option<&SessionStreamCursor>,
+    observer: &mut SessionRecordObserver<'_>,
+) -> Result<(usize, blake3::Hash), ProjectEventStoreError> {
     let path = project.session_stream_path_existing(session_id)?;
     let stream_id = ProjectEventStream::Session(session_id.clone()).stream_id();
     let file = File::open(&path).map_err(|source| ProjectEventStoreError::Io {
@@ -239,12 +288,15 @@ pub(crate) fn visit_session_records_after_checkpoint(
         source,
     })?;
     let mut reader = BufReader::new(file);
-    let mut hash = verify_prefix_bytes(
-        &mut reader,
-        &path,
-        checkpoint.bytes,
-        blake3::Hash::from(checkpoint.hash),
-    )?;
+    let mut hash = match cursor {
+        Some(cursor) => verify_session_prefix(&mut reader, &path, &stream_id, cursor)?,
+        None => verify_prefix_bytes(
+            &mut reader,
+            &path,
+            checkpoint.bytes,
+            blake3::Hash::from(checkpoint.hash),
+        )?,
+    };
     let registry = EventUpcasterRegistry::current();
     match scan::scan_stream_reader_observed(
         &mut reader,
@@ -368,6 +420,7 @@ impl ProjectWriter {
                     source,
                 })?,
             );
+        let revision = file_revision(reader.get_ref(), &path)?;
         let offset = cursor.map_or(0, |cursor| cursor.bytes);
         let mut hash = match cursor {
             Some(cursor) => verify_session_prefix(&mut reader, &path, &stream_id, cursor)?,
@@ -399,7 +452,13 @@ impl ProjectWriter {
             registry,
             PhantomData,
         )?;
+        if file_revision(reader.get_ref(), &path)? != revision
+            || file_revision(&store.file, &path)? != revision
+        {
+            return Err(ProjectEventStoreError::ValidatedPrefixChanged { path });
+        }
         store.projection_cursor = Some(SessionStreamCursor {
+            revision,
             path,
             stream_id,
             bytes: validated_bytes,
@@ -551,6 +610,54 @@ impl<'writer> JsonlEventStore<'writer> {
             .expect("Session projection store was opened with a verified cursor")
             .clone()
     }
+
+    /// The caller's prepared prefix belongs to this live projection. Opening
+    /// this Writer already synchronized and verified the complete cached state.
+    pub(crate) fn read_prepared_suffix(
+        &self,
+        prepared: &SessionStreamCursor,
+    ) -> Result<Vec<EventEnvelope<Value>>, ProjectEventStoreError> {
+        let current = self.projection_cursor();
+        if prepared.path != current.path
+            || prepared.stream_id != current.stream_id
+            || prepared.bytes > current.bytes
+        {
+            return Err(ProjectEventStoreError::ValidatedPrefixChanged {
+                path: self.path.clone(),
+            });
+        }
+        let file = File::open(&self.path).map_err(|source| ProjectEventStoreError::Io {
+            operation: "read prepared Session suffix",
+            path: self.path.clone(),
+            source,
+        })?;
+        let mut reader = BufReader::new(file);
+        verify_session_prefix(&mut reader, &self.path, &self.stream_id, &current)?;
+        reader
+            .seek(SeekFrom::Start(prepared.bytes as u64))
+            .map_err(|source| ProjectEventStoreError::Io {
+                operation: "seek prepared Session suffix",
+                path: self.path.clone(),
+                source,
+            })?;
+        let mut hash = prepared.hash.clone();
+        let scan = scan::scan_stream_reader(
+            &mut reader,
+            &self.path,
+            &self.stream_id,
+            &self.registry,
+            prepared.bytes,
+            prepared.last_sequence,
+            &mut hash,
+        )?;
+        let events = scan.into_complete(&self.path)?;
+        if hash.finalize() != current.hash.finalize() {
+            return Err(ProjectEventStoreError::ValidatedPrefixChanged {
+                path: self.path.clone(),
+            });
+        }
+        Ok(events)
+    }
 }
 
 impl EventSource<Value> for JsonlEventStore<'_> {
@@ -586,6 +693,20 @@ impl EventSink<Value> for JsonlEventStore<'_> {
             .into());
         }
 
+        if let Some(cursor) = &self.projection_cursor {
+            let current = File::open(&self.path).map_err(|source| ProjectEventStoreError::Io {
+                operation: "inspect Session path before append",
+                path: self.path.clone(),
+                source,
+            })?;
+            if file_revision(&self.file, &self.path)? != cursor.revision
+                || file_revision(&current, &self.path)? != cursor.revision
+            {
+                return Err(ProjectEventStoreError::ValidatedPrefixChanged {
+                    path: self.path.clone(),
+                });
+            }
+        }
         let mut encoded = serde_json::to_vec(event).map_err(ProjectEventStoreError::EventEncode)?;
         encoded.push(b'\n');
         self.file
@@ -607,6 +728,7 @@ impl EventSink<Value> for JsonlEventStore<'_> {
             cursor.hash.update(&encoded);
             cursor.bytes += encoded.len();
             cursor.last_sequence = Some(event.sequence);
+            cursor.revision = file_revision(&self.file, &self.path)?;
         }
         Ok(())
     }

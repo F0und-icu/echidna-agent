@@ -32,7 +32,7 @@ mod persistence;
 mod recovery;
 mod task_context;
 mod task_index;
-mod task_posting_manifest;
+mod task_posting_lengths;
 mod theme;
 mod timing;
 mod tool_output;
@@ -89,8 +89,10 @@ pub(crate) async fn run(
     mut requested_domain: Option<DomainProfile>,
     mut requested_phase: Option<ResearchPhase>,
 ) -> Result<(), ChatError> {
+    let startup_timing = timing::TurnTiming::new(composition.diagnostic_output_enabled());
     let _runtime_lease = project.acquire_chat_runtime_lease()?;
     let discovered_mcp = composition.discover_chat_mcp().await?;
+    startup_timing.checkpoint("resume_discovery");
     let terminal_input = io::stdin().is_terminal();
     let mut input_closed = false;
     let mut pending_input = None;
@@ -114,6 +116,7 @@ pub(crate) async fn run(
             )?,
         };
         let research_enabled = binding.definition().research().is_some();
+        startup_timing.checkpoint("resume_projection");
         if !research_enabled && (requested_domain.is_some() || requested_phase.is_some()) {
             return Err(definition::error(
                 "--domain/--phase require a research-enabled Agent definition",
@@ -130,6 +133,7 @@ pub(crate) async fn run(
             compaction_validation,
             mut capacity_required,
         ) = session.start_or_resume(explicit_resume, composition, false, &discovered_mcp)?;
+        startup_timing.checkpoint("resume_binding");
         let domain = requested_domain.unwrap_or_else(|| {
             session_state
                 .domain_profile_selection()
@@ -172,6 +176,7 @@ pub(crate) async fn run(
             let current = session.refresh_context(&mut context_cache, &tools)?;
             agent.refresh_current_context(current)?;
             task_context::TaskContextRuntime::new(&session).restore_after_resume(&mut agent)?;
+            startup_timing.checkpoint("resume_task_context");
             if capacity_required && agent.has_task_context() {
                 capacity_required = agent.fresh_compaction_context_diagnostic()?.is_err();
             }

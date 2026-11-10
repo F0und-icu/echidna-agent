@@ -6,7 +6,7 @@
 mod error;
 
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
@@ -18,6 +18,7 @@ use crate::adapters::project_event_store::{
 use crate::domain::artifacts::BlobId;
 use crate::ports::artifact::{ArtifactStore, StoredBlob};
 
+use crate::adapters::file_revision::FileRevision;
 use error::LocalArtifactStoreError;
 
 const BLOB_PATH_SEGMENTS: [&str; 3] = ["artifacts", "blobs", "sha256"];
@@ -26,12 +27,15 @@ const HASH_BUFFER_BYTES: usize = 64 * 1024;
 /// A project-isolated local Artifact Blob Store.
 pub(crate) struct LocalArtifactStore {
     project: Project,
+    verified_ranges:
+        std::sync::Mutex<std::collections::BTreeMap<BlobId, (FileRevision, Option<String>)>>,
 }
 
 impl LocalArtifactStore {
     pub(crate) fn for_project(project: &Project) -> Self {
         Self {
             project: project.clone(),
+            verified_ranges: Default::default(),
         }
     }
 }
@@ -71,7 +75,8 @@ impl ArtifactStore for LocalArtifactStore {
     }
 
     fn read_blob(&self, blob_id: &BlobId) -> Result<Vec<u8>, Self::Error> {
-        self.read_blob_checked(blob_id)
+        self.read_verified_range(blob_id, 0, usize::MAX, Some(u64::MAX))
+            .map(|(bytes, _, _)| bytes)
     }
 }
 
@@ -92,7 +97,7 @@ impl LocalArtifactStore {
         .map(|(bytes, size, _)| (bytes, size))
     }
 
-    /// Read a bounded Artifact range while hashing the complete immutable Blob.
+    /// Validate a Blob revision once, then read only the requested range.
     pub(crate) fn read_artifact_range(
         &self,
         blob_id: &BlobId,
@@ -111,16 +116,60 @@ impl LocalArtifactStore {
     ) -> Result<(Vec<u8>, u64, Option<String>), LocalArtifactStoreError> {
         self.inspect_blob_directory()?;
         let path = self.blob_directory().join(blob_id.as_str());
-        let file = open_regular_existing_blob(&path)?;
-        let size = file
-            .metadata()
-            .map_err(|source| LocalArtifactStoreError::ExistingBlobInspect {
+        let mut file = open_regular_existing_blob(&path)?;
+        let metadata =
+            file.metadata()
+                .map_err(|source| LocalArtifactStoreError::ExistingBlobInspect {
+                    path: path.clone(),
+                    source,
+                })?;
+        let revision = FileRevision::of(&metadata).map_err(|source| {
+            LocalArtifactStoreError::ExistingBlobInspect {
                 path: path.clone(),
                 source,
-            })?
-            .len();
+            }
+        })?;
+        let size = metadata.len();
         if maximum_size.is_some_and(|maximum| size > maximum) || offset > size {
             return Err(LocalArtifactStoreError::OutputRange { offset, size });
+        }
+        let cached = self
+            .verified_ranges
+            .lock()
+            .expect("Blob revision lock poisoned")
+            .get(blob_id)
+            .filter(|(previous, hash)| {
+                previous == &revision && (maximum_size.is_some() || hash.is_some())
+            })
+            .cloned();
+        if let Some((_, hash)) = cached {
+            file.seek(SeekFrom::Start(offset)).map_err(|source| {
+                LocalArtifactStoreError::ExistingBlobInspect {
+                    path: path.clone(),
+                    source,
+                }
+            })?;
+            let mut bytes = vec![0; (size - offset).min(limit as u64) as usize];
+            file.read_exact(&mut bytes).map_err(|source| {
+                LocalArtifactStoreError::ExistingBlobInspect {
+                    path: path.clone(),
+                    source,
+                }
+            })?;
+            let after = file
+                .metadata()
+                .and_then(|metadata| FileRevision::of(&metadata))
+                .map_err(|source| LocalArtifactStoreError::ExistingBlobInspect {
+                    path: path.clone(),
+                    source,
+                })?;
+            if after != revision {
+                return Err(LocalArtifactStoreError::ExistingBlobConflict {
+                    path,
+                    blob_id: blob_id.clone(),
+                });
+            }
+            return Ok((bytes, size, hash));
         }
         let mut position = 0u64;
         let end = offset.saturating_add(limit as u64);
@@ -147,31 +196,26 @@ impl LocalArtifactStore {
                 blob_id: blob_id.clone(),
             });
         }
-        Ok((
-            bytes,
-            size,
-            content_hash.map(|hash| hash.finalize().to_hex().to_string()),
-        ))
-    }
-
-    /// Reads a previously published Blob only after revalidating its immutable
-    /// SHA-256 identity. Memory revision diffs use this narrow local helper;
-    /// it does not create a new Artifact or cache entry.
-    fn read_blob_checked(&self, blob_id: &BlobId) -> Result<Vec<u8>, LocalArtifactStoreError> {
-        self.inspect_blob_directory()?;
-        let path = self.blob_directory().join(blob_id.as_str());
-        let mut file = open_regular_existing_blob(&path)?;
-        let mut bytes = Vec::new();
-        let (actual_blob_id, _) = hash_open_existing_blob(&path, &mut file, |chunk| {
-            bytes.extend_from_slice(chunk);
-        })?;
-        if actual_blob_id != *blob_id {
+        let after = file
+            .get_ref()
+            .metadata()
+            .and_then(|metadata| FileRevision::of(&metadata))
+            .map_err(|source| LocalArtifactStoreError::ExistingBlobInspect {
+                path: path.clone(),
+                source,
+            })?;
+        if after != revision {
             return Err(LocalArtifactStoreError::ExistingBlobConflict {
                 path,
                 blob_id: blob_id.clone(),
             });
         }
-        Ok(bytes)
+        let content_hash = content_hash.map(|hash| hash.finalize().to_hex().to_string());
+        self.verified_ranges
+            .lock()
+            .expect("Blob revision lock poisoned")
+            .insert(blob_id.clone(), (revision, content_hash.clone()));
+        Ok((bytes, size, content_hash))
     }
 
     fn publish_staged(

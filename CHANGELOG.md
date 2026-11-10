@@ -5,6 +5,27 @@ changes remain available in Git history.
 
 ## Unreleased
 
+### Task preparation efficiency — 2026-11-10
+
+- Batch disposable task postings and keep their counts in memory, removing
+  per-entry authentication trees and redundant disk writes.
+- Reuse synchronized Session state and incremental source digests across turns;
+  scan only new events after a live append-only cursor. Preserve source identity,
+  complete records, ordering, Tool pairing and unknown execution outcomes.
+- Keep retrieval vocabulary, candidate policy and context capacity unchanged.
+  Debug output identifies source indexing, postings, candidates and source preparation.
+
+### Recovery and local read efficiency — 2026-11-09
+
+- Restore current task sources and typed execution state without reconstructing
+  retired Provider request chains on every Resume. Explicit historical audit
+  retains full verification; Resume does not retry inputs or tools.
+- Reuse unchanged local file revisions for Session/Research projections and
+  verified Blob reads. Repeated Blob pages read only their requested ranges.
+- Reuse prepared task sources and validate newly appended selection events;
+  avoid repeated decoding of unrelated event variants during replay.
+- `chat --debug` reports local startup/recovery stage timings.
+
 ### Task-context selection repairs — 2026-11-08
 
 - Accept repeated known references, equivalent task scopes and valid overlapping

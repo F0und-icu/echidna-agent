@@ -184,6 +184,15 @@ ordinary language when necessary. Task changes preserve real Tool outcomes and
 background work. Stops requiring recovery retain the existing `/resume` flow.
 Older binaries cannot Resume Sessions containing the new task-context events.
 
+Normal Resume rebuilds durable state and verifies the latest task sources and
+current dependencies without reconstructing every retired Provider request chain.
+Explicit historical audit retains full verification. Resume never retries old
+inputs or tools and never resolves unknown execution effects by assumption.
+Active conversations reuse the Session projection and incrementally batch index
+updates with in-memory counts. Harness-owned history is treated as append-only;
+old prefixes are not reread to detect manual rewrites. Retrieval scope and
+context-selection policy stay unchanged.
+
 ### Optional self-improvement
 
 The [self-improving Agent](examples/agents/self-improving) explicitly enables

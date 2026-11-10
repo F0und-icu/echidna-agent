@@ -14,7 +14,9 @@ fn task_index_recalls_old_source_and_updates_only_the_new_suffix() {
     let root = TemporaryDirectory::new("task-postings-incremental");
     initialize_project(root.path());
     let agent = definition(root.path(), None);
-    let offline = write_context_window_config(root.path(), "http://127.0.0.1:1/v1", 272_000);
+    // The batching workload retains a 512 KiB Tool result plus 529 lexical rows.
+    // Its explicit fixture capacity must admit that source before indexing is tested.
+    let offline = write_context_window_config(root.path(), "http://127.0.0.1:1/v1", 1_000_000);
     let created = run_chat(
         root.path(),
         &offline,
@@ -81,11 +83,15 @@ fn task_index_recalls_old_source_and_updates_only_the_new_suffix() {
             EventSink::append_event(&mut store, &event).unwrap();
         }
     }
+    let repeated_terms = (0..70)
+        .map(|index| format!("batchword{index:04}"))
+        .collect::<Vec<_>>()
+        .join(" ");
     append_source_items(
         &project,
         &prior,
         (0..529)
-            .map(|_| echidna::domain::model::ContentItem::assistant_text("x"))
+            .map(|_| echidna::domain::model::ContentItem::assistant_text(&repeated_terms))
             .collect(),
     );
     let server = spawn_scripted_responses_server(vec![
@@ -94,7 +100,7 @@ fn task_index_recalls_old_source_and_updates_only_the_new_suffix() {
         ScriptedResponse::NewSelection,
         ScriptedResponse::Response(200, text_response("second complete", "postings-second")),
     ]);
-    let config = write_context_window_config(root.path(), &server.base_url, 272_000);
+    let config = write_context_window_config(root.path(), &server.base_url, 1_000_000);
     let output = run_chat(
         root.path(),
         &config,
@@ -144,15 +150,33 @@ fn task_index_recalls_old_source_and_updates_only_the_new_suffix() {
     assert!(
         field(work[0], "source_index_text_write_bytes") <= field(work[0], "source_rows") * 1024
     );
-    assert!(field(work[0], "source_index_text_write_bytes") < 16 * 1024);
+    assert!(field(work[0], "source_index_text_write_bytes") < 512 * 1024);
+    assert!(field(work[0], "posting_rows_written") > 65_536);
+    assert_eq!(field(work[0], "posting_batch_peak_rows"), 65_536);
+    assert!(field(work[0], "posting_batches") > 1);
     assert!(field(work[0], "source_index_hash_write_bytes") > 0);
     assert!(field(work[0], "source_index_record_write_bytes") > 0);
     assert!(work[0].contains("metadata_rebuilt=true"));
     assert!(field(work[1], "source_rows") <= 4, "{}", work[1]);
+    assert!(
+        field(work[1], "source_index_read_bytes") < field(work[0], "source_index_read_bytes"),
+        "{}",
+        work[1]
+    );
     assert!(work[1].contains("metadata_rebuilt=false"), "{}", work[1]);
-    assert!(field(work[1], "proof_nodes_read") > 0, "{}", work[1]);
-    assert!(field(work[1], "proof_nodes_read") <= 40_000, "{}", work[1]);
+    assert!(field(work[1], "posting_keys") > 0, "{}", work[1]);
+    assert!(
+        field(work[1], "posting_keys")
+            <= field(work[0], "posting_keys") + field(work[1], "posting_rows_written"),
+        "{}",
+        work[1]
+    );
     for line in work {
+        assert!(field(line, "posting_batch_peak_rows") <= 65_536);
+        assert_eq!(
+            field(line, "posting_bytes_written"),
+            field(line, "posting_rows_written") * 8
+        );
         assert!(field(line, "semantics_rows_read") <= 513, "{line}");
         assert!(field(line, "posting_rows_read") <= 12_000, "{line}");
     }

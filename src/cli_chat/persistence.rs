@@ -20,7 +20,7 @@ impl CachedSessionProjection {
         let project_events =
             crate::adapters::project_event_store::read_existing_research_events(project)?;
         Ok(Self {
-            projection: SessionProjection::replay_project_verified(
+            projection: SessionProjection::replay_for_resume(
                 project.project_id().clone(),
                 &events,
                 &project_events,
@@ -103,7 +103,7 @@ impl DurableChatSession {
                         crate::adapters::project_event_store::read_existing_research_events(
                             &self.project,
                         )?;
-                    SessionProjection::replay_project_verified(
+                    SessionProjection::replay_for_resume(
                         self.project.project_id().clone(),
                         &all_events,
                         &project_events,
@@ -129,7 +129,7 @@ impl DurableChatSession {
                     crate::adapters::project_event_store::read_existing_research_events(
                         &self.project,
                     )?;
-                SessionProjection::replay_project_verified(
+                SessionProjection::replay_for_resume(
                     self.project.project_id().clone(),
                     &events,
                     &project_events,

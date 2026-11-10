@@ -173,7 +173,11 @@ fn later_main_audit_rejects_coherent_substitution_for_full_and_incremental() {
             .expect("coherent forgery must pass structural replay");
         write_events(&forged);
         let before = fs::read(&event_path).unwrap();
-        let rejected = run_chat(root.path(), &config, "/exit\n", &["--resume", "latest"]);
+        let rejected = Command::new(env!("CARGO_BIN_EXE_echidna"))
+            .current_dir(root.path())
+            .args(["session", "show", &session_id(root.path())])
+            .output()
+            .unwrap();
         assert!(
             !rejected.status.success(),
             "coherent forged {incremental:?} audit was accepted"
