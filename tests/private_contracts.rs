@@ -36,6 +36,9 @@ mod research_turn;
 #[path = "private_cases/tool_catalog.rs"]
 mod tool_catalog;
 
+#[path = "private_cases/command_interruption.rs"]
+mod command_interruption;
+
 #[path = "private_cases/compaction_continuity.rs"]
 mod compaction_continuity;
 #[path = "private_cases/compaction_replay.rs"]

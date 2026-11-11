@@ -2,7 +2,9 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
+use futures_util::FutureExt;
 use thiserror::Error;
 
 use crate::domain::tools::{
@@ -14,7 +16,62 @@ pub type ToolExecutionFuture<'executor> = Pin<
     Box<dyn Future<Output = Result<ToolExecutionOutcome, ToolExecutionError>> + Send + 'executor>,
 >;
 
+/// Scheduler-owned cancellation broadcast; each active command can await it.
+#[derive(Clone)]
+pub struct ToolCancellation {
+    requested: Arc<dyn Fn() -> bool + Send + Sync>,
+    notification: futures_util::future::Shared<futures_util::future::BoxFuture<'static, ()>>,
+}
+
+impl ToolCancellation {
+    pub(crate) fn new(
+        requested: impl Fn() -> bool + Send + Sync + 'static,
+        notification: impl Future<Output = ()> + Send + 'static,
+    ) -> Self {
+        Self {
+            requested: Arc::new(requested),
+            notification: notification.boxed().shared(),
+        }
+    }
+
+    pub(crate) fn never() -> Self {
+        Self::new(|| false, std::future::pending())
+    }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
+        (self.requested)()
+    }
+
+    pub(crate) async fn wait(&self) {
+        self.notification.clone().await;
+    }
+
+    pub(crate) async fn interrupt(
+        self,
+        execution: ToolExecutionFuture<'_>,
+    ) -> Result<ToolExecutionOutcome, ToolExecutionError> {
+        futures_util::select_biased! {
+            () = self.wait().fuse() => Err(ToolExecutionError::Interrupted),
+            outcome = execution.fuse() => outcome,
+        }
+    }
+}
+
 pub trait ToolExecutor: Send + Sync {
+    /// Executors may settle cancellation cooperatively. The default preserves
+    /// unknown effects when an execution cannot return a terminal observation.
+    fn execute_interruptible(
+        &self,
+        plan: ToolExecutionPlan,
+        observer: Option<ToolObservationSender>,
+        cancellation: ToolCancellation,
+    ) -> ToolExecutionFuture<'_> {
+        let execution = match observer {
+            Some(observer) => self.execute_observed(plan, observer),
+            None => self.execute(plan),
+        };
+        Box::pin(cancellation.interrupt(execution))
+    }
     /// A current observation from an executor that owns live Job/PTY state.
     /// None means this executor does not provide that observation.
     fn live_processes(&self) -> Option<Vec<crate::domain::tools::LiveProcessObservation>> {
@@ -102,6 +159,8 @@ pub trait ToolExecutor: Send + Sync {
 /// scheduler stops the Turn before History can be extended.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum ToolExecutionError {
+    #[error("Tool execution interrupted without a terminal observation")]
+    Interrupted,
     #[error("Tool outcome is unknown after dispatch: {safe_reason}")]
     OutcomeUnknown { safe_reason: String },
 }

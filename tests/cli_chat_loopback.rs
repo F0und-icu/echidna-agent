@@ -4695,15 +4695,13 @@ fn f3_graceful_interrupt_never_fabricates_a_receipt_for_unobserved_external_effe
     let project = TemporaryDirectory::new("m5-cli-tool-terminal-visibility");
     initialize_project(project.path());
     let marker = project.path().join("blocking-tool-started");
-    let blocking_tool = project.path().join("blocking-tool.sh");
-    fs::write(
-        &blocking_tool,
-        "#!/bin/sh\n: > \"$1\"\nexec /bin/sleep 30\n",
-    )
-    .unwrap();
-    let mut permissions = fs::metadata(&blocking_tool).unwrap().permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&blocking_tool, permissions).unwrap();
+    let agent = task_context::definition(project.path(), None);
+    let manifest_path = agent.join("agent.toml");
+    let mut manifest = fs::read_to_string(&manifest_path).unwrap();
+    manifest.push_str("http_request = \"direct\"\n");
+    fs::write(manifest_path, manifest).unwrap();
+    let endpoint = TcpListener::bind("127.0.0.1:0").unwrap();
+    endpoint.set_nonblocking(true).unwrap();
 
     let server = spawn_scripted_responses_server(vec![
         InitialSelection,
@@ -4722,13 +4720,10 @@ fn f3_graceful_interrupt_never_fabricates_a_receipt_for_unobserved_external_effe
             200,
             m4_long_flow_tool_response(
                 "m5-cancelled",
-                "run_command",
-                json!({
-                    "argv": [
-                        blocking_tool.to_str().unwrap(),
-                        marker.to_str().unwrap()
-                    ]
-                }),
+                "http_request",
+                json!({"method":"post", "url":format!("http://{}/effect", endpoint.local_addr().unwrap()), "timeout_ms":30000,
+                    "body":{"kind":"text","value":"apply-once"},
+                    "artifact":{"event_id":"http-response", "occurred_at":"2026-11-11T00:00:00Z", "artifact_id":"http-response", "toolchain_fingerprint":"loopback-fixture"}}),
                 "m5-cancelled-tool",
             ),
         ),
@@ -4736,7 +4731,13 @@ fn f3_graceful_interrupt_never_fabricates_a_receipt_for_unobserved_external_effe
     let config = write_config(project.path(), &server.base_url);
     let mut child = Command::new(env!("CARGO_BIN_EXE_echidna"))
         .current_dir(project.path())
-        .args(["chat", "--config", config.to_str().unwrap()])
+        .args([
+            "chat",
+            "--config",
+            config.to_str().unwrap(),
+            "--agent",
+            agent.to_str().unwrap(),
+        ])
         .env("CYBER_AGENT_PRIMARY_API_KEY", "loopback-primary-secret")
         .env("CYBER_AGENT_VISION_API_KEY", "loopback-vision-secret")
         .stdin(Stdio::piped())
@@ -4751,14 +4752,15 @@ fn f3_graceful_interrupt_never_fabricates_a_receipt_for_unobserved_external_effe
         .write_all(b"exercise failure\nexercise cancellation\n/exit\n")
         .unwrap();
 
-    let deadline = Instant::now() + F2A_WAIT;
-    while !marker.exists() && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(10));
-    }
+    let mut pending = f3_context::accept_before_deadline(&endpoint, "unobserved external effect");
+    pending.set_read_timeout(Some(F2A_WAIT)).unwrap();
+    let request = read_http_request(&mut pending);
     assert!(
-        marker.exists(),
-        "the cancellable Tool never crossed its start boundary"
+        request.starts_with("POST ") && request.ends_with("apply-once"),
+        "{request}"
     );
+    // The peer applies an effect but withholds the outcome from the executor.
+    fs::write(&marker, b"applied").unwrap();
     let signal_status = Command::new("/bin/kill")
         .args(["-INT", &child.id().to_string()])
         .status()
@@ -4817,6 +4819,9 @@ fn f3_graceful_interrupt_never_fabricates_a_receipt_for_unobserved_external_effe
         })
         .unwrap();
     assert_eq!(unresolved.output["execution_status"], "unknown");
+    assert!(
+        matches!(endpoint.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+    );
 }
 
 #[test]

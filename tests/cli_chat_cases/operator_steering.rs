@@ -1140,21 +1140,29 @@ fn terminal_correction_during_unknown_tool_execution_is_not_automatically_submit
     let root = TemporaryDirectory::new("tool-steering");
     let harness = TemporaryDirectory::new("tool-steering-provider");
     initialize_project(root.path());
+    let agent = super::task_context::definition(root.path(), None);
+    let manifest_path = agent.join("agent.toml");
+    let mut manifest = fs::read_to_string(&manifest_path).unwrap();
+    manifest.push_str("http_request = \"direct\"\n");
+    fs::write(manifest_path, manifest).unwrap();
+    let endpoint = TcpListener::bind("127.0.0.1:0").unwrap();
+    endpoint.set_nonblocking(true).unwrap();
     let server = spawn_scripted_responses_server(vec![
         InitialSelection,
         Response(
             200,
             m4_long_flow_tool_response(
-                "started-command",
-                "run_command",
-                json!({"argv":["sh", "-c", "printf x >> started; exec sleep 5"]}),
+                "started-request",
+                "http_request",
+                json!({"method":"post", "url":format!("http://{}/effect", endpoint.local_addr().unwrap()), "timeout_ms":30000, "body":{"kind":"text","value":"apply-once"},
+                    "artifact":{"event_id":"http-response", "occurred_at":"2026-11-11T00:00:00Z", "artifact_id":"http-response", "toolchain_fingerprint":"loopback-fixture"}}),
                 "started-response",
             ),
         ),
     ]);
     let config = write_config(harness.path(), &server.base_url);
-    let mut chat = TerminalChat::new(root.path(), &config);
-    chat.send("run the bounded command\n");
+    let mut chat = TerminalChat::start(root.path(), &config, None, "xterm-256color", Some(&agent));
+    chat.send("send the request once\n");
     selector_candidates(&f2a_request_body(
         &server.requests,
         "unknown effect initial selection",
@@ -1163,11 +1171,15 @@ fn terminal_correction_during_unknown_tool_execution_is_not_automatically_submit
         .requests
         .recv_timeout(Duration::from_secs(10))
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !root.path().join("started").exists() {
-        assert!(Instant::now() < deadline);
-        thread::sleep(Duration::from_millis(10));
-    }
+    // The remote side received a mutation request but has not returned an
+    // outcome. Dropping the HTTP future cannot establish its external effect.
+    let mut pending = f3_context::accept_before_deadline(&endpoint, "unknown HTTP effect");
+    pending.set_read_timeout(Some(F2A_WAIT)).unwrap();
+    let request = read_http_request(&mut pending);
+    assert!(
+        request.starts_with("POST ") && request.ends_with("apply-once"),
+        "{request}"
+    );
     chat.send("only report status, do not run again\n");
     chat.wait_for("[queued input not submitted or saved]");
     chat.wait_for("external effects are unknown");
@@ -1180,7 +1192,9 @@ fn terminal_correction_during_unknown_tool_execution_is_not_automatically_submit
         assert!(Instant::now() < deadline);
         thread::sleep(Duration::from_millis(10));
     }
-    assert_eq!(fs::read(root.path().join("started")).unwrap(), b"x");
+    assert!(
+        matches!(endpoint.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+    );
     chat.assert_restored();
     assert!(!String::from_utf8_lossy(&chat.captured).contains("[Follow-up accepted"));
     let project = Project::discover(root.path()).unwrap();
@@ -1193,6 +1207,89 @@ fn terminal_correction_during_unknown_tool_execution_is_not_automatically_submit
             .contains("only report status")
     );
     server.join();
+}
+
+#[test]
+fn terminal_command_interruption_settles_and_accepts_the_next_turn() {
+    for (mode, interruption) in [
+        ("single", "\u{3}"),
+        ("serial", "/stop\n"),
+        ("parallel", "only report status\n"),
+    ] {
+        let root = TemporaryDirectory::new("terminal-command-interruption");
+        let harness = TemporaryDirectory::new("terminal-command-provider");
+        initialize_project(root.path());
+        let running = json!({"argv":["/bin/sh", "-c", "printf PARTIAL_OUTPUT; printf x >> started; exec /bin/sleep 30"], "resources":[{"kind":"output","path":"started"}]});
+        let (tool, arguments) = if mode == "single" {
+            ("run_command", running)
+        } else {
+            (
+                "run_commands",
+                json!({"mode":mode,"commands":[
+                    {"argv":["/bin/sh","-c","printf KNOWN_OUTPUT; printf x >> completed"], "resources":[{"kind":"output","path":"completed"}]},
+                    running,
+                    {"argv":["/bin/sh","-c","printf x >> forbidden"], "resources":[{"kind":"output","path":"started"}]}
+                ]}),
+            )
+        };
+        let server = spawn_scripted_responses_server(vec![
+            InitialSelection,
+            Response(
+                200,
+                m4_long_flow_tool_response(
+                    "interrupt-command",
+                    tool,
+                    arguments,
+                    "interrupt-response",
+                ),
+            ),
+            ContinueSelection { usage: None },
+            Response(
+                200,
+                text_response("CONTINUED_AFTER_CANCELLATION", "continued-response"),
+            ),
+        ]);
+        let config = write_context_window_config(harness.path(), &server.base_url, 272_000);
+        let mut chat = TerminalChat::new(root.path(), &config);
+        chat.send("execute these commands once\n");
+        f2a_request_body(&server.requests, "command selection");
+        f2a_request_body(&server.requests, "command dispatch");
+        let deadline = Instant::now() + F2A_WAIT;
+        while !root.path().join("started").exists() {
+            assert!(Instant::now() < deadline, "command did not start");
+            thread::sleep(Duration::from_millis(10));
+        }
+        if mode != "single" {
+            chat.wait_for("subcommand 1/3");
+        }
+        chat.send(interruption);
+        chat.wait_for("[request cancelled]");
+        if mode != "parallel" {
+            assert!(server.requests.try_recv().is_err());
+            chat.send("only report status\n");
+        }
+        chat.wait_for("CONTINUED_AFTER_CANCELLATION");
+        chat.exit();
+        f2a_request_body(&server.requests, "continuation selection");
+        let next = f2a_request_body(&server.requests, "continuation main");
+        let wire = next.to_string();
+        assert!(wire.contains("PARTIAL_OUTPUT"));
+        assert!(wire.contains("cancelled"));
+        assert!(!root.path().join("forbidden").exists());
+        assert_eq!(fs::read(root.path().join("started")).unwrap(), b"x");
+        if mode != "single" {
+            assert!(wire.contains("KNOWN_OUTPUT"));
+            assert_eq!(fs::read(root.path().join("completed")).unwrap(), b"x");
+        }
+        let state = reduced_session(
+            &Project::discover(root.path()).unwrap(),
+            &session_id(root.path()),
+        );
+        assert_eq!(state.execution_receipt_count(), 1);
+        assert!(state.history().ensure_all_tool_calls_paired().is_ok());
+        assert!(!String::from_utf8_lossy(&chat.captured).contains("chat failed:"));
+        f2a_join_server(server, "command interruption");
+    }
 }
 
 #[test]

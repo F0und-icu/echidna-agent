@@ -5,6 +5,15 @@ changes remain available in Git history.
 
 ## Unreleased
 
+### Foreground command interruption — 2026-11-11
+
+- Settle interrupted `run_command` and `run_commands` executions before returning
+  to Chat input: terminate and reap the owned local process, retain bounded output
+  and completed child checkpoints, and stop launching later commands.
+- Allow a queued correction to proceed after the cancelled outcome is saved.
+  Keep genuinely unknown executions and persistence failures explicit, with no
+  automatic replay, rollback or implied termination of background/remote work.
+
 ### Selectable task sources — 2026-11-11
 
 - Include bounded original History excerpts for sources referenced by supplied

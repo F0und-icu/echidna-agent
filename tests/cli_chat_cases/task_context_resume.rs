@@ -319,14 +319,22 @@ fn resumed_compaction_never_replays_or_hides_unknown_execution() {
     let root = TemporaryDirectory::new("task-context-resume-unknown-compact");
     initialize_project(root.path());
     let agent = definition(root.path(), None);
+    let manifest_path = agent.join("agent.toml");
+    let mut manifest = fs::read_to_string(&manifest_path).unwrap();
+    manifest.push_str("http_request = \"direct\"\n");
+    fs::write(manifest_path, manifest).unwrap();
+    let endpoint = TcpListener::bind("127.0.0.1:0").unwrap();
+    endpoint.set_nonblocking(true).unwrap();
     let server = spawn_scripted_responses_server(vec![
         ScriptedResponse::InitialSelection,
         ScriptedResponse::Response(
             200,
             m4_long_flow_tool_response(
                 "resume-unknown",
-                "run_command",
-                json!({"argv":["/bin/sh","-c","printf 'started\\n' >> unknown-count.txt; exec /bin/sleep 30"]}),
+                "http_request",
+                json!({"method":"post", "url":format!("http://{}/effect", endpoint.local_addr().unwrap()), "timeout_ms":30000,
+                    "body":{"kind":"text","value":"apply-once"},
+                    "artifact":{"event_id":"http-response", "occurred_at":"2026-11-11T00:00:00Z", "artifact_id":"http-response", "toolchain_fingerprint":"loopback-fixture"}}),
                 "unknown-response",
             ),
         ),
@@ -344,11 +352,15 @@ fn resumed_compaction_never_replays_or_hides_unknown_execution() {
     ));
     f2a_request_body(&server.requests, "unknown execution request");
     let count = root.path().join("unknown-count.txt");
-    let deadline = Instant::now() + F2A_WAIT;
-    while !count.exists() && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(10));
-    }
-    assert!(count.exists());
+    let mut pending =
+        f3_context::accept_before_deadline(&endpoint, "unknown effect before compaction");
+    pending.set_read_timeout(Some(F2A_WAIT)).unwrap();
+    let request = read_http_request(&mut pending);
+    assert!(
+        request.starts_with("POST ") && request.ends_with("apply-once"),
+        "{request}"
+    );
+    fs::write(&count, b"started\n").unwrap();
     assert!(
         Command::new("/bin/kill")
             .args(["-INT", &child.id().to_string()])
@@ -386,6 +398,9 @@ fn resumed_compaction_never_replays_or_hides_unknown_execution() {
         );
     }
     assert_eq!(fs::read_to_string(count).unwrap(), "started\n");
+    assert!(
+        matches!(endpoint.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+    );
 }
 
 #[test]

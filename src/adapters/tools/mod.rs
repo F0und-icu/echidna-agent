@@ -432,7 +432,7 @@ impl ToolExecutor for ToolRegistry {
     }
 
     fn execute(&self, plan: ToolExecutionPlan) -> ToolExecutionFuture<'_> {
-        self.execute_with_observer(plan, None)
+        self.execute_with_observer(plan, None, crate::ports::tool::ToolCancellation::never())
     }
 
     fn execute_observed(
@@ -440,7 +440,29 @@ impl ToolExecutor for ToolRegistry {
         plan: ToolExecutionPlan,
         observer: crate::ports::tool::ToolObservationSender,
     ) -> ToolExecutionFuture<'_> {
-        self.execute_with_observer(plan, Some(observer))
+        self.execute_with_observer(
+            plan,
+            Some(observer),
+            crate::ports::tool::ToolCancellation::never(),
+        )
+    }
+
+    fn execute_interruptible(
+        &self,
+        plan: ToolExecutionPlan,
+        observer: Option<crate::ports::tool::ToolObservationSender>,
+        cancellation: crate::ports::tool::ToolCancellation,
+    ) -> ToolExecutionFuture<'_> {
+        let cooperative = matches!(
+            self.tools.get(&plan.call.name),
+            Some(RegisteredTool::Builtin(BuiltinTool::Command(_)))
+        );
+        let execution = self.execute_with_observer(plan, observer, cancellation.clone());
+        if cooperative {
+            execution
+        } else {
+            Box::pin(cancellation.interrupt(execution))
+        }
     }
 }
 
@@ -449,6 +471,7 @@ impl ToolRegistry {
         &self,
         plan: ToolExecutionPlan,
         observer: Option<crate::ports::tool::ToolObservationSender>,
+        cancellation: crate::ports::tool::ToolCancellation,
     ) -> ToolExecutionFuture<'_> {
         let tool = self.tools.get(&plan.call.name);
         Box::pin(async move {
@@ -470,7 +493,7 @@ impl ToolRegistry {
             // Keep deferred lifecycle controls reachable, without exempting
             // arbitrary read-only filesystem/process tools from resource locks.
             if tool == BuiltinTool::ToolSearch {
-                return Ok(tool.execute(self, plan, observer).await);
+                return tool.execute(self, plan, observer, cancellation).await;
             }
             if !matches!(tool, BuiltinTool::Job(_) | BuiltinTool::Pty(_))
                 && let Some(conflict) = self.active_leases.conflicting(&plan)
@@ -478,14 +501,15 @@ impl ToolRegistry {
                 return Ok(active_resource_busy(plan, conflict));
             }
             let timeout_plan = plan.clone();
-            match tokio::time::timeout(
-                Duration::from_millis(plan.timeout_ms),
-                tool.execute(self, plan, observer),
-            )
-            .await
-            {
-                Ok(outcome) => Ok(outcome),
-                Err(_) => Ok(ToolExecutionOutcome::cancelled(
+            let execution = tool.execute(self, plan, observer, cancellation.clone());
+            tokio::pin!(execution);
+            tokio::select! {
+                biased;
+                // Once operator cancellation starts command settlement, the
+                // original execution deadline must not drop its wait/drain/ack.
+                () = cancellation.wait(), if matches!(tool, BuiltinTool::Command(_)) => execution.await,
+                outcome = &mut execution => outcome,
+                () = tokio::time::sleep(Duration::from_millis(timeout_plan.timeout_ms)) => Ok(ToolExecutionOutcome::cancelled(
                     timeout_plan,
                     "tool_timeout",
                 )),
@@ -606,11 +630,14 @@ impl BuiltinTool {
         registry: &ToolRegistry,
         plan: ToolExecutionPlan,
         observer: Option<crate::ports::tool::ToolObservationSender>,
-    ) -> ToolExecutionOutcome {
-        match self {
+        cancellation: crate::ports::tool::ToolCancellation,
+    ) -> Result<ToolExecutionOutcome, crate::ports::tool::ToolExecutionError> {
+        Ok(match self {
             Self::Filesystem(tool) => tool.execute(registry, plan).await,
             Self::FileWrite(tool) => tool.execute(registry, plan).await,
-            Self::Command(tool) => tool.execute(registry, plan, observer).await,
+            Self::Command(tool) => {
+                return tool.execute(registry, plan, observer, cancellation).await;
+            }
             Self::Job(tool) => tool.execute(registry, plan).await,
             Self::Pty(tool) => tool.execute(registry, plan).await,
             Self::Memory(tool) => tool.execute(registry, plan).await,
@@ -631,7 +658,7 @@ impl BuiltinTool {
                 let deferred = plan.deferred_tool_specs().to_vec();
                 tool_search::execute(plan, &deferred)
             }
-        }
+        })
     }
 }
 

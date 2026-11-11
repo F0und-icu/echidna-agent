@@ -242,7 +242,8 @@ fn ctf_r3b1_completed_child_survives_killed_batch_and_resume_without_rerun() {
         } else {
             let _ = child.kill();
         }
-        let _ = f2a_wait_child(child, "R3b1 killed child");
+        let stopped = f2a_wait_child(child, "R3b1 killed child");
+        assert_eq!(stopped.status.success(), interrupt);
         assert_eq!(fs::read(root.path().join("first-count")).unwrap(), b"x");
         assert!(root.path().join("second-start").exists());
         let shown = Command::new(env!("CARGO_BIN_EXE_echidna"))
@@ -256,7 +257,8 @@ fn ctf_r3b1_completed_child_survives_killed_batch_and_resume_without_rerun() {
             String::from_utf8_lossy(&shown.stderr)
         );
         let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
-        assert_eq!(shown["subcommand_checkpoints"], 1);
+        let expected_checkpoints = if interrupt { 2 } else { 1 };
+        assert_eq!(shown["subcommand_checkpoints"], expected_checkpoints);
         let events = session_events(root.path(), &session);
         let checkpoints: Vec<_> = events
             .iter()
@@ -264,13 +266,14 @@ fn ctf_r3b1_completed_child_survives_killed_batch_and_resume_without_rerun() {
             .collect();
         assert_eq!(
             checkpoints.len(),
-            1,
+            expected_checkpoints,
             "{mode}: completed child must be durable before parent completion"
         );
-        assert!(
-            !events
+        assert_eq!(
+            events
                 .iter()
-                .any(|event| event["event_type"] == "tool.execution_outcome_recorded")
+                .any(|event| event["event_type"] == "tool.execution_outcome_recorded"),
+            interrupt
         );
         assert!(checkpoints[0].to_string().contains("CHILD_OUTPUT"));
         let blob = checkpoints[0]["payload"]["output_captures"][0]["blob_id"]
@@ -289,10 +292,7 @@ fn ctf_r3b1_completed_child_survives_killed_batch_and_resume_without_rerun() {
         use super::task_context::ScriptedResponse::ContinueSelection;
         let resumed = spawn_scripted_responses_server(vec![
             ContinueSelection { usage: None },
-            Response(
-                200,
-                text_response("KNOWN CHILD RETAINED; PARENT UNKNOWN", "resumed"),
-            ),
+            Response(200, text_response("KNOWN CHILD RETAINED", "resumed")),
         ]);
         let config = write_config(harness.path(), &resumed.base_url);
         let output = f2a_wait_child(
@@ -323,7 +323,7 @@ fn ctf_r3b1_completed_child_survives_killed_batch_and_resume_without_rerun() {
                 .iter()
                 .filter(|event| event["event_type"] == "tool.subcommand_checkpointed")
                 .count(),
-            1
+            expected_checkpoints
         );
     }
 }

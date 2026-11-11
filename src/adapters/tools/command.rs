@@ -21,8 +21,8 @@ use crate::domain::tools::{
     scheduling_conflicts,
 };
 use crate::domain::tools::{OutputCapture, SubcommandCheckpoint};
-use crate::ports::tool::ToolExecutorError;
 use crate::ports::tool::ToolObservationSender;
+use crate::ports::tool::{ToolCancellation, ToolExecutionError, ToolExecutorError};
 
 use super::filesystem::{display_path, resolve_path};
 use super::output::{BoundedText, CapturedOutput, OUTPUT_DRAIN_GRACE, bounded_text};
@@ -208,43 +208,63 @@ fn normalize_batch(
     ))
 }
 
-async fn execute_one(project_root: &Path, plan: ToolExecutionPlan) -> ToolExecutionOutcome {
+async fn execute_one(
+    project_root: &Path,
+    plan: ToolExecutionPlan,
+    cancellation: &ToolCancellation,
+) -> Result<ToolExecutionOutcome, ToolExecutionError> {
+    if cancellation.is_cancelled() {
+        return Ok(ToolExecutionOutcome::cancelled(
+            plan,
+            "agent_cancelled_before_process_start",
+        ));
+    }
     let arguments: RunCommandArgs =
         match decode_arguments("run_command", plan.call.arguments.clone()) {
             Ok(arguments) => arguments,
-            Err(error) => return invalid_plan(plan, error),
+            Err(error) => return Ok(invalid_plan(plan, error)),
         };
     if let Err(error) = validate_command(&arguments, "run_command") {
-        return invalid_plan(plan, error);
+        return Ok(invalid_plan(plan, error));
     }
     let output = run(
         project_root,
         &arguments,
         plan.output_policy.max_bytes,
         MAX_CAPTURE_STREAM_BYTES,
+        cancellation,
     )
-    .await;
-    let mut outcome = match output.result {
-        Ok(value) => ToolExecutionOutcome::succeeded(plan, value),
-        Err(value) => ToolExecutionOutcome::failed(plan, "command_failed", value),
+    .await?;
+    let mut outcome = if output.cancelled {
+        ToolExecutionOutcome::cancelled_with_output(
+            plan,
+            "agent_cancelled",
+            output.result.unwrap_or_else(|value| value),
+        )
+    } else {
+        match output.result {
+            Ok(value) => ToolExecutionOutcome::succeeded(plan, value),
+            Err(value) => ToolExecutionOutcome::failed(plan, "command_failed", value),
+        }
     };
     outcome.pending_captures = output.captures;
-    outcome
+    Ok(outcome)
 }
 
 async fn execute_batch_observed(
     project_root: &Path,
     plan: ToolExecutionPlan,
     observer: Option<ToolObservationSender>,
-) -> ToolExecutionOutcome {
+    cancellation: &ToolCancellation,
+) -> Result<ToolExecutionOutcome, ToolExecutionError> {
     let arguments: RunCommandsArgs =
         match decode_arguments("run_commands", plan.call.arguments.clone()) {
             Ok(arguments) => arguments,
-            Err(error) => return invalid_plan(plan, error),
+            Err(error) => return Ok(invalid_plan(plan, error)),
         };
     let resource_sets = match command_resource_sets(&arguments, project_root) {
         Ok(keys) => keys,
-        Err(error) => return invalid_plan(plan, error),
+        Err(error) => return Ok(invalid_plan(plan, error)),
     };
     let max_each = per_item_limit(plan.output_policy.max_bytes, arguments.commands.len());
     let raw_each = batch_capture_stream_limit(arguments.commands.len());
@@ -252,6 +272,7 @@ async fn execute_batch_observed(
         plan: &plan,
         count: arguments.commands.len(),
         observer: observer.as_ref(),
+        cancellation,
     };
     let results = match arguments.mode {
         CommandBatchMode::Serial => {
@@ -275,13 +296,12 @@ async fn execute_batch_observed(
             )
             .await
         }
-    };
-    let partial_failure = results.iter().any(|output| output.result.is_err());
+    }?;
+    let partial_failure = results.iter().any(|(_, output)| output.result.is_err());
     let mut captures = Vec::new();
     let mut published = Vec::new();
     let commands = results
         .into_iter()
-        .enumerate()
         .map(|(index, mut output)| {
             for capture in &mut output.captures {
                 capture.child_index = Some(index as u8);
@@ -294,23 +314,26 @@ async fn execute_batch_observed(
             }
         })
         .collect::<Vec<_>>();
-    let mut outcome = ToolExecutionOutcome::succeeded(
-        plan,
-        json!({"commands": commands, "partial_failure": partial_failure}),
-    );
+    let output = json!({"commands": commands, "partial_failure": partial_failure});
+    let mut outcome = if cancellation.is_cancelled() {
+        ToolExecutionOutcome::cancelled_with_output(plan, "agent_cancelled", output)
+    } else {
+        ToolExecutionOutcome::succeeded(plan, output)
+    };
     outcome.pending_captures = captures;
     if observer.is_some() {
         outcome.result.output["output_captures"] =
             serde_json::to_value(&published).expect("capture serialization");
         outcome.receipt.output_captures = published;
     }
-    outcome
+    Ok(outcome)
 }
 
 struct BatchObservation<'a> {
     plan: &'a ToolExecutionPlan,
     count: usize,
     observer: Option<&'a ToolObservationSender>,
+    cancellation: &'a ToolCancellation,
 }
 
 impl BatchObservation<'_> {
@@ -437,19 +460,30 @@ async fn run_serial(
     max_bytes: usize,
     raw_bytes: usize,
     observation: &BatchObservation<'_>,
-) -> Vec<CapturedCommand> {
+) -> Result<Vec<(usize, CapturedCommand)>, ToolExecutionError> {
     let mut results = Vec::with_capacity(commands.len());
     for (index, command) in commands.iter().enumerate() {
-        results.push(
+        if observation.cancellation.is_cancelled() {
+            break;
+        }
+        results.push((
+            index,
             observation
                 .completed(
                     index,
-                    run(project_root, command, max_bytes, raw_bytes).await,
+                    run(
+                        project_root,
+                        command,
+                        max_bytes,
+                        raw_bytes,
+                        observation.cancellation,
+                    )
+                    .await?,
                 )
                 .await,
-        );
+        ));
     }
-    results
+    Ok(results)
 }
 
 /// The command batch has no second Resource Key definition: it forms waves
@@ -461,11 +495,11 @@ async fn run_parallel(
     max_bytes: usize,
     raw_bytes: usize,
     observation: &BatchObservation<'_>,
-) -> Vec<CapturedCommand> {
+) -> Result<Vec<(usize, CapturedCommand)>, ToolExecutionError> {
     let mut pending = (0..commands.len()).collect::<VecDeque<_>>();
     let mut results = (0..commands.len()).map(|_| None).collect::<Vec<_>>();
 
-    while !pending.is_empty() {
+    while !pending.is_empty() && !observation.cancellation.is_cancelled() {
         let mut wave: Vec<usize> = Vec::new();
         while let Some(position) = pending.iter().position(|candidate| {
             wave.iter().all(|active| {
@@ -484,23 +518,31 @@ async fn run_parallel(
             }
         }
         let completed = join_all(wave.iter().map(|index| async move {
-            observation
+            Ok(observation
                 .completed(
                     *index,
-                    run(project_root, &commands[*index], max_bytes, raw_bytes).await,
+                    run(
+                        project_root,
+                        &commands[*index],
+                        max_bytes,
+                        raw_bytes,
+                        observation.cancellation,
+                    )
+                    .await?,
                 )
-                .await
+                .await)
         }))
         .await;
         for (index, result) in wave.into_iter().zip(completed) {
-            results[index] = Some(result);
+            results[index] = Some(result?);
         }
     }
 
-    results
+    Ok(results
         .into_iter()
-        .map(|result| result.expect("each admitted command is assigned to a completed wave"))
-        .collect()
+        .enumerate()
+        .filter_map(|(index, result)| result.map(|output| (index, output)))
+        .collect())
 }
 
 async fn run(
@@ -508,17 +550,18 @@ async fn run(
     arguments: &RunCommandArgs,
     max_bytes: usize,
     raw_bytes: usize,
-) -> CapturedCommand {
+    cancellation: &ToolCancellation,
+) -> Result<CapturedCommand, ToolExecutionError> {
     let mut arguments = arguments.clone();
     for path in arguments.code_inputs.clone() {
         let bytes = match read_attested_input(&project_root.join(&path)) {
             Ok((bytes, _)) => bytes,
             Err(error) => {
-                return verification_failure(
+                return Ok(verification_failure(
                     project_root,
                     &arguments,
                     format!("read code input `{path}`: {error}"),
-                );
+                ));
             }
         };
         let digest = blake3::hash(&bytes).to_hex().to_string();
@@ -528,11 +571,11 @@ async fn run(
             .find(|file| file.path == path)
         {
             if expected.blake3 != digest {
-                return verification_failure(
+                return Ok(verification_failure(
                     project_root,
                     &arguments,
                     format!("code input `{path}` does not match explicit expected digest"),
-                );
+                ));
             }
         } else {
             arguments.verified_inputs.push(ScriptFile {
@@ -543,20 +586,21 @@ async fn run(
     }
     let cwd = resolve_path(project_root, arguments.cwd.as_deref().unwrap_or("."));
     if let Err(error) = verify_inputs(project_root, &arguments.verified_inputs) {
-        return CapturedCommand {
+        return Ok(CapturedCommand {
             result: Err(
                 json!({"cwd":display_path(project_root, &cwd),"exit_code":null,"stdout":"","stderr":"","truncated":false,"error":error}),
             ),
             captures: Vec::new(),
             published: Vec::new(),
-        };
+            cancelled: false,
+        });
     }
     let argv = arguments
         .argv
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>();
-    let output = run_probe_at(cwd.clone(), &argv, max_bytes, raw_bytes).await;
+    let output = run_probe_at(cwd.clone(), &argv, max_bytes, raw_bytes, cancellation).await?;
     let mut value = output_value(project_root, &output.cwd, &output);
     if let Some(error) = &output.error {
         value["error"] = Value::from(error.clone());
@@ -574,11 +618,12 @@ async fn run(
     } else {
         Err(value)
     };
-    CapturedCommand {
+    Ok(CapturedCommand {
         result,
         captures: output.captures,
         published: Vec::new(),
-    }
+        cancelled: output.cancelled,
+    })
 }
 
 fn verification_failure(
@@ -592,6 +637,7 @@ fn verification_failure(
         ),
         captures: Vec::new(),
         published: Vec::new(),
+        cancelled: false,
     }
 }
 
@@ -611,12 +657,14 @@ fn verify_inputs(project_root: &Path, inputs: &[ScriptFile]) -> Result<(), Strin
 }
 
 struct CapturedCommand {
+    cancelled: bool,
     result: Result<Value, Value>,
     captures: Vec<PendingOutputCapture>,
     published: Vec<OutputCapture>,
 }
 
 pub(super) struct FixedProbeOutput {
+    cancelled: bool,
     pub(super) cwd: std::path::PathBuf,
     pub(super) exit_code: Option<i32>,
     pub(super) stdout: BoundedText,
@@ -655,7 +703,15 @@ pub(super) async fn run_fixed_probe(
     max_bytes: usize,
 ) -> FixedProbeOutput {
     let cwd = resolve_path(project_root, ".");
-    run_probe_at(cwd, argv, max_bytes, max_bytes / 2).await
+    run_probe_at(
+        cwd,
+        argv,
+        max_bytes,
+        max_bytes / 2,
+        &ToolCancellation::never(),
+    )
+    .await
+    .expect("a fixed probe has no cooperative cancellation signal")
 }
 
 async fn run_probe_at(
@@ -663,16 +719,18 @@ async fn run_probe_at(
     argv: &[&str],
     max_bytes: usize,
     raw_bytes: usize,
-) -> FixedProbeOutput {
+    cancellation: &ToolCancellation,
+) -> Result<FixedProbeOutput, ToolExecutionError> {
     let Some(program) = argv.first() else {
-        return FixedProbeOutput {
+        return Ok(FixedProbeOutput {
+            cancelled: false,
             cwd,
             exit_code: None,
             stdout: bounded_text(&[], max_bytes / 2),
             stderr: bounded_text(&[], max_bytes / 2),
             error: Some("fixed probe has no program".to_owned()),
             captures: Vec::new(),
-        };
+        });
     };
     let mut command = Command::new(program);
     command
@@ -686,14 +744,15 @@ async fn run_probe_at(
         Ok(child) => child,
         Err(error) => {
             let message = ProcessFailureStage::Spawn.describe(program, &cwd, &error);
-            return FixedProbeOutput {
+            return Ok(FixedProbeOutput {
+                cancelled: false,
                 cwd,
                 exit_code: None,
                 stdout: bounded_text(&[], max_bytes / 2),
                 stderr: bounded_text(&[], max_bytes / 2),
                 error: Some(message),
                 captures: Vec::new(),
-            };
+            });
         }
     };
     let stdout = child
@@ -707,6 +766,7 @@ async fn run_probe_at(
     let max_each = max_bytes / 2;
     let mut stdout_capture = CapturedOutput::new(raw_bytes);
     let mut stderr_capture = CapturedOutput::new(raw_bytes);
+    let mut cancelled = false;
     let (status, stdout_incomplete, stderr_incomplete) = {
         let stdout_reader = read_bounded_output(stdout, &mut stdout_capture);
         let stderr_reader = read_bounded_output(stderr, &mut stderr_capture);
@@ -716,9 +776,16 @@ async fn run_probe_at(
         let mut stderr_done = false;
         let status = loop {
             tokio::select! {
+                biased;
+                status = child.wait() => break status,
+                () = cancellation.wait(), if !cancelled => {
+                    child.start_kill().map_err(|error| ToolExecutionError::OutcomeUnknown {
+                        safe_reason: format!("foreground command cancellation failed: {error}"),
+                    })?;
+                    cancelled = true;
+                }
                 () = &mut stdout_reader, if !stdout_done => stdout_done = true,
                 () = &mut stderr_reader, if !stderr_done => stderr_done = true,
-                status = child.wait() => break status,
             }
         };
         let grace = tokio::time::sleep(OUTPUT_DRAIN_GRACE);
@@ -732,6 +799,11 @@ async fn run_probe_at(
         }
         (status, !stdout_done, !stderr_done)
     };
+    if cancelled && let Err(error) = &status {
+        return Err(ToolExecutionError::OutcomeUnknown {
+            safe_reason: format!("foreground command wait after cancellation failed: {error}"),
+        });
+    }
     // The reader futures and their local pipe handles dropped with the inner
     // scope above, so no reader can mutate a capture after it is incomplete.
     if stdout_incomplete {
@@ -762,14 +834,15 @@ async fn run_probe_at(
                     .map(|error| stage.describe(program, &cwd, error))
             })
     });
-    FixedProbeOutput {
+    Ok(FixedProbeOutput {
+        cancelled,
         cwd,
         exit_code: status.ok().and_then(|status| status.code()),
         stdout: stdout_capture.preview(max_each),
         stderr: stderr_capture.preview(max_each),
         error,
         captures,
-    }
+    })
 }
 
 /// Drains a child pipe so the process cannot block while retaining at most
@@ -951,11 +1024,12 @@ impl Tool {
         registry: &ToolRegistry,
         plan: ToolExecutionPlan,
         observer: Option<crate::ports::tool::ToolObservationSender>,
-    ) -> ToolExecutionOutcome {
+        cancellation: ToolCancellation,
+    ) -> Result<ToolExecutionOutcome, ToolExecutionError> {
         match self {
-            Self::RunCommand => execute_one(&registry.project_root, plan).await,
+            Self::RunCommand => execute_one(&registry.project_root, plan, &cancellation).await,
             Self::RunCommands => {
-                execute_batch_observed(&registry.project_root, plan, observer).await
+                execute_batch_observed(&registry.project_root, plan, observer, &cancellation).await
             }
         }
     }

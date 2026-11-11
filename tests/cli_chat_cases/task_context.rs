@@ -3740,18 +3740,46 @@ fn task_context_durable_boundaries_resume_without_adopting_prepared_or_replaying
 }
 
 #[test]
+fn task_context_interrupted_command_has_a_receipt_and_is_not_replayed_on_resume() {
+    assert_interruption_resume(true);
+}
+
+#[test]
 fn task_context_unknown_tool_effect_blocks_a_queued_task_and_is_not_replayed_on_resume() {
+    assert_interruption_resume(false);
+}
+
+fn assert_interruption_resume(cooperative_command: bool) {
     let root = TemporaryDirectory::new("task-context-unknown-effect");
     initialize_project(root.path());
     let agent = definition(root.path(), None);
+    let manifest_path = agent.join("agent.toml");
+    let mut manifest = fs::read_to_string(&manifest_path).unwrap();
+    manifest.push_str("http_request = \"direct\"\n");
+    fs::write(manifest_path, manifest).unwrap();
+    let endpoint = TcpListener::bind("127.0.0.1:0").unwrap();
+    endpoint.set_nonblocking(true).unwrap();
+    let (tool, arguments) = if cooperative_command {
+        (
+            "run_command",
+            json!({"argv":["/bin/sh","-c","printf 'started\\n' >> unknown-count.txt; exec /bin/sleep 30"]}),
+        )
+    } else {
+        (
+            "http_request",
+            json!({"method":"post", "url":format!("http://{}/effect", endpoint.local_addr().unwrap()), "timeout_ms":30000,
+            "body":{"kind":"text","value":"apply-once"},
+            "artifact":{"event_id":"http-response", "occurred_at":"2026-11-11T00:00:00Z", "artifact_id":"http-response", "toolchain_fingerprint":"loopback-fixture"}}),
+        )
+    };
     let server = spawn_scripted_responses_server(vec![
         ScriptedResponse::InitialSelection,
         ScriptedResponse::Response(
             200,
             m4_long_flow_tool_response(
                 "unknown-effect-once",
-                "run_command",
-                json!({"argv":["/bin/sh","-c","printf 'started\\n' >> unknown-count.txt; exec /bin/sleep 30"]}),
+                tool,
+                arguments,
                 "accepted-before-unknown-effect",
             ),
         ),
@@ -3760,7 +3788,11 @@ fn task_context_unknown_tool_effect_blocks_a_queued_task_and_is_not_replayed_on_
     let child = spawn_f2a_chat(
         root.path(),
         &config,
-        &format!("{TASK_A}\n{TASK_B}\n/exit\n"),
+        &if cooperative_command {
+            format!("{TASK_A}\n/exit\n")
+        } else {
+            format!("{TASK_A}\n{TASK_B}\n/exit\n")
+        },
         &["--agent", agent.to_str().unwrap()],
     );
     selector_candidates(&f2a_request_body(
@@ -3769,14 +3801,27 @@ fn task_context_unknown_tool_effect_blocks_a_queued_task_and_is_not_replayed_on_
     ));
     f2a_request_body(&server.requests, "unknown effect original request");
     let counter = root.path().join("unknown-count.txt");
-    let deadline = Instant::now() + F2A_WAIT;
-    while !counter.exists() && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(10));
-    }
-    assert!(
-        counter.exists(),
-        "the external mutation must precede interruption"
-    );
+    let _pending = if cooperative_command {
+        let deadline = Instant::now() + F2A_WAIT;
+        while !counter.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            counter.exists(),
+            "the external mutation must precede interruption"
+        );
+        None
+    } else {
+        let mut pending =
+            f3_context::accept_before_deadline(&endpoint, "unknown HTTP effect before task switch");
+        pending.set_read_timeout(Some(F2A_WAIT)).unwrap();
+        let request = read_http_request(&mut pending);
+        assert!(
+            request.starts_with("POST ") && request.ends_with("apply-once"),
+            "{request}"
+        );
+        Some(pending)
+    };
     assert!(
         Command::new("/bin/kill")
             .args(["-INT", &child.id().to_string()])
@@ -3785,9 +3830,10 @@ fn task_context_unknown_tool_effect_blocks_a_queued_task_and_is_not_replayed_on_
             .success()
     );
     let output = f2a_wait_child(child, "unknown effect before task switch");
-    assert!(!output.status.success());
-    assert!(
+    assert_eq!(output.status.success(), cooperative_command);
+    assert_eq!(
         String::from_utf8_lossy(&output.stderr).contains("external effects are unknown"),
+        !cooperative_command,
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -3812,10 +3858,20 @@ fn task_context_unknown_tool_effect_blocks_a_queued_task_and_is_not_replayed_on_
     let state = reduced_session(&Project::discover(root.path()).unwrap(), &session);
     assert_eq!(
         state.execution_receipt_count(),
-        0,
-        "unknown is not a fabricated terminal outcome"
+        u64::from(cooperative_command),
+        "only observed termination may produce a cancellation Receipt"
     );
-    assert!(state.history().ensure_all_tool_calls_paired().is_err());
+    assert_eq!(
+        state.history().ensure_all_tool_calls_paired().is_ok(),
+        cooperative_command
+    );
+    if cooperative_command {
+        let outcome = events
+            .iter()
+            .find(|event| event["event_type"] == "tool.execution_outcome_recorded")
+            .unwrap();
+        assert_eq!(outcome["payload"]["receipt"]["status"], "cancelled");
+    }
     assert!(
         !state
             .history()
@@ -3835,9 +3891,17 @@ fn task_context_unknown_tool_effect_blocks_a_queued_task_and_is_not_replayed_on_
     );
     let after = reduced_session(&Project::discover(root.path()).unwrap(), &session);
     assert_eq!(after.request_audits().len(), state.request_audits().len());
-    assert_eq!(after.execution_receipt_count(), 0);
+    assert_eq!(
+        after.execution_receipt_count(),
+        u64::from(cooperative_command)
+    );
     assert_eq!(after.history().items(), state.history().items());
-    assert_eq!(fs::read_to_string(counter).unwrap(), "started\n");
+    if cooperative_command {
+        assert_eq!(fs::read_to_string(counter).unwrap(), "started\n");
+    }
+    assert!(
+        matches!(endpoint.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+    );
 }
 
 #[test]

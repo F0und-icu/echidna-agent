@@ -10,7 +10,9 @@ use crate::domain::tools::{
     IdempotencyKey, ToolExecutionOutcome, ToolExecutionPlan, ToolFailure, ToolFailureRetryability,
     ToolResult, ToolResultStatus, ToolRetryPolicy, scheduling_conflicts,
 };
-use crate::ports::tool::{ToolExecutionError, ToolExecutor, ToolObservationSender};
+use crate::ports::tool::{
+    ToolCancellation, ToolExecutionError, ToolExecutor, ToolObservationSender,
+};
 
 use super::agent_loop::{AgentLoopError, ToolExecutionStartStage};
 use super::cancellation::AgentCancellation;
@@ -116,15 +118,25 @@ pub(super) async fn execute_batch<Tools: ToolExecutor + ?Sized>(
     let (sender, mut observations) = tokio::sync::mpsc::channel(1);
     let sender = observation_sender(sender);
     let mut children = Vec::new();
+    let (cancel_sender, mut cancel_receiver) = tokio::sync::watch::channel(cancelled);
+    let requested = cancel_receiver.clone();
+    let tool_cancellation = ToolCancellation::new(move || *requested.borrow(), async move {
+        // The scheduler retains the sender until every active executor settles.
+        cancel_receiver
+            .wait_for(|cancelled| *cancelled)
+            .await
+            .expect("scheduler retains the cancellation sender while executors are active");
+    });
 
-    while !cancelled && unknown_stop.is_none() && (!pending.is_empty() || !running.is_empty()) {
-        if cancellation.is_cancelled() {
+    while unknown_stop.is_none() && (!pending.is_empty() || !running.is_empty()) {
+        if !cancelled && cancellation.is_cancelled() {
             cancelled = true;
-            break;
+            cancel_sender.send_replace(true);
         }
-        while let Some(position) = pending
-            .iter()
-            .position(|index| can_start(&plans[*index], active.values()))
+        while !cancelled
+            && let Some(position) = pending
+                .iter()
+                .position(|index| can_start(&plans[*index], active.values()))
         {
             let Some(index) = pending.remove(position) else {
                 break;
@@ -134,11 +146,11 @@ pub(super) async fn execute_batch<Tools: ToolExecutor + ?Sized>(
                 stage(plan);
             }
             active.insert(index, plan.clone());
-            let execution = if observe_children {
-                tools.execute_observed(plan.clone(), sender.clone())
-            } else {
-                tools.execute(plan.clone())
-            };
+            let execution = tools.execute_interruptible(
+                plan.clone(),
+                observe_children.then(|| sender.clone()),
+                tool_cancellation.clone(),
+            );
             running.push(Box::pin(async move { (index, execution.await) }));
         }
 
@@ -152,27 +164,30 @@ pub(super) async fn execute_batch<Tools: ToolExecutor + ?Sized>(
                 checkpoint_child(observation, completion_stage, &mut children, &active)?;
                 // Check cancellation before polling acknowledged producers;
                 // otherwise that poll could launch the next serial child.
-                cancelled = cancellation.is_cancelled();
                 continue;
             }
-            _ = cancellation.wait_for_cancellation() => { cancelled = true; continue; }
+            _ = cancellation.wait_for_cancellation(), if !cancelled => { continue; }
             completed = running.next() => completed,
         };
         match completion {
             Some((index, result)) => {
+                // Preserve accepted observations even if the executor could
+                // not settle its parent execution after cancellation.
+                while let Ok(observation) = observations.try_recv() {
+                    checkpoint_child(observation, completion_stage, &mut children, &active)?;
+                }
                 let mut outcome = match result {
                     Ok(outcome) => outcome,
+                    Err(ToolExecutionError::Interrupted) => {
+                        active.remove(&index);
+                        outcomes[index] = Some(ScheduledToolResult::Interrupted);
+                        continue;
+                    }
                     Err(ToolExecutionError::OutcomeUnknown { safe_reason }) => {
                         unknown_stop = Some(safe_reason);
                         break;
                     }
                 };
-                // Polling an executor may enqueue its last observation and
-                // observe its deadline in the same poll. Drain that accepted
-                // fact before reconciling the terminal parent.
-                while let Ok(observation) = observations.try_recv() {
-                    checkpoint_child(observation, completion_stage, &mut children, &active)?;
-                }
                 active.remove(&index);
                 crate::domain::tools::reconcile_subcommands(&children, &mut outcome)?;
                 checkpoint_completion(completion_stage, &mut outcome)?;

@@ -44,8 +44,8 @@ impl AgentCancellation {
     }
 
     /// Resolves once cancellation is requested. A batch scheduler uses this as
-    /// its one outer cancellation wait while child Tool futures remain owned by
-    /// the scheduler and are dropped together on cancellation.
+    /// its one outer cancellation wait, then broadcasts to active executors
+    /// and observes their settlement before returning.
     pub(crate) async fn wait_for_cancellation(&self) {
         poll_fn(|context| {
             if self.is_cancelled() {
