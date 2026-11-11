@@ -1,0 +1,132 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="1240" viewBox="0 0 1500 1240" role="img" aria-labelledby="figure-title figure-description">
+  <title id="figure-title">Echidna: automatic task context</title>
+  <desc id="figure-description">Local retrieval supplies bounded candidates from complete Session history. An isolated, tool-free request to the same primary model selects continue, new, return, compose or unresolved. One source expansion is possible within a two-selection Turn limit. The harness compiles source-bound context and persists the selection before adopting it. Delivery either keeps compatible continuation or starts a fresh Full context to exclude old material. Actual answers and tool outcomes remain in the original durable record. Task switching does not replay tools or erase history.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#19171f" stroke-width="1.6"/></marker>
+    <marker id="accent-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#69577f" stroke-width="1.6"/></marker>
+    <style>
+      text { fill: #19171f; font-family: Arial, Helvetica, sans-serif; }
+      .heading { font-family: Georgia, 'Times New Roman', serif; font-size: 36px; }
+      .panel { font-family: Georgia, 'Times New Roman', serif; font-size: 25px; }
+      .label { font-size: 23px; font-weight: 600; }
+      .detail { font-size: 19px; }
+      .small { font-size: 17px; }
+      .muted { fill: #514959; }
+      .accent { fill: #69577f; }
+      .box { fill: #ece6db; stroke: #19171f; stroke-width: 1.5; }
+      .flow { fill: none; stroke: #19171f; stroke-width: 2; marker-end: url(#arrow); }
+      .contract { fill: none; stroke: #69577f; stroke-width: 2; stroke-dasharray: 7 6; marker-end: url(#accent-arrow); }
+      .rule { fill: none; stroke: #19171f; stroke-opacity: .22; stroke-width: 1; }
+    </style>
+  </defs>
+  <rect width="1500" height="1240" fill="#ece6db"/>
+  <text class="heading" x="54" y="61">Echidna: automatic task context</text>
+  <text class="detail muted" x="55" y="98">Retrieve locally. Interpret task relationships. Deliver relevant context while preserving the complete record.</text>
+  <path class="rule" d="M54 122H1446"/>
+
+  <text class="panel" x="54" y="168">(a) Retrieve sources</text>
+  <text class="panel" x="486" y="168">(b) Select and compile</text>
+  <text class="panel" x="1000" y="168">(c) Manage model context</text>
+  <rect x="54" y="190" width="390" height="744" fill="#19171f" fill-opacity=".035"/>
+  <rect x="486" y="190" width="472" height="744" rx="8" fill="#a697c3" fill-opacity=".13" stroke="#69577f" stroke-width="1.5"/>
+  <rect x="1000" y="190" width="446" height="744" fill="#19171f" fill-opacity=".035"/>
+
+  <!-- Local retrieval produces candidates, not the main request. -->
+  <rect class="box" x="74" y="214" width="350" height="90" rx="5"/>
+  <text class="label" x="94" y="250">Natural user input</text>
+  <text class="detail" x="94" y="280">New question, follow-up or return</text>
+  <path class="flow" d="M249 304V365"/>
+  <rect class="box" x="74" y="365" width="350" height="190" rx="5"/>
+  <text class="label" x="94" y="404">Local candidate retrieval</text>
+  <text class="detail" x="94" y="440">Identifiers / BM25 / n-grams</text>
+  <text class="detail" x="94" y="469">Rank fusion + source anchors</text>
+  <text class="small muted" x="94" y="507">Incremental indexes, bounded excerpts</text>
+  <text class="small muted" x="94" y="533">Task cards and active constraint sources</text>
+  <path class="flow" d="M249 555V630"/>
+  <rect class="box" x="74" y="630" width="350" height="122" rx="5"/>
+  <text class="label" x="94" y="668">Candidate set</text>
+  <text class="detail" x="94" y="700">Goals, references and progress</text>
+  <text class="small muted" x="94" y="730">Available to select; not all sent onward</text>
+  <text class="small muted" x="94" y="820">Original history remains intact.</text>
+  <text class="small muted" x="94" y="847">Task views are derived navigation.</text>
+  <text class="small muted" x="94" y="874">No manual task switching required.</text>
+  <path class="flow" d="M424 690H465V500H506"/>
+
+  <!-- A bounded model sample interprets intent; the harness owns adoption. -->
+  <text class="small accent" x="506" y="239">Source expansion only when needed</text>
+  <text class="small muted" x="506" y="266">At most two semantic selections per Turn</text>
+  <path class="contract" d="M722 365V292H455V410H424"/>
+  <rect x="506" y="365" width="432" height="190" rx="5" fill="#a697c3" fill-opacity=".32" stroke="#69577f" stroke-width="1.8"/>
+  <text class="label" x="526" y="404">Task relationship selection</text>
+  <text class="detail" x="526" y="440">Same primary model, isolated request</text>
+  <text class="small muted" x="526" y="469">Tool-free; shares the original Turn budget</text>
+  <text class="detail accent" x="526" y="508">continue / new / return / compose</text>
+  <text class="small muted" x="526" y="535">unresolved: retain explicit source gaps</text>
+  <path class="flow" d="M722 555V630"/>
+  <text class="small" x="740" y="599">Selected references</text>
+  <rect class="box" x="506" y="630" width="432" height="122" rx="5"/>
+  <text class="label" x="526" y="668">Context compilation</text>
+  <text class="detail" x="526" y="700">Resolve sources, scope and dependencies</text>
+  <text class="small muted" x="526" y="730">ContextPlanner: budget + required content</text>
+  <path class="flow" d="M722 752V808"/>
+  <rect class="box" x="506" y="808" width="432" height="105" rx="5"/>
+  <text class="label" x="526" y="844">Selection checkpoint</text>
+  <text class="detail" x="526" y="875">Persist decision and source mappings</text>
+  <text class="small muted" x="526" y="899">Before adopting the next model context</text>
+
+  <!-- Excluding old content also retires incompatible Provider continuation. -->
+  <text class="small muted" x="1020" y="239">Keep current input and applicable constraints.</text>
+  <text class="small muted" x="1020" y="266">Retain instructions and real execution state.</text>
+  <text class="small muted" x="1020" y="293">Preserve complete Tool Call / Result groups.</text>
+  <path class="flow" d="M938 860H979V425H1020"/>
+  <rect class="box" x="1020" y="365" width="406" height="120" rx="5"/>
+  <text class="label" x="1040" y="405">Provider context boundary</text>
+  <text class="detail" x="1040" y="442">Must prior material be excluded?</text>
+  <text class="small muted" x="1040" y="468">Apply only at a durable boundary</text>
+  <path class="flow" d="M1116 485V570"/>
+  <path class="flow" d="M1329 485V570"/>
+  <text class="small" x="1130" y="532">No</text>
+  <text class="small" x="1343" y="532">Yes</text>
+  <rect class="box" x="1020" y="570" width="193" height="110" rx="5"/>
+  <text class="detail" x="1035" y="605">Keep continuation</text>
+  <text class="small muted" x="1035" y="637">Compatible context</text>
+  <text class="small muted" x="1035" y="662">Existing model state</text>
+  <rect x="1233" y="570" width="193" height="110" rx="5" fill="#a697c3" fill-opacity=".32" stroke="#69577f" stroke-width="1.8"/>
+  <text class="detail" x="1248" y="605">Fresh Full context</text>
+  <text class="small muted" x="1248" y="637">No old response ID</text>
+  <text class="small muted" x="1248" y="662">No old continuation</text>
+  <path d="M1116 680V718H1329V680" fill="none" stroke="#19171f" stroke-width="2"/>
+  <circle cx="1223" cy="718" r="3" fill="#19171f"/>
+  <path class="flow" d="M1223 718V770"/>
+  <rect class="box" x="1020" y="770" width="406" height="143" rx="5"/>
+  <text class="label" x="1040" y="808">Main answer and Tool loop</text>
+  <text class="detail" x="1040" y="843">One AgentLoop, real execution outcomes</text>
+  <text class="small muted" x="1040" y="876">context_read: search / readback / progress</text>
+  <text class="small muted" x="1040" y="900">Ordinary Tool steps reuse task selection</text>
+
+  <!-- Distinct durable sources remain authoritative across task changes. -->
+  <text class="panel" x="54" y="980">(d) Preserve the record, derive the next task view</text>
+  <path class="contract" d="M1223 913V1008"/>
+  <path class="contract" d="M180 1008V992H34V460H74"/>
+  <rect x="54" y="1008" width="1390" height="120" fill="#19171f" fill-opacity=".035" stroke="#19171f" stroke-width="1.4"/>
+  <path class="rule" d="M386 1030V1107M733 1030V1107M1095 1030V1107"/>
+  <text class="label" x="78" y="1047">Complete history</text>
+  <text class="detail" x="78" y="1077">Inputs, answers, Tool results</text>
+  <text class="small muted" x="78" y="1105">Append-only Session records</text>
+  <text class="label" x="412" y="1047">Source references</text>
+  <text class="detail" x="412" y="1077">Original excerpts and artifacts</text>
+  <text class="small muted" x="412" y="1105">Exact source attribution</text>
+  <text class="label" x="758" y="1047">Selection records</text>
+  <text class="detail" x="758" y="1077">Decisions and request audits</text>
+  <text class="small muted" x="758" y="1105">Traceable context delivery</text>
+  <text class="label" x="1120" y="1047">Task progress</text>
+  <text class="detail" x="1120" y="1077">Derived from real records</text>
+  <text class="small muted" x="1120" y="1105">Not proof of task completion</text>
+
+  <path class="flow" d="M55 1168H109"/>
+  <text class="small" x="125" y="1174">Execution / information flow</text>
+  <path class="contract" d="M453 1168H507"/>
+  <text class="small" x="523" y="1174">Source / persistence relation</text>
+  <text class="small accent" x="55" y="1211">One Session. No Tool replay on task switches.</text>
+  <text class="small muted" x="520" y="1211">Selection adds model work; lower latency or token use is not guaranteed on every Turn.</text>
+</svg>

@@ -5,7 +5,7 @@ model explicitly supporting **1M**, use its declared window or import it with
 `auth select-model --apply-capabilities`. A model ID alone does not prove its
 capacity. Small-window boundary fixtures do not define the product defaults.
 
-[简体中文说明](../README.md#2-配置模型) · [English guide](../README.en.md#2-configure-a-model)
+[简体中文说明](../guides/setup.md#2-配置模型) · [English guide](../guides/setup.en.md#2-configure-a-model)
 
 Copy one complete Provider template outside the repository. Replace placeholder
 URLs, models and private paths; export only the dedicated keys it references.
