@@ -69,6 +69,7 @@ pub(super) struct ResponseDecoder {
     reasoning_summary: text::TextOutput,
     last_presented_reasoning_summary_part: Option<(usize, usize)>,
     completed_items: Vec<(Option<usize>, Vec<ModelEvent>)>,
+    incomplete_message: bool,
     profile: ResponsesWireProfile,
     opaque_scope: Option<OpaqueContinuationScope>,
 }
@@ -83,6 +84,7 @@ impl ResponseDecoder {
             reasoning_summary: text::TextOutput::default(),
             last_presented_reasoning_summary_part: None,
             completed_items: Vec::new(),
+            incomplete_message: false,
             profile,
             opaque_scope,
         }
@@ -192,6 +194,12 @@ impl ResponseDecoder {
                 let reasoning_summaries =
                     self.reasoning_summaries_from_item(event.output_index, &item)?;
                 if item.get("type").and_then(Value::as_str) == Some("message") {
+                    if item.get("status").and_then(Value::as_str) == Some("incomplete") {
+                        // Item termination may precede response.incomplete/failed.
+                        // Keep its text provisional and read the terminal reason.
+                        self.incomplete_message = true;
+                        return Ok(decoded(Vec::new()));
+                    }
                     let mut decoded = decoded(self.text.message(event.output_index, &item)?);
                     decoded.reasoning_summaries = reasoning_summaries;
                     Ok(decoded)
@@ -212,6 +220,11 @@ impl ResponseDecoder {
                 }
             }
             "response.completed" => {
+                if self.incomplete_message {
+                    return Err(protocol_error(
+                        "response.completed followed an incomplete message (source=response.output_item.done status=incomplete)",
+                    ));
+                }
                 let mut decoded = decode_completed(
                     event.response.as_ref(),
                     usage_required,

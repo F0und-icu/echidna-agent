@@ -40,6 +40,80 @@ fn completed(output: Value) -> Value {
 }
 
 #[tokio::test]
+async fn incomplete_message_waits_for_terminal_failure_reason() {
+    for terminal in [
+        json!({"type":"response.incomplete","response":{"status":"incomplete",
+            "incomplete_details":{"reason":"max_output_tokens"}}}),
+        json!({"type":"response.failed","response":{"status":"failed",
+            "error":{"code":"server_error","message":"terminal failure detail"}}}),
+    ] {
+        let mut item = message(0, &["partial answer"]);
+        item["status"] = json!("incomplete");
+        let result = consume(vec![
+            delta(0, 0, "partial answer"),
+            json!({"type":"response.output_item.done","output_index":0,"item":item,
+                "sequence_number":838}),
+            terminal.clone(),
+        ])
+        .await;
+        let Err(ModelStreamingError::Provider(ModelProviderError::ProviderFailure {
+            code,
+            message,
+        })) = result
+        else {
+            panic!("terminal reason must survive item finalization: {result:?}")
+        };
+        if terminal["type"] == "response.incomplete" {
+            assert_eq!(code.as_deref(), Some("response_incomplete"));
+            assert!(message.contains("max_output_tokens"), "{message}");
+        } else {
+            assert_eq!(code.as_deref(), Some("server_error"));
+            assert!(message.contains("terminal failure detail"), "{message}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn incomplete_message_cannot_be_promoted_by_successful_terminal_snapshot() {
+    let mut item = message(0, &["partial answer"]);
+    item["status"] = json!("incomplete");
+    for terminal in [
+        completed(json!([item.clone()])),
+        completed(json!([message(0, &["partial answer"])])),
+        json!({"type":"response.completed","response":{"id":"missing-output"}}),
+    ] {
+        let result = consume(vec![
+            json!({"type":"response.output_item.done","output_index":0,"item":item}),
+            terminal,
+        ])
+        .await;
+        assert!(matches!(
+            result,
+            Err(ModelStreamingError::Provider(
+                ModelProviderError::ProtocolFailure { .. }
+            ))
+        ));
+    }
+}
+
+#[tokio::test]
+async fn incomplete_message_without_terminal_response_remains_interrupted() {
+    let mut item = message(0, &["partial answer"]);
+    item["status"] = json!("incomplete");
+    let result = consume(vec![
+        delta(0, 0, "partial answer"),
+        json!({"type":"response.output_item.done","output_index":0,"item":item}),
+    ])
+    .await;
+    assert!(matches!(
+        result,
+        Err(ModelStreamingError::Provider(
+            ModelProviderError::ResponseInterrupted { .. }
+        ))
+    ));
+}
+
+#[tokio::test]
 async fn reasoning_content_part_finalization_stays_out_of_assistant_text() {
     let reasoning = json!({"type":"reasoning","id":"reasoning-0",
         "content":[{"type":"reasoning_text","text":"reasoning only"}]});

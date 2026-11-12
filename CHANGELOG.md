@@ -5,6 +5,14 @@ changes remain available in Git history.
 
 ## Unreleased
 
+### Incomplete response diagnostics — 2026-11-12
+
+- Read the terminal response reason after an explicitly incomplete message item,
+  instead of stopping early with a generic message-status protocol error.
+- Keep partial output and Tool Calls uncommitted. A later successful response
+  cannot override the observed incomplete item; existing transport interruption
+  handling and explicit recovery remain unchanged.
+
 ### Foreground command interruption — 2026-11-11
 
 - Settle interrupted `run_command` and `run_commands` executions before returning

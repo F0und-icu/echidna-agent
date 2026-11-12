@@ -110,6 +110,52 @@ fn f4_default_shows_raw_rejected_events_without_committing_them() {
     }
 }
 
+#[test]
+fn incomplete_message_preserves_terminal_reason_without_dispatch_or_history_commit() {
+    let root = TemporaryDirectory::new("incomplete-message-terminal");
+    initialize_project(root.path());
+    let body = [
+        json!({"type":"response.output_item.done","output_index":0,"item":{
+            "type":"function_call","call_id":"uncommitted-write","name":"write_file",
+            "arguments":json!({"path":"must-not-exist.txt","content":"not executed"}).to_string()}}),
+        json!({"type":"response.output_text.delta","output_index":1,"content_index":0,
+            "item_id":"partial-message","delta":"UNCOMMITTED_PARTIAL_ANSWER"}),
+        json!({"type":"response.output_item.done","sequence_number":838,"output_index":1,
+            "item":{"id":"partial-message","type":"message","role":"assistant",
+                "status":"incomplete","content":[{"type":"output_text",
+                    "text":"UNCOMMITTED_PARTIAL_ANSWER","annotations":[],"logprobs":[]}]}}),
+        json!({"type":"response.incomplete","response":{"status":"incomplete",
+            "incomplete_details":{"reason":"max_output_tokens"}}}),
+    ]
+    .into_iter()
+    .map(|event| format!("data: {event}\n\n"))
+    .collect::<String>();
+    let server = spawn_scripted_responses_server(vec![InitialSelection, Response(200, body)]);
+    let config = write_config(root.path(), &server.base_url);
+    let output = run_chat(root.path(), &config, "hello\n/exit\n", &[]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("max_output_tokens"), "{stderr}");
+    assert!(!stderr.contains("completed message has non-completed status"));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Durable checkpoint retained"), "{stdout}");
+    assert!(!root.path().join("must-not-exist.txt").exists());
+    let project = Project::discover(root.path()).unwrap();
+    let id = session_id(root.path());
+    let state = reduced_session(&project, &id);
+    assert_eq!(state.execution_receipt_count(), 0);
+    assert_eq!(
+        state.history().items(),
+        &[echidna::domain::model::ContentItem::user_text("hello")]
+    );
+    assert!(
+        !session_events(root.path(), &id)
+            .iter()
+            .any(|event| event["event_type"] == "session.model_delivery_committed")
+    );
+    server.join();
+}
+
 fn debug_requests(stderr: &[u8]) -> Vec<String> {
     String::from_utf8_lossy(stderr)
         .split("[debug sending ")
