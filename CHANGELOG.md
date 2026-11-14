@@ -5,6 +5,16 @@ changes remain available in Git history.
 
 ## Unreleased
 
+### Task reference correction — 2026-11-12
+
+- Allow one correction of an unknown task/context reference or invalid task focus
+  within the existing two-sample selection limit, shared with source expansion.
+  Preserve the rejected proposal and request usage without adopting it or running
+  tools; a repeated error remains explicit.
+- Clarify reference namespaces and include the failed field in unknown-reference
+  errors. Sessions containing rejected schema2 proposals require this version or
+  newer to Resume; historical selector prompts retain their original bytes.
+
 ### Incomplete response diagnostics — 2026-11-12
 
 - Read the terminal response reason after an explicitly incomplete message item,

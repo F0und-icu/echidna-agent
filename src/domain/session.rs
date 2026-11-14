@@ -525,7 +525,9 @@ impl SessionEvent {
             }
             "session.task_selection_sample_recorded" => {
                 let sample: TaskSelectionSample = decode_strict_payload(event_type, payload)?;
-                require_current_payload_schema(event_type, sample.schema_version)?;
+                if sample.schema_version != 2 {
+                    require_current_payload_schema(event_type, sample.schema_version)?;
+                }
                 Ok(Self::TaskSelectionSampleRecorded { sample })
             }
             "session.task_selection_usage_recorded" => {

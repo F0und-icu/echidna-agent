@@ -612,7 +612,7 @@ impl TaskContextStage for TaskContextRuntime<'_> {
         output: &TaskSelectionSampleOutput,
     ) -> Result<EventId, AgentLoopError> {
         let sample = TaskSelectionSample {
-            schema_version: 1,
+            schema_version: if output.rejected { 2 } else { 1 },
             source: prepared.source.clone(),
             capture_event_id: prepared.capture_event_id.clone(),
             capture_blob: prepared.capture_blob.clone(),

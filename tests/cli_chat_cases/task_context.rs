@@ -1632,6 +1632,11 @@ fn request_reference_expansion(candidates: &Value) -> Value {
 
 fn select_expanded_reference(candidates: &Value) -> Value {
     assert_eq!(candidates["expansion_references"], json!(["A_ONLY_RESULT"]));
+    assert!(candidates["previous_selection"]["validation_error"].is_null());
+    assert_eq!(
+        candidates["previous_selection"]["previous_proposal"]["unresolved_references"],
+        json!(["A_ONLY_RESULT"])
+    );
     let source = candidates["context"]
         .as_array()
         .unwrap()
@@ -1731,6 +1736,233 @@ fn invalid_reference(candidates: &Value) -> Value {
     })
 }
 
+fn invalid_task_reference(candidates: &Value) -> Value {
+    let mut decision = invalid_reference(candidates);
+    decision["required_context_refs"] = json!([]);
+    decision["related_task_refs"] = json!([format!(
+        "task:{}",
+        candidates["input"]["ref"].as_str().unwrap()
+    )]);
+    decision
+}
+
+fn task_reference_in_context(candidates: &Value) -> Value {
+    let mut decision = invalid_reference(candidates);
+    decision["required_context_refs"] = json!([candidates["tasks"][0]["ref"]]);
+    decision
+}
+
+fn invalid_focus_reference(candidates: &Value) -> Value {
+    let mut decision = invalid_reference(candidates);
+    decision["relation"] = json!("continue");
+    decision["focus"] = json!({"kind":"existing", "task_ref":"task:absent"});
+    decision["required_context_refs"] = json!([]);
+    decision
+}
+
+fn corrected_reference(candidates: &Value) -> Value {
+    let previous = &candidates["previous_selection"];
+    assert!(previous["previous_proposal"].is_object());
+    let error = previous["validation_error"].as_str().unwrap();
+    assert!(error.contains("unknown candidate") || error.contains("focus"));
+    let mut decision = invalid_reference(candidates);
+    decision["required_context_refs"] = json!([]);
+    decision
+}
+
+#[test]
+fn task_context_reference_correction_preserves_rejected_proposal_and_resumes() {
+    for invalid in [
+        invalid_reference as fn(&Value) -> Value,
+        invalid_task_reference,
+        task_reference_in_context,
+        invalid_focus_reference,
+    ] {
+        let root = TemporaryDirectory::new("task-reference-correction");
+        initialize_project(root.path());
+        let agent = definition(root.path(), None);
+        let server = spawn_scripted_responses_server(vec![
+            ScriptedResponse::InitialSelection,
+            ScriptedResponse::Response(200, text_response(A_RESULT, "ref-a")),
+            ScriptedResponse::SelectionDecision(invalid),
+            ScriptedResponse::SelectionDecision(corrected_reference),
+            ScriptedResponse::Response(200, text_response("CORRECTION-COMPLETE", "ref-final")),
+        ]);
+        let config = write_context_window_config(root.path(), &server.base_url, 272_000);
+        let output = run_chat(
+            root.path(),
+            &config,
+            &format!("{TASK_A}\n{TASK_B}\n/exit\n"),
+            &["--agent", agent.to_str().unwrap()],
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let wires = (0..5)
+            .map(|_| f2a_request_body(&server.requests, "reference correction"))
+            .collect::<Vec<_>>();
+        server.join();
+        assert!(!wires[4].to_string().contains(A_RESULT));
+        assert!(!wires[4].to_string().contains("previous_proposal"));
+        let session = session_id(root.path());
+        let events = session_events(root.path(), &session);
+        let samples = events
+            .iter()
+            .filter(|e| e["event_type"] == "session.task_selection_sample_recorded")
+            .collect::<Vec<_>>();
+        assert_eq!(samples.len(), 3);
+        assert_eq!(samples[1]["payload"]["schema_version"], 2);
+        assert_eq!(samples[2]["payload"]["schema_version"], 1);
+        assert_eq!(
+            selector_candidates(&wires[3])["previous_selection"]["previous_proposal"],
+            samples[1]["payload"]["decision"]
+        );
+        let selected = events
+            .iter()
+            .rfind(|e| e["event_type"] == "session.task_context_selected")
+            .unwrap();
+        assert_eq!(
+            selected["payload"]["sample_event_id"],
+            samples[2]["event_id"]
+        );
+        let resumed = run_chat(root.path(), &config, "/exit\n", &["--resume", "latest"]);
+        assert!(
+            resumed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&resumed.stderr)
+        );
+        let state = reduced_session(&Project::discover(root.path()).unwrap(), &session);
+        assert_eq!(state.request_audits().len(), 5);
+        assert_eq!(state.history().items().len(), 4);
+        let mut rejected_adoption = events.clone();
+        let last_sample = rejected_adoption
+            .iter_mut()
+            .rfind(|e| e["event_type"] == "session.task_selection_sample_recorded")
+            .unwrap();
+        last_sample["payload"]["schema_version"] = json!(2);
+        assert!(
+            SessionReducer
+                .reduce(
+                    rejected_adoption
+                        .into_iter()
+                        .map(|e| serde_json::from_value(e).unwrap())
+                )
+                .is_err(),
+            "a rejected sample cannot authorize selection"
+        );
+    }
+}
+
+#[test]
+fn task_context_reference_correction_preserves_main_request_reservation() {
+    let root = TemporaryDirectory::new("task-reference-budget");
+    initialize_project(root.path());
+    let agent = definition(root.path(), None);
+    let server = spawn_scripted_responses_server(vec![ScriptedResponse::SelectionDecision(
+        invalid_reference,
+    )]);
+    let config = write_context_window_config(root.path(), &server.base_url, 272_000);
+    fs::write(
+        &config,
+        format!(
+            "{}\n[runtime]\nmodel_request_limit_per_turn = 2\n",
+            fs::read_to_string(&config).unwrap()
+        ),
+    )
+    .unwrap();
+    let output = run_chat(
+        root.path(),
+        &config,
+        &format!("{TASK_A}\n/exit\n"),
+        &["--agent", agent.to_str().unwrap()],
+    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unresolved stopped Turn"));
+    f2a_request_body(&server.requests, "bounded reference correction");
+    assert!(server.requests.try_recv().is_err());
+    server.join();
+    let events = session_events(root.path(), &session_id(root.path()));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e["event_type"] == "session.task_selection_sample_recorded")
+            .count(),
+        1
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| e["event_type"] == "session.task_context_selected"
+                || e["event_type"] == "session.model_delivery_committed"
+                || e["event_type"] == "tool.execution_outcome_recorded")
+    );
+}
+
+#[test]
+fn task_context_reference_correction_shares_expansion_limit_and_never_adopts_failure() {
+    for first in [
+        invalid_reference as fn(&Value) -> Value,
+        request_reference_expansion,
+    ] {
+        let root = TemporaryDirectory::new("task-reference-limit");
+        initialize_project(root.path());
+        let agent = definition(root.path(), None);
+        let server = spawn_scripted_responses_server(vec![
+            ScriptedResponse::InitialSelection,
+            ScriptedResponse::Response(200, text_response(A_RESULT, "ref-limit-a")),
+            ScriptedResponse::SelectionDecision(first),
+            ScriptedResponse::SelectionDecision(invalid_reference),
+        ]);
+        let config = write_context_window_config(root.path(), &server.base_url, 272_000);
+        let output = run_chat(
+            root.path(),
+            &config,
+            &format!("{TASK_A}\n{TASK_B}\n/exit\n"),
+            &["--agent", agent.to_str().unwrap()],
+        );
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("unknown candidate `fabricated-source` in required_context_refs")
+        );
+        for _ in 0..4 {
+            f2a_request_body(&server.requests, "reference correction limit");
+        }
+        assert!(server.requests.try_recv().is_err());
+        server.join();
+        let events = session_events(root.path(), &session_id(root.path()));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e["event_type"] == "session.task_selection_sample_recorded")
+                .count(),
+            3
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e["event_type"] == "session.task_context_selected")
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e["event_type"] == "session.model_delivery_committed")
+                .count(),
+            1
+        );
+        let resumed = run_chat(root.path(), &config, "/exit\n", &["--resume", "latest"]);
+        assert!(
+            resumed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&resumed.stderr)
+        );
+    }
+}
+
 fn invalid_utf8_objective(candidates: &Value) -> Value {
     let mut decision = invalid_reference(candidates);
     decision["required_context_refs"] = json!([]);
@@ -1760,6 +1992,85 @@ fn invalid_obsolete_change_only(candidates: &Value) -> Value {
     decision
 }
 
+#[test]
+fn task_context_reference_correction_does_not_mask_range_scope_or_authority_errors() {
+    for focus_error in [false, true] {
+        for kind in ["objective", "scope", "authority", "source_range"] {
+            let root = TemporaryDirectory::new("task-reference-mixed-error");
+            initialize_project(root.path());
+            let agent = definition(root.path(), None);
+            let server = super::task_context_paging::paged_server(move |step, wire| match step {
+                0 => (initial_selection_response(wire, "mixed-initial"), false),
+                1 => (text_response(A_RESULT, "mixed-main"), false),
+                2 => {
+                    let candidates = selector_candidates(wire);
+                    let mut decision = match kind {
+                        "authority" => invalid_assistant_constraint(&candidates),
+                        _ => invalid_reference(&candidates),
+                    };
+                    match kind {
+                        "objective" => {
+                            decision["new_objectives"] = json!([{"start_byte":0,"end_byte":999999,"description":"outside input"}])
+                        }
+                        "scope" => {
+                            decision["scope_classifications"] = json!([{"context_ref":candidates["input"]["ref"],"scope":{"kind":"global"}}])
+                        }
+                        "source_range" => {
+                            decision["source_ranges"] = json!([{"context_ref":candidates["context"][0]["ref"],"start_byte":0,"end_byte":999999}])
+                        }
+                        "authority" => {}
+                        _ => unreachable!(),
+                    }
+                    decision["required_context_refs"] = json!(["fabricated-source"]);
+                    if focus_error {
+                        decision["relation"] = json!("continue");
+                        decision["focus"] = json!({"kind":"existing","task_ref":"task:absent"});
+                    }
+                    (text_response(&decision.to_string(), "mixed-invalid"), true)
+                }
+                _ => panic!("mixed semantic failure must not request correction"),
+            });
+            let config = write_context_window_config(root.path(), &server.base_url, 272_000);
+            let output = run_chat(
+                root.path(),
+                &config,
+                &format!("{TASK_A}\n{TASK_B}\n/exit\n"),
+                &["--agent", agent.to_str().unwrap()],
+            );
+            assert!(!output.status.success());
+            let expected = match kind {
+                "objective" => "task objective range",
+                "scope" => "context scope classification",
+                "authority" => "constraint update is not bound",
+                "source_range" => "selected source range",
+                _ => unreachable!(),
+            };
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains(expected),
+                "{kind}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            server.join();
+            let events = session_events(root.path(), &session_id(root.path()));
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|e| e["event_type"] == "session.task_selection_sample_recorded")
+                    .count(),
+                1,
+                "only the initial valid sample is recorded; mixed failures never enter correction"
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|e| e["event_type"] == "session.request_audit_recorded")
+                    .count(),
+                3
+            );
+        }
+    }
+}
+
 fn invalid_obsolete_inconsistent_change_and_update(candidates: &Value) -> Value {
     let mut decision = invalid_obsolete_change_only(candidates);
     decision["constraint_updates"] = json!([{"source_ref":candidates["input"]["ref"],
@@ -1770,8 +2081,7 @@ fn invalid_obsolete_inconsistent_change_and_update(candidates: &Value) -> Value 
 #[test]
 fn task_context_invalid_sources_ranges_and_constraint_authority_stop_before_main_delivery() {
     for decide in [
-        invalid_reference as fn(&Value) -> Value,
-        invalid_utf8_objective,
+        invalid_utf8_objective as fn(&Value) -> Value,
         invalid_assistant_constraint,
         invalid_obsolete_change_only,
         invalid_obsolete_inconsistent_change_and_update,

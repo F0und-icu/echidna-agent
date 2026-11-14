@@ -183,6 +183,7 @@ impl TaskCompileCapture {
 
 /// An isolated selector output. The corresponding audited request and frozen
 /// candidates are retained separately; this is not conversation History.
+/// Schema 2 retains a rejected reference proposal and cannot authorize adoption.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaskSelectionSample {
@@ -2205,7 +2206,7 @@ impl SessionState {
                 .is_none_or(|sample| &sample.decision != expansion)
         {
             return Err(invalid(
-                "candidate expansion does not match the prior accepted selection sample",
+                "candidate expansion does not match the prior selection sample",
             ));
         }
         let mut candidates = if source_refresh {
@@ -4098,7 +4099,8 @@ pub(super) fn apply_selection(
                 .find(|(id, _)| id == sample_id)
                 .map(|(_, sample)| sample)
                 .ok_or_else(|| invalid("selection sample is absent"))?;
-            if sample.source != selection.source
+            if sample.schema_version != 1
+                || sample.source != selection.source
                 || sample.capture_event_id != selection.capture_event_id
                 || sample.capture_blob != selection.capture_blob
                 || sample.input_ref != selection.input_ref

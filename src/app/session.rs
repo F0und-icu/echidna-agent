@@ -1024,6 +1024,7 @@ where
             &source,
             &capture.candidates,
             capture.compile.selection_prompt_version,
+            capture.expansion.as_ref(),
         )
         .map_err(|error| invalid(format!("selection source compilation failed: {error}")))?;
         let actual = audit

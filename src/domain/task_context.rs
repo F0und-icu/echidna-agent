@@ -204,7 +204,7 @@ impl SelectionCandidates {
         &self,
         decision: &TaskSelectionDecision,
     ) -> Result<(), TaskSelectionError> {
-        let tasks = self
+        let tasks: BTreeSet<_> = self
             .tasks
             .iter()
             .map(|candidate| candidate.reference.clone())
@@ -215,7 +215,6 @@ impl SelectionCandidates {
             .map(|candidate| candidate.reference.clone())
             .chain(std::iter::once(self.input.reference.clone()))
             .collect();
-        decision.validate_references(&self.input.reference, &tasks, &context)?;
         let current_task = decision.focus.task_id();
         for objective in &decision.new_objectives {
             if objective.description.trim().is_empty()
@@ -326,7 +325,8 @@ impl SelectionCandidates {
                 return Err(TaskSelectionError::InvalidSourceRange);
             }
         }
-        Ok(())
+        // A correctable reference error must not mask invalid ranges or authority.
+        decision.validate_references(&self.input.reference, &tasks, &context)
     }
 }
 
@@ -409,8 +409,12 @@ impl TaskSelectionDecision {
             ) if task_refs.contains(task_ref) => {}
             _ => return Err(TaskSelectionError::InvalidFocus),
         }
-        require_known(&self.related_task_refs, task_refs)?;
-        require_known(&self.required_context_refs, context_refs)?;
+        require_known(&self.related_task_refs, task_refs, "related_task_refs")?;
+        require_known(
+            &self.required_context_refs,
+            context_refs,
+            "required_context_refs",
+        )?;
         Ok(())
     }
 }
@@ -418,11 +422,13 @@ impl TaskSelectionDecision {
 fn require_known(
     selected: &[String],
     candidates: &BTreeSet<String>,
+    field: &'static str,
 ) -> Result<(), TaskSelectionError> {
     for reference in selected {
         if !candidates.contains(reference) {
             return Err(TaskSelectionError::UnknownReference {
                 reference: reference.clone(),
+                field,
             });
         }
     }
@@ -433,8 +439,11 @@ fn require_known(
 pub(crate) enum TaskSelectionError {
     #[error("task selection focus does not match its relation or supplied candidates")]
     InvalidFocus,
-    #[error("task selection references unknown candidate `{reference}`")]
-    UnknownReference { reference: String },
+    #[error("task selection references unknown candidate `{reference}` in {field}")]
+    UnknownReference {
+        reference: String,
+        field: &'static str,
+    },
     #[error("task objective range is outside the inspected input")]
     InvalidObjectiveRange,
     #[error("context scope classification is not supported by the inspected source")]

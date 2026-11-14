@@ -129,7 +129,7 @@ fn repeated_active_constraints_keep_exact_scope_range_and_single_revision() {
             .unwrap(),
         )
         .unwrap();
-        assert_eq!(capture["compile"]["selection_prompt_version"], 1);
+        assert_eq!(capture["compile"]["selection_prompt_version"], 2);
         if valid {
             let revisions = selections[1]["constraint_revisions"].as_array().unwrap();
             assert_eq!(revisions.len(), usize::from(mode == "partial"));

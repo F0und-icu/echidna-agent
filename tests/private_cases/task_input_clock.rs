@@ -862,7 +862,7 @@ fn task_source_anchor_closure_preserves_old_policy_and_bounded_original_text() {
         .required_context_refs
         .push("missing-source".to_owned());
     assert!(
-        matches!(current.validate_decision(&decision), Err(crate::domain::task_context::TaskSelectionError::UnknownReference { reference }) if reference == "missing-source")
+        matches!(current.validate_decision(&decision), Err(crate::domain::task_context::TaskSelectionError::UnknownReference { reference, field: "required_context_refs" }) if reference == "missing-source")
     );
 }
 
@@ -993,6 +993,32 @@ fn task_cards_are_bounded_and_query_recalls_an_old_legacy_task() {
             "each accepted input belongs to its own original legacy task"
         );
     }
+
+    // A real task outside the initial pool may become valid after expansion.
+    // Feedback must reflect the expanded pool, not insist it is still absent.
+    let omitted = (0..530)
+        .map(|i| format!("legacy:clock-{}", 2 + i * 2))
+        .find(|id| !candidates.tasks.iter().any(|task| &task.reference == id))
+        .unwrap();
+    let proposal: crate::domain::task_context::TaskSelectionDecision =
+        serde_json::from_value(serde_json::json!({
+            "relation":"new", "focus":{"kind":"new_from_input","input_ref":"clock-1062"},
+            "related_task_refs":[omitted], "required_context_refs":[], "unresolved_references":[]
+        }))
+        .unwrap();
+    assert!(matches!(
+        candidates.validate_decision(&proposal),
+        Err(crate::domain::task_context::TaskSelectionError::UnknownReference { .. })
+    ));
+    let expanded = state
+        .task_selection_candidates(
+            "project-cold-card",
+            &EventId::new("clock-1062"),
+            Some(&proposal),
+            &crate::app::context_read::history_navigation_excerpt,
+        )
+        .unwrap();
+    expanded.validate_decision(&proposal).unwrap();
 
     // Exercise the same production candidate policy with a finite posting
     // reader, then independently rebuild from Session facts for comparison.
