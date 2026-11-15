@@ -6,9 +6,9 @@
 
 ---
 
-`codex/agent-definition-v1` externalizes persona, work instructions, and methods into local
-files while retaining one execution loop. This branch is maintained separately and will
-not merge into main. Research remains the default; the
+`main` externalizes persona, work instructions, and methods into local files while
+retaining one execution loop. The persona implementation is now the mainline; the previous
+research version is preserved at `codex/backup-main-2026-11-14`. Research remains the default; the
 [`technical-writing` example](../examples/agents/technical-writing) provides a generic agent.
 
 ```sh

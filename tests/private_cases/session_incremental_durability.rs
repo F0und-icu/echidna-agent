@@ -230,6 +230,122 @@ mod durability {
     }
 
     #[test]
+    fn reused_result_checkpoint_is_atomic_and_preserves_task_source_identity() {
+        struct Sink {
+            fail: bool,
+            events: Vec<EventEnvelope<Value>>,
+        }
+        impl EventSink<Value> for Sink {
+            type Error = &'static str;
+            fn append_event(&mut self, event: &EventEnvelope<Value>) -> Result<(), Self::Error> {
+                if self.fail {
+                    return Err("injected reused-result append failure");
+                }
+                self.events.push(event.clone());
+                Ok(())
+            }
+        }
+        let leader = call("leader");
+        let follower = call("follower");
+        let (receipt, result) = outcome(&leader);
+        let mut events = vec![started()];
+        for call in [&leader, &follower] {
+            events.push(envelope(
+                SessionEvent::HistoryItemRecorded {
+                    item: ContentItem::ToolCall { call: call.clone() },
+                },
+                events.len() as u64 + 1,
+            ));
+        }
+        events.push(envelope(
+            SessionEvent::ExecutionOutcomeRecorded {
+                receipt,
+                result: result.clone(),
+            },
+            4,
+        ));
+        let reused_result = result.for_deduplicated_call(&follower);
+        let reused = envelope(
+            SessionEvent::ExecutionResultReused {
+                receipt_event_id: events[3].event_id.clone(),
+                result: reused_result.clone(),
+            },
+            5,
+        );
+        let mut projection = SessionProjection::replay(events.clone()).unwrap();
+        let mut sink = Sink { fail: true, events };
+        assert!(projection.append(&mut sink, reused.clone()).is_err());
+        assert_source(&projection, &sink.events);
+        assert!(
+            projection
+                .state()
+                .recorded_tool_result(&follower.call_id)
+                .is_none()
+        );
+        sink.fail = false;
+        projection.append(&mut sink, reused.clone()).unwrap();
+        assert_source(&projection, &sink.events);
+        assert_eq!(projection.state().execution_receipts().len(), 1);
+        assert_eq!(
+            projection.state().recorded_tool_result(&follower.call_id),
+            Some(&reused_result)
+        );
+        assert_eq!(
+            projection
+                .state()
+                .recorded_result_by_event(&reused.event_id),
+            Some(&reused_result)
+        );
+        let wanted = vec![
+            sink.events[1].event_id.clone(),
+            sink.events[2].event_id.clone(),
+        ];
+        for version in 0..=crate::domain::session::TASK_REQUEST_PROOF_VERSION {
+            let items = projection
+                .state()
+                .task_resume_history(
+                    &wanted,
+                    projection.task_source_events().iter().map(AsRef::as_ref),
+                    version,
+                )
+                .unwrap();
+            let recovered = items.iter().find(|item| matches!(
+                &item.item, ContentItem::ToolResult { result } if result.call_id == follower.call_id
+            )).unwrap();
+            assert_eq!(
+                recovered.item,
+                ContentItem::ToolResult {
+                    result: reused_result.clone()
+                }
+            );
+            assert_eq!(
+                recovered.source_refs,
+                vec![wanted[1].clone(), reused.event_id.clone()]
+            );
+            assert_eq!(
+                recovered.semantics.origin,
+                crate::domain::context::ContextOrigin::ToolResult
+            );
+        }
+        for change in ["arguments", "rerun", "result", "source"] {
+            let mut invalid = sink.events.clone();
+            match change {
+                "arguments" => {
+                    invalid[2].payload["item"]["call"]["arguments"]["path"] = json!("different.txt")
+                }
+                "rerun" => {
+                    invalid[2].payload["item"]["call"]["arguments"]["execution"] =
+                        json!({"rerun_reason":"run again"})
+                }
+                "result" => invalid[4].payload["result"]["output"] = json!({"fabricated":true}),
+                "source" => invalid[4].payload["receipt_event_id"] = json!("missing"),
+                _ => unreachable!(),
+            }
+            assert!(SessionReducer.reduce(invalid).is_err(), "{change}");
+        }
+    }
+
+    #[test]
     fn suffix_refresh_sees_independent_receipts_and_matches_full_replay() {
         let root = TemporaryDirectory::new("session-suffix");
         let project = Project::initialize(root.path()).unwrap();

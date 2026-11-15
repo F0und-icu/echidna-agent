@@ -1648,16 +1648,12 @@ impl DurableChatSession {
     ) -> Result<ReceiptRecordDisposition, ChatError> {
         if projection
             .state()
-            .execution_receipts()
-            .iter()
-            .any(|record| {
-                record.receipt == outcome.receipt
-                    && (record.result.as_ref() == Some(&outcome.result)
-                        // The existing deduplicated_for contract reuses its
-                        // leader's Receipt with a separately paired follower.
-                        || outcome.receipt.execution_id
-                            != crate::domain::tools::ExecutionId::for_model_call(&outcome.result.call_id))
-            })
+            .recorded_tool_result(&outcome.result.call_id)
+            == Some(&outcome.result)
+            && projection
+                .state()
+                .receipt_for_call(&outcome.result.call_id)
+                .is_some_and(|record| record.receipt == outcome.receipt)
         {
             return Ok(ReceiptRecordDisposition::Existing);
         }
@@ -1668,15 +1664,34 @@ impl DurableChatSession {
             sequence.get(),
             "execution-receipt",
         );
-        let event = SessionEvent::ExecutionOutcomeRecorded {
-            receipt: outcome.receipt.clone(),
-            result: outcome.result.clone(),
+        let reused = outcome.receipt.execution_id
+            != crate::domain::tools::ExecutionId::for_model_call(&outcome.result.call_id);
+        let event = if reused {
+            let original = projection
+                .state()
+                .execution_receipts()
+                .iter()
+                .find(|record| record.receipt == outcome.receipt)
+                .ok_or(SessionError::ExecutionOutcomeMismatch)?;
+            SessionEvent::ExecutionResultReused {
+                receipt_event_id: original.event_id.clone(),
+                result: outcome.result.clone(),
+            }
+        } else {
+            SessionEvent::ExecutionOutcomeRecorded {
+                receipt: outcome.receipt.clone(),
+                result: outcome.result.clone(),
+            }
         }
         .into_envelope(receipt_event_id, stream_id.clone(), sequence, occurred_at())?;
         projection
             .append(store, event)
             .map_err(ChatError::from_session_append)?;
-        Ok(ReceiptRecordDisposition::Recorded)
+        Ok(if reused {
+            ReceiptRecordDisposition::Existing
+        } else {
+            ReceiptRecordDisposition::Recorded
+        })
     }
 
     fn record_model_rejection(

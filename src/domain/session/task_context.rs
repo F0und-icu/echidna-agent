@@ -1261,13 +1261,9 @@ impl SessionState {
                 let (call_id, _) = self.history_items_with_event_ids().find(|(_, item)|
                 matches!(item, ContentItem::ToolCall { call } if call.call_id == result.call_id))
                 .ok_or_else(|| invalid("resumed marker has no original Call"))?;
-                let (source, origin) = if let Some(record) = self
-                    .execution_receipts()
-                    .iter()
-                    .find(|record| record.result.as_ref() == Some(result))
-                {
+                let (source, origin) = if let Some(id) = self.recorded_result_source(result) {
                     (
-                        record.event_id.clone(),
+                        id.clone(),
                         crate::domain::context::ContextOrigin::ToolResult,
                     )
                 } else {

@@ -6,8 +6,9 @@
 
 ---
 
-`codex/agent-definition-v1` 将人格、工作内容和方法外置为本地文件，保留同一个
-执行循环。该分支独立维护，不合并主分支。默认仍为研究 Agent；也可使用
+`main` 将人格、工作内容和方法外置为本地文件，保留同一个执行循环。
+人格实现现已成为主线；原研究版本保存在 `codex/backup-main-2026-11-14`。
+默认仍为研究 Agent；也可使用
 [`examples/agents/technical-writing`](../examples/agents/technical-writing) 切换为技术写作 Agent。
 
 ```sh

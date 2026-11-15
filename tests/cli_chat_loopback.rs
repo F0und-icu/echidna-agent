@@ -56,6 +56,8 @@ mod output_budget;
 mod provider_config;
 #[path = "cli_chat_cases/provider_usage.rs"]
 mod provider_usage;
+#[path = "cli_chat_cases/reused_results.rs"]
+mod reused_results;
 mod support;
 #[path = "cli_chat_cases/task_context.rs"]
 mod task_context;

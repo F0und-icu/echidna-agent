@@ -23,9 +23,10 @@ Echidna is a local-first agent for individual use, built in Rust with an interac
 CLI for models, files, commands and network tools. Sessions, execution receipts and
 research materials stay in the project so you can continue work and inspect its basis.
 
-This `codex/agent-definition-v1` branch supports external persona, work and method
+The `main` branch supports external persona, work and method
 files. Vulnerability research is the default; custom definitions also support tasks
-such as technical writing. The branch is maintained separately and is not merged into main.
+such as technical writing. The previous research mainline is preserved at
+`codex/backup-main-2026-11-14`; ongoing development and updates use `main`.
 
 ## Capabilities
 
@@ -50,7 +51,7 @@ the [toolchain](rust-toolchain.toml) pins Rust 1.93.1. Use the same terminal thr
 ### 1. Build
 
 ```sh
-git clone --branch codex/agent-definition-v1 --single-branch https://github.com/F0und-icu/echidna-agent.git
+git clone --branch main --single-branch https://github.com/F0und-icu/echidna-agent.git
 cd echidna-agent
 cargo build --locked --release
 ECHIDNA_BIN="$PWD/target/release/echidna"

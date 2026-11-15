@@ -22,8 +22,9 @@
 Echidna 是面向个人使用的本地优先 Agent，以 Rust 实现，通过交互式 CLI 调用模型、
 文件、命令行和网络工具。会话、工具回执与研究材料保存在项目中，便于继续工作和回看依据。
 
-本分支 `codex/agent-definition-v1` 支持外接人格、工作内容和方法文件；默认提供漏洞研究
-Agent，也可用于技术写作等任务。该分支独立维护，不合并主分支。
+主分支 `main` 支持外接人格、工作内容和方法文件；默认提供漏洞研究 Agent，
+也可用于技术写作等任务。原研究主线保留在 `codex/backup-main-2026-11-14`；
+后续开发与更新以 `main` 为准。
 
 ## 能力
 
@@ -47,7 +48,7 @@ Agent，也可用于技术写作等任务。该分支独立维护，不合并主
 ### 1. 构建
 
 ```sh
-git clone --branch codex/agent-definition-v1 --single-branch https://github.com/F0und-icu/echidna-agent.git
+git clone --branch main --single-branch https://github.com/F0und-icu/echidna-agent.git
 cd echidna-agent
 cargo build --locked --release
 ECHIDNA_BIN="$PWD/target/release/echidna"

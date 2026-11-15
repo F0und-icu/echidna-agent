@@ -5,6 +5,16 @@ changes remain available in Git history.
 
 ## Unreleased
 
+### Durable reused tool results and mainline promotion — 2026-11-14
+
+- Persist a deduplicated tool call's actual result with its original execution
+  Receipt reference before acknowledging completion. Resume, task context and
+  compaction retain that result if History has not yet been written, without
+  running the tool again or inventing another Receipt. Sessions containing this
+  event require a reader that supports it.
+- Use `main` for the persona implementation and installation instructions.
+  Preserve the previous research mainline at `codex/backup-main-2026-11-14`.
+
 ### Task reference correction — 2026-11-12
 
 - Allow one correction of an unknown task/context reference or invalid task focus

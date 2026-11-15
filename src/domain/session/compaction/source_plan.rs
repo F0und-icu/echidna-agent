@@ -566,12 +566,7 @@ impl CompactionSourcePlan {
                         _ => None,
                     })
                     .ok_or_else(|| invalid_task("tool source has no normalized Result"))?;
-                let execution_id = crate::domain::tools::ExecutionId::for_model_call(call_id);
-                let receipts = state
-                    .execution_receipts()
-                    .iter()
-                    .filter(|record| record.receipt.execution_id == execution_id)
-                    .collect::<Vec<_>>();
+                let receipts = state.receipts_for_call(call_id).collect::<Vec<_>>();
                 entry.artifact_refs.extend(
                     receipts
                         .iter()
@@ -920,10 +915,8 @@ impl CompactionSourcePlan {
                 }
                 CompactionSourceKind::RecordedOutcome(id) => {
                     let result = state
-                        .execution_receipts()
-                        .iter()
-                        .find(|record| &record.event_id == id)
-                        .and_then(|record| record.result.clone())
+                        .recorded_result_by_event(id)
+                        .cloned()
                         .ok_or_else(|| invalid_task("unknown recorded outcome source"))?;
                     if serde_json::to_string(&ContentItem::ToolResult { result })
                         .map_err(|error| invalid_task(error.to_string()))?
@@ -1175,14 +1168,8 @@ fn normalized_source_identities(
                 "normalized History item has no durable source",
             ));
         };
-        if let Some(record) = state
-            .execution_receipts()
-            .iter()
-            .find(|record| record.result.as_ref() == Some(result))
-        {
-            sources.push(CompactionSourceKind::RecordedOutcome(
-                record.event_id.clone(),
-            ));
+        if let Some(id) = state.recorded_result_source(result) {
+            sources.push(CompactionSourceKind::RecordedOutcome(id.clone()));
             continue;
         }
         let (call_id, _) = history.iter().find(|(_, item)| matches!(item, ContentItem::ToolCall { call } if call.call_id == result.call_id)).ok_or_else(|| invalid_task("recovery marker lacks its original Call"))?;

@@ -557,6 +557,17 @@ pub struct ToolResult {
     pub output: Value,
 }
 
+impl ToolResult {
+    pub(crate) fn for_deduplicated_call(&self, call: &ToolCall) -> Self {
+        Self {
+            call_id: call.call_id.clone(),
+            tool_name: call.name.clone(),
+            status: self.status,
+            output: self.output.clone(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionReceipt {
@@ -800,12 +811,7 @@ impl ToolExecutionOutcome {
         Self {
             receipt: source.receipt.clone(),
             pending_captures: Vec::new(),
-            result: ToolResult {
-                call_id: plan.call.call_id.clone(),
-                tool_name: plan.call.name.clone(),
-                status: source.result.status,
-                output: source.result.output.clone(),
-            },
+            result: source.result.for_deduplicated_call(&plan.call),
         }
     }
 

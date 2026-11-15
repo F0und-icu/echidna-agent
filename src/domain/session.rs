@@ -50,6 +50,7 @@ const SESSION_RESUMED_EVENT_TYPE: &str = "session.resumed";
 const SESSION_ENDED_EVENT_TYPE: &str = "session.ended";
 const RECEIPT_RECORDED_EVENT_TYPE: &str = "tool.execution_receipt_recorded";
 const EXECUTION_OUTCOME_RECORDED_EVENT_TYPE: &str = "tool.execution_outcome_recorded";
+const EXECUTION_RESULT_REUSED_EVENT_TYPE: &str = "tool.execution_result_reused";
 const SUBCOMMAND_CHECKPOINT_EVENT_TYPE: &str = "tool.subcommand_checkpointed";
 const CACHE_HIT_EVENT_TYPE: &str = "tool.result_cache_hit";
 const STREAM_RECOVERED_EVENT_TYPE: &str = "StreamRecovered";
@@ -123,6 +124,13 @@ pub(crate) struct SessionExecutionReceiptRecord {
     pub(crate) result: Option<ToolResult>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ReusedExecutionResult {
+    event_id: EventId,
+    receipt_event_id: EventId,
+    result: ToolResult,
+}
+
 /// The distinct lifecycle state reconstructed from a Session stream.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SessionLifecycle {
@@ -169,6 +177,10 @@ pub enum SessionEvent {
     },
     ExecutionOutcomeRecorded {
         receipt: ExecutionReceipt,
+        result: ToolResult,
+    },
+    ExecutionResultReused {
+        receipt_event_id: EventId,
         result: ToolResult,
     },
     ImprovementActivityRecorded {
@@ -308,6 +320,9 @@ impl SessionEvent {
             Self::ExecutionOutcomeRecorded { .. } => {
                 EventType::new(EXECUTION_OUTCOME_RECORDED_EVENT_TYPE)
             }
+            Self::ExecutionResultReused { .. } => {
+                EventType::new(EXECUTION_RESULT_REUSED_EVENT_TYPE)
+            }
             Self::ImprovementActivityRecorded { .. } => {
                 EventType::new("session.rsi_activity_recorded")
             }
@@ -396,6 +411,14 @@ impl SessionEvent {
                     result: result.clone(),
                 })
             }
+            Self::ExecutionResultReused {
+                receipt_event_id,
+                result,
+            } => serde_json::to_value(ReusedExecutionResultPayload {
+                schema_version: CURRENT_SESSION_PAYLOAD_SCHEMA_VERSION,
+                receipt_event_id: receipt_event_id.clone(),
+                result: result.clone(),
+            }),
             Self::ImprovementActivityRecorded { activity } => serde_json::to_value(activity),
             Self::StartedWithAgent {
                 primary_provider_session,
@@ -702,6 +725,15 @@ impl SessionEvent {
                     result: payload.result,
                 })
             }
+            EXECUTION_RESULT_REUSED_EVENT_TYPE => {
+                let payload: ReusedExecutionResultPayload =
+                    decode_strict_payload(event_type, payload)?;
+                require_current_payload_schema(event_type, payload.schema_version)?;
+                Ok(Self::ExecutionResultReused {
+                    receipt_event_id: payload.receipt_event_id,
+                    result: payload.result,
+                })
+            }
             RECEIPT_RECORDED_EVENT_TYPE => decode_execution_receipt(payload, event_type)
                 .map(|receipt| Self::ExecutionReceiptRecorded { receipt }),
             CACHE_HIT_EVENT_TYPE => decode_execution_receipt(payload, event_type)
@@ -837,6 +869,7 @@ pub struct SessionState {
     resume_count: u64,
     execution_receipt_count: u64,
     execution_receipts: Vec<SessionExecutionReceiptRecord>,
+    reused_execution_results: Vec<ReusedExecutionResult>,
     subcommand_checkpoints: Vec<SubcommandCheckpoint>,
     cache_hit_count: u64,
     recovery_count: u64,
@@ -885,6 +918,7 @@ impl Default for SessionState {
             resume_count: 0,
             execution_receipt_count: 0,
             execution_receipts: Vec::new(),
+            reused_execution_results: Vec::new(),
             subcommand_checkpoints: Vec::new(),
             cache_hit_count: 0,
             recovery_count: 0,
@@ -985,6 +1019,11 @@ impl SessionState {
             .execution_receipts
             .iter()
             .filter_map(|record| record.result.as_ref())
+            .chain(
+                self.reused_execution_results
+                    .iter()
+                    .map(|record| &record.result),
+            )
             .collect::<Vec<_>>();
         normalize_with_recorded_results(items, &self.subcommand_checkpoints, &results)
     }
@@ -993,7 +1032,60 @@ impl SessionState {
         self.execution_receipts
             .iter()
             .filter_map(|record| record.result.as_ref())
+            .chain(
+                self.reused_execution_results
+                    .iter()
+                    .map(|record| &record.result),
+            )
             .find(|result| &result.call_id == call_id)
+    }
+
+    pub(crate) fn recorded_result_source(&self, result: &ToolResult) -> Option<&EventId> {
+        self.execution_receipts
+            .iter()
+            .find(|record| record.result.as_ref() == Some(result))
+            .map(|record| &record.event_id)
+            .or_else(|| {
+                self.reused_execution_results
+                    .iter()
+                    .find(|record| &record.result == result)
+                    .map(|record| &record.event_id)
+            })
+    }
+
+    pub(crate) fn recorded_result_by_event(&self, id: &EventId) -> Option<&ToolResult> {
+        self.execution_receipts
+            .iter()
+            .find(|record| &record.event_id == id)
+            .and_then(|record| record.result.as_ref())
+            .or_else(|| {
+                self.reused_execution_results
+                    .iter()
+                    .find(|record| &record.event_id == id)
+                    .map(|record| &record.result)
+            })
+    }
+
+    pub(crate) fn receipt_for_call(
+        &self,
+        call_id: &ToolCallId,
+    ) -> Option<&SessionExecutionReceiptRecord> {
+        self.receipts_for_call(call_id).next()
+    }
+
+    pub(crate) fn receipts_for_call(
+        &self,
+        call_id: &ToolCallId,
+    ) -> impl Iterator<Item = &SessionExecutionReceiptRecord> {
+        let execution_id = super::tools::ExecutionId::for_model_call(call_id);
+        let reused_receipt = self
+            .reused_execution_results
+            .iter()
+            .find(|record| &record.result.call_id == call_id)
+            .map(|record| &record.receipt_event_id);
+        self.execution_receipts.iter().filter(move |record| {
+            record.receipt.execution_id == execution_id || reused_receipt == Some(&record.event_id)
+        })
     }
 
     /// A completed boundary may retain an explicitly recovered older unknown
@@ -1763,6 +1855,71 @@ fn apply_session_event(
                     .result = Some(result);
             }
         }
+        SessionEvent::ExecutionResultReused {
+            receipt_event_id,
+            result,
+        } => {
+            require_transition(
+                state.lifecycle,
+                EXECUTION_RESULT_REUSED_EVENT_TYPE,
+                SessionLifecycle::Active,
+            )?;
+            let original = state
+                .execution_receipts
+                .iter()
+                .find(|record| record.event_id == receipt_event_id)
+                .ok_or(SessionError::ExecutionOutcomeMismatch)?;
+            let original_result = original
+                .result
+                .as_ref()
+                .ok_or(SessionError::ExecutionOutcomeMismatch)?;
+            let find_call = |id: &ToolCallId| {
+                state
+                    .history
+                    .items()
+                    .iter()
+                    .chain(state.improvement_records.iter().flat_map(|record| {
+                        match &record.activity.fact {
+                            ImprovementFact::Sample { items, .. }
+                            | ImprovementFact::Results { items, .. } => items.as_slice(),
+                            _ => &[],
+                        }
+                    }))
+                    .find_map(|item| match item {
+                        ContentItem::ToolCall { call } if &call.call_id == id => Some(call),
+                        _ => None,
+                    })
+            };
+            let original_call = find_call(&original_result.call_id)
+                .ok_or(SessionError::ExecutionOutcomeMismatch)?;
+            let follower =
+                find_call(&result.call_id).ok_or(SessionError::ExecutionOutcomeMismatch)?;
+            let (source_arguments, _) =
+                super::tools::split_execution_control(original_call.arguments.clone())
+                    .map_err(|_| SessionError::ExecutionOutcomeMismatch)?;
+            let (follower_arguments, rerun) =
+                super::tools::split_execution_control(follower.arguments.clone())
+                    .map_err(|_| SessionError::ExecutionOutcomeMismatch)?;
+            if original_result.call_id == result.call_id
+                || follower.name != original_call.name || follower.name != result.tool_name
+                || source_arguments != follower_arguments || rerun.is_some()
+                || original_result.for_deduplicated_call(follower) != result || original.receipt.status != result.status
+                || state.recorded_tool_result(&result.call_id).is_some()
+                || state.receipt_for_call(&result.call_id).is_some()
+                || state.history.items().iter().any(|item| matches!(item, ContentItem::ToolResult { result: previous } if previous.call_id == result.call_id))
+            {
+                return Err(SessionError::ExecutionOutcomeMismatch);
+            }
+            original
+                .receipt
+                .validate_output_captures(&result)
+                .map_err(|_| SessionError::OutputCaptureMismatch)?;
+            state.reused_execution_results.push(ReusedExecutionResult {
+                event_id: event_id.clone(),
+                receipt_event_id,
+                result,
+            });
+        }
         SessionEvent::ExecutionReceiptRecorded { receipt } => {
             validate_child_receipt(state, &receipt)?;
             state.execution_receipt_count =
@@ -1819,12 +1976,7 @@ fn apply_session_event(
                 {
                     return Err(SessionError::SubcommandCheckpointMismatch);
                 }
-                let execution_id = super::tools::ExecutionId::for_model_call(&result.call_id);
-                if let Some(record) = state
-                    .execution_receipts
-                    .iter()
-                    .find(|record| record.receipt.execution_id == execution_id)
-                {
+                if let Some(record) = state.receipt_for_call(&result.call_id) {
                     record
                         .receipt
                         .validate_output_captures(result)
@@ -2430,6 +2582,14 @@ struct SessionHistoryItemPayload {
 struct ExecutionOutcomePayload {
     schema_version: u16,
     receipt: ExecutionReceipt,
+    result: ToolResult,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ReusedExecutionResultPayload {
+    schema_version: u16,
+    receipt_event_id: EventId,
     result: ToolResult,
 }
 

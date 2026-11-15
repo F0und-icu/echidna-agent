@@ -15,7 +15,7 @@
 ## 1. 构建
 
 ```sh
-git clone --branch codex/agent-definition-v1 --single-branch https://github.com/F0und-icu/echidna-agent.git
+git clone --branch main --single-branch https://github.com/F0und-icu/echidna-agent.git
 cd echidna-agent
 cargo build --locked --release
 
