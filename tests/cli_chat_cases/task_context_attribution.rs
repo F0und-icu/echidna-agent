@@ -183,12 +183,13 @@ fn multi_objective_results_remain_unattributed_until_exact_source_selection() {
                     .unwrap()
                     .iter()
                     .find(|candidate| {
-                        source_refs.contains(&candidate["source_event_ref"])
+                        source_refs.contains(&candidate["ref"])
                             && candidate["excerpt"]
                                 .as_str()
                                 .is_some_and(|text| text.contains("SHARED_ONLY_VALUE"))
                     })
                     .expect("the explicitly selected shared original is a candidate");
+                assert!(shared.get("source_event_ref").is_none());
                 (decision(&alpha, vec![shared["ref"].clone()]), false)
             }
             12 => {

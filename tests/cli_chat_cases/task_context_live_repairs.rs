@@ -277,7 +277,7 @@ fn repeated_active_constraints_keep_exact_scope_range_and_single_revision() {
             .unwrap(),
         )
         .unwrap();
-        assert_eq!(capture["compile"]["selection_prompt_version"], 2);
+        assert_eq!(capture["compile"]["selection_prompt_version"], 3);
         if valid {
             let revisions = selections[1]["constraint_revisions"].as_array().unwrap();
             assert_eq!(revisions.len(), usize::from(mode == "partial"));
@@ -1053,8 +1053,7 @@ fn explicitly_requested_superseded_constraint_remains_historical_context() {
                     .unwrap()
                     .iter()
                     .find(|candidate| {
-                        candidate["source_event_ref"]
-                            == prior["constraint_range"]["source_event_id"]
+                        candidate["ref"] == prior["constraint_range"]["source_event_id"]
                             && candidate["constraint_range"].is_null()
                     })
                     .unwrap();

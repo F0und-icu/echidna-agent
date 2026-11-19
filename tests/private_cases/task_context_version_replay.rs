@@ -14,6 +14,87 @@ use crate::ports::artifact::ArtifactStore;
 use crate::support::TemporaryDirectory;
 
 #[test]
+fn compact_selector_preserves_candidate_material_and_old_request_bytes() {
+    use crate::domain::model::ContentItem;
+    use crate::domain::session::{SessionSourceIdentity, TaskContextCapture};
+    let blobs = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/task_context_proof_v5_compaction/blobs");
+    let capture_id = "204549b14032d96cc3fb284269ec599760e484197b2d97208c3326c07fe13f99";
+    let capture: TaskContextCapture =
+        serde_json::from_slice(&fs::read(blobs.join(capture_id)).unwrap()).unwrap();
+    let events = fs::read_to_string(
+        blobs.join("ef7d3b1e1b6b3eeb97f41ee991bc0e108da243ebcf0aada8e89fb0d811f2bde4"),
+    )
+    .unwrap();
+    let event = events
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|e| {
+            e["event_type"] == "session.task_context_selected"
+                && e["payload"]["capture_blob"] == capture_id
+        })
+        .unwrap();
+    let source: SessionSourceIdentity =
+        serde_json::from_value(event["payload"]["source"].clone()).unwrap();
+    let render = |version, candidates: &crate::domain::task_context::SelectionCandidates| {
+        let plan = crate::app::agent_loop::compile_selection(
+            &crate::domain::context::ContextPlanner::current()
+                .with_budget_policy(capture.common.policy),
+            &capture.common.capabilities,
+            &source,
+            candidates,
+            Some(version),
+            None,
+        )
+        .unwrap();
+        let [ContentItem::Text { text, .. }] = plan.input_items() else {
+            panic!("expected selector candidate message")
+        };
+        let json = text
+            .strip_prefix(crate::domain::task_context::SELECTION_INPUT_MARKER)
+            .unwrap();
+        (plan.base_instructions().to_owned(), json.to_owned())
+    };
+    let (old_prompt, old_json) = render(2, &capture.candidates);
+    let (prompt, json) = render(3, &capture.candidates);
+    // Actual generation-2 instruction blob identity before this change.
+    assert_eq!(
+        format!("{:x}", Sha256::digest(old_prompt.as_bytes())),
+        "f788d2aa5fcccdc056a0132d7168f09f9fc6a9c4ca70dd31fe95b03a7c4282e2"
+    );
+    let original = serde_json::to_value(&capture.candidates).unwrap();
+    assert_eq!(old_json, original.to_string());
+    let example = prompt
+        .lines()
+        .find(|line| line.starts_with("{\"relation\""))
+        .unwrap();
+    serde_json::from_str::<crate::domain::task_context::TaskSelectionDecision>(example).unwrap();
+    assert!(prompt.contains("For compose or unresolved use either focus."));
+    assert!(prompt.len() < old_prompt.len() && json.len() < old_json.len());
+    let mut restored: Value = serde_json::from_str(&json).unwrap();
+    for entry in restored["context"].as_array_mut().unwrap() {
+        if entry.get("source_event_ref").is_none() {
+            entry["source_event_ref"] = entry["ref"].clone();
+        }
+    }
+    assert_eq!(restored, original);
+
+    let mut distinct = capture.candidates.clone();
+    let index = distinct
+        .context
+        .iter()
+        .position(|c| c.source_event_ref.is_some())
+        .unwrap();
+    distinct.context[index].reference = "constraint:fixture-range".into();
+    let (_, json) = render(3, &distinct);
+    let wire: Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(
+        wire["context"][index]["source_event_ref"],
+        original["context"][index]["source_event_ref"]
+    );
+}
+
+#[test]
 fn proof_v1_multi_objective_sources_replay_with_original_attribution() {
     replay_fixture(
         "task_context_proof_v1",

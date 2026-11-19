@@ -5,6 +5,15 @@ changes remain available in Git history.
 
 ## Unreleased
 
+### Task selection and document revisions
+
+- Shorten the task selector's instructions and send a History candidate's ID
+  once when it also identifies the source event. Each new input still goes
+  through model selection. Existing Sessions retain their recorded request
+  format during replay. Generation 3 Sessions require an updated reader.
+- The technical-writing template groups independent document reads and carries
+  the latest applicable order, units and precision through revisions.
+
 ### Incremental runtime preparation — 2026-11-19
 
 - Reuse validated Project/Research/Memory projections and unchanged Memory file

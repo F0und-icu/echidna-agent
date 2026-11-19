@@ -108,9 +108,7 @@ fn task_selection_preserves_vision_authority_for_history_and_excerpts_and_reject
         let selector = f2a_request_body(&primary.requests, "vision selector");
         assert!(json_contains_text(&first["input"], TASK_VISION_MARKER));
         let candidates = super::task_context::selector_candidates(&selector);
-        let source = vision_candidate(&candidates)["source_event_ref"]
-            .as_str()
-            .unwrap();
+        let source = vision_candidate(&candidates)["ref"].as_str().unwrap();
         if !invalid {
             let second = f2a_request_body(&primary.requests, "vision selected Primary");
             assert!(json_contains_text(&second["input"], TASK_VISION_MARKER));
@@ -221,7 +219,7 @@ fn selected_vision_history_and_excerpt_keep_reference_chain_through_resume() {
         let _first_main = f2a_request_body(&primary.requests, "Vision first main");
         let selector = f2a_request_body(&primary.requests, "Vision excerpt selection");
         let candidates = super::task_context::selector_candidates(&selector);
-        let source = vision_candidate(&candidates)["source_event_ref"]
+        let source = vision_candidate(&candidates)["ref"]
             .as_str()
             .unwrap()
             .to_owned();

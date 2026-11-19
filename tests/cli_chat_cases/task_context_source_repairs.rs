@@ -207,7 +207,7 @@ fn source_refresh_pins_old_selected_excerpt_past_candidate_limit() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|unit| unit["source_event_ref"] == ids[0])
+            .any(|unit| unit["ref"] == ids[0])
     );
     assert!(json_contains_text(&wires[2]["input"], OLD_METHOD_MARKER));
     if wires[3]["previous_response_id"].is_null() {

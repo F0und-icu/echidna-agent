@@ -3341,7 +3341,8 @@ fn m5_production_compaction_applies_one_durable_reference_summary_then_resumes_e
                 1,
                 "the original follow-up remains a source"
             );
-            assert!(prior_input[0]["source_event_ref"].is_string());
+            assert!(prior_input[0]["ref"].is_string());
+            assert!(prior_input[0].get("source_event_ref").is_none());
             decision["required_context_refs"]
                 .as_array_mut()
                 .unwrap()
