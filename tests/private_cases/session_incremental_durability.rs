@@ -76,7 +76,14 @@ mod durability {
         )
         .unwrap();
         assert_eq!(
-            projection.task_source_identity(project, &[]).unwrap(),
+            projection
+                .task_source_identity(
+                    project,
+                    0,
+                    crate::domain::session::SessionSourceIdentity::project_hash_for_events(&[])
+                        .unwrap()
+                )
+                .unwrap(),
             expected
         );
         assert_eq!(projection.state(), &state);

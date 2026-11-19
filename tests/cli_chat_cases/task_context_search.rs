@@ -272,6 +272,16 @@ fn task_index_recalls_old_source_and_updates_only_the_new_suffix() {
             .parse()
             .unwrap()
     };
+    let storage = stderr
+        .lines()
+        .filter(|line| line.contains("phase=task_posting_storage "))
+        .collect::<Vec<_>>();
+    assert_eq!(storage.len(), 2);
+    assert_eq!(field(storage[0], "posting_file_opens"), 2);
+    assert_eq!(field(storage[1], "posting_file_opens"), 0);
+    for line in &storage {
+        assert!(field(line, "posting_pending_bytes") <= 3 * 65_536 * 8);
+    }
     assert!(field(work[0], "source_rows") >= 530, "{}", work[0]);
     assert!(field(work[0], "source_index_read_bytes") >= 512 * 1024);
     assert!(

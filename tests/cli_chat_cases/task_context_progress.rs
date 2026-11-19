@@ -1754,7 +1754,7 @@ fn three_non_core_memory_writes_refresh_without_resampling_or_replay() {
         root.path(),
         &config,
         "Update the alpha note and continue.\n/exit\n",
-        &["--agent", agent.to_str().unwrap()],
+        &["--agent", agent.to_str().unwrap(), "--debug"],
     );
     assert!(
         output.status.success(),
@@ -1764,6 +1764,21 @@ fn three_non_core_memory_writes_refresh_without_resampling_or_replay() {
     let wires = (0..5)
         .map(|_| f2a_request_body(&server.requests, "updated task Memory"))
         .collect::<Vec<_>>();
+    let diagnostics = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        diagnostics
+            .lines()
+            .filter(|line| line.contains("phase=task_index "))
+            .count(),
+        1
+    );
+    assert_eq!(
+        diagnostics
+            .lines()
+            .filter(|line| line.contains("phase=task_refresh_dependencies "))
+            .count(),
+        3
+    );
     assert!(server.requests.try_recv().is_err());
     server.join();
     assert!(json_contains_text(&wires[1]["input"], old));

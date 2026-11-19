@@ -17,6 +17,93 @@ use crate::domain::session::{
 use crate::ports::input_clock::{InputClock, InputClockError};
 
 #[test]
+fn partial_core_scope_keeps_semantic_errors_terminal() {
+    use crate::domain::task_context::{
+        SelectionCandidates, TaskSelectionDecision, TaskSelectionError, UnitScope,
+    };
+    use serde_json::json;
+    let mut candidates: SelectionCandidates = serde_json::from_value(json!({
+        "input":{"ref":"input","text":"continue","inspected_bytes":8,"total_bytes":8,
+            "received_at":{"unix_seconds":0,"nanoseconds":0,"timezone":{"source":"unknown"}},
+            "source_origin":"operator_input","source_authority":"operator_assertion"},
+        "tasks":[{"ref":"task:prior","goal":"synthetic","source_ref":"prior"}],
+        "context":[{"ref":"core:fixture","task_ref":null,"excerpt":"x".repeat(1024),"source_event_ref":null,"truncated":true,
+            "core_range":{"fragment_id":"memory-core:fixture","start_byte":1644,"end_byte":3199,"content_hash":"synthetic","inspected_bytes":1024},
+            "known_scope":{"kind":"unknown"}}],"gaps":[]
+    })).unwrap();
+    let proposal: TaskSelectionDecision = serde_json::from_value(json!({
+        "relation":"continue","focus":{"kind":"existing","task_ref":"task:prior"},
+        "related_task_refs":[],"required_context_refs":[],"unresolved_references":[],
+        "scope_classifications":[{"context_ref":"core:fixture","scope":{"kind":"task","task_ref":"task:prior"}}]
+    })).unwrap();
+    assert!(matches!(
+        candidates.validate_decision(&proposal),
+        Err(TaskSelectionError::IncompleteCoreScope {
+            inspected_bytes: 1024,
+            total_bytes: 1555,
+            ..
+        })
+    ));
+    let mut unknown = proposal.clone();
+    unknown.scope_classifications[0].scope = UnitScope::Unknown;
+    candidates.validate_decision(&unknown).unwrap();
+    for failure in [
+        "global",
+        "scope_target",
+        "conflicting_scope",
+        "objective",
+        "constraint",
+        "source_range",
+    ] {
+        let mut source = candidates.clone();
+        let mut value = serde_json::to_value(&proposal).unwrap();
+        match failure {
+            "global" => source.context[0].known_scope = Some(UnitScope::Global),
+            "scope_target" => {
+                value["scope_classifications"][0]["scope"]["task_ref"] = json!("task:absent")
+            }
+            "conflicting_scope" => value["scope_classifications"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"context_ref":"core:fixture","scope":{"kind":"global"}})),
+            "objective" => {
+                value["new_objectives"] =
+                    json!([{"start_byte":0,"end_byte":999,"description":"invalid"}])
+            }
+            "constraint" => {
+                value["constraint_updates"] = json!([{"source_ref":"core:fixture","start_byte":0,"end_byte":1,"scope":{"kind":"global"},"supersedes":null}])
+            }
+            "source_range" => {
+                value["source_ranges"] =
+                    json!([{"context_ref":"core:fixture","start_byte":0,"end_byte":1}])
+            }
+            _ => unreachable!(),
+        }
+        let error = source
+            .validate_decision(&serde_json::from_value(value).unwrap())
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                TaskSelectionError::InvalidScopeClassification
+                    | TaskSelectionError::InvalidObjectiveRange
+                    | TaskSelectionError::InvalidConstraintUpdate
+                    | TaskSelectionError::InvalidSourceRange
+            ),
+            "{failure}: {error}"
+        );
+    }
+    candidates.context[0]
+        .core_range
+        .as_mut()
+        .unwrap()
+        .inspected_bytes = 1555;
+    candidates.context[0].excerpt = "x".repeat(1555);
+    candidates.context[0].truncated = false;
+    candidates.validate_decision(&proposal).unwrap();
+}
+
+#[test]
 fn task_epoch_carries_only_an_unconsumed_compaction_reset() {
     use crate::domain::context::{
         BaselineAssessment, BaselineInvalidationReason, InternalRequestMetadata, ModelIdentity,
@@ -99,53 +186,109 @@ fn task_epoch_carries_only_an_unconsumed_compaction_reset() {
 
 // Ordinary posting counts are tested through their private owner.
 #[allow(clippy::duplicate_mod)]
+#[path = "../../src/cli_chat/task_postings.rs"]
+mod task_postings;
+
+#[test]
+fn packed_postings_preserve_namespaces_pending_tail_and_incomplete_file_errors() {
+    let root = crate::support::TemporaryDirectory::new("packed-postings");
+    let path = root.path().join("postings");
+    let mut store = task_postings::PackedPostings::new(&path).unwrap();
+    let key = blake3::hash(b"term");
+    store.append("history", key, &[1, 3, 7]).unwrap();
+    assert_eq!(store.ordinal("history", key, 2).unwrap(), 7);
+    assert_eq!(store.published_bytes().unwrap(), 0);
+    let extra = (10..140_000).collect::<Vec<_>>();
+    store.append("history", key, &extra).unwrap();
+    store.append("cards", key, &[5, 12]).unwrap();
+    store.flush().unwrap();
+    assert!(store.pending_bytes(store.published_bytes().unwrap()) <= 3 * 65_536 * 8);
+    for index in [0, 2, 3, 65_536, 100_000, 139_992] {
+        assert_eq!(
+            store.ordinal("history", key, index).unwrap(),
+            if index < 3 {
+                [1, 3, 7][index as usize]
+            } else {
+                index as usize + 7
+            }
+        );
+    }
+    assert_eq!(store.ordinal("cards", key, 1).unwrap(), 12);
+    assert_eq!(store.len(), 2);
+    store.clear("cards");
+    assert_eq!(store.count("cards", key), 0);
+    assert_eq!(store.len(), 1);
+    store.close().unwrap();
+    assert_eq!(
+        store.published_bytes().unwrap(),
+        (extra.len() as u64 + 5) * 8
+    );
+    assert_eq!(store.ordinal("history", key, 139_992).unwrap(), 139_999);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(8)
+        .unwrap();
+    assert!(store.ordinal("history", key, 2).is_err());
+}
+
+#[allow(clippy::duplicate_mod)]
 #[path = "../../src/cli_chat/task_posting_lengths.rs"]
 mod task_posting_lengths;
 
+#[cfg(unix)]
 #[test]
-fn task_posting_counts_preserve_namespaces_updates_and_incomplete_file_errors() {
-    let root = crate::support::TemporaryDirectory::new("task-posting-proof");
-    let mut proof = task_posting_lengths::PostingLengths::default();
-    for (index, namespace) in ["history", "cards", "anchor-post", "card-ref"]
-        .into_iter()
-        .enumerate()
-    {
-        let key = blake3::hash(format!("term-{index}").as_bytes());
-        let other = blake3::hash(format!("absent-{index}").as_bytes());
-        let file = root.path().join(format!("posting-{index}"));
-        std::fs::write(&file, [0u8; 120]).unwrap();
-        proof.set(namespace, key, 3);
-        assert_eq!(
-            proof.verify_length(namespace, key, &file, 40).unwrap(),
-            Some(3)
-        );
-        assert_eq!(proof.get(namespace, other), None);
-        std::fs::write(&file, [0u8; 80]).unwrap();
-        assert!(
-            proof.verify_length(namespace, key, &file, 40).is_err(),
-            "aligned truncation in {namespace}"
-        );
-        std::fs::remove_file(&file).unwrap();
-        assert!(
-            proof.verify_length(namespace, key, &file, 40).is_err(),
-            "missing posting in {namespace}"
-        );
+fn packed_posting_worker_write_failure_remains_observable() {
+    const CHILD: &str = "ECHIDNA_POSTING_WRITE_FAILURE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "task_input_clock::packed_posting_worker_write_failure_remains_observable",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        return;
     }
-    for index in 0..64 {
-        let key = blake3::hash(format!("additional-{index}").as_bytes());
-        proof.set("history", key, index + 1);
+    let root = crate::support::TemporaryDirectory::new("posting-write-failure");
+    let mut store = task_postings::PackedPostings::new(&root.path().join("postings")).unwrap();
+    let limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // Only this dedicated child changes process-wide limits. The worker's real
+    // write must return EFBIG instead of terminating the test process.
+    unsafe {
+        assert_ne!(libc::signal(libc::SIGXFSZ, libc::SIG_IGN), libc::SIG_ERR);
+        assert_eq!(libc::setrlimit(libc::RLIMIT_FSIZE, &limit), 0);
     }
-    for index in 0..64 {
-        let key = blake3::hash(format!("additional-{index}").as_bytes());
-        assert_eq!(proof.get("history", key), Some(index + 1));
-    }
-    let updated = blake3::hash(b"additional-0");
-    assert_eq!(proof.len(), 68);
-    proof.set("history", updated, 99);
-    assert_eq!(proof.get("history", updated), Some(99));
-    proof.clear("cards");
-    assert_eq!(proof.get("cards", blake3::hash(b"term-1")), None);
-    assert_eq!(proof.len(), 67);
+    let key = blake3::hash(b"failed-term");
+    store.append("history", key, &[1]).unwrap();
+    let _ = store.flush(); // Publication can fail before or after enqueue returns.
+    let failure = store.close().unwrap_err().to_string();
+    assert_eq!(store.published_bytes().unwrap_err().to_string(), failure);
+    assert_eq!(
+        store.ordinal("history", key, 0).unwrap_err().to_string(),
+        failure
+    );
+}
+
+#[test]
+fn task_posting_counts_preserve_namespaces_and_updates() {
+    let mut counts = task_posting_lengths::PostingLengths::default();
+    let key = blake3::hash(b"term");
+    counts.set("history", key, 3);
+    counts.set("cards", key, 7);
+    assert_eq!(counts.get("history", key), Some(3));
+    counts.set("history", key, 10);
+    assert_eq!(counts.get("history", key), Some(10));
+    assert_eq!(counts.get("cards", key), Some(7));
+    assert_eq!(counts.get("absent", key), None);
 }
 
 #[test]

@@ -9,7 +9,7 @@ use crate::domain::events::EventId;
 use crate::domain::request_audit::RequestAuditAttempt;
 use crate::domain::session::{
     CompactionContextCapture, SessionEvent, SessionSourceIdentity, TaskContextCapture,
-    TaskContextSelected, TaskSelectionSample,
+    TaskSelectionSample,
 };
 use crate::domain::task_context::TaskSelectionDecision;
 use crate::ports::artifact::ArtifactStore;
@@ -68,6 +68,11 @@ impl TaskContextRuntime<'_> {
         Ok(super::context::load_task_memory(
             &self.session.project,
             &self.session.binding,
+            &mut *self
+                .session
+                .memory_cache
+                .lock()
+                .map_err(|_| std::io::Error::other("Memory cache lock poisoned"))?,
         )?)
     }
     pub(super) fn restore_after_resume<Provider: crate::ports::model::ModelProvider + ?Sized>(
@@ -385,188 +390,222 @@ impl TaskContextStage for TaskContextRuntime<'_> {
         timing.checkpoint("task_prepare_start");
         // Acquire before the projection lock: building the source index itself
         // verifies and advances that projection.
-        let source_index =
-            super::context_read::index::ColdIndex::acquire(self.session).map_err(stage_error)?;
+        let source_index = if source_refresh {
+            None
+        } else {
+            Some(
+                super::context_read::index::ColdIndex::acquire(self.session)
+                    .map_err(stage_error)?,
+            )
+        };
         timing.checkpoint("task_source_index");
-        let mut task_cache =
-            super::task_index::update(self.session, &source_index).map_err(stage_error)?;
+        let mut task_cache = source_index
+            .as_ref()
+            .map(|source| super::task_index::update(self.session, source))
+            .transpose()
+            .map_err(stage_error)?;
         timing.checkpoint("task_postings_ready");
-        let result = self
-            .session
-            .with_projection(|projection, store, stream_id| {
-                let task_index = task_cache.as_mut().expect("task index was installed");
-                let state = projection.state();
-                let last = state
-                    .history_items_with_event_ids()
-                    .last()
-                    .map(|(id, _)| id.as_str());
-                if !task_index.matches(state.history().items().len(), last) {
-                    return Err(ChatError::CompactionSummarySource {
-                        message: "task index source changed before candidate preparation"
-                            .to_owned(),
-                    });
-                }
-                task_index.update_navigation(state, input)?;
-                if compile.research_enabled
-                    != projection
-                        .state()
-                        .agent_definition_binding()
-                        .is_some_and(|binding| binding.definition().research().is_some())
-                {
-                    return Err(ChatError::CompactionSummarySource {
-                        message: "Research capture does not match the bound AgentDefinition"
-                            .to_owned(),
-                    });
-                }
-                let project_path = self.session.project.research_stream_path_existing()?;
-                let project_revision = crate::adapters::file_revision::FileRevision::of(
-                    &std::fs::metadata(&project_path)?,
-                )?;
-                let read = if compile.research_enabled {
-                    Some(self.session.project_read(projection.state())?)
+        let result = (|| {
+            let navigation_source =
+                if let Some(index) = task_cache.as_mut().and_then(|cache| cache.as_mut()) {
+                    // Snapshot under the short writer lease, then build and wait
+                    // for derived posting backpressure after releasing that lease.
+                    let state = self.session.durable_state()?;
+                    let last = state
+                        .history_items_with_event_ids()
+                        .last()
+                        .map(|(id, _)| id.as_str());
+                    if !index.matches(state.history().items().len(), last) {
+                        return Err(ChatError::CompactionSummarySource {
+                            message: "task index source changed before candidate preparation"
+                                .to_owned(),
+                        });
+                    }
+                    index.update_navigation(&state, input)?;
+                    Some(state.next_event_sequence()?)
                 } else {
                     None
                 };
-                let raw_events = if read.is_none() {
-                    Some(
-                        crate::adapters::project_event_store::read_existing_research_events(
-                            &self.session.project,
-                        )?,
-                    )
-                } else {
-                    None
-                };
-                let project_events = match &read {
-                    Some(read) => read.events.as_slice(),
-                    None => raw_events
-                        .as_deref()
-                        .expect("non-Research source was loaded"),
-                };
-                let project_hash = SessionSourceIdentity::project_hash_for_events(project_events)?;
-                let (research_candidates, research_omitted) = match &read {
-                    Some(read) => projection.state().task_research_candidates_from_state(
-                        self.session.project.project_id().as_str(),
-                        input,
-                        &project_hash,
-                        read.research_state(),
-                        &read.references,
-                        expansion.as_ref(),
-                        source_refresh,
-                    )?,
-                    None => (Vec::new(), 0),
-                };
-                let memory = self.current_memory()?;
-                let mut candidates = projection.state().task_selection_candidates_with_index(
-                    self.session.project.project_id().as_str(),
-                    input,
-                    &common,
-                    &research_candidates,
-                    research_omitted,
-                    &memory,
-                    expansion.as_ref(),
-                    source_refresh,
-                    crate::domain::session::TASK_CANDIDATE_POLICY_VERSION,
-                    &crate::app::context_read::history_navigation_excerpt,
-                    Some(&|card, key, before, limit| {
-                        task_index
+            self.session
+                .with_projection(|projection, store, stream_id| {
+                    if let Some(sequence) = navigation_source
+                        && sequence != projection.next_event_sequence()?
+                    {
+                        return Err(ChatError::CompactionSummarySource {
+                            message: "task navigation source changed during index preparation"
+                                .to_owned(),
+                        });
+                    }
+                    let state = projection.state();
+                    let navigation = task_cache.as_mut().and_then(|cache| cache.as_mut());
+                    let postings = |card: bool, key: &str, before: usize, limit: usize| {
+                        navigation
+                            .as_ref()
+                            .expect("ranked selection has an index")
                             .posting(card, key, before, limit)
                             .map_err(|error| crate::domain::session::SessionError::TaskContext {
                                 message: format!("task posting read failed: {error}"),
                             })
-                    }),
-                    Some(&task_index.view(state)),
-                )?;
-                projection
-                    .state()
-                    .append_current_visual_candidates(input, &mut candidates)?;
-                timing.checkpoint("task_candidates_ready");
-                let capture = TaskContextCapture {
-                    schema_version: 2,
-                    candidate_policy_version: crate::domain::session::TASK_CANDIDATE_POLICY_VERSION,
-                    common,
-                    candidates: candidates.clone(),
-                    expansion: expansion.clone(),
-                    source_refresh,
-                    compile,
-                    research_candidates,
-                    research_omitted,
-                    memory,
-                };
-                capture.common.fragments()?;
-                let bytes = serde_json::to_vec(&capture).map_err(|error| {
-                    ChatError::CompactionSummarySource {
-                        message: error.to_string(),
+                    };
+                    let view = navigation.as_ref().map(|index| index.view(state));
+                    if compile.research_enabled
+                        != projection
+                            .state()
+                            .agent_definition_binding()
+                            .is_some_and(|binding| binding.definition().research().is_some())
+                    {
+                        return Err(ChatError::CompactionSummarySource {
+                            message: "Research capture does not match the bound AgentDefinition"
+                                .to_owned(),
+                        });
                     }
-                })?;
-                let blob = self
-                    .session
-                    .artifacts
-                    .publish_bytes(&bytes)
-                    .map_err(|error| ChatError::CompactionSummarySource {
-                        message: format!("task context capture publication failed: {error}"),
-                    })?
-                    .blob_id;
-                let sequence = store.next_sequence()?;
-                let id = event_id(
-                    self.session.project.project_id(),
-                    &self.session.session_id,
-                    sequence.get(),
-                    "task-context-capture",
-                );
-                let event = SessionEvent::TaskContextCaptured {
-                    blob_id: blob.clone(),
-                }
-                .into_envelope(id.clone(), stream_id, sequence, occurred_at())?;
-                projection
-                    .append(store, event)
-                    .map_err(ChatError::from_session_append)?;
-                let source = projection.task_source_identity(
-                    self.session.project.project_id().clone(),
-                    project_events,
-                )?;
-                let state = projection.state().clone();
-                let events = projection.task_source_events().to_vec();
-                let samples_used = projection.state().task_selection_sample_count(input);
-                if !events.iter().any(|event| &event.event_id == input) {
-                    return Err(ChatError::CompactionSummarySource {
-                        message: "task input Event is absent from its prepared source".to_owned(),
-                    });
-                }
-                if crate::adapters::file_revision::FileRevision::of(&std::fs::metadata(
-                    &project_path,
-                )?)? != project_revision
-                {
-                    return Err(ChatError::CompactionSummarySource {
-                        message: "Research source changed during task preparation".to_owned(),
-                    });
-                }
-                let cached = PreparedSource {
-                    source: source.clone(),
-                    state,
-                    capture,
-                    events,
-                    cursor: store.projection_cursor(),
-                    project_revision,
-                };
-                timing.checkpoint("task_source_ready");
-                Ok((
-                    TaskContextPrepared {
-                        source,
-                        capture_event_id: id,
-                        capture_blob: blob,
-                        input_ref: input.clone(),
-                        candidates,
-                        samples_used,
-                        expansion,
-                    },
-                    cached,
-                ))
-            });
-        if let Some(index) = task_cache.as_ref() {
-            super::timing::task_index_work(self.diagnostic, &index.stats());
+                    let project_path = self.session.project.research_stream_path_existing()?;
+                    let project_revision = crate::adapters::file_revision::FileRevision::of(
+                        &std::fs::metadata(&project_path)?,
+                    )?;
+                    let read = self.session.project_read(projection.state())?;
+                    let project_events = read.events.as_slice();
+                    let project_hash = read.project_hash.clone();
+                    let (research_candidates, research_omitted) = if compile.research_enabled {
+                        projection.state().task_research_candidates_from_state(
+                            self.session.project.project_id().as_str(),
+                            input,
+                            &project_hash,
+                            read.research_state(),
+                            &read.references,
+                            expansion.as_ref(),
+                            source_refresh,
+                        )?
+                    } else {
+                        (Vec::new(), 0)
+                    };
+                    let memory = self.current_memory()?;
+                    let mut candidates = projection.state().task_selection_candidates_with_index(
+                        self.session.project.project_id().as_str(),
+                        input,
+                        &common,
+                        &research_candidates,
+                        research_omitted,
+                        &memory,
+                        expansion.as_ref(),
+                        source_refresh,
+                        crate::domain::session::TASK_CANDIDATE_POLICY_VERSION,
+                        &crate::app::context_read::history_navigation_excerpt,
+                        if navigation.is_some() {
+                            Some(&postings)
+                        } else {
+                            None
+                        },
+                        view.as_ref().map(|value| {
+                            value as &dyn crate::domain::session::TaskNavigationAccess
+                        }),
+                    )?;
+                    projection
+                        .state()
+                        .append_current_visual_candidates(input, &mut candidates)?;
+                    timing.checkpoint("task_candidates_ready");
+                    let capture = TaskContextCapture {
+                        schema_version: 2,
+                        candidate_policy_version:
+                            crate::domain::session::TASK_CANDIDATE_POLICY_VERSION,
+                        common,
+                        candidates: candidates.clone(),
+                        expansion: expansion.clone(),
+                        source_refresh,
+                        compile,
+                        research_candidates,
+                        research_omitted,
+                        memory,
+                    };
+                    capture.common.fragments()?;
+                    let bytes = serde_json::to_vec(&capture).map_err(|error| {
+                        ChatError::CompactionSummarySource {
+                            message: error.to_string(),
+                        }
+                    })?;
+                    let blob = self
+                        .session
+                        .artifacts
+                        .publish_bytes(&bytes)
+                        .map_err(|error| ChatError::CompactionSummarySource {
+                            message: format!("task context capture publication failed: {error}"),
+                        })?
+                        .blob_id;
+                    let sequence = store.next_sequence()?;
+                    let id = event_id(
+                        self.session.project.project_id(),
+                        &self.session.session_id,
+                        sequence.get(),
+                        "task-context-capture",
+                    );
+                    let event = SessionEvent::TaskContextCaptured {
+                        blob_id: blob.clone(),
+                    }
+                    .into_envelope(
+                        id.clone(),
+                        stream_id,
+                        sequence,
+                        occurred_at(),
+                    )?;
+                    projection
+                        .append(store, event)
+                        .map_err(ChatError::from_session_append)?;
+                    let source = projection.task_source_identity(
+                        self.session.project.project_id().clone(),
+                        project_events
+                            .last()
+                            .map_or(0, |event| event.sequence.get()),
+                        project_hash,
+                    )?;
+                    let state = projection.state().clone();
+                    let events = projection.task_source_events().to_vec();
+                    let samples_used = projection.state().task_selection_sample_count(input);
+                    if !events.iter().any(|event| &event.event_id == input) {
+                        return Err(ChatError::CompactionSummarySource {
+                            message: "task input Event is absent from its prepared source"
+                                .to_owned(),
+                        });
+                    }
+                    if crate::adapters::file_revision::FileRevision::of(&std::fs::metadata(
+                        &project_path,
+                    )?)? != project_revision
+                    {
+                        return Err(ChatError::CompactionSummarySource {
+                            message: "Research source changed during task preparation".to_owned(),
+                        });
+                    }
+                    let cached = PreparedSource {
+                        source: source.clone(),
+                        state,
+                        capture,
+                        events,
+                        cursor: store.projection_cursor(),
+                        project_revision,
+                    };
+                    timing.checkpoint("task_source_ready");
+                    Ok((
+                        TaskContextPrepared {
+                            source,
+                            capture_event_id: id,
+                            capture_blob: blob,
+                            input_ref: input.clone(),
+                            candidates,
+                            samples_used,
+                            expansion,
+                        },
+                        cached,
+                    ))
+                })
+        })();
+        if let Some(index) = task_cache.as_ref().and_then(|cache| cache.as_ref()) {
+            super::timing::task_index_work(self.diagnostic, &index.stats().map_err(stage_error)?);
+        } else {
+            timing.checkpoint("task_refresh_dependencies");
         }
-        if result.is_err() {
-            *task_cache = None;
+        if result.is_err()
+            && let Some(cache) = task_cache.as_mut()
+        {
+            **cache = None;
         }
         let (prepared, cached) = result.map_err(stage_error)?;
         self.prepared = Some(cached);
@@ -689,40 +728,29 @@ impl TaskContextStage for TaskContextRuntime<'_> {
             .map_err(stage_error)
     }
 
-    fn commit(&mut self, selection: TaskContextSelected) -> Result<(), AgentLoopError> {
-        let bytes = self
-            .session
-            .artifacts
-            .read_blob(&selection.capture_blob)
-            .map_err(stage_error)?;
-        let capture: TaskContextCapture = serde_json::from_slice(&bytes).map_err(stage_error)?;
-        let samples_used = self
-            .session
-            .durable_state()
-            .map_err(stage_error)?
-            .task_selection_sample_count(&selection.input_ref);
-        let prepared = TaskContextPrepared {
-            source: selection.source.clone(),
-            capture_event_id: selection.capture_event_id.clone(),
-            capture_blob: selection.capture_blob.clone(),
-            input_ref: selection.input_ref.clone(),
-            candidates: capture.candidates,
-            samples_used,
-            expansion: capture.expansion,
-        };
+    fn commit(
+        &mut self,
+        compiled: crate::app::agent_loop::CompiledTaskSelection,
+    ) -> Result<(), AgentLoopError> {
+        let selection = compiled.into_selection();
         self.session
             .with_projection(|projection, store, stream_id| {
-                let (source_state, capture, events) = self.verify_source(&prepared, store)?;
-                let research_units =
-                    self.research_units(source_state, &prepared, capture, &selection.decision)?;
-                crate::app::agent_loop::compile_captured_task_context(
-                    source_state,
-                    capture,
-                    &selection,
-                    events.iter().map(AsRef::as_ref),
-                    &research_units,
-                )
-                .map_err(ChatError::from)?;
+                let cached = self
+                    .prepared
+                    .as_ref()
+                    .ok_or(AgentLoopError::ContextStateMismatch)?;
+                let prepared = TaskContextPrepared {
+                    source: selection.source.clone(),
+                    capture_event_id: selection.capture_event_id.clone(),
+                    capture_blob: selection.capture_blob.clone(),
+                    input_ref: selection.input_ref.clone(),
+                    candidates: cached.capture.candidates.clone(),
+                    samples_used: projection
+                        .state()
+                        .task_selection_sample_count(&selection.input_ref),
+                    expansion: cached.capture.expansion.clone(),
+                };
+                self.verify_source(&prepared, store)?;
                 let sequence = store.next_sequence()?;
                 let event = SessionEvent::TaskContextSelected { selection }.into_envelope(
                     event_id(

@@ -33,7 +33,8 @@ impl SessionSourceIdentity {
         project_id: ProjectId,
         state: &SessionState,
         stream_hash: String,
-        project_events: &[EventEnvelope<Value>],
+        project_stream_watermark: u64,
+        project_stream_hash: String,
     ) -> Result<Self, SessionError> {
         Ok(Self {
             project_id,
@@ -43,10 +44,8 @@ impl SessionSourceIdentity {
                 .clone(),
             watermark: EventSequence::new(state.next_event_sequence()?.get() - 1),
             stream_hash,
-            project_stream_watermark: project_events
-                .last()
-                .map_or(0, |event| event.sequence.get()),
-            project_stream_hash: Self::project_hash_for_events(project_events)?,
+            project_stream_watermark,
+            project_stream_hash,
         })
     }
 

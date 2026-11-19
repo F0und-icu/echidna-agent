@@ -98,9 +98,24 @@ fn resume_checks_current_sources_without_auditing_retired_requests() {
     let (source, _) =
         crate::domain::session::SessionSourceIdentity::from_events(id.clone(), &events, &[])
             .unwrap();
-    assert_eq!(full.task_source_identity(id.clone(), &[]).unwrap(), source);
     assert_eq!(
-        recent.task_source_identity(id.clone(), &[]).unwrap(),
+        full.task_source_identity(
+            id.clone(),
+            0,
+            crate::domain::session::SessionSourceIdentity::project_hash_for_events(&[]).unwrap()
+        )
+        .unwrap(),
+        source
+    );
+    assert_eq!(
+        recent
+            .task_source_identity(
+                id.clone(),
+                0,
+                crate::domain::session::SessionSourceIdentity::project_hash_for_events(&[])
+                    .unwrap()
+            )
+            .unwrap(),
         source
     );
     assert_eq!(full.task_source_events(), recent.task_source_events());

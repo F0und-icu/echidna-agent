@@ -533,7 +533,7 @@ impl ContextReadRuntime {
             .with_projection(|projection, _, _| self.session.project_read(projection.state()))?;
         let mut memory_state = crate::domain::memory::MemoryState::default();
         let mut seen = std::collections::BTreeSet::new();
-        for event in &read.events {
+        for event in read.events.iter() {
             if !matches!(
                 event.event_type.as_str(),
                 "memory.changed" | "memory.external_change_detected"

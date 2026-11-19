@@ -66,7 +66,13 @@ impl DurableChatSession {
         self.with_projection(|projection, _, _| {
             let read = self.project_read(projection.state())?;
             cache
-                .refresh_from_read_context(&self.project, tools, &self.binding, &read)
+                .refresh_from_read_context(
+                    &self.project,
+                    tools,
+                    &self.binding,
+                    &read,
+                    &self.memory_cache,
+                )
                 .map_err(ChatError::from)
         })
     }
@@ -147,10 +153,16 @@ impl DurableChatSession {
         };
         let stream = ProjectEventStream::Session(self.session_id.clone()).stream_id();
         let value = operation(&mut projection, &mut store, stream)?;
-        *cache = Some(CachedSessionProjection {
-            projection,
-            cursor: store.projection_cursor(),
-        });
+        let cursor = store.projection_cursor();
+        self.receipt_cache
+            .lock()
+            .map_err(|_| std::io::Error::other("Receipt projection lock poisoned"))?
+            .remember_validated_session(
+                &self.session_id,
+                projection.state(),
+                cursor.file_revision().clone(),
+            );
+        *cache = Some(CachedSessionProjection { projection, cursor });
         Ok(value)
     }
 

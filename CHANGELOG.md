@@ -5,6 +5,38 @@ changes remain available in Git history.
 
 ## Unreleased
 
+### Incremental runtime preparation — 2026-11-19
+
+- Reuse validated Project/Research/Memory projections and unchanged Memory file
+  content. Apply new events without replaying the entire Project stream.
+- Refresh an adopted task's dependencies without rebuilding search postings or
+  ranking a new candidate pool. New user inputs retain normal task selection.
+- Pack task postings into one disposable file and write bounded blocks in the
+  background. Queries include pending blocks, preserving complete search results.
+- Commit the production-compiled selection directly after source freshness checks;
+  explicit replay still reconstructs it independently. New selections use request
+  proof version 10 and require a compatible reader; historical proofs remain supported.
+
+### Reused Session receipts for Memory tools — 2026-11-18
+
+- Reuse validated Session receipt projections across memory reads and writes.
+  Share the CLI's cache and advance it after durable Session checkpoints instead
+  of replaying unchanged history. Preserve write acknowledgements, version
+  comparisons and detection of changed sources.
+
+### Explicit constraint dependencies across source refresh — 2026-11-18
+
+- Preserve an explicitly selected constraint from another task when refreshing
+  sources within the current Turn. Keep its original scope and exact range without
+  pulling in that task's other constraints or sampling another task selection.
+
+### Incomplete Core Memory scope expansion — 2026-11-16
+
+- Expand a partially inspected Core Memory section before asking the task selector
+  to reconsider its scope. Reuse the existing two-sample limit and retain rejected
+  proposals; do not adopt incomplete classifications or replay tools. If inspection
+  remains partial, diagnostics identify the byte counts and the unknown-scope option.
+
 ### Durable reused tool results and mainline promotion — 2026-11-14
 
 - Persist a deduplicated tool call's actual result with its original execution

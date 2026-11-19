@@ -33,6 +33,7 @@ mod recovery;
 mod task_context;
 mod task_index;
 mod task_posting_lengths;
+mod task_postings;
 mod theme;
 mod timing;
 mod tool_output;
@@ -1295,7 +1296,8 @@ struct DurableChatSession {
     current_binding: Arc<std::sync::RwLock<AgentDefinitionBinding>>,
     projection: Arc<std::sync::Mutex<Option<persistence::CachedSessionProjection>>>,
     receipt_cache:
-        std::sync::Mutex<crate::adapters::research_projection::SessionReceiptCatalogCache>,
+        Arc<std::sync::Mutex<crate::adapters::research_projection::SessionReceiptCatalogCache>>,
+    memory_cache: std::sync::Mutex<crate::adapters::project_memory::MemoryReadCache>,
     context_source_index: Arc<std::sync::Mutex<Option<Arc<context_read::index::ColdIndex>>>>,
     task_index: std::sync::Mutex<Option<task_index::TaskIndex>>,
 }
@@ -1328,9 +1330,10 @@ impl DurableChatSession {
             current_binding: Arc::new(std::sync::RwLock::new(binding.clone())),
             binding,
             projection: Arc::new(std::sync::Mutex::new(None)),
-            receipt_cache: std::sync::Mutex::new(
+            receipt_cache: Arc::new(std::sync::Mutex::new(
                 crate::adapters::research_projection::SessionReceiptCatalogCache::default(),
-            ),
+            )),
+            memory_cache: std::sync::Mutex::new(Default::default()),
             context_source_index: Arc::new(std::sync::Mutex::new(None)),
             task_index: std::sync::Mutex::new(None),
         })

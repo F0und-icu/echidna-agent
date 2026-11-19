@@ -85,6 +85,8 @@ pub struct ToolRegistry {
     active_leases: ActiveProcessLeases,
     artifact_scope: artifact::ArtifactScopeBinding,
     memory_scope: Option<MemoryScope>,
+    receipt_cache:
+        Arc<std::sync::Mutex<crate::adapters::research_projection::SessionReceiptCatalogCache>>,
     context_reader: Option<Arc<dyn crate::ports::context_read::ContextReadPort>>,
     input_verification_enabled: bool,
     automatic_verification_enabled: bool,
@@ -187,6 +189,7 @@ impl ToolRegistry {
             active_leases: ActiveProcessLeases::new(),
             artifact_scope,
             memory_scope,
+            receipt_cache: Arc::new(std::sync::Mutex::new(Default::default())),
             context_reader: None,
             input_verification_enabled: false,
             automatic_verification_enabled: false,
@@ -204,6 +207,16 @@ impl ToolRegistry {
         reader: Arc<dyn crate::ports::context_read::ContextReadPort>,
     ) -> Self {
         self.context_reader = Some(reader);
+        self
+    }
+
+    pub(crate) fn with_receipt_cache(
+        mut self,
+        cache: Arc<
+            std::sync::Mutex<crate::adapters::research_projection::SessionReceiptCatalogCache>,
+        >,
+    ) -> Self {
+        self.receipt_cache = cache;
         self
     }
 

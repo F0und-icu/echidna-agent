@@ -43,6 +43,12 @@ impl TurnTiming {
 pub(super) fn task_index_work(enabled: bool, stats: &super::task_index::TaskIndexStats) {
     if enabled {
         console_eprintln!(
+            "[debug timing] phase=task_posting_storage posting_file_opens={} posting_file_bytes={} posting_pending_bytes={}",
+            stats.posting_file_opens,
+            stats.posting_file_bytes,
+            stats.posting_pending_bytes
+        );
+        console_eprintln!(
             "[debug timing] phase=task_index source_rows={} source_prefix_bytes={} source_verification_bytes={} source_index_read_bytes={} source_index_text_write_bytes={} source_index_hash_write_bytes={} source_index_record_write_bytes={} posting_rows_read={} posting_bytes_read={} posting_rows_written={} posting_bytes_written={} cache_rows_written={} cache_bytes_written={} posting_keys={} posting_batch_peak_rows={} posting_batches={} card_rows_read={} card_bytes_read={} task_ref_rows_read={} task_ref_bytes_read={} anchor_rows_read={} anchor_bytes_read={} semantics_rows_read={} semantics_bytes_read={} cards_written={} anchors_written={} navigation_stage_read_bytes={} navigation_stage_write_bytes={} metadata_rebuilt={}",
             stats.source_rows,
             stats.source_prefix_bytes,

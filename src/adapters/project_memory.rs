@@ -25,6 +25,14 @@ pub(crate) struct MemoryDocument {
     pub(crate) hash: Option<String>,
 }
 
+#[derive(Default)]
+pub(crate) struct MemoryReadCache {
+    documents: std::collections::BTreeMap<
+        PathBuf,
+        (crate::adapters::file_revision::FileRevision, MemoryDocument),
+    >,
+}
+
 /// A bounded, read-only Memory fact selected for local retrieval Shadow.
 /// The Markdown remains authoritative; this value is never persisted.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -224,6 +232,14 @@ impl<'project> LocalProjectMemory<'project> {
         &self,
         path: &MemoryPath,
     ) -> Result<MemoryDocument, LocalProjectMemoryError> {
+        self.read_cached(path, &mut MemoryReadCache::default())
+    }
+
+    pub(crate) fn read_cached(
+        &self,
+        path: &MemoryPath,
+        cache: &mut MemoryReadCache,
+    ) -> Result<MemoryDocument, LocalProjectMemoryError> {
         self.ensure_control_directory_existing()?;
         if !self.validate_memory_root_existing()? {
             return Ok(MemoryDocument {
@@ -246,6 +262,16 @@ impl<'project> LocalProjectMemory<'project> {
             }
             Ok(metadata) => {
                 self.validate_size(path, metadata.len())?;
+                let revision = crate::adapters::file_revision::FileRevision::of(&metadata)
+                    .map_err(|source| LocalProjectMemoryError::Inspect {
+                        path: document_path.clone(),
+                        source,
+                    })?;
+                if let Some((known, document)) = cache.documents.get(&document_path)
+                    && known == &revision
+                {
+                    return Ok(document.clone());
+                }
                 let bytes =
                     fs::read(&document_path).map_err(|source| LocalProjectMemoryError::Read {
                         path: document_path.clone(),
@@ -257,10 +283,14 @@ impl<'project> LocalProjectMemory<'project> {
                         source,
                     }
                 })?;
-                Ok(MemoryDocument {
+                let document = MemoryDocument {
                     hash: Some(content_hash(content.as_bytes())),
                     content: Some(content),
-                })
+                };
+                cache
+                    .documents
+                    .insert(document_path, (revision, document.clone()));
+                Ok(document)
             }
             Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(MemoryDocument {
                 content: None,
@@ -278,6 +308,13 @@ impl<'project> LocalProjectMemory<'project> {
     pub(crate) fn read_retrieval_documents(
         &self,
     ) -> Result<Vec<RetrievalMemoryDocument>, LocalProjectMemoryError> {
+        self.read_retrieval_documents_cached(&mut MemoryReadCache::default())
+    }
+
+    pub(crate) fn read_retrieval_documents_cached(
+        &self,
+        cache: &mut MemoryReadCache,
+    ) -> Result<Vec<RetrievalMemoryDocument>, LocalProjectMemoryError> {
         self.ensure_control_directory_existing()?;
         if !self.validate_memory_root_existing()? {
             return Ok(Vec::new());
@@ -291,11 +328,19 @@ impl<'project> LocalProjectMemory<'project> {
             })?;
         paths.extend(self.retrieval_note_paths()?);
         paths.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        let live = paths
+            .iter()
+            .map(|path| self.document_path(path))
+            .chain(std::iter::once(self.memory_root().join("core.md")))
+            .collect::<std::collections::BTreeSet<_>>();
+        cache
+            .documents
+            .retain(|path, _| !path.starts_with(self.memory_root()) || live.contains(path));
         paths
             .into_iter()
             .map(|path| {
                 self.validate_retrieval_document_size(&path)?;
-                let document = self.read(&path)?;
+                let document = self.read_cached(&path, cache)?;
                 Ok(RetrievalMemoryDocument { path, document })
             })
             .filter_map(

@@ -17,19 +17,17 @@ use crate::adapters::project_event_store::{Project, ProjectEventStream};
 use crate::adapters::project_memory::{
     LocalProjectMemory, MemoryDocument, content_hash, replacement_diff,
 };
-use crate::adapters::research_projection::load_reference_catalog;
+use crate::adapters::research_projection::{ProjectReadContext, SessionReceiptCatalogCache};
 use crate::domain::events::{EventEnvelope, EventId, EventType, OccurredAt};
 use crate::domain::memory::{
     MemoryEvent, MemoryPath, MemoryReducer, MemoryRevision, MemoryScope, MemoryState,
     validate_content_hash,
 };
-use crate::domain::research::{
-    ResearchEvent, ResearchReducer, ResearchReferenceCatalog, ResearchState,
-};
+use crate::domain::research::{ResearchEvent, ResearchReducer, ResearchState};
 use crate::domain::tools::{ResourceKey, ToolExecutionOutcome, ToolExecutionPlan};
+use crate::ports::EventSink;
 use crate::ports::artifact::ArtifactStore;
 use crate::ports::tool::ToolExecutorError;
-use crate::ports::{EventSink, EventSource};
 
 use super::resources::ResourceKeyResolver;
 use super::{decode_arguments, invalid_plan};
@@ -83,6 +81,7 @@ fn normalize_write(
 
 async fn execute_read(
     project_root: &Path,
+    receipt_cache: &std::sync::Mutex<SessionReceiptCatalogCache>,
     scope: &MemoryScope,
     plan: ToolExecutionPlan,
     core_byte_limit: usize,
@@ -112,16 +111,17 @@ async fn execute_read(
         Ok(writer) => writer,
         Err(error) => return memory_failure(plan, "memory_writer_unavailable", error),
     };
-    let mut store = match writer.open_research(None) {
+    let read = match memory_projection(&project, receipt_cache) {
+        Ok(references) => references,
+        Err((code, error)) => return memory_failure(plan, code, error),
+    };
+    let mut store = match writer.open_research_projection(&read.cursor) {
         Ok(store) => store,
         Err(error) => return memory_failure(plan, "memory_stream_unavailable", error),
     };
-    let references = match load_reference_catalog(&project) {
-        Ok(references) => references,
-        Err(error) => return memory_failure(plan, "memory_receipts_invalid", error),
-    };
-    let (mut research_state, mut memory_state) = match reduce_states(&store, &references) {
-        Ok(states) => states,
+    let mut research_state = read.research_state().clone();
+    let mut memory_state = match read.memory_state() {
+        Ok(state) => state.clone(),
         Err(error) => return memory_failure(plan, "memory_state_invalid", error),
     };
     let memory = LocalProjectMemory::with_scope(&project, scope.clone())
@@ -172,6 +172,7 @@ async fn execute_read(
 
 async fn execute_write(
     project_root: &Path,
+    receipt_cache: &std::sync::Mutex<SessionReceiptCatalogCache>,
     scope: &MemoryScope,
     plan: ToolExecutionPlan,
     core_byte_limit: usize,
@@ -206,16 +207,17 @@ async fn execute_write(
         Ok(writer) => writer,
         Err(error) => return memory_failure(plan, "memory_writer_unavailable", error),
     };
-    let mut store = match writer.open_research(None) {
+    let read = match memory_projection(&project, receipt_cache) {
+        Ok(references) => references,
+        Err((code, error)) => return memory_failure(plan, code, error),
+    };
+    let mut store = match writer.open_research_projection(&read.cursor) {
         Ok(store) => store,
         Err(error) => return memory_failure(plan, "memory_stream_unavailable", error),
     };
-    let references = match load_reference_catalog(&project) {
-        Ok(references) => references,
-        Err(error) => return memory_failure(plan, "memory_receipts_invalid", error),
-    };
-    let (mut research_state, mut memory_state) = match reduce_states(&store, &references) {
-        Ok(states) => states,
+    let mut research_state = read.research_state().clone();
+    let mut memory_state = match read.memory_state() {
+        Ok(state) => state.clone(),
         Err(error) => return memory_failure(plan, "memory_state_invalid", error),
     };
     let event_id = EventId::new(arguments.event_id.clone());
@@ -363,36 +365,29 @@ fn validate_expected_hash(tool_name: &str, value: Option<&str>) -> Result<(), To
     })
 }
 
-fn reduce_states(
-    store: &crate::adapters::project_event_store::JsonlEventStore<'_>,
-    references: &ResearchReferenceCatalog,
-) -> Result<(ResearchState, MemoryState), String> {
-    let events = EventSource::read_events(store, &ProjectEventStream::Research.stream_id())
-        .map_err(|error| error.to_string())?;
-    let mut research_state = ResearchState::default();
-    let mut memory_state = MemoryState::default();
-    let research_reducer = ResearchReducer;
-    let memory_reducer = MemoryReducer;
-    for envelope in events {
-        let already_applied = research_state.has_event_id(&envelope.event_id);
-        if envelope.event_type.as_str() == "StreamRecovered" {
-            research_reducer
-                .apply_with_references(&mut research_state, envelope, references)
-                .map_err(|error| error.to_string())?;
-            continue;
-        }
-        let event = ResearchEvent::decode(envelope.event_type.as_str(), envelope.payload.clone())
-            .map_err(|error| error.to_string())?;
-        research_reducer
-            .apply_with_references(&mut research_state, envelope, references)
-            .map_err(|error| error.to_string())?;
-        if !already_applied && let ResearchEvent::Memory(event) = event {
-            memory_reducer
-                .apply(&mut memory_state, event)
-                .map_err(|error| error.to_string())?;
-        }
-    }
-    Ok((research_state, memory_state))
+fn memory_projection(
+    project: &Project,
+    cache: &std::sync::Mutex<SessionReceiptCatalogCache>,
+) -> Result<ProjectReadContext, (&'static str, String)> {
+    let mut cache = cache.lock().map_err(|_| {
+        (
+            "memory_receipts_invalid",
+            "Receipt projection lock poisoned".to_owned(),
+        )
+    })?;
+    let (references, digest) = cache
+        .refresh_with_session(project, None)
+        .map_err(|error| ("memory_receipts_invalid", error))?;
+    ProjectReadContext::load_with_references(project, &mut cache, references, digest).map_err(
+        |error| match error {
+            crate::adapters::research_projection::ProjectProjectionError::Stream(message) => {
+                ("memory_stream_unavailable", message)
+            }
+            crate::adapters::research_projection::ProjectProjectionError::State(message) => {
+                ("memory_state_invalid", message)
+            }
+        },
+    )
 }
 
 fn external_revision(
@@ -672,6 +667,7 @@ impl Tool {
             Self::MemoryRead => {
                 execute_read(
                     &registry.project_root,
+                    &registry.receipt_cache,
                     registry
                         .memory_scope
                         .as_ref()
@@ -685,6 +681,7 @@ impl Tool {
             Self::MemoryWrite => {
                 execute_write(
                     &registry.project_root,
+                    &registry.receipt_cache,
                     registry
                         .memory_scope
                         .as_ref()

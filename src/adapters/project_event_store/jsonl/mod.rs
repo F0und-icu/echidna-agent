@@ -46,6 +46,13 @@ pub(crate) struct SessionStreamCheckpoint {
 }
 
 impl SessionStreamCursor {
+    pub(crate) fn content_digest(&self) -> String {
+        self.hash.finalize().to_hex().to_string()
+    }
+    pub(crate) fn file_revision(&self) -> &FileRevision {
+        &self.revision
+    }
+
     pub(crate) fn indexed_bytes(&self) -> usize {
         self.bytes
     }
@@ -70,6 +77,75 @@ impl SessionStreamCursor {
             && self.stream_id == other.stream_id
             && self.matches_watermark(other.bytes, other.hash.finalize())
     }
+}
+
+pub(crate) fn read_research_projection(
+    project: &Project,
+    cursor: Option<&SessionStreamCursor>,
+) -> Result<(SessionStreamCursor, Vec<EventEnvelope<Value>>), ProjectEventStoreError> {
+    let path = project.research_stream_path_existing()?;
+    let stream_id = ProjectEventStream::Research.stream_id();
+    let file = File::open(&path).map_err(|source| ProjectEventStoreError::Io {
+        operation: "read Project Event suffix",
+        path: path.clone(),
+        source,
+    })?;
+    let revision = file_revision(&file, &path)?;
+    let mut reader = BufReader::new(file);
+    let mut hash = match cursor {
+        Some(cursor) => {
+            if revision != cursor.revision
+                && reader
+                    .get_ref()
+                    .metadata()
+                    .map_err(|source| ProjectEventStoreError::Io {
+                        operation: "inspect Project Event suffix",
+                        path: path.clone(),
+                        source,
+                    })?
+                    .len()
+                    == cursor.bytes as u64
+            {
+                verify_prefix_bytes(&mut reader, &path, cursor.bytes, cursor.hash.finalize())?;
+            }
+            verify_session_prefix(&mut reader, &path, &stream_id, cursor)?
+        }
+        None => blake3::Hasher::new(),
+    };
+    let scan = scan::scan_stream_reader(
+        &mut reader,
+        &path,
+        &stream_id,
+        &EventUpcasterRegistry::current(),
+        cursor.map_or(0, |c| c.bytes),
+        cursor.and_then(|c| c.last_sequence),
+        &mut hash,
+    )?;
+    let StreamScan::Complete {
+        events,
+        last_sequence,
+        validated_bytes,
+    } = scan
+    else {
+        let StreamScan::Trailing { offset, .. } = scan else {
+            unreachable!()
+        };
+        return Err(ProjectEventStoreError::RecoveryMetadataRequired { path, offset });
+    };
+    if file_revision(reader.get_ref(), &path)? != revision {
+        return Err(ProjectEventStoreError::ValidatedPrefixChanged { path });
+    }
+    Ok((
+        SessionStreamCursor {
+            revision,
+            path,
+            stream_id,
+            bytes: validated_bytes,
+            hash,
+            last_sequence,
+        },
+        events,
+    ))
 }
 
 pub(crate) fn verify_session_checkpoint(
@@ -469,6 +545,29 @@ impl ProjectWriter {
     }
 
     /// Opens the project Research JSONL Writer.
+    pub(crate) fn open_research_projection(
+        &mut self,
+        cursor: &SessionStreamCursor,
+    ) -> Result<JsonlEventStore<'_>, ProjectEventStoreError> {
+        let path = self.project.research_stream_path_existing()?;
+        let stream_id = ProjectEventStream::Research.stream_id();
+        let mut store = JsonlEventStore::open(
+            path.clone(),
+            stream_id.clone(),
+            cursor.last_sequence,
+            EventUpcasterRegistry::current(),
+            PhantomData,
+        )?;
+        if cursor.path != path
+            || cursor.stream_id != stream_id
+            || file_revision(&store.file, &path)? != cursor.revision
+        {
+            return Err(ProjectEventStoreError::ValidatedPrefixChanged { path });
+        }
+        store.projection_cursor = Some(cursor.clone());
+        Ok(store)
+    }
+
     pub fn open_research(
         &mut self,
         recovery: Option<RecoveryMetadata>,

@@ -185,6 +185,7 @@ impl DurableChatSession {
             tools
                 .with_project(&self.project)
                 .with_context_reader(context_reader)
+                .with_receipt_cache(self.receipt_cache.clone())
                 .with_input_verification(self.binding.definition().rsi().is_some())
                 .with_automatic_verification(
                     self.binding
@@ -252,6 +253,7 @@ impl DurableChatSession {
                 &tools,
                 &self.binding,
                 read,
+                &self.memory_cache,
             )?,
         )?;
         let history = state.compaction_source_history()?;

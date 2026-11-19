@@ -112,7 +112,13 @@ fn rebuilt_navigation_streams_real_same_input_source_refreshes() {
         .lines()
         .filter(|line| line.contains("phase=task_index "))
         .collect::<Vec<_>>();
-    assert_eq!(work.len(), 5, "{diagnostics}");
+    assert_eq!(work.len(), 2, "{diagnostics}");
+    assert_eq!(
+        diagnostics
+            .matches("phase=task_refresh_dependencies ")
+            .count(),
+        3
+    );
     assert!(work[0].contains("metadata_rebuilt=true"), "{}", work[0]);
     for line in &work[1..] {
         assert!(line.contains("metadata_rebuilt=false"), "{line}");
@@ -124,18 +130,14 @@ fn rebuilt_navigation_streams_real_same_input_source_refreshes() {
             .parse()
             .unwrap()
     };
-    // Only the previous answer and the new input are added to the existing
-    // source index. A fresh TaskIndex would re-index the earlier tool pair too.
-    assert_eq!(counter(work[4], "source_rows"), 2, "{}", work[4]);
-    for line in &work[2..] {
-        for name in [
-            "navigation_stage_read_bytes",
-            "navigation_stage_write_bytes",
-            "cards_written",
-            "anchors_written",
-        ] {
-            assert_eq!(counter(line, name), 0, "{line}");
-        }
+    // Source-only refresh leaves indexing deferred until the next new input.
+    // That update consumes three Tool pairs, the answer and the new input once.
+    assert_eq!(counter(work[1], "source_rows"), 8, "{}", work[1]);
+    for name in [
+        "navigation_stage_read_bytes",
+        "navigation_stage_write_bytes",
+    ] {
+        assert_eq!(counter(work[1], name), 0, "{}", work[1]);
     }
     let project = Project::discover(root.path()).unwrap();
     reduced_session(&project, &session_id(root.path()));
@@ -162,124 +164,206 @@ fn rebuilt_navigation_streams_real_same_input_source_refreshes() {
 }
 
 #[test]
-fn task_posting_namespaces_keep_distinct_ordinals_and_reject_incomplete_rows() {
-    for incomplete in [false, true] {
-        let root = TemporaryDirectory::new("task-posting-namespace-swap");
-        initialize_project(root.path());
-        let agent = definition(root.path(), None);
-        let scratch = root.path().join("scratch");
-        fs::create_dir(&scratch).unwrap();
-        let scratch_for_server = scratch.clone();
-        let project_path = root.path().to_path_buf();
-        let server = paged_server(move |step, wire| {
-            if step == 0 {
-                return (
-                    new_selection_response(wire, "swap-initial-selection"),
-                    false,
-                );
+fn task_posting_namespaces_keep_distinct_tasks_across_refresh_and_resume() {
+    let root = TemporaryDirectory::new("task-posting-namespaces");
+    initialize_project(root.path());
+    let agent = definition(root.path(), None);
+    let server = paged_server(move |step, wire| match step {
+        0 | 2 | 5 => {
+            let candidates = selector_candidates(wire);
+            if step == 5 {
+                let tasks = candidates["tasks"].as_array().unwrap();
+                let seed = tasks
+                    .iter()
+                    .find(|task| task["goal"] == "Seed task.")
+                    .unwrap();
+                let target = tasks
+                    .iter()
+                    .find(|task| task["goal"] == "Write target file.")
+                    .unwrap();
+                assert_ne!(seed["ref"], target["ref"]);
             }
-            match step - 1 {
-                0 => (text_response("Seed complete.", "swap-seed"), false),
-                1 => (new_selection_response(wire, "swap-select-target"), false),
-                2 => (
-                    m4_long_flow_tool_response(
-                        "swap-write",
-                        "run_command",
-                        json!({"argv":["/bin/sh", "-c", "printf 'once\\n' > swap-effect.txt"]}),
-                        "swap-tool",
-                    ),
-                    false,
-                ),
-                3 => {
-                    let id = session_id(&project_path);
-                    let events = session_events(&project_path, &id);
-                    let selection = events
-                        .iter()
-                        .rev()
-                        .find(|event| event["event_type"] == "session.task_context_selected")
-                        .unwrap();
-                    let task_id = selection["payload"]["task_revisions"][0]["task_id"]
-                        .as_str()
-                        .unwrap();
-                    let digest = blake3::hash(task_id.as_bytes()).to_hex().to_string();
-                    let indexes = fs::read_dir(&scratch_for_server)
-                        .unwrap()
-                        .map(|entry| entry.unwrap().path())
-                        .filter(|path| {
-                            path.file_name()
-                                .unwrap()
-                                .to_string_lossy()
-                                .starts_with("echidna-task-index-")
-                        })
-                        .collect::<Vec<_>>();
-                    assert_eq!(indexes.len(), 1);
-                    let card = indexes[0].join("card-ref").join(&digest);
-                    let anchor = indexes[0].join("anchor-post").join(&digest);
-                    let card_bytes = fs::read(&card).unwrap();
-                    let anchor_bytes = fs::read(&anchor).unwrap();
-                    assert_eq!(card_bytes.len(), 8);
-                    assert_eq!(anchor_bytes.len(), 8);
-                    assert_ne!(&card_bytes[..8], &anchor_bytes[..8]);
-                    if incomplete {
-                        fs::write(card, &card_bytes[..7]).unwrap();
-                    }
-                    (
-                        text_response("Target complete.", "swap-target-done"),
-                        incomplete,
-                    )
-                }
-                4 => (new_selection_response(wire, "swap-select-next"), false),
-                5 => (
-                    text_response("Control complete.", "swap-control-done"),
-                    true,
-                ),
-                _ => panic!("unexpected namespace swap request"),
-            }
-        });
-        let config = write_context_window_config(root.path(), &server.base_url, 272_000);
-        let mut child = Command::new(env!("CARGO_BIN_EXE_echidna"))
-            .current_dir(root.path())
-            .args([
-                "chat",
-                "--config",
-                config.to_str().unwrap(),
-                "--agent",
-                agent.to_str().unwrap(),
-                "--debug",
-            ])
-            .env("TMPDIR", &scratch)
-            .env("CYBER_AGENT_PRIMARY_API_KEY", "loopback-primary-secret")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(b"Seed task.\nWrite target file.\nStart next task.\n/exit\n")
-            .unwrap();
-        let output = child.wait_with_output().unwrap();
-        server.join();
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if incomplete {
-            assert!(!output.status.success(), "{stderr}");
-            assert!(stderr.contains("task posting length changed"), "{stderr}");
-        } else {
-            assert!(output.status.success(), "{stderr}");
-            let resumed = run_chat(root.path(), &config, "/exit\n", &["--resume", "latest"]);
-            assert!(
-                resumed.status.success(),
-                "{}",
-                String::from_utf8_lossy(&resumed.stderr)
-            );
+            (
+                new_selection_response(wire, &format!("namespace-select-{step}")),
+                false,
+            )
         }
-        assert_eq!(
-            fs::read_to_string(root.path().join("swap-effect.txt")).unwrap(),
-            "once\n"
-        );
+        1 => (text_response("Seed complete.", "namespace-seed"), false),
+        3 => (
+            m4_long_flow_tool_response(
+                "namespace-write",
+                "run_command",
+                json!({"argv":["/bin/sh", "-c", "printf 'once\\n' > namespace-effect.txt"]}),
+                "namespace-tool",
+            ),
+            false,
+        ),
+        4 => (text_response("Target complete.", "namespace-target"), false),
+        6 => (
+            text_response("Control complete.", "namespace-control"),
+            true,
+        ),
+        _ => panic!("unexpected namespace request"),
+    });
+    let config = write_context_window_config(root.path(), &server.base_url, 272_000);
+    let output = run_chat(
+        root.path(),
+        &config,
+        "Seed task.\nWrite target file.\nStart next task.\n/exit\n",
+        &["--agent", agent.to_str().unwrap()],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    server.join();
+    // Packed ordinal separation and truncated published-file rejection are
+    // covered directly in private_cases/task_input_clock.rs.
+    let resumed = run_chat(root.path(), &config, "/exit\n", &["--resume", "latest"]);
+    assert!(
+        resumed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join("namespace-effect.txt")).unwrap(),
+        "once\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn navigation_build_releases_writer_and_rejects_a_concurrent_session_append() {
+    struct ChildGuard(Option<std::process::Child>);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            if let Some(child) = &mut self.0 {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
     }
+    let root = TemporaryDirectory::new("navigation-writer-concurrency");
+    initialize_project(root.path());
+    let agent = definition(root.path(), None);
+    let config = write_context_window_config(root.path(), "http://127.0.0.1:1/v1", 1_000_000);
+    let created = run_chat(
+        root.path(),
+        &config,
+        "/exit\n",
+        &["--agent", agent.to_str().unwrap()],
+    );
+    assert!(created.status.success());
+    let id = session_id(root.path());
+    let project = Project::discover(root.path()).unwrap();
+    append_source_items(
+        &project,
+        &id,
+        (0..2048)
+            .map(|index| ContentItem::assistant_text(format!("Synthetic navigation row {index}")))
+            .collect(),
+    );
+    let scratch = root.path().join("index-scratch");
+    fs::create_dir(&scratch).unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_echidna"))
+        .current_dir(root.path())
+        .args([
+            "chat",
+            "--config",
+            config.to_str().unwrap(),
+            "--resume",
+            &id,
+        ])
+        .env("TMPDIR", &scratch)
+        .env("CYBER_AGENT_PRIMARY_API_KEY", "loopback-primary-secret")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut child = ChildGuard(Some(child));
+    child
+        .0
+        .as_mut()
+        .unwrap()
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"Prepare the synthetic task.\n/exit\n")
+        .unwrap();
+    let pid = child.0.as_ref().unwrap().id() as libc::pid_t;
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let stage = loop {
+        let stage = fs::read_dir(&scratch).unwrap().find_map(|entry| {
+            let path = entry.unwrap().path().join("navigation-stage");
+            path.join("groups/0").exists().then_some(path)
+        });
+        if let Some(stage) = stage {
+            break stage;
+        }
+        assert!(
+            child.0.as_mut().unwrap().try_wait().unwrap().is_none(),
+            "child exited before navigation construction"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "navigation construction did not start"
+        );
+        thread::sleep(Duration::from_millis(1));
+    };
+    // Stop only this synthetic child and confirm the stop before attempting a
+    // competing append. No production hook or timing-only lock assertion.
+    let mut status = 0;
+    unsafe {
+        assert_eq!(libc::kill(pid, libc::SIGSTOP), 0);
+        assert_eq!(libc::waitpid(pid, &mut status, libc::WUNTRACED), pid);
+    }
+    assert!(libc::WIFSTOPPED(status));
+    assert!(
+        stage.exists(),
+        "child must be stopped within navigation construction"
+    );
+    let mut writer = project
+        .open_writer()
+        .expect("navigation construction must release the Project lease");
+    let mut store = writer.open_session(StreamId::new(&id), None).unwrap();
+    let event = SessionEvent::HistoryItemRecorded {
+        item: ContentItem::assistant_text("Concurrent synthetic observation"),
+    }
+    .into_envelope(
+        EventId::new("navigation-concurrent-append"),
+        ProjectEventStream::Session(StreamId::new(&id)).stream_id(),
+        store.next_sequence().unwrap(),
+        OccurredAt::new("2026-11-19T00:00:00Z"),
+    )
+    .unwrap();
+    store.append_event(&event).unwrap();
+    drop(store);
+    drop(writer);
+    unsafe {
+        assert_eq!(libc::kill(pid, libc::SIGCONT), 0);
+    }
+    let output = child.0.take().unwrap().wait_with_output().unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("task navigation source changed during index preparation"),
+        "{stderr}"
+    );
+    let events = session_events(root.path(), &id);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["event_id"] == "navigation-concurrent-append")
+            .count(),
+        1
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| event["event_type"] == "session.task_context_selected")
+    );
 }
 
 fn search_response(call: &str, query: &str, cursor: Value) -> String {

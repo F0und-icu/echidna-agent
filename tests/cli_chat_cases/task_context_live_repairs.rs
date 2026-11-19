@@ -16,6 +16,154 @@ fn decision(candidates: &Value) -> Value {
 }
 
 #[test]
+fn explicitly_selected_foreign_constraint_survives_source_refresh_and_resume() {
+    const RULE: &str = "DEPENDENCY-RULE";
+    const OTHER: &str = "UNSELECTED-RULE";
+    let root = TemporaryDirectory::new("task-explicit-constraint-refresh");
+    initialize_project(root.path());
+    let agent = definition(root.path(), None);
+    let server = paged_server(move |step, wire| match step {
+        0 => {
+            let candidates = selector_candidates(wire);
+            let mut selected = decision(&candidates);
+            selected["constraint_updates"] = json!([
+                {"source_ref":candidates["input"]["ref"],"start_byte":0,"end_byte":RULE.len(),
+                    "scope":{"kind":"current_task"},"supersedes":null},
+                {"source_ref":candidates["input"]["ref"],"start_byte":RULE.len()+1,"end_byte":RULE.len()+1+OTHER.len(),
+                    "scope":{"kind":"current_task"},"supersedes":null}
+            ]);
+            (
+                text_response(&selected.to_string(), "foreign-first-select"),
+                false,
+            )
+        }
+        1 => (text_response("Seed complete.", "foreign-seed"), false),
+        2 => {
+            let candidates = selector_candidates(wire);
+            let constraint = candidates["context"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|candidate| {
+                    candidate["constraint_range"].is_object() && candidate["excerpt"] == RULE
+                })
+                .unwrap();
+            let mut selected = decision(&candidates);
+            selected["required_context_refs"] = json!([constraint["ref"]]);
+            (
+                text_response(&selected.to_string(), "foreign-second-select"),
+                false,
+            )
+        }
+        3 | 4 => (
+            m4_long_flow_tool_response(
+                &format!("foreign-write-{step}"),
+                "run_command",
+                json!({"argv":["/bin/sh","-c",format!("printf '{step}\\n' >> foreign-effect.txt")]}),
+                &format!("foreign-tool-{step}"),
+            ),
+            false,
+        ),
+        5 => (
+            text_response("Dependent task complete.", "foreign-dependent"),
+            false,
+        ),
+        6 => (
+            text_response(
+                &decision(&selector_candidates(wire)).to_string(),
+                "foreign-third-select",
+            ),
+            false,
+        ),
+        7 => (
+            text_response("Unrelated task complete.", "foreign-unrelated"),
+            true,
+        ),
+        _ => unreachable!(),
+    });
+    let config = write_context_window_config(root.path(), &server.base_url, 272_000);
+    let output = run_chat(
+        root.path(),
+        &config,
+        &format!(
+            "{RULE} {OTHER}\nWrite two synthetic lines using the selected dependency.\nStart an unrelated task.\n/exit\n"
+        ),
+        &["--agent", agent.to_str().unwrap()],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let wires = (0..8)
+        .map(|_| f2a_request_body(&server.requests, "foreign constraint refresh"))
+        .collect::<Vec<_>>();
+    server.join();
+    assert!(wires[3].to_string().contains(RULE));
+    assert!(!wires[7].to_string().contains(RULE));
+    let id = session_id(root.path());
+    let events = session_events(root.path(), &id);
+    let audits = events
+        .iter()
+        .filter(|event| event["event_type"] == "session.request_audit_recorded")
+        .collect::<Vec<_>>();
+    for audit in &audits[3..6] {
+        let text = super::task_context_progress::logical_user_texts(root.path(), audit).join("\n");
+        assert!(text.contains(RULE), "selected dependency disappeared");
+        assert!(
+            !text.contains(OTHER),
+            "unselected sibling constraint leaked"
+        );
+    }
+    let state = reduced_session(&Project::discover(root.path()).unwrap(), &id);
+    assert_audits_reconstruct(root.path(), &state);
+    let selections = events
+        .iter()
+        .filter(|event| event["event_type"] == "session.task_context_selected")
+        .collect::<Vec<_>>();
+    assert_eq!(selections.len(), 5);
+    let selected = &selections[1]["payload"];
+    assert_eq!(
+        selected["selected_constraints"].as_array().unwrap().len(),
+        1
+    );
+    for pair in selections[1..4].windows(2) {
+        assert_eq!(pair[1]["payload"]["refresh_of"], pair[0]["event_id"]);
+        for key in [
+            "task_revisions",
+            "selected_constraints",
+            "selected_history",
+            "selected_excerpts",
+        ] {
+            assert_eq!(pair[1]["payload"][key], selected[key], "{key}");
+        }
+    }
+    assert!(
+        selections[4]["payload"]["selected_constraints"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let source = root
+        .path()
+        .join(".echidna/sessions")
+        .join(id)
+        .join("events.jsonl");
+    let before = fs::read(&source).unwrap();
+    let resumed = run_chat(root.path(), &config, "/exit\n", &["--resume", "latest"]);
+    assert!(
+        resumed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    assert!(fs::read(source).unwrap().starts_with(&before));
+    assert_eq!(
+        fs::read_to_string(root.path().join("foreign-effect.txt")).unwrap(),
+        "3\n4\n"
+    );
+}
+
+#[test]
 fn repeated_active_constraints_keep_exact_scope_range_and_single_revision() {
     const TEXT: &str = "只熟悉，并告诉我你的理解就可以了";
     assert_eq!(TEXT.len(), 48);
@@ -821,7 +969,7 @@ fn partial_excerpt_retains_complete_protected_constraint_and_resumes() {
         assert_eq!(selections.len(), if valid { 3 } else { 2 });
         if valid {
             let selected = selections[2];
-            assert_eq!(selected["payload"]["request_proof_version"], 9);
+            assert_eq!(selected["payload"]["request_proof_version"], 10);
             let range = &selected["payload"]["selected_excerpts"][0];
             let constraint = &selected["payload"]["selected_constraints"][0];
             assert_eq!(range["source_event_id"], constraint["source_event_id"]);

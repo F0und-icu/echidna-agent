@@ -1901,6 +1901,117 @@ fn task_context_reference_correction_preserves_main_request_reservation() {
 }
 
 #[test]
+fn task_context_partial_core_scope_expands_before_adoption_and_resumes() {
+    let root = TemporaryDirectory::new("partial-core-scope");
+    initialize_project(root.path());
+    let agent = definition(root.path(), None);
+    let manifest = agent.join("agent.toml");
+    fs::write(
+        &manifest,
+        fs::read_to_string(&manifest)
+            .unwrap()
+            .replace("memory = \"none\"", "memory = \"agent\""),
+    )
+    .unwrap();
+    let memory = root
+        .path()
+        .join(".echidna/memory/agents/task-context-fixture/core.md");
+    fs::create_dir_all(memory.parent().unwrap()).unwrap();
+    let core_text = format!("# Core task notes\n{}TAIL-OF-CORE", "x".repeat(1525));
+    assert_eq!(core_text.len(), 1555);
+    fs::write(&memory, &core_text).unwrap();
+    let server = super::task_context_paging::paged_server(|step, wire| match step {
+        0 | 1 => (initial_selection_response(wire, "scope-initial"), false),
+        2 => (text_response(A_RESULT, "scope-first-main"), false),
+        3 | 4 => {
+            let candidates = selector_candidates(wire);
+            let core = candidates["context"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["core_range"].is_object())
+                .unwrap();
+            assert_eq!(core["known_scope"]["kind"], "unknown");
+            assert_eq!(
+                core["core_range"]["inspected_bytes"],
+                if step == 3 { 1024 } else { 1555 }
+            );
+            assert_eq!(core["truncated"], step == 3);
+            if step == 4 {
+                assert!(candidates["previous_selection"]["previous_proposal"].is_object());
+                assert!(candidates["previous_selection"]["validation_error"].is_null());
+                assert!(core["excerpt"].as_str().unwrap().ends_with("TAIL-OF-CORE"));
+            }
+            let decision = json!({"relation":"continue","focus":{"kind":"existing","task_ref":candidates["tasks"][0]["ref"]},
+                "related_task_refs":[],"required_context_refs":[],"unresolved_references":[],
+                "scope_classifications":[{"context_ref":core["ref"],"scope":{"kind":"task","task_ref":candidates["tasks"][0]["ref"]}}]});
+            (
+                text_response(&decision.to_string(), "scope-proposal"),
+                false,
+            )
+        }
+        5 => {
+            assert!(wire.to_string().contains("TAIL-OF-CORE"));
+            assert!(!wire.to_string().contains("previous_proposal"));
+            (
+                text_response("SCOPE-EXPANSION-COMPLETE", "scope-main"),
+                true,
+            )
+        }
+        _ => panic!("only two selector samples are allowed for the second input"),
+    });
+    let config = write_context_window_config(root.path(), &server.base_url, 272_000);
+    let output = run_chat(
+        root.path(),
+        &config,
+        &format!("{TASK_A}\nContinue the core task.\n/exit\n"),
+        &["--agent", agent.to_str().unwrap()],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let wires = (0..6)
+        .map(|_| f2a_request_body(&server.requests, "partial Core expansion"))
+        .collect::<Vec<_>>();
+    assert!(server.requests.try_recv().is_err());
+    server.join();
+    let session = session_id(root.path());
+    let events = session_events(root.path(), &session);
+    let samples = events
+        .iter()
+        .filter(|e| e["event_type"] == "session.task_selection_sample_recorded")
+        .collect::<Vec<_>>();
+    assert_eq!(samples.len(), 4);
+    assert_eq!(samples[2]["payload"]["schema_version"], 2);
+    assert_eq!(samples[3]["payload"]["schema_version"], 1);
+    assert_eq!(
+        samples[2]["payload"]["decision"],
+        selector_candidates(&wires[4])["previous_selection"]["previous_proposal"]
+    );
+    let selected = events
+        .iter()
+        .rfind(|e| e["event_type"] == "session.task_context_selected")
+        .unwrap();
+    assert_eq!(
+        selected["payload"]["sample_event_id"],
+        samples[3]["event_id"]
+    );
+    let resumed = run_chat(root.path(), &config, "/exit\n", &["--resume", "latest"]);
+    assert!(
+        resumed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    let state = reduced_session(&Project::discover(root.path()).unwrap(), &session);
+    assert_eq!(state.request_audits().len(), 6);
+    assert_eq!(state.history().items().len(), 4);
+    assert_audits_reconstruct(root.path(), &state);
+    assert_eq!(fs::read_to_string(memory).unwrap(), core_text);
+}
+
+#[test]
 fn task_context_reference_correction_shares_expansion_limit_and_never_adopts_failure() {
     for first in [
         invalid_reference as fn(&Value) -> Value,
@@ -1960,6 +2071,144 @@ fn task_context_reference_correction_shares_expansion_limit_and_never_adopts_fai
             "{}",
             String::from_utf8_lossy(&resumed.stderr)
         );
+    }
+}
+
+#[test]
+fn task_context_partial_core_scope_preserves_limits_and_unknown_content() {
+    for mode in ["unknown", "repeat", "budget", "already_expanded"] {
+        let root = TemporaryDirectory::new("partial-core-boundary");
+        initialize_project(root.path());
+        let agent = definition(root.path(), None);
+        let manifest = agent.join("agent.toml");
+        fs::write(
+            &manifest,
+            fs::read_to_string(&manifest)
+                .unwrap()
+                .replace("memory = \"none\"", "memory = \"agent\""),
+        )
+        .unwrap();
+        let memory = root
+            .path()
+            .join(".echidna/memory/agents/task-context-fixture/core.md");
+        fs::create_dir_all(memory.parent().unwrap()).unwrap();
+        let core_text = format!("# Large task notes\n{}UNINSPECTED-TAIL", "x".repeat(5000));
+        fs::write(&memory, &core_text).unwrap();
+        let server = super::task_context_paging::paged_server(move |step, wire| {
+            if step == 2 {
+                assert_eq!(mode, "unknown");
+                assert!(wire.to_string().contains("UNINSPECTED-TAIL"));
+                return (
+                    text_response("UNKNOWN-CORE-PRESERVED", "scope-boundary-main"),
+                    true,
+                );
+            }
+            assert!(step < 2, "no third selector sample");
+            let candidates = selector_candidates(wire);
+            let core = candidates["context"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["core_range"].is_object())
+                .unwrap();
+            assert_eq!(
+                core["core_range"]["inspected_bytes"],
+                if step == 0 { 1024 } else { 4096 }
+            );
+            assert_eq!(core["truncated"], true);
+            if step == 1 && mode != "already_expanded" {
+                let error = candidates["previous_selection"]["validation_error"]
+                    .as_str()
+                    .unwrap();
+                assert!(error.contains("4096/") && error.contains("choose unknown"));
+            }
+            let scope =
+                if (step == 1 && mode == "unknown") || (step == 0 && mode == "already_expanded") {
+                    "unknown"
+                } else {
+                    "current_task"
+                };
+            let decision = json!({"relation":"new","focus":{"kind":"new_from_input","input_ref":candidates["input"]["ref"]},
+                "related_task_refs":[],"required_context_refs":[],"unresolved_references":[],
+                "scope_classifications":[{"context_ref":core["ref"],"scope":{"kind":scope}}]});
+            (
+                text_response(&decision.to_string(), "scope-boundary-proposal"),
+                mode == "budget" || (step == 1 && mode != "unknown"),
+            )
+        });
+        let config = write_context_window_config(root.path(), &server.base_url, 272_000);
+        if mode == "budget" {
+            fs::write(
+                &config,
+                format!(
+                    "{}\n[runtime]\nmodel_request_limit_per_turn = 2\n",
+                    fs::read_to_string(&config).unwrap()
+                ),
+            )
+            .unwrap();
+        }
+        let output = run_chat(
+            root.path(),
+            &config,
+            "Analyze the synthetic core notes.\n/exit\n",
+            &["--agent", agent.to_str().unwrap()],
+        );
+        assert_eq!(
+            output.status.success(),
+            mode == "unknown",
+            "{mode}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if mode == "repeat" || mode == "already_expanded" {
+            assert!(
+                String::from_utf8_lossy(&output.stderr)
+                    .contains("requires full Core inspection (4096/")
+            );
+        }
+        let expected = if mode == "budget" {
+            1
+        } else if mode == "unknown" {
+            3
+        } else {
+            2
+        };
+        for _ in 0..expected {
+            f2a_request_body(&server.requests, "partial Core boundary");
+        }
+        assert!(server.requests.try_recv().is_err());
+        server.join();
+        let session = session_id(root.path());
+        let events = session_events(root.path(), &session);
+        let samples = events
+            .iter()
+            .filter(|e| e["event_type"] == "session.task_selection_sample_recorded")
+            .collect::<Vec<_>>();
+        assert_eq!(samples.len(), if mode == "budget" { 1 } else { 2 });
+        assert_eq!(
+            samples[0]["payload"]["schema_version"],
+            if mode == "already_expanded" { 1 } else { 2 }
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e["event_type"] == "session.task_context_selected")
+                .count(),
+            usize::from(mode == "unknown")
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| e["event_type"] == "tool.execution_outcome_recorded")
+        );
+        let resumed = run_chat(root.path(), &config, "/exit\n", &["--resume", "latest"]);
+        assert!(
+            resumed.status.success(),
+            "{mode}: {}",
+            String::from_utf8_lossy(&resumed.stderr)
+        );
+        let state = reduced_session(&Project::discover(root.path()).unwrap(), &session);
+        assert_audits_reconstruct(root.path(), &state);
+        assert_eq!(fs::read_to_string(memory).unwrap(), core_text);
     }
 }
 

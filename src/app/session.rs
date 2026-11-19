@@ -631,13 +631,15 @@ impl SessionProjection {
     pub(crate) fn task_source_identity(
         &self,
         project_id: crate::domain::project::ProjectId,
-        project_events: &[EventEnvelope<serde_json::Value>],
+        project_watermark: u64,
+        project_hash: String,
     ) -> Result<crate::domain::session::SessionSourceIdentity, SessionError> {
         crate::domain::session::SessionSourceIdentity::from_tracked_prefix(
             project_id,
             &self.state,
             self.source_hash.finish(),
-            project_events,
+            project_watermark,
+            project_hash,
         )
     }
 
@@ -863,7 +865,9 @@ where
     if (selection.request_proof_version >= 4 && capture.schema_version != 2)
         || (selection.request_proof_version < 4 && capture.schema_version != 1)
         || capture.candidate_policy_version
-            != if selection.request_proof_version >= 9 {
+            != if selection.request_proof_version >= 10 {
+                6
+            } else if selection.request_proof_version >= 9 {
                 5
             } else if selection.request_proof_version >= 7 {
                 4

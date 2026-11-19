@@ -227,6 +227,7 @@ impl SelectionCandidates {
             }
         }
         let mut classified = BTreeMap::new();
+        let mut incomplete_core = None;
         for classification in &decision.scope_classifications {
             let candidate = self
                 .context
@@ -252,12 +253,19 @@ impl SelectionCandidates {
                 }
                 return Err(TaskSelectionError::InvalidScopeClassification);
             };
-            if (core.inspected_bytes < core.end_byte - core.start_byte
-                && classification.scope != UnitScope::Unknown)
-                || (candidate.known_scope == Some(UnitScope::Global)
-                    && classification.scope != UnitScope::Global)
+            if candidate.known_scope == Some(UnitScope::Global)
+                && classification.scope != UnitScope::Global
             {
                 return Err(TaskSelectionError::InvalidScopeClassification);
+            }
+            if core.inspected_bytes < core.end_byte - core.start_byte
+                && classification.scope != UnitScope::Unknown
+            {
+                incomplete_core = Some(TaskSelectionError::IncompleteCoreScope {
+                    reference: classification.context_ref.clone(),
+                    inspected_bytes: core.inspected_bytes,
+                    total_bytes: core.end_byte - core.start_byte,
+                });
             }
         }
         let mut superseded = BTreeSet::new();
@@ -325,8 +333,12 @@ impl SelectionCandidates {
                 return Err(TaskSelectionError::InvalidSourceRange);
             }
         }
-        // A correctable reference error must not mask invalid ranges or authority.
-        decision.validate_references(&self.input.reference, &tasks, &context)
+        // Expansion/correction must not mask invalid ranges, scopes or authority.
+        decision.validate_references(&self.input.reference, &tasks, &context)?;
+        match incomplete_core {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 }
 
@@ -448,6 +460,14 @@ pub(crate) enum TaskSelectionError {
     InvalidObjectiveRange,
     #[error("context scope classification is not supported by the inspected source")]
     InvalidScopeClassification,
+    #[error(
+        "context scope classification for `{reference}` requires full Core inspection ({inspected_bytes}/{total_bytes} bytes inspected); choose unknown while the source is truncated"
+    )]
+    IncompleteCoreScope {
+        reference: String,
+        inspected_bytes: usize,
+        total_bytes: usize,
+    },
     #[error("constraint update is not bound to the inspected input or an existing constraint")]
     InvalidConstraintUpdate,
     #[error("selected source range is not an inspected original Event range")]

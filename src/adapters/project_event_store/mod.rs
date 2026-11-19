@@ -18,6 +18,7 @@ pub(crate) use durable_file::{
     remove_durable_temporary_file_best_effort, replace_durable_file, sync_directory,
 };
 pub use error::ProjectEventStoreError;
+pub(crate) use jsonl::read_research_projection;
 pub use jsonl::{JsonlEventStore, RecoveryMetadata};
 pub(crate) use jsonl::{SessionStreamCheckpoint, SessionStreamCursor};
 pub(crate) use jsonl::{

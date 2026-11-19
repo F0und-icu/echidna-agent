@@ -18,8 +18,8 @@ const TASK_SELECTION_INPUT_BYTES: usize = 16 * 1024;
 fn is_zero(value: &u8) -> bool {
     *value == 0
 }
-pub(crate) const TASK_CANDIDATE_POLICY_VERSION: u16 = 5;
-pub(crate) const TASK_REQUEST_PROOF_VERSION: u8 = 9;
+pub(crate) const TASK_CANDIDATE_POLICY_VERSION: u16 = 6;
+pub(crate) const TASK_REQUEST_PROOF_VERSION: u8 = 10;
 type PostingReader<'a> =
     dyn Fn(bool, &str, usize, usize) -> Result<(Vec<usize>, bool), SessionError> + 'a;
 type NavigationReader<'a> =
@@ -183,7 +183,7 @@ impl TaskCompileCapture {
 
 /// An isolated selector output. The corresponding audited request and frozen
 /// candidates are retained separately; this is not conversation History.
-/// Schema 2 retains a rejected reference proposal and cannot authorize adoption.
+/// Schema 2 retains a rejected navigation proposal and cannot authorize adoption.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaskSelectionSample {
@@ -1495,6 +1495,22 @@ impl SessionState {
                 .find(|candidate| candidate.source_event_ref.as_deref() == Some(id.as_str()))
                 .ok_or_else(|| invalid("source refresh History dependency is unavailable"))?;
             required.insert(candidate.reference.clone());
+        }
+        // Scope-derived constraints are already selected by materialization.
+        // Preserve explicit cross-task dependencies without changing historical
+        // refresh decisions that only used the automatically applicable set.
+        for candidate in &candidates.context {
+            if let (Some(range), Some(scope)) =
+                (&candidate.constraint_range, &candidate.known_scope)
+                && previous.selected_constraints.contains(range)
+                && !constraint_scope_applies(
+                    scope,
+                    &focus.task_id,
+                    &previous.decision.related_task_refs,
+                )
+            {
+                required.insert(candidate.reference.clone());
+            }
         }
         for reference in previous
             .selected_research
@@ -2961,6 +2977,7 @@ impl SessionState {
         metadata: Option<&dyn TaskNavigationAccess>,
     ) -> Result<SelectionCandidates, SessionError> {
         const MAX_CONTEXT_UNITS: usize = 512;
+        let direct_refresh = source_refresh && candidate_policy_version >= 6;
         let history = self.history.items();
         let history_ids = &self.history_event_ids;
         let input_index = history_ids
@@ -3056,7 +3073,7 @@ impl SessionState {
         }
         let mut task_postings =
             std::collections::BTreeMap::<String, (std::collections::VecDeque<usize>, bool)>::new();
-        if postings.is_none() && metadata.task_count() > MAX_CONTEXT_UNITS {
+        if !direct_refresh && postings.is_none() && metadata.task_count() > MAX_CONTEXT_UNITS {
             let keys = crate::domain::retrieval::task_posting_keys(query)
                 .into_iter()
                 .take(64)
@@ -3074,7 +3091,17 @@ impl SessionState {
                 }
             }
         }
-        let task_pool = if metadata.task_count() > MAX_CONTEXT_UNITS {
+        let task_pool = if direct_refresh {
+            let mut required = std::collections::BTreeSet::new();
+            for id in &pinned {
+                required.insert(
+                    metadata
+                        .task_ordinal(id)?
+                        .ok_or_else(|| invalid("source refresh task is absent"))?,
+                );
+            }
+            required
+        } else if metadata.task_count() > MAX_CONTEXT_UNITS {
             let mut required = std::collections::BTreeSet::new();
             for id in &pinned {
                 if let Some(ordinal) = metadata.task_ordinal(id)? {
@@ -3111,23 +3138,34 @@ impl SessionState {
         } else {
             metadata.all_cards()?.into_iter().collect()
         };
-        if metadata.task_count() > task_pool.len() {
+        if !direct_refresh && metadata.task_count() > task_pool.len() {
             gaps.push(
                 "Task candidate limit reached; other tasks require search or expansion".to_owned(),
             );
         }
-        let mut task_ranker = crate::domain::retrieval::ScopedTaskRanker::new(project_id, query)
-            .map_err(|_| invalid("task card ranking failed"))?;
+        let mut task_ranker = if direct_refresh {
+            None
+        } else {
+            Some(
+                crate::domain::retrieval::ScopedTaskRanker::new(project_id, query)
+                    .map_err(|_| invalid("task card ranking failed"))?,
+            )
+        };
         let mut task_cards = std::collections::BTreeMap::new();
         for ordinal in &task_pool {
             let card = metadata.card(*ordinal)?;
-            task_ranker
-                .push(&card.reference, &card.goal)
-                .map_err(|_| invalid("task card ranking failed"))?;
+            if let Some(ranker) = &mut task_ranker {
+                ranker
+                    .push(&card.reference, &card.goal)
+                    .map_err(|_| invalid("task card ranking failed"))?;
+            }
             task_cards.insert(card.reference.clone(), card);
         }
         let mut tasks = std::collections::BTreeMap::<String, TaskCandidate>::new();
-        for id in task_ranker.finish() {
+        for id in task_ranker
+            .map(|ranker| ranker.finish())
+            .unwrap_or_default()
+        {
             let card = task_cards
                 .remove(&id)
                 .ok_or_else(|| invalid("ranked task card is absent"))?;
@@ -3135,7 +3173,28 @@ impl SessionState {
         }
         tasks.extend(task_cards);
         let mut navigation = std::collections::BTreeMap::new();
-        let selected = if input_index > MAX_CONTEXT_UNITS {
+        let selected = if direct_refresh {
+            let (id, previous) = self
+                .latest_task_context_selection()
+                .ok_or_else(|| invalid("source refresh has no adopted task"))?;
+            let (history, _) = self.task_refresh_projection(id, previous, true);
+            let required = history
+                .iter()
+                .chain(
+                    previous
+                        .selected_excerpts
+                        .iter()
+                        .map(|range| &range.source_event_id),
+                )
+                .map(|id| {
+                    history_ids
+                        .iter()
+                        .position(|value| value == id)
+                        .ok_or_else(|| invalid("source refresh dependency is absent"))
+                })
+                .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
+            Some(required)
+        } else if input_index > MAX_CONTEXT_UNITS {
             let mut related = expansion
                 .map(|decision| decision.related_task_refs.clone())
                 .unwrap_or_default();
@@ -3800,11 +3859,20 @@ impl SessionState {
             active_constraints.insert(reference, value.clone());
             constraint_revisions.push(value);
         }
-        let mut selected_constraints = active_constraints.into_values().filter(|constraint| {
-            decision.required_context_refs.contains(&constraint.reference)
-                || matches!(constraint.scope, UnitScope::Global | UnitScope::Unknown)
-                || matches!(&constraint.scope, UnitScope::Task { task_ref } if task_ref == &task_id || decision.related_task_refs.contains(task_ref))
-        }).map(|constraint| constraint.range).collect::<Vec<_>>();
+        let mut selected_constraints = active_constraints
+            .into_values()
+            .filter(|constraint| {
+                decision
+                    .required_context_refs
+                    .contains(&constraint.reference)
+                    || constraint_scope_applies(
+                        &constraint.scope,
+                        &task_id,
+                        &decision.related_task_refs,
+                    )
+            })
+            .map(|constraint| constraint.range)
+            .collect::<Vec<_>>();
         let constraint_ids = selected_constraints
             .iter()
             .map(|range| range.source_event_id.clone())
@@ -4057,6 +4125,11 @@ pub(super) fn apply_sample(
         .task_selection_samples
         .push((event_id.clone(), sample));
     Ok(())
+}
+
+fn constraint_scope_applies(scope: &UnitScope, task_id: &str, related: &[String]) -> bool {
+    matches!(scope, UnitScope::Global | UnitScope::Unknown)
+        || matches!(scope, UnitScope::Task { task_ref } if task_ref == task_id || related.contains(task_ref))
 }
 
 pub(super) fn apply_selection(

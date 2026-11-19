@@ -117,6 +117,21 @@ fn project_research_cache_reuses_exact_prefix_and_rejects_rewritten_history() {
     drop(writer);
     let appended = ProjectReadContext::load(&project, &mut cache, None).unwrap();
     assert_eq!(appended.research_state().applied_event_count(), 1);
+    assert_eq!(
+        appended.project_hash,
+        crate::domain::session::SessionSourceIdentity::project_hash_for_events(&appended.events)
+            .unwrap()
+    );
+    assert!(
+        appended
+            .memory_state()
+            .unwrap()
+            .latest(
+                &MemoryScope::Project,
+                &MemoryPath::parse("decisions.md").unwrap()
+            )
+            .is_some()
+    );
     let unchanged = ProjectReadContext::load(&project, &mut cache, None).unwrap();
     assert!(std::ptr::eq(
         appended.research_state(),
@@ -126,16 +141,31 @@ fn project_research_cache_reuses_exact_prefix_and_rejects_rewritten_history() {
     let original = fs::read_to_string(&path).unwrap();
     let tampered = original.replace("cache-original", "cache-modified");
     assert_ne!(tampered, original);
-    fs::write(&path, tampered).unwrap();
-    let error = ProjectReadContext::load(&project, &mut cache, None)
-        .err()
-        .expect("rewritten prefix must be rejected");
-    assert!(
-        error.contains("validated Project stream prefix changed"),
-        "{error}"
-    );
+    fs::write(&path, &tampered).unwrap();
+    for _ in 0..2 {
+        assert!(ProjectReadContext::load(&project, &mut cache, None).is_err());
+    }
     fs::write(&path, &original).unwrap();
     ProjectReadContext::load(&project, &mut cache, None).unwrap();
+    // A valid JSON suffix can fail semantic reduction after scanning succeeds.
+    // That failure must not discard the previously validated prefix either.
+    let mut conflicting = envelope.clone();
+    conflicting.sequence = EventSequence::new(2);
+    conflicting.payload["data"]["data"]["revision"]["path"] = json!("core.md");
+    fs::write(
+        &path,
+        format!(
+            "{original}{}\n",
+            serde_json::to_string(&conflicting).unwrap()
+        ),
+    )
+    .unwrap();
+    assert!(ProjectReadContext::load(&project, &mut cache, None).is_err());
+    fs::write(&path, &tampered).unwrap();
+    assert!(ProjectReadContext::load(&project, &mut cache, None).is_err());
+    fs::write(&path, &original).unwrap();
+    let restored = ProjectReadContext::load(&project, &mut cache, None).unwrap();
+    assert_eq!(restored.project_hash, appended.project_hash);
     let reformatted = original.replacen("\":", "\": ", 1);
     assert_ne!(reformatted, original);
     assert_eq!(
@@ -143,12 +173,111 @@ fn project_research_cache_reuses_exact_prefix_and_rejects_rewritten_history() {
         serde_json::from_str::<Value>(&reformatted).unwrap()
     );
     fs::write(&path, reformatted).unwrap();
-    let error = ProjectReadContext::load(&project, &mut cache, None)
+    let _error = ProjectReadContext::load(&project, &mut cache, None)
         .err()
         .expect("reformatted prefix bytes must be rejected");
-    assert!(
-        error.contains("validated Project stream prefix changed"),
-        "{error}"
+}
+
+#[test]
+fn committed_session_receipts_are_reused_by_memory_without_losing_new_receipts() {
+    let root = TemporaryDirectory::new("committed-receipt-memory-cache");
+    let project = Project::initialize(root.path()).unwrap();
+    let id = StreamId::new("current");
+    let mut events = Vec::new();
+    push(
+        &mut events,
+        "current",
+        SessionEvent::Started {
+            primary_provider_session: provider("current"),
+        },
+    );
+    persist(&project, "current", &events);
+    let mut state = SessionReducer.reduce(events.clone()).unwrap();
+    let mut cache = SessionReceiptCatalogCache::default();
+    let mut writer = project.open_writer().unwrap();
+    let project_before = ProjectReadContext::load(&project, &mut cache, None).unwrap();
+    let (mut store, _) = writer.open_session_projection(id.clone(), None).unwrap();
+    for next in [
+        receipt("first"),
+        SessionEvent::HistoryItemRecorded {
+            item: ContentItem::user_text("Continue"),
+        },
+        receipt("second"),
+    ] {
+        push(&mut events, "current", next);
+        let event = events.last().unwrap();
+        store.append_event(event).unwrap();
+        SessionReducer.apply(&mut state, event.clone()).unwrap();
+        cache.remember_validated_session(
+            &id,
+            &state,
+            store.projection_cursor().file_revision().clone(),
+        );
+        let (reused, digest) = cache.refresh_with_session(&project, None).unwrap();
+        let project_after = ProjectReadContext::load(&project, &mut cache, None).unwrap();
+        assert!(
+            std::ptr::eq(
+                project_before.research_state(),
+                project_after.research_state()
+            ),
+            "new receipts must not replay an unchanged Project stream"
+        );
+        let strict = load_reference_catalog(&project).unwrap();
+        assert_eq!(
+            reused.execution_receipts().collect::<Vec<_>>(),
+            strict.execution_receipts().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            reused.execution_receipts().count(),
+            state.execution_receipt_count() as usize
+        );
+        cache.remember_validated_session(
+            &id,
+            &state,
+            store.projection_cursor().file_revision().clone(),
+        );
+        let (again, unchanged) = cache.refresh_with_session(&project, None).unwrap();
+        assert_eq!(digest, unchanged);
+        assert_eq!(
+            again.execution_receipts().collect::<Vec<_>>(),
+            reused.execution_receipts().collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn memory_content_cache_observes_external_edits_deletion_and_scope_changes() {
+    use crate::adapters::project_memory::{LocalProjectMemory, MemoryReadCache};
+    use crate::domain::memory::{MemoryPath, MemoryScope};
+    let root = TemporaryDirectory::new("memory-content-reuse");
+    let project = Project::initialize(root.path()).unwrap();
+    let memory = LocalProjectMemory::with_scope(&project, MemoryScope::Project);
+    let path = MemoryPath::parse("core.md").unwrap();
+    let mut cache = MemoryReadCache::default();
+    for content in ["first", "second", "second"] {
+        memory.replace(&path, content).unwrap();
+        assert_eq!(
+            memory.read_cached(&path, &mut cache).unwrap(),
+            memory.read(&path).unwrap()
+        );
+    }
+    fs::remove_file(project.control_directory().join("memory/core.md")).unwrap();
+    assert_eq!(memory.read_cached(&path, &mut cache).unwrap().content, None);
+    memory.replace(&path, "recreated").unwrap();
+    assert_eq!(
+        memory
+            .read_cached(&path, &mut cache)
+            .unwrap()
+            .content
+            .as_deref(),
+        Some("recreated")
+    );
+    let other_root = TemporaryDirectory::new("memory-content-other");
+    let other = Project::initialize(other_root.path()).unwrap();
+    let other_memory = LocalProjectMemory::with_scope(&other, MemoryScope::Project);
+    assert_eq!(
+        other_memory.read_cached(&path, &mut cache).unwrap().content,
+        None
     );
 }
 

@@ -59,6 +59,32 @@ fn write_args(path: &str, content: &str, expected_hash: Value, event_id: &str) -
 }
 
 #[tokio::test]
+async fn memory_stream_scan_failures_preserve_read_and_write_error_codes() {
+    let (_root, project) = initialized_project("memory-stream-errors");
+    let tools = ToolRegistry::for_project(project.root());
+    fs::write(
+        project.root().join(".echidna/research.jsonl"),
+        b"{\"unfinished\":",
+    )
+    .unwrap();
+    for (name, args) in [
+        ("memory_read", read_args("core.md", "failed-read")),
+        (
+            "memory_write",
+            write_args("core.md", "must not be saved", Value::Null, "failed-write"),
+        ),
+    ] {
+        let result = execute(&tools, name, name, args).await;
+        assert_eq!(result.result.status, ToolResultStatus::Failed);
+        assert_eq!(
+            result.receipt.exit_reason.as_deref(),
+            Some("memory_stream_unavailable")
+        );
+    }
+    assert!(!project.root().join(".echidna/memory/core.md").exists());
+}
+
+#[tokio::test]
 async fn memory_write_is_cas_protected_and_external_edits_are_audited_with_blobs() {
     let (_root, project) = initialized_project("memory-audit");
     let tools = ToolRegistry::for_project(project.root());

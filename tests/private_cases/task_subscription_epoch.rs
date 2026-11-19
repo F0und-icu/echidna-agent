@@ -34,7 +34,7 @@ use crate::domain::request_audit::{
 use crate::domain::research_control::PromptComposition;
 use crate::domain::session::{
     CompactionContextCapture, SessionEvent, SessionSourceIdentity, TaskContextCapture,
-    TaskContextSelected, TaskInputTime, TaskSelectionSample, TimeZoneObservation,
+    TaskInputTime, TaskSelectionSample, TimeZoneObservation,
 };
 use crate::domain::task_context::TaskSelectionDecision;
 use crate::domain::world_state::ProjectSnapshotContext;
@@ -332,7 +332,11 @@ impl TaskContextStage for FixtureStage {
             memory: Vec::new(),
         })
     }
-    fn commit(&mut self, selection: TaskContextSelected) -> Result<(), AgentLoopError> {
+    fn commit(
+        &mut self,
+        compiled: crate::app::agent_loop::CompiledTaskSelection,
+    ) -> Result<(), AgentLoopError> {
+        let selection = compiled.into_selection();
         let mut facts = self.0.borrow_mut();
         let (state, capture, events) = facts.captured.as_ref().unwrap();
         let history = state.compaction_source_history()?;
@@ -499,7 +503,10 @@ impl TaskContextStage for CancelOnRefresh {
         }
         Ok(decision)
     }
-    fn commit(&mut self, selection: TaskContextSelected) -> Result<(), AgentLoopError> {
+    fn commit(
+        &mut self,
+        selection: crate::app::agent_loop::CompiledTaskSelection,
+    ) -> Result<(), AgentLoopError> {
         self.adoptions += 1;
         self.inner.commit(selection)
     }

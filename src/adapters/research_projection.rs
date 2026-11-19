@@ -4,7 +4,6 @@ use crate::adapters::file_revision::FileRevision;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
-use std::io::Read;
 
 use crate::adapters::project_event_store::{
     Project, read_existing_research_events, read_existing_session_events,
@@ -71,15 +70,17 @@ impl ProjectArtifactCatalog {
 pub(crate) struct SessionReceiptCatalogCache {
     sessions: BTreeMap<crate::domain::events::StreamId, CachedSessionReceipts>,
     research: Option<CachedResearchProjection>,
+    research_references_changed: bool,
 }
 
+#[derive(Clone)]
 struct CachedResearchProjection {
+    canonical: crate::domain::canonical_json::CanonicalArrayHasher,
     revision: FileRevision,
-    events: Vec<EventEnvelope<serde_json::Value>>,
-    count: usize,
-    byte_length: u64,
+    events: std::sync::Arc<Vec<EventEnvelope<serde_json::Value>>>,
+    cursor: crate::adapters::project_event_store::SessionStreamCursor,
+    memory: Result<std::sync::Arc<crate::domain::memory::MemoryState>, String>,
     byte_digest: String,
-    receipt_digest: String,
     state: std::sync::Arc<ResearchState>,
 }
 
@@ -90,6 +91,34 @@ struct CachedSessionReceipts {
 }
 
 impl SessionReceiptCatalogCache {
+    /// Called after synchronizing and committing the active Session projection.
+    /// Its append-only receipts can advance without replaying that Session again.
+    pub(crate) fn remember_validated_session(
+        &mut self,
+        id: &StreamId,
+        state: &SessionState,
+        revision: FileRevision,
+    ) {
+        let cached = self
+            .sessions
+            .entry(id.clone())
+            .or_insert_with(|| CachedSessionReceipts {
+                revision: revision.clone(),
+                receipts: Vec::new(),
+            });
+        cached.receipts.extend(
+            state.execution_receipts()[cached.receipts.len()..]
+                .iter()
+                .map(|record| {
+                    (
+                        ExecutionReceiptId::new(record.event_id.as_str()),
+                        record.receipt.clone(),
+                    )
+                }),
+        );
+        cached.revision = revision;
+    }
+
     /// Reuses only unchanged individual Session receipt projections. A normal
     /// History checkpoint changes the active Session file, but never causes
     /// every other project Session to be replayed.
@@ -104,7 +133,11 @@ impl SessionReceiptCatalogCache {
             .existing_session_ids()
             .map_err(|error| error.to_string())?;
         let live = session_ids.iter().cloned().collect::<BTreeSet<_>>();
-        self.sessions.retain(|id, _| live.contains(id));
+        self.sessions.retain(|id, _| {
+            let keep = live.contains(id);
+            self.research_references_changed |= !keep;
+            keep
+        });
 
         for session_id in &session_ids {
             if current.is_some_and(|(id, _)| id == session_id) {
@@ -122,6 +155,9 @@ impl SessionReceiptCatalogCache {
                 continue;
             }
             let receipts = load_session_receipts(project, session_id)?;
+            if let Some(previous) = self.sessions.get(session_id) {
+                self.research_references_changed |= !receipts.starts_with(&previous.receipts);
+            }
             let after = source_revision(&path)?;
             if before != after {
                 return Err(format!(
@@ -169,55 +205,31 @@ impl SessionReceiptCatalogCache {
     }
 }
 
-fn session_source_digest(path: &std::path::Path) -> Result<String, String> {
-    let mut file = fs::File::open(path)
-        .map_err(|error| format!("read Event stream `{}`: {error}", path.display()))?;
-    let mut digest = blake3::Hasher::new();
-    let mut chunk = [0; 65_536];
-    loop {
-        let count = file
-            .read(&mut chunk)
-            .map_err(|error| format!("read Event stream `{}`: {error}", path.display()))?;
-        if count == 0 {
-            return Ok(digest.finalize().to_hex().to_string());
-        }
-        digest.update(&chunk[..count]);
-    }
-}
-
 fn source_revision(path: &std::path::Path) -> Result<FileRevision, String> {
     fs::metadata(path)
         .and_then(|metadata| FileRevision::of(&metadata))
         .map_err(|error| format!("inspect source revision: {error}"))
 }
 
-fn source_prefix_digest(path: &std::path::Path, mut remaining: u64) -> Result<String, String> {
-    let mut file = fs::File::open(path)
-        .map_err(|error| format!("read Event stream `{}`: {error}", path.display()))?;
-    let mut digest = blake3::Hasher::new();
-    let mut chunk = [0; 65_536];
-    while remaining != 0 {
-        let maximum = remaining.min(chunk.len() as u64) as usize;
-        let count = file
-            .read(&mut chunk[..maximum])
-            .map_err(|error| format!("read Event stream prefix `{}`: {error}", path.display()))?;
-        if count == 0 {
-            return Err("validated Project stream prefix changed".to_owned());
-        }
-        digest.update(&chunk[..count]);
-        remaining -= count as u64;
-    }
-    Ok(digest.finalize().to_hex().to_string())
-}
-
 /// One short-lived strictly scanned project view shared by Context and Summary
 /// validation in the same synchronized transaction.
 pub(crate) struct ProjectReadContext {
-    pub(crate) events: Vec<EventEnvelope<serde_json::Value>>,
+    pub(crate) project_hash: String,
+    pub(crate) cursor: crate::adapters::project_event_store::SessionStreamCursor,
+    pub(crate) events: std::sync::Arc<Vec<EventEnvelope<serde_json::Value>>>,
     pub(crate) references: ResearchReferenceCatalog,
     pub(crate) research_digest: String,
     pub(crate) receipt_digest: String,
     research: std::sync::Arc<ResearchState>,
+    memory: Result<std::sync::Arc<crate::domain::memory::MemoryState>, String>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ProjectProjectionError {
+    #[error("{0}")]
+    Stream(String),
+    #[error("{0}")]
+    State(String),
 }
 
 impl ProjectReadContext {
@@ -226,74 +238,137 @@ impl ProjectReadContext {
         cache: &mut SessionReceiptCatalogCache,
         current: Option<(&StreamId, &SessionState)>,
     ) -> Result<Self, String> {
+        let (references, receipt_digest) = cache.refresh_with_session(project, current)?;
+        Self::load_with_references(project, cache, references, receipt_digest)
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn load_with_references(
+        project: &Project,
+        cache: &mut SessionReceiptCatalogCache,
+        references: ResearchReferenceCatalog,
+        receipt_digest: String,
+    ) -> Result<Self, ProjectProjectionError> {
         let path = project
             .research_stream_path_existing()
-            .map_err(|error| error.to_string())?;
-        let before = source_revision(&path)?;
-        let (references, receipt_digest) = cache.refresh_with_session(project, current)?;
-        if before != source_revision(&path)? {
-            return Err("Project stream changed during projection read".to_owned());
-        }
-        if let Some(value) = &cache.research
+            .map_err(|error| ProjectProjectionError::Stream(error.to_string()))?;
+        let before = source_revision(&path).map_err(ProjectProjectionError::Stream)?;
+        if let Some(value) = &mut cache.research
             && value.revision == before
-            && value.receipt_digest == receipt_digest
+            && !cache.research_references_changed
         {
             return Ok(Self {
+                project_hash: value.canonical.finish(),
+                cursor: value.cursor.clone(),
                 events: value.events.clone(),
                 references,
                 research_digest: value.byte_digest.clone(),
                 receipt_digest,
                 research: value.state.clone(),
+                memory: value.memory.clone(),
             });
         }
-        let events = read_existing_research_events(project).map_err(|error| error.to_string())?;
-        let after = session_source_digest(&path)?;
-        if before != source_revision(&path)? {
-            return Err("Project stream changed during projection read".to_owned());
-        }
-        let byte_length = fs::metadata(&path)
-            .map_err(|error| format!("stat Event stream `{}`: {error}", path.display()))?
-            .len();
-        let mut cached = cache.research.take();
-        if let Some(value) = &cached
-            && (value.count > events.len()
-                || value.byte_length > byte_length
-                || source_prefix_digest(&path, value.byte_length)? != value.byte_digest)
+        // Keep the validated snapshot until both scanning and reduction succeed.
+        let previous = cache.research.clone();
+        let (cursor, suffix) = crate::adapters::project_event_store::read_research_projection(
+            project,
+            previous.as_ref().map(|value| &value.cursor),
+        )
+        .map_err(|error| match error {
+            crate::adapters::project_event_store::ProjectEventStoreError::ValidatedPrefixChanged { .. } =>
+                ProjectProjectionError::State(error.to_string()),
+            _ => ProjectProjectionError::Stream(error.to_string()),
+        })?;
+        let digest = cursor.content_digest();
+        let (mut events, mut state, mut memory, mut canonical, unchanged_receipts) = match previous
         {
-            return Err("validated Project stream prefix changed".to_owned());
-        }
-        let state = match cached.take() {
-            Some(mut value) if value.receipt_digest == receipt_digest => {
-                let state = std::sync::Arc::make_mut(&mut value.state);
-                for event in &events[value.count..] {
-                    ProjectStreamReducer
-                        .apply(state, event.clone(), &references)
-                        .map_err(|error| error.to_string())?;
-                }
-                value.state
-            }
-            _ => std::sync::Arc::new(
-                ProjectStreamReducer
-                    .reduce(events.iter().cloned(), &references)
-                    .map_err(|error| error.to_string())?,
+            Some(value) => (
+                value.events,
+                value.state,
+                value.memory,
+                value.canonical,
+                !cache.research_references_changed,
+            ),
+            None => (
+                std::sync::Arc::new(Vec::new()),
+                std::sync::Arc::new(ResearchState::default()),
+                Ok(std::sync::Arc::new(
+                    crate::domain::memory::MemoryState::default(),
+                )),
+                crate::domain::canonical_json::CanonicalArrayHasher::new(),
+                true,
             ),
         };
+        for event in &suffix {
+            canonical
+                .push(event)
+                .map_err(|error| ProjectProjectionError::State(error.to_string()))?;
+            let duplicate = state.has_event_id(&event.event_id);
+            ProjectStreamReducer
+                .apply(
+                    std::sync::Arc::make_mut(&mut state),
+                    event.clone(),
+                    &references,
+                )
+                .map_err(|error| ProjectProjectionError::State(error.to_string()))?;
+            if !duplicate
+                && matches!(
+                    event.event_type.as_str(),
+                    "memory.changed" | "memory.external_change_detected"
+                )
+            {
+                let crate::domain::research::ResearchEvent::Memory(value) =
+                    crate::domain::research::ResearchEvent::decode(
+                        event.event_type.as_str(),
+                        event.payload.clone(),
+                    )
+                    .map_err(|error| ProjectProjectionError::State(error.to_string()))?
+                else {
+                    unreachable!()
+                };
+                // A bad Memory chain is reported by its Memory consumer, not
+                // promoted to a failure of unrelated Project/Research reads.
+                if let Ok(state) = &mut memory
+                    && let Err(error) = crate::domain::memory::MemoryReducer
+                        .apply(std::sync::Arc::make_mut(state), value)
+                {
+                    memory = Err(error.to_string());
+                }
+            }
+        }
+        std::sync::Arc::make_mut(&mut events).extend(suffix);
+        if !unchanged_receipts {
+            state = std::sync::Arc::new(
+                ProjectStreamReducer
+                    .reduce(events.iter().cloned(), &references)
+                    .map_err(|error| ProjectProjectionError::State(error.to_string()))?,
+            );
+        }
+        let project_hash = canonical.finish();
         cache.research = Some(CachedResearchProjection {
-            revision: before,
+            canonical,
+            revision: cursor.file_revision().clone(),
             events: events.clone(),
-            count: events.len(),
-            byte_length,
-            byte_digest: after.clone(),
-            receipt_digest: receipt_digest.clone(),
+            cursor: cursor.clone(),
+            byte_digest: digest.clone(),
             state: state.clone(),
+            memory: memory.clone(),
         });
+        cache.research_references_changed = false;
         Ok(Self {
+            project_hash,
+            cursor,
             events,
             references,
-            research_digest: after,
+            research_digest: digest,
             receipt_digest,
             research: state,
+            memory,
         })
+    }
+
+    pub(crate) fn memory_state(&self) -> Result<&crate::domain::memory::MemoryState, &str> {
+        self.memory.as_deref().map_err(String::as_str)
     }
 
     pub(crate) fn research_state(&self) -> &ResearchState {

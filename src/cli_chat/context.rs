@@ -42,17 +42,25 @@ impl ChatContextCache {
         tools: &ToolRegistry,
         binding: &AgentDefinitionBinding,
         read: &ProjectReadContext,
+        memory_cache: &std::sync::Mutex<crate::adapters::project_memory::MemoryReadCache>,
     ) -> Result<CurrentContextState, ChatContextRefreshError> {
+        let mut memory_cache = memory_cache.lock().map_err(|_| {
+            ChatContextRefreshError::MemoryRevision("Memory cache lock poisoned".to_owned())
+        })?;
         let world_state =
             self.current_project_context(read, binding.definition().research().is_some())?;
         let snapshot = LocalProjectSnapshot::new(project)
             .inspect(&tools.specs(), &[], "context-refresh")
             .map_err(ChatContextRefreshError::ProjectSnapshot)?;
         let project_snapshot = ProjectSnapshotContext::new(snapshot.snapshot)?;
-        let core_memory =
-            load_core_memory(project, binding, tools.window_policy().core_file_bytes())?;
+        let core_memory = load_core_memory(
+            project,
+            binding,
+            tools.window_policy().core_file_bytes(),
+            &mut memory_cache,
+        )?;
         let memory_revision = crate::domain::canonical_json::canonical_blake3_hash(
-            &load_task_memory(project, binding)?,
+            &load_task_memory(project, binding, &mut memory_cache)?,
         )
         .map_err(|error| ChatContextRefreshError::MemoryRevision(error.to_string()))?;
         Ok(
@@ -101,12 +109,13 @@ impl ChatContextCache {
 pub(super) fn load_task_memory(
     project: &Project,
     binding: &AgentDefinitionBinding,
+    cache: &mut crate::adapters::project_memory::MemoryReadCache,
 ) -> Result<Vec<crate::domain::session::TaskMemoryDocument>, ChatContextRefreshError> {
     let Some(scope) = crate::cli_agent::memory_scope(binding) else {
         return Ok(Vec::new());
     };
     LocalProjectMemory::with_scope(project, scope.clone())
-        .read_retrieval_documents()?
+        .read_retrieval_documents_cached(cache)?
         .into_iter()
         .map(
             |document| match (document.document.content, document.document.hash) {
@@ -134,6 +143,7 @@ fn load_core_memory(
     project: &Project,
     binding: &AgentDefinitionBinding,
     core_file_bytes: usize,
+    cache: &mut crate::adapters::project_memory::MemoryReadCache,
 ) -> Result<Option<ContextFragment>, ChatContextRefreshError> {
     let scope = match binding.definition().context().memory() {
         AgentMemoryScope::None => return Ok(None),
@@ -149,7 +159,7 @@ fn load_core_memory(
     };
     let document = LocalProjectMemory::with_scope(project, scope)
         .with_core_byte_limit(core_file_bytes)
-        .read(&path)?;
+        .read_cached(&path, cache)?;
     match document.content {
         None => Ok(None),
         Some(content) if content.is_empty() => {

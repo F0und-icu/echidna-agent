@@ -1000,11 +1000,12 @@ impl<Provider: ModelProvider + ?Sized, Tools: ToolExecutor + ?Sized>
                 .map_err(|error| AgentLoopError::TaskSelectionRejected {
                     reason: format!("invalid selection JSON ({:?})", error.classify()),
                 })?;
-            let reference_error = match prepared.candidates.validate_decision(&decision) {
+            let correctable_error = match prepared.candidates.validate_decision(&decision) {
                 Ok(()) => None,
                 Err(
                     error @ (TaskSelectionError::UnknownReference { .. }
-                    | TaskSelectionError::InvalidFocus),
+                    | TaskSelectionError::InvalidFocus
+                    | TaskSelectionError::IncompleteCoreScope { .. }),
                 ) => Some(error),
                 Err(error) => {
                     return Err(AgentLoopError::TaskSelectionRejected {
@@ -1015,10 +1016,10 @@ impl<Provider: ModelProvider + ?Sized, Tools: ToolExecutor + ?Sized>
             let sample = TaskSelectionSampleOutput {
                 decision,
                 audit_event_id,
-                rejected: reference_error.is_some(),
+                rejected: correctable_error.is_some(),
             };
             let id = boundary.stage.record_sample(&prepared, &scope, &sample)?;
-            if let Some(error) = reference_error {
+            if let Some(error) = correctable_error {
                 if prepared.samples_used == 0 {
                     expansion = Some(sample.decision);
                     continue;
@@ -1138,7 +1139,9 @@ impl<Provider: ModelProvider + ?Sized, Tools: ToolExecutor + ?Sized>
             .iter()
             .map(|process| process.observation.clone())
             .collect();
-        boundary.stage.commit(selection)?;
+        boundary
+            .stage
+            .commit(super::CompiledTaskSelection { selection })?;
         if !keeps_epoch {
             self.provider_session = self.provider_session.next_task_epoch(epoch);
             self.clear_committed_primary_delivery_state();

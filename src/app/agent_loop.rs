@@ -40,6 +40,16 @@ pub(crate) trait ToolBatchStage<Provider: ModelProvider + ?Sized, Tools: ToolExe
 
 /// The fixed durable source/adoption stage for normal Chat. Model sampling
 /// remains inside the one AgentLoop and is not a second execution runtime.
+pub(crate) struct CompiledTaskSelection {
+    selection: crate::domain::session::TaskContextSelected,
+}
+
+impl CompiledTaskSelection {
+    pub(crate) fn into_selection(self) -> crate::domain::session::TaskContextSelected {
+        self.selection
+    }
+}
+
 pub(crate) trait TaskContextStage {
     fn control_directory(&self) -> &'static str;
     fn current_protected_context(
@@ -78,10 +88,7 @@ pub(crate) trait TaskContextStage {
         &mut self,
         prepared: &TaskContextPrepared,
     ) -> Result<TaskRefreshDecision, AgentLoopError>;
-    fn commit(
-        &mut self,
-        selection: crate::domain::session::TaskContextSelected,
-    ) -> Result<(), AgentLoopError>;
+    fn commit(&mut self, selection: CompiledTaskSelection) -> Result<(), AgentLoopError>;
 }
 
 pub(crate) struct TaskRefreshDecision {

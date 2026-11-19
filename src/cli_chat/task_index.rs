@@ -8,7 +8,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
-use super::task_posting_lengths::PostingLengths;
+use super::task_postings::PackedPostings;
 use super::{ChatError, DurableChatSession, context_read::index::ColdIndex};
 use crate::domain::session::{
     SessionError, SessionState, TaskCardSource, TaskNavigationAccess, TaskNavigationChange,
@@ -51,6 +51,9 @@ pub(super) struct TaskIndexStats {
     pub(super) posting_keys: usize,
     pub(super) posting_batch_peak_rows: usize,
     pub(super) posting_batches: usize,
+    pub(super) posting_file_opens: usize,
+    pub(super) posting_file_bytes: u64,
+    pub(super) posting_pending_bytes: usize,
 }
 
 pub(super) struct TaskIndex {
@@ -68,11 +71,14 @@ pub(super) struct TaskIndex {
     last_anchor: Option<usize>,
     recent: VecDeque<usize>,
     stats: Cell<TaskIndexStats>,
-    manifest: PostingLengths,
+    postings: PackedPostings,
 }
 
 impl Drop for TaskIndex {
     fn drop(&mut self) {
+        if let Err(error) = self.postings.close() {
+            eprintln!("Task posting maintenance failed: {error}");
+        }
         let _ = fs::remove_dir_all(&self.directory);
     }
 }
@@ -99,18 +105,10 @@ impl TaskIndex {
             blake3::hash(&key).to_hex()
         ));
         fs::create_dir(&directory)?;
-        for name in [
-            "history",
-            "cards",
-            "card-data",
-            "card-ref",
-            "task-ref",
-            "anchor-post",
-            "semantics",
-        ] {
+        for name in ["card-data", "task-ref", "semantics"] {
             fs::create_dir(directory.join(name))?;
         }
-        let manifest = PostingLengths::default();
+        let postings = PackedPostings::new(&directory.join("postings"))?;
         Ok(Self {
             directory,
             source_identity: identity,
@@ -126,7 +124,7 @@ impl TaskIndex {
             last_anchor: None,
             recent: VecDeque::new(),
             stats: Cell::new(TaskIndexStats::default()),
-            manifest,
+            postings,
         })
     }
 
@@ -136,10 +134,12 @@ impl TaskIndex {
         self.stats.set(stats);
     }
 
-    pub(super) fn stats(&self) -> TaskIndexStats {
+    pub(super) fn stats(&self) -> Result<TaskIndexStats, ChatError> {
         let mut stats = self.stats.get();
-        stats.posting_keys = self.manifest.len();
-        stats
+        stats.posting_keys = self.postings.len();
+        stats.posting_file_bytes = self.postings.published_bytes()?;
+        stats.posting_pending_bytes = self.postings.pending_bytes(stats.posting_file_bytes);
+        Ok(stats)
     }
 
     pub(super) fn update(
@@ -148,6 +148,9 @@ impl TaskIndex {
         session: &DurableChatSession,
     ) -> Result<(), ChatError> {
         let (watermark, read, text, hashes, records) = source.preparation_work();
+        if self.source_watermark.is_none() {
+            self.measure(|stats| stats.posting_file_opens = 2);
+        }
         if self.source_watermark != Some(watermark) {
             self.measure(|stats| {
                 stats.source_index_read_bytes = read;
@@ -215,7 +218,7 @@ impl TaskIndex {
         for (digest, ordinals) in std::mem::take(postings) {
             self.append_postings("history", blake3::Hash::from_bytes(digest), &ordinals)?;
         }
-        Ok(())
+        self.postings.flush().map_err(ChatError::from)
     }
 
     fn append_posting(
@@ -233,48 +236,26 @@ impl TaskIndex {
         digest: blake3::Hash,
         ordinals: &[usize],
     ) -> Result<(), ChatError> {
-        let path = self
-            .directory
-            .join(directory)
-            .join(digest.to_hex().as_str());
-        let expected = self
-            .manifest
-            .verify_length(directory, digest, &path, ENTRY_BYTES)?
-            .unwrap_or(0);
-        let mut options = OpenOptions::new();
-        options.append(true);
-        if expected == 0 {
-            options.create_new(true);
-        }
-        let mut file = options.open(path)?;
-        let mut bytes = Vec::with_capacity(ordinals.len() * ENTRY_BYTES as usize);
-        for ordinal in ordinals {
-            bytes.extend_from_slice(&(*ordinal as u64).to_le_bytes());
-        }
-        file.write_all(&bytes)?;
-        self.manifest.set(
-            directory,
-            digest,
-            expected
-                .checked_add(ordinals.len() as u64)
-                .ok_or_else(|| fail("task posting count overflow"))?,
-        );
+        self.postings.append(directory, digest, ordinals)?;
         self.measure(|stats| {
             stats.posting_rows_written += ordinals.len();
-            stats.posting_bytes_written += bytes.len();
+            stats.posting_bytes_written += ordinals.len() * ENTRY_BYTES as usize;
         });
         Ok(())
     }
 
-    fn ordinal(&self, file: &mut File, position: u64) -> Result<usize, ChatError> {
-        file.seek(SeekFrom::Start(position * ENTRY_BYTES))?;
-        let mut ordinal = [0; 8];
-        file.read_exact(&mut ordinal)?;
+    fn ordinal(
+        &self,
+        directory: &str,
+        digest: blake3::Hash,
+        position: u64,
+    ) -> Result<usize, ChatError> {
+        let ordinal = self.postings.ordinal(directory, digest, position)?;
         self.measure(|stats| {
             stats.posting_rows_read += 1;
             stats.posting_bytes_read += ENTRY_BYTES as usize;
         });
-        usize::try_from(u64::from_le_bytes(ordinal)).map_err(fail)
+        Ok(ordinal)
     }
 
     fn posting_at(
@@ -284,23 +265,12 @@ impl TaskIndex {
         before: usize,
         limit: usize,
     ) -> Result<(Vec<usize>, bool), ChatError> {
-        let path = self
-            .directory
-            .join(directory)
-            .join(digest.to_hex().as_str());
-        let Some(expected) = self
-            .manifest
-            .verify_length(directory, digest, &path, ENTRY_BYTES)?
-        else {
-            return Ok((Vec::new(), false));
-        };
-        let mut file = File::open(path)?;
-        let length = expected * ENTRY_BYTES;
+        self.postings.published_bytes()?;
         let mut low = 0;
-        let mut high = length / ENTRY_BYTES;
+        let mut high = self.postings.count(directory, digest);
         while low < high {
             let middle = low + (high - low) / 2;
-            if self.ordinal(&mut file, middle)? < before {
+            if self.ordinal(directory, digest, middle)? < before {
                 low = middle + 1;
             } else {
                 high = middle;
@@ -309,7 +279,7 @@ impl TaskIndex {
         let start = low.saturating_sub(limit as u64);
         let mut values = Vec::new();
         for position in start..low {
-            values.push(self.ordinal(&mut file, position)?);
+            values.push(self.ordinal(directory, digest, position)?);
         }
         Ok((values, start > 0))
     }
@@ -526,12 +496,12 @@ impl TaskIndex {
         input: &crate::domain::events::EventId,
     ) -> Result<(), ChatError> {
         self.measure(|stats| stats.metadata_rebuilt = true);
-        for name in ["cards", "card-data", "card-ref", "task-ref", "anchor-post"] {
+        for name in ["card-data", "task-ref"] {
             fs::remove_dir_all(self.directory.join(name))?;
             fs::create_dir(self.directory.join(name))?;
         }
         for name in ["cards", "card-data", "card-ref", "anchor-post"] {
-            self.manifest.clear(name);
+            self.postings.clear(name);
         }
         let anchor_path = self.directory.join("anchors");
         if anchor_path.exists() {
