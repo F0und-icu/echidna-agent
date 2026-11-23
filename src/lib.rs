@@ -20,6 +20,7 @@ pub mod ports;
 pub mod provider_composition;
 pub mod trace_eval_runtime;
 
+mod chat_display;
 mod cli_agent;
 mod cli_auth;
 mod cli_chat;
@@ -60,6 +61,9 @@ enum CliCommand {
 
         #[arg(long)]
         debug: bool,
+        /// Select terminal text or versioned JSON Lines on stdout.
+        #[arg(long, value_enum, default_value_t = ChatOutputFormat::Text)]
+        output_format: ChatOutputFormat,
         /// Save diagnostic snapshots of failed Provider requests to this directory.
         #[arg(long, value_name = "DIR")]
         debug_failures: Option<PathBuf>,
@@ -138,6 +142,12 @@ enum SessionCommand {
         #[arg(long, value_name = "PATH")]
         output: Option<PathBuf>,
     },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ChatOutputFormat {
+    Text,
+    Jsonl,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -276,6 +286,8 @@ pub enum CliError {
     ModelSelection { message: String },
     #[error("failed to build the local chat runtime: {0}")]
     ChatRuntime(#[source] io::Error),
+    #[error("Chat display failed: {0}")]
+    ChatDisplay(#[source] io::Error),
     #[error("chat failed: {message}")]
     Chat { message: String },
     #[error("Session `{session_id}` does not exist in the current project")]
@@ -454,17 +466,25 @@ where
             domain,
             phase,
             debug_failures,
-
+            output_format,
             debug,
-        }) => run_chat(
-            cli.config.as_deref(),
-            agent,
-            session,
-            domain,
-            phase,
-            debug_failures,
-            debug,
-        ),
+        }) => {
+            let chat = || {
+                run_chat(
+                    cli.config.as_deref(),
+                    agent,
+                    session,
+                    domain,
+                    phase,
+                    debug_failures,
+                    debug,
+                )
+            };
+            match output_format {
+                ChatOutputFormat::Text => chat(),
+                ChatOutputFormat::Jsonl => chat_display::JsonLines::run(chat),
+            }
+        }
         Some(CliCommand::Doctor) => {
             let composition = load_provider_composition(cli.config.as_deref())?;
             print_json(&doctor_report(composition.as_ref()))

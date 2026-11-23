@@ -1,12 +1,13 @@
 //! Terminal rendering of configured MCP lifecycle and protocol observations.
 use crate::adapters::mcp::observation::{McpObservation, McpObserver};
+use crate::chat_display::{JsonLines, Log, LogWriter};
 use crate::diagnostic_text::escaped_text;
-use crate::terminal_console as console;
 use std::io::Write;
 use std::sync::Arc;
 
 pub(crate) fn observer() -> McpObserver {
-    Arc::new(|event| {
+    let stream = JsonLines::current();
+    Arc::new(move |event| {
         let message = match event {
             McpObservation::Startup { server_id, stage } => {
                 format!("[MCP {}: {stage}]", escaped_text(&server_id))
@@ -47,6 +48,13 @@ pub(crate) fn observer() -> McpObserver {
                 escaped_text(&server_id)
             ),
         };
-        let _ = writeln!(console::stderr(), "{message}");
+        let _ = writeln!(
+            LogWriter {
+                stream: stream.clone(),
+                log: Log::Mcp,
+                stderr: true
+            },
+            "{message}"
+        );
     })
 }

@@ -17,6 +17,7 @@ impl DurableChatSession {
                 provider_session: provider_session.clone(),
                 usage,
             },
+            request_audit_event_id,
             provider_session,
             usage,
         )
@@ -36,6 +37,7 @@ impl DurableChatSession {
                 provider_session: provider_session.clone(),
                 usage,
             },
+            request_audit_event_id,
             provider_session,
             usage,
         )
@@ -44,6 +46,7 @@ impl DurableChatSession {
     fn record_usage_event(
         &self,
         event: SessionEvent,
+        audit_id: &EventId,
         provider_session: &ProviderSessionRef,
         usage: ModelUsage,
     ) -> Result<(), ChatError> {
@@ -65,6 +68,14 @@ impl DurableChatSession {
                 .map_err(ChatError::from_session_append)?;
             Ok(())
         })?;
+        if let Some(stream) = JsonLines::current() {
+            let _ = stream.send(DisplayEvent::Usage {
+                role: provider_session.role,
+                audit_id: audit_id.as_str(),
+                usage,
+            });
+            return Ok(());
+        }
         let cached = usage
             .cached_input_tokens
             .map_or_else(|| "unknown".to_owned(), |tokens| tokens.to_string());

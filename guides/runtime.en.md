@@ -8,6 +8,8 @@
 
 ## Interaction and Sessions
 
+An external TUI or Web backend can consume Chat over stdin and stdout with `chat --output-format jsonl`. [Event fields and runnable Python example](chat-events.md)
+
 List prior sessions or continue the latest session in a new process:
 
 ```sh

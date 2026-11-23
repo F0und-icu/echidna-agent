@@ -110,6 +110,7 @@ cd ../echidna-research
 | --- | --- |
 | 恢复最近会话 | `echidna --config /path/to/provider.toml chat --resume latest` |
 | 查看实际请求与调试信息 | 启动 Chat 时添加 `--debug` |
+| 接入外部 TUI 或 Web | 使用 `chat --output-format jsonl` 逐行读取[显示事件](guides/chat-events.md)。 |
 | 停止当前轮次 | `/stop` 或 Ctrl+C；已发生的操作不会撤销。 |
 | 压缩上下文 / 添加图片 / 退出 | `/compact` · `/image PATH` · `/exit` |
 

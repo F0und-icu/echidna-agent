@@ -25,11 +25,17 @@ impl TurnTiming {
         if self.enabled {
             let now = Instant::now();
             let previous = self.previous.replace(now);
-            console_eprintln!(
-                "[debug timing] phase={phase} stage_ms={} turn_ms={}",
-                now.duration_since(previous).as_millis(),
-                now.duration_since(self.start).as_millis()
-            );
+            let stage_ms = now.duration_since(previous).as_millis();
+            let turn_ms = now.duration_since(self.start).as_millis();
+            if let Some(stream) = crate::chat_display::JsonLines::current() {
+                let _ = stream.send(crate::chat_display::Event::Timing {
+                    phase,
+                    stage_ms,
+                    turn_ms,
+                });
+                return;
+            }
+            console_eprintln!("[debug timing] phase={phase} stage_ms={stage_ms} turn_ms={turn_ms}");
         }
     }
 

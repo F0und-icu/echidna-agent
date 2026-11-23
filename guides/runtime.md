@@ -8,6 +8,8 @@
 
 ## 交互与会话
 
+外部 TUI 或 Web 后端可以用 `echidna --config provider.toml chat --output-format jsonl` 启动子进程，从 stdout 逐行读取显示事件。stdin 接收现有聊天指令，stderr 单独接收进程诊断。[事件字段与可运行的 Python 示例](chat-events.md)
+
 查看历史会话，或者在新进程中继续最近的会话：
 
 ```sh

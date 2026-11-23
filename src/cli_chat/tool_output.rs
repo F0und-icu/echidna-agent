@@ -62,7 +62,7 @@ impl ToolOutput {
                 },
             },
         );
-        self.sink.send(format!(
+        self.sink.send(&plan.call.call_id, plan.call.name.as_str(), "started", None, format!(
             "\n┌ Tool #{} · {} · running (result not yet persisted) · configured deadline {:.1}s\n{}\n",
             self.next,
             escaped_text(plan.call.name.as_str()),
@@ -86,7 +86,7 @@ impl ToolOutput {
             .get(checkpoint.index as usize)
             .map(String::as_str)
             .unwrap_or("");
-        self.sink.send(format!(
+        self.sink.send(&checkpoint.call_id, &active.name, "checkpointed", Some(checkpoint.status), format!(
             "\n├ Tool #{} · subcommand {}/{} · persisted ({status}; not a terminal batch result) · {}\nCommand:\n{command}\n{}\n{}",
             active.number, checkpoint.index as usize + 1, checkpoint.child_count,
             active.timing(), ContentView::preview(&checkpoint.result),
@@ -95,8 +95,8 @@ impl ToolOutput {
     }
 
     pub(super) fn finish_turn(&mut self) {
-        for (_, active) in std::mem::take(&mut self.active) {
-            self.sink.send(format!(
+        for (call_id, active) in std::mem::take(&mut self.active) {
+            self.sink.send(&call_id, &active.name, "unknown", None, format!(
                 "\n└ Tool #{} · {} · outcome unknown (no terminal batch outcome observed) · {}\nPersisted child outcomes are recorded in the Session; no automatic replay.\n",
                 active.number, active.name, active.timing()
             ));
@@ -140,12 +140,18 @@ impl ToolOutput {
         } else {
             ""
         };
-        self.sink.send(format!(
-            "└ Tool #{number} · {} · {status}{reason}{reuse} · {timing}\n{}\n{}",
-            escaped_text(outcome.result.tool_name.as_str()),
-            ContentView::preview(&outcome.result.output),
-            capture_hints(&outcome.receipt.output_captures)
-        ));
+        self.sink.send(
+            &outcome.result.call_id,
+            outcome.result.tool_name.as_str(),
+            "recorded",
+            Some(outcome.receipt.status),
+            format!(
+                "└ Tool #{number} · {} · {status}{reason}{reuse} · {timing}\n{}\n{}",
+                escaped_text(outcome.result.tool_name.as_str()),
+                ContentView::preview(&outcome.result.output),
+                capture_hints(&outcome.receipt.output_captures)
+            ),
+        );
     }
 }
 

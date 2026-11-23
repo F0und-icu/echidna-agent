@@ -117,6 +117,7 @@ depends on the model's judgment.
 | --- | --- |
 | Resume the latest Session | `echidna --config /path/to/provider.toml chat --resume latest` |
 | Inspect requests and diagnostics | Add `--debug` when starting Chat. |
+| Connect a TUI or Web frontend | Read [display events](guides/chat-events.md) with `chat --output-format jsonl`. |
 | Stop the current Turn | `/stop` or Ctrl+C; completed effects are not rolled back. |
 | Compact context / attach an image / exit | `/compact` · `/image PATH` · `/exit` |
 

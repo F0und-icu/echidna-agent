@@ -88,6 +88,12 @@ impl ChatInput {
     }
 
     fn with_clock(clock: Arc<dyn InputClock>) -> io::Result<Self> {
+        if crate::chat_display::JsonLines::current().is_some() {
+            return Ok(Self::Lines(
+                BufReader::new(tokio::io::stdin()).lines(),
+                clock,
+            ));
+        }
         Ok(match Terminal::start()? {
             Some((terminal, editor)) => Self::Terminal {
                 reader: TerminalReader::start(editor, clock)?,
@@ -98,6 +104,15 @@ impl ChatInput {
     }
 
     pub(super) fn prompt(&self, mode: InputMode) -> io::Result<()> {
+        if let Some(stream) = crate::chat_display::JsonLines::current() {
+            return stream.send(crate::chat_display::Event::Input {
+                mode: match mode {
+                    InputMode::Task => "task",
+                    InputMode::Paste => "paste",
+                    InputMode::Processing => "processing",
+                },
+            });
+        }
         match self {
             Self::Terminal { terminal, .. } => terminal.mode(mode),
             Self::Lines(..) if mode == InputMode::Processing => Ok(()),

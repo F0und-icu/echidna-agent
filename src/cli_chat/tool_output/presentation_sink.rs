@@ -1,5 +1,7 @@
 //! Best-effort bounded tool presentation; never an execution acknowledgement.
 
+use crate::chat_display::{Event, JsonLines};
+use crate::domain::tools::{ToolCallId, ToolResultStatus};
 use std::fs::File;
 use std::io::{self, Write};
 use std::os::fd::AsFd;
@@ -9,6 +11,7 @@ use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::time::Duration;
 
 pub(super) enum PresentationSink {
+    JsonLines(JsonLines),
     Terminal(crate::terminal_console::PreviewSender),
     Worker {
         sender: Option<SyncSender<String>>,
@@ -19,6 +22,9 @@ pub(super) enum PresentationSink {
 
 impl Default for PresentationSink {
     fn default() -> Self {
+        if let Some(stream) = JsonLines::current() {
+            return Self::JsonLines(stream);
+        }
         if let Some(terminal) = crate::terminal_console::preview_sender() {
             return Self::Terminal(terminal);
         }
@@ -57,8 +63,22 @@ impl Default for PresentationSink {
 }
 
 impl PresentationSink {
-    pub(super) fn send(&self, frame: String) {
+    pub(super) fn send(
+        &self,
+        call_id: &ToolCallId,
+        name: &str,
+        stage: &'static str,
+        status: Option<ToolResultStatus>,
+        frame: String,
+    ) {
         match self {
+            Self::JsonLines(stream) => stream.preview(Event::Tool {
+                call_id: call_id.as_str(),
+                name,
+                stage,
+                status,
+                text: &frame,
+            }),
             Self::Terminal(terminal) => terminal.send(frame),
             Self::Worker {
                 sender, dropped, ..

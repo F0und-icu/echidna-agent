@@ -49,6 +49,9 @@ pub(super) fn report_budget(budget: &ModelRequestBudget) {
 }
 
 pub(super) fn report_stop(error: &AgentLoopError, budget: &ModelRequestBudget) {
+    if let Some(display) = crate::chat_display::JsonLines::current() {
+        let _ = display.send(crate::chat_display::Event::Turn { state: "stopped" });
+    }
     console_eprintln!("[turn stopped] {error}");
     report_budget(budget);
     if matches!(

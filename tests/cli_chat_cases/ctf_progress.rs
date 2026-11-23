@@ -6,6 +6,19 @@ use super::*;
 
 #[test]
 fn ctf_r3b2_unread_tool_preview_does_not_block_child_durability() {
+    let output = unread_previews(&[]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("presentation congested"),
+        "queue saturation must be explicit: {stderr}"
+    );
+    assert!(
+        stderr.matches("· subcommand").count() < 32,
+        "saturated previews must be dropped"
+    );
+}
+
+pub(super) fn unread_previews(args: &[&str]) -> std::process::Output {
     let root = TemporaryDirectory::new("r3b2-slow-terminal");
     let harness = TemporaryDirectory::new("r3b2-slow-provider");
     initialize_project(root.path());
@@ -29,9 +42,9 @@ fn ctf_r3b2_unread_tool_preview_does_not_block_child_durability() {
         Response(200, text_response("DONE", "slow-final")),
     ]);
     let config = write_context_window_config(harness.path(), &server.base_url, 1_000_000);
-    // Intentionally leave stderr unread until every real child and parent
+    // Intentionally leave the display pipes unread until every real child and parent
     // checkpoint exists. More than 128 KiB of previews exceeds the pipe/queue.
-    let child = spawn_f2a_chat(root.path(), &config, "bounded output\n/exit\n", &[]);
+    let child = spawn_f2a_chat(root.path(), &config, "bounded output\n/exit\n", args);
     selector_candidates(&f2a_request_body(&server.requests, "slow selection"));
     let _ = f2a_request_body(&server.requests, "slow first");
     let session = session_id(root.path());
@@ -83,17 +96,7 @@ fn ctf_r3b2_unread_tool_preview_does_not_block_child_durability() {
         fs::read(root.path().join("completed")).unwrap(),
         vec![b'x'; 32]
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("presentation congested"),
-        "queue saturation must be explicit: {stderr}"
-    );
-    // Bytes already accepted by the OS pipe are not queue occupancy. Prove
-    // that presentation was dropped while all32 execution facts survived.
-    assert!(
-        stderr.matches("· subcommand").count() < 32,
-        "saturated previews must be dropped"
-    );
+    output
 }
 
 #[test]

@@ -6,17 +6,16 @@
 //! RequestAudit, Tool execution and
 //! model streaming retain their existing owners.
 
-// These macros route the existing CLI presentation through the active Chat
-// console. Outside a capable terminal the original streams/bytes are retained.
+// Route ordinary messages through the Chat's selected display.
 macro_rules! console_print {
-    ($($arg:tt)*) => {{ use std::io::Write as _; write!(crate::terminal_console::stdout(), $($arg)*).expect("CLI stdout failed"); }};
+    ($($arg:tt)*) => {{ crate::chat_display::print(format_args!($($arg)*), false); }};
 }
 macro_rules! console_println {
-    () => { console_print!("\n") };
+    () => {{ if crate::chat_display::JsonLines::current().is_none() { console_print!("\n"); } }};
     ($($arg:tt)*) => { console_print!("{}\n", format_args!($($arg)*)) };
 }
 macro_rules! console_eprintln {
-    ($($arg:tt)*) => {{ use std::io::Write as _; writeln!(crate::terminal_console::stderr(), $($arg)*).expect("CLI stderr failed"); }};
+    ($($arg:tt)*) => {{ crate::chat_display::print(format_args!("{}\n", format_args!($($arg)*)), true); }};
 }
 
 mod compaction;
@@ -64,6 +63,7 @@ use crate::app::cancellation::AgentCancellation;
 use crate::app::model_request_budget::ModelRequestBudget;
 use crate::app::request_audit::RequestAuditService;
 use crate::app::session::{AppendAfterDurableError, SessionProjection};
+use crate::chat_display::{Event as DisplayEvent, JsonLines};
 use crate::domain::agent_definition::AgentDefinitionBinding;
 use crate::domain::context::{ProviderSession, ProviderSessionId, ProviderSessionRole};
 use crate::domain::domain_profile::{DomainProfile, DomainProfileSelection};
@@ -94,7 +94,8 @@ pub(crate) async fn run(
     let _runtime_lease = project.acquire_chat_runtime_lease()?;
     let discovered_mcp = composition.discover_chat_mcp().await?;
     startup_timing.checkpoint("resume_discovery");
-    let terminal_input = io::stdin().is_terminal();
+    let display = JsonLines::current();
+    let terminal_input = display.is_none() && io::stdin().is_terminal();
     let mut input_closed = false;
     let mut pending_input = None;
     let mut chat_input = None;
@@ -193,24 +194,34 @@ pub(crate) async fn run(
         );
 
         let theme = theme::Theme::detect();
-        theme.welcome();
-        if research_enabled {
-            console_println!(
-                "{} session `{}` with domain `{}` and phase `{}`. Enter a line, or use /paste, /image, /domain, /phase, /context, /memory, /compact, /resume, /stop, /exit or EOF. While running in a terminal, /stop or a new instruction interrupts the current Turn before further input is handled.",
-                disposition.message(),
-                session_id.as_str(),
-                domain.id(),
-                requested_phase
-                    .unwrap_or_else(|| session_state.effective_research_phase())
-                    .id(),
-            );
+        if let Some(display) = &display {
+            display.send(DisplayEvent::Session {
+                session_id: session_id.as_str(),
+                disposition: match disposition {
+                    SessionDisposition::Started => "started",
+                    SessionDisposition::Resumed => "resumed",
+                },
+            })?;
         } else {
-            console_println!(
-                "{} session `{}` with Agent `{}`. Enter a task, or use /agent, /agent reload, /agent use <path>, /memory, /image, /compact, /resume or /exit.",
-                disposition.message(),
-                session_id.as_str(),
-                session.binding.definition().id().as_str()
-            );
+            theme.welcome();
+            if research_enabled {
+                console_println!(
+                    "{} session `{}` with domain `{}` and phase `{}`. Enter a line, or use /paste, /image, /domain, /phase, /context, /memory, /compact, /resume, /stop, /exit or EOF. While running in a terminal, /stop or a new instruction interrupts the current Turn before further input is handled.",
+                    disposition.message(),
+                    session_id.as_str(),
+                    domain.id(),
+                    requested_phase
+                        .unwrap_or_else(|| session_state.effective_research_phase())
+                        .id(),
+                );
+            } else {
+                console_println!(
+                    "{} session `{}` with Agent `{}`. Enter a task, or use /agent, /agent reload, /agent use <path>, /memory, /image, /compact, /resume or /exit.",
+                    disposition.message(),
+                    session_id.as_str(),
+                    session.binding.definition().id().as_str()
+                );
+            }
         }
         // Publish the first editable prompt only after the Session is ready.
         // Agent switches retain this same terminal and its restoration guard.
@@ -820,6 +831,9 @@ pub(crate) async fn run(
                 if cancellation.is_cancelled() {
                     match prepared {
                         Ok(_) | Err(ChatError::VisionCancelled) => {
+                            if let Some(display) = &display {
+                                display.send(DisplayEvent::Turn { state: "cancelled" })?;
+                            }
                             console_println!(
                                 "\n[vision request cancelled; no Primary request was started]"
                             );
@@ -861,6 +875,13 @@ pub(crate) async fn run(
             };
             let mut text_delta = |text: &str| {
                 timing.observe_text(text);
+                if let Some(display) = &display {
+                    return display
+                        .send(DisplayEvent::AssistantDelta { text })
+                        .map_err(|error| AgentLoopError::TextDeltaOutput {
+                            message: error.to_string(),
+                        });
+                }
                 if !answer_started.get() && !text.is_empty() {
                     console_print!("{}", theme.answer_prefix());
                     answer_started.set(true);
@@ -1116,6 +1137,9 @@ pub(crate) async fn run(
             let mut auto_compacted = false;
             match outcome {
                 Ok(AgentTurnOutcome::Completed { .. }) => {
+                    if let Some(display) = &display {
+                        display.send(DisplayEvent::Turn { state: "completed" })?;
+                    }
                     console_println!();
                     let protected = session.with_projection(|projection, _, _| {
                         Ok(projection.state().current_protected_operator_context()?)
@@ -1231,6 +1255,9 @@ pub(crate) async fn run(
                 }
                 Ok(AgentTurnOutcome::InitialSelectionCancelled { anchor, .. }) => {
                     session.record_initial_selection_cancelled(anchor)?;
+                    if let Some(display) = &display {
+                        display.send(DisplayEvent::Turn { state: "cancelled" })?;
+                    }
                     console_println!("\n[request cancelled]");
                     let protected = session.with_projection(|projection, _, _| {
                         Ok(projection.state().current_protected_operator_context()?)
@@ -1238,6 +1265,9 @@ pub(crate) async fn run(
                     agent.set_protected_context(protected);
                 }
                 Ok(AgentTurnOutcome::Cancelled { .. }) => {
+                    if let Some(display) = &display {
+                        display.send(DisplayEvent::Turn { state: "cancelled" })?;
+                    }
                     console_println!("\n[request cancelled]");
                     let protected = session.with_projection(|projection, _, _| {
                         Ok(projection.state().current_protected_operator_context()?)

@@ -3,7 +3,7 @@
 use crate::adapters::responses::presentation::{
     RequestObserver, ResponseNotice, ResponsePresentation, ResponsesObserver,
 };
-use crate::terminal_console as console;
+use crate::chat_display::{Event, JsonLines, LogWriter, model_log};
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -18,14 +18,8 @@ use crate::terminal_content::escaped_text;
 
 static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
 
-pub(crate) fn discarded_partial_response(role: &str, retry: usize) {
-    let _ = writeln!(
-        console::stdout(),
-        "\n[response interrupted; partial {role} output discarded; retry {retry}/2]"
-    );
-}
-
 pub(crate) struct RequestOutput {
+    stream: Option<JsonLines>,
     role: &'static str,
     request_id: u64,
     saw_reasoning: bool,
@@ -42,8 +36,9 @@ pub(crate) struct RequestOutput {
 }
 
 impl RequestOutput {
-    pub(crate) fn new(role: &'static str, full: bool, selection: bool) -> Self {
+    fn new(role: &'static str, full: bool, selection: bool, stream: Option<JsonLines>) -> Self {
         Self {
+            stream,
             role,
             request_id: NEXT_REQUEST.fetch_add(1, Ordering::Relaxed),
             saw_reasoning: false,
@@ -60,6 +55,20 @@ impl RequestOutput {
         }
     }
 
+    fn log(&self) -> LogWriter {
+        model_log(&self.stream, self.role, Some(self.request_id))
+    }
+
+    fn sample(&self, state: &'static str) {
+        if let Some(stream) = &self.stream {
+            let _ = stream.send(Event::Sample {
+                role: self.role,
+                request_id: self.request_id,
+                state,
+            });
+        }
+    }
+
     fn request(&self, value: &Value) {
         if !self.full {
             return;
@@ -69,7 +78,7 @@ impl RequestOutput {
         } else {
             "Full"
         };
-        let mut stderr = console::stderr();
+        let mut stderr = self.log();
         let _ = writeln!(
             stderr,
             "\n[debug sending {} #{} · {mode}]",
@@ -119,7 +128,7 @@ impl RequestOutput {
                 self.end_reasoning_line();
 
                 if self.full && self.role != "primary" {
-                    let mut stderr = console::stderr();
+                    let mut stderr = self.log();
                     if !self.scoped_text_open {
                         let label = if self.role == "vision" {
                             "Vision"
@@ -158,7 +167,7 @@ impl RequestOutput {
         if starts_part && self.saw_reasoning_summary {
             self.end_reasoning_summary_line();
         }
-        let mut stderr = console::stderr();
+        let mut stderr = self.log();
         if !self.saw_reasoning_summary {
             let _ = writeln!(
                 stderr,
@@ -175,26 +184,28 @@ impl RequestOutput {
 
     pub(crate) fn completed(&mut self) {
         self.completed = true;
+        self.sample("completed");
         self.end_reasoning_line();
         self.end_reasoning_summary_line();
         if self.saw_reasoning_summary {
-            let _ = writeln!(console::stderr(), "[reasoning summary completed]");
+            let _ = writeln!(self.log(), "[reasoning summary completed]");
         }
         if self.full_debug() {
             self.emit("response completed", Value::Null);
         } else if self.saw_reasoning {
             self.end_reasoning_line();
-            let _ = writeln!(console::stderr(), "[reasoning completed]");
+            let _ = writeln!(self.log(), "[reasoning completed]");
         }
     }
 
     fn rejected(&mut self, protocol_error: bool, response: &str) {
         self.rejected = true;
+        self.sample("rejected");
         self.end_reasoning_line();
         self.end_reasoning_summary_line();
         if self.saw_reasoning_summary {
             let _ = writeln!(
-                console::stderr(),
+                self.log(),
                 "[reasoning summary not committed: {}]",
                 if protocol_error {
                     "protocol decoding failed"
@@ -216,15 +227,11 @@ impl RequestOutput {
             return;
         }
         if !self.selection {
-            let _ = writeln!(
-                console::stderr(),
-                "[rejected response] {}",
-                escaped_text(response)
-            );
+            let _ = writeln!(self.log(), "[rejected response] {}", escaped_text(response));
         }
         if self.saw_reasoning {
             let _ = writeln!(
-                console::stderr(),
+                self.log(),
                 "[reasoning not committed: {}]",
                 if protocol_error {
                     "protocol decoding failed"
@@ -239,7 +246,7 @@ impl RequestOutput {
         if text.is_empty() {
             return;
         }
-        let mut stderr = console::stderr();
+        let mut stderr = self.log();
         if !self.saw_reasoning {
             let _ = writeln!(
                 stderr,
@@ -257,14 +264,14 @@ impl RequestOutput {
 
     fn end_reasoning_line(&mut self) {
         if self.reasoning_line_open {
-            let _ = writeln!(console::stderr());
+            let _ = writeln!(self.log());
             self.reasoning_line_open = false;
         }
     }
 
     fn end_reasoning_summary_line(&mut self) {
         if self.reasoning_summary_line_open {
-            let _ = writeln!(console::stderr());
+            let _ = writeln!(self.log());
             self.reasoning_summary_line_open = false;
         }
     }
@@ -275,7 +282,7 @@ impl RequestOutput {
 
     fn emit(&self, kind: &str, payload: Value) {
         let _ = writeln!(
-            console::stderr(),
+            self.log(),
             "\n[debug {} #{} · {kind}]\n{}",
             self.role,
             self.request_id,
@@ -293,10 +300,11 @@ impl Drop for RequestOutput {
         if self.completed || self.rejected {
             return;
         }
+        self.sample("interrupted");
         self.end_reasoning_summary_line();
         if self.saw_reasoning_summary {
             let _ = writeln!(
-                console::stderr(),
+                self.log(),
                 "[reasoning summary interrupted: response not completed]"
             );
         }
@@ -307,7 +315,7 @@ impl Drop for RequestOutput {
         } else if self.saw_reasoning {
             self.end_reasoning_line();
             let _ = writeln!(
-                console::stderr(),
+                self.log(),
                 "[reasoning interrupted: response not completed]"
             );
         }
@@ -315,10 +323,15 @@ impl Drop for RequestOutput {
 }
 
 pub(crate) fn observer(role: &'static str, full: bool) -> Arc<dyn ResponsesObserver> {
-    Arc::new(CliModelOutput { role, full })
+    Arc::new(CliModelOutput {
+        role,
+        full,
+        stream: JsonLines::current(),
+    })
 }
 
 struct CliModelOutput {
+    stream: Option<JsonLines>,
     role: &'static str,
 
     full: bool,
@@ -335,7 +348,9 @@ impl ResponsesObserver for CliModelOutput {
         } else {
             self.role
         };
-        Box::new(RequestOutput::new(role, self.full, selection))
+        let output = RequestOutput::new(role, self.full, selection, self.stream.clone());
+        output.sample("started");
+        Box::new(output)
     }
 
     fn full_debug(&self) -> bool {
@@ -352,18 +367,23 @@ impl ResponsesObserver for CliModelOutput {
                 } else {
                     self.role
                 };
-                discarded_partial_response(role, retry)
+                let mut log = model_log(&self.stream, role, None);
+                log.stderr = false;
+                let _ = writeln!(
+                    log,
+                    "\n[response interrupted; partial {role} output discarded; retry {retry}/2]"
+                );
             }
             ResponseNotice::CaptureSaved { path } => {
                 let _ = writeln!(
-                    console::stderr(),
+                    model_log(&self.stream, self.role, None),
                     "[debug-failures] saved request diagnostic snapshot: {}",
                     escaped_text(&path)
                 );
             }
             ResponseNotice::CaptureFailed { kind } => {
                 let _ = writeln!(
-                    console::stderr(),
+                    model_log(&self.stream, self.role, None),
                     "[debug-failures] capture failed ({kind:?}); original Provider error preserved"
                 );
             }

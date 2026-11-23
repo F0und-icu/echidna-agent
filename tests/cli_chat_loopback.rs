@@ -46,6 +46,8 @@ mod f4_output;
 mod f5_output;
 #[path = "cli_chat_cases/f6a_geometry.rs"]
 mod f6a_geometry;
+#[path = "cli_chat_cases/jsonl_display.rs"]
+mod jsonl_display;
 #[path = "cli_chat_cases/mcp_http.rs"]
 mod mcp_http;
 #[path = "cli_chat_cases/operator_steering.rs"]
