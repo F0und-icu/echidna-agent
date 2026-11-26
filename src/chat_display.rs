@@ -44,6 +44,22 @@ pub(crate) enum Event<'a> {
         request_id: u64,
         state: &'a str,
     },
+    ModelRequest {
+        role: &'a str,
+        request_id: u64,
+        phase: &'static str,
+        model: &'a str,
+        delivery: &'static str,
+        content: serde_json::Value,
+        omitted: &'a [&'static str],
+        truncated: bool,
+    },
+    ModelResponse {
+        role: &'a str,
+        request_id: u64,
+        #[serde(flatten)]
+        response: ModelResponse<'a>,
+    },
     Mcp {
         text: &'a str,
     },
@@ -69,6 +85,35 @@ pub(crate) enum Event<'a> {
     },
     Error {
         text: &'a str,
+    },
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum ModelResponse<'a> {
+    TextDelta {
+        text: &'a str,
+    },
+    ReasoningDelta {
+        text: &'a str,
+    },
+    ReasoningItem {
+        text: &'a str,
+        matches_deltas: bool,
+    },
+    ReasoningSummary {
+        text: &'a str,
+        starts_part: bool,
+    },
+    ResponseStatus {
+        status: u16,
+    },
+    ResponseError {
+        category: &'static str,
+        text: &'a str,
+    },
+    ToolCall {
+        call: &'a crate::domain::tools::ToolCall,
     },
 }
 

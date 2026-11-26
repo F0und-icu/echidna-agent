@@ -47,7 +47,7 @@ impl TurnTiming {
 }
 
 pub(super) fn task_index_work(enabled: bool, stats: &super::task_index::TaskIndexStats) {
-    if enabled {
+    if enabled && crate::chat_display::JsonLines::current().is_none() {
         console_eprintln!(
             "[debug timing] phase=task_posting_storage posting_file_opens={} posting_file_bytes={} posting_pending_bytes={}",
             stats.posting_file_opens,
@@ -116,7 +116,7 @@ pub(super) struct ContextReadWork {
 }
 
 pub(super) fn context_read_work(enabled: bool, work: &ContextReadWork) {
-    if enabled {
+    if enabled && crate::chat_display::JsonLines::current().is_none() {
         console_eprintln!(
             "[debug timing] phase=context_read scan_bytes={} records={} rank_window_checks={} retrieval_source_window_bytes={} retrieval_index_source_bytes={} retrieval_needle_scan_bytes={} retrieval_candidate_anchors={} retrieval_local_gram_probes={} retrieval_window_gram_probes={} retrieval_rank_window_bytes={} source_verification_bytes={} source_materialization_read_bytes={} source_materialization_write_bytes={} source_index_scan_bytes={} source_index_text_write_bytes={} source_index_hash_write_bytes={} source_index_record_write_bytes={} auxiliary_preparation_memory_read_bytes={} auxiliary_preparation_write_bytes={} indexed_events={} indexed_bytes={} initial_indexed_events={} initial_indexed_bytes={}",
             work.scan_bytes,

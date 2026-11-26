@@ -204,6 +204,187 @@ mod debug_regression {
         }
     }
 
+    #[tokio::test]
+    async fn standard_and_siwc_public_summaries_use_the_same_reconciliation() {
+        use crate::adapters::responses::presentation::{
+            RequestObserver, ResponseNotice, ResponsePresentation, ResponsesObserver,
+        };
+        use std::sync::Mutex;
+        struct Recorder(Arc<Mutex<Vec<(String, bool)>>>, bool);
+        impl ResponsesObserver for Recorder {
+            fn role(&self) -> &'static str {
+                "primary"
+            }
+            fn begin(
+                &self,
+                _: crate::ports::model::ModelRequestPresentation,
+            ) -> Box<dyn RequestObserver> {
+                Box::new(Recorder(self.0.clone(), self.1))
+            }
+            fn notify(&self, _: ResponseNotice) {}
+            fn full_debug(&self) -> bool {
+                self.1
+            }
+        }
+        impl RequestObserver for Recorder {
+            fn observe(&mut self, event: ResponsePresentation) {
+                if let ResponsePresentation::ReasoningSummary { text, starts_part } = event {
+                    self.0.lock().unwrap().push((text, starts_part));
+                }
+            }
+        }
+        for profile in ["standard", "siwc"] {
+            for conflict in [false, true] {
+                for debug in [false, true] {
+                    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                    let base_url = format!("http://{}", listener.local_addr().unwrap());
+                    let server = thread::spawn(move || {
+                        let item = serde_json::json!({"type":"reasoning","id":"summary-item","content":[],
+                        "summary":[{"type":"summary_text","text":"first last"}]});
+                        let events = [
+                            serde_json::json!({"type":"response.reasoning_summary_text.delta","output_index":0,"summary_index":0,"item_id":"summary-item","delta":"first "}),
+                            serde_json::json!({"type":"response.reasoning_summary_text.done","output_index":0,"summary_index":0,"item_id":"summary-item","text":if conflict {"different"} else {"first last"}}),
+                            serde_json::json!({"type":"response.output_item.done","output_index":0,"item":item}),
+                            serde_json::json!({"type":"response.completed","response":{"id":"done","status":"completed"}}),
+                        ];
+                        let body = events
+                            .iter()
+                            .map(|event| format!("data: {event}\n\n"))
+                            .collect::<String>();
+                        respond_failure(&listener, "200 OK", "text/event-stream", &body);
+                    });
+                    let config = ResponsesHttpConfig::new(
+                        base_url,
+                        "fixture-model",
+                        "chatgpt_subscription:fixture",
+                        subscription_capabilities(),
+                    );
+                    let config = if profile == "siwc" {
+                        config.with_chatgpt_subscription_profile()
+                    } else {
+                        config
+                    };
+                    let observed = Arc::new(Mutex::new(Vec::new()));
+                    let provider =
+                        ResponsesHttpAdapter::new(config, Arc::new(FixtureCredentialSource))
+                            .with_observer(Some(Arc::new(Recorder(observed.clone(), debug))));
+                    let input = ModelInputIR::current(
+                        "fixture",
+                        vec![ContentItem::user_text("task")],
+                        ModelRequestRequirements::default(),
+                    );
+                    let mut stream = provider.stream(ModelRequest::full(input)).unwrap();
+                    let mut failed = false;
+                    while let Some(event) = stream.next().await {
+                        if event.is_err() {
+                            failed = true;
+                            break;
+                        }
+                    }
+                    server.join().unwrap();
+                    assert_eq!(failed, conflict, "{profile}");
+                    let observed = observed.lock().unwrap();
+                    if !debug {
+                        assert!(observed.is_empty());
+                    } else if conflict {
+                        assert_eq!(&*observed, &[("first ".to_owned(), true)]);
+                    } else {
+                        assert_eq!(
+                            &*observed,
+                            &[("first ".to_owned(), true), ("last".to_owned(), false)]
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn rejected_events_do_not_expose_parseable_opaque_continuation() {
+        use crate::adapters::responses::presentation::{
+            RequestObserver, ResponseNotice, ResponsePresentation, ResponsesObserver,
+        };
+        use std::sync::Mutex;
+        struct Recorder(Arc<Mutex<Vec<String>>>, bool);
+        impl ResponsesObserver for Recorder {
+            fn role(&self) -> &'static str {
+                "primary"
+            }
+            fn begin(
+                &self,
+                _: crate::ports::model::ModelRequestPresentation,
+            ) -> Box<dyn RequestObserver> {
+                Box::new(Recorder(self.0.clone(), self.1))
+            }
+            fn notify(&self, _: ResponseNotice) {}
+            fn full_debug(&self) -> bool {
+                self.1
+            }
+        }
+        impl RequestObserver for Recorder {
+            fn observe(&mut self, event: ResponsePresentation) {
+                if matches!(event, ResponsePresentation::Rejected { .. }) {
+                    self.0.lock().unwrap().push(format!("{event:?}"));
+                }
+            }
+        }
+        for profile in ["standard", "siwc", "codex"] {
+            for malformed in [false, true] {
+                if profile == "standard" && malformed {
+                    continue;
+                }
+                for debug in [false, true] {
+                    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                    let base_url = format!("http://{}", listener.local_addr().unwrap());
+                    let server = thread::spawn(move || {
+                        let data = if malformed {
+                            r#"{"type":"response.output_item.done","item":{"encrypted_content":"opaque-secret"#.to_owned()
+                        } else {
+                            serde_json::json!({"type":"response.output_item.done","output_index":0,
+                            "item":{"type":"reasoning","id":"reasoning-item","content":[{"type":"reasoning_text","text":"plaintext"}],"encrypted_content":"opaque-secret","summary":"invalid"}}).to_string()
+                        };
+                        respond_failure(
+                            &listener,
+                            "200 OK",
+                            "text/event-stream",
+                            &format!("data: {data}\n\n"),
+                        );
+                    });
+                    let reference = if profile == "codex" {
+                        "codex:fixture"
+                    } else {
+                        "chatgpt_subscription:fixture"
+                    };
+                    let config = ResponsesHttpConfig::new(
+                        base_url,
+                        "fixture-model",
+                        reference,
+                        subscription_capabilities(),
+                    );
+                    let config = match profile {
+                        "codex" => config.with_codex_subscription_profile(),
+                        "siwc" => config.with_chatgpt_subscription_profile(),
+                        _ => config,
+                    };
+                    let observed = Arc::new(Mutex::new(Vec::new()));
+                    let provider = ResponsesHttpAdapter::new(config, Arc::new(CapacityCredential))
+                        .with_observer(Some(Arc::new(Recorder(observed.clone(), debug))));
+                    let input = ModelInputIR::current(
+                        "fixture",
+                        vec![ContentItem::user_text("task")],
+                        ModelRequestRequirements::default(),
+                    );
+                    let mut stream = provider.stream(ModelRequest::full(input)).unwrap();
+                    assert!(stream.next().await.unwrap().is_err());
+                    server.join().unwrap();
+                    let observed = observed.lock().unwrap().join("\n");
+                    assert!(!observed.contains("opaque-secret"), "{profile}: {observed}");
+                    assert!(observed.contains("omitted"), "{profile}: {observed}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn subscription_failures_redact_actual_debug_stderr() {
         if std::env::var_os(CHILD_ENV).is_some() {

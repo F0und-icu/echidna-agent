@@ -1036,14 +1036,14 @@ async fn explicit_reasoning_effort_uses_the_same_nested_wire_field_for_all_profi
 }
 
 #[tokio::test]
-async fn codex_summary_events_require_a_valid_summary_index_while_other_profiles_ignore_it() {
+async fn summary_events_require_a_valid_summary_index_for_all_profiles() {
     let body = [
         json!({
             "type": "response.reasoning_summary_text.delta",
             "output_index": 0,
             "item_id": "summary-index-fixture",
             "summary_index": "invalid",
-            "delta": "must stay ignored outside Codex",
+            "delta": "invalid summary index",
         }),
         json!({
             "type": "response.completed",
@@ -1082,24 +1082,14 @@ async fn codex_summary_events_require_a_valid_summary_index_while_other_profiles
             .consume(model_request, ModelStreamCancellation::new())
             .await;
 
-        if profile == "codex" {
-            assert!(matches!(
+        assert!(
+            matches!(
                 result,
                 Err(ModelStreamingError::Provider(ModelProviderError::ProtocolFailure { message }))
                     if message.contains("valid `summary_index`")
-            ));
-        } else {
-            assert_eq!(
-                result,
-                Ok(ModelStreamOutcome::Completed {
-                    events: Vec::new(),
-                    completion: ModelResponseCompletion::new(ProviderResponseId::new(
-                        "summary-index-response"
-                    )),
-                }),
-                "{profile} must retain its ignored-summary behavior"
-            );
-        }
+            ),
+            "{profile}"
+        );
         request.await.unwrap();
         server.await.unwrap();
     }

@@ -3,7 +3,7 @@
 use crate::adapters::responses::presentation::{
     RequestObserver, ResponseNotice, ResponsePresentation, ResponsesObserver,
 };
-use crate::chat_display::{Event, JsonLines, LogWriter, model_log};
+use crate::chat_display::{Event, JsonLines, LogWriter, ModelResponse, model_log};
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -69,7 +69,7 @@ impl RequestOutput {
         }
     }
 
-    fn request(&self, value: &Value) {
+    fn request(&self, value: &Value, omitted: &[&'static str]) {
         if !self.full {
             return;
         }
@@ -78,6 +78,48 @@ impl RequestOutput {
         } else {
             "Full"
         };
+        let mut visible_input = None;
+        if let Some(stream) = &self.stream {
+            let mut input = value["input"].clone();
+            let mut omitted = omitted.to_vec();
+            for item in input.as_array_mut().expect("encoded input is an array") {
+                if let Some(parts) = item.get_mut("content").and_then(Value::as_array_mut) {
+                    for part in parts {
+                        if let Some(part) = part.as_object_mut()
+                            && part.get("type").and_then(Value::as_str) == Some("input_image")
+                            && part.remove("image_url").is_some()
+                        {
+                            part.insert("omitted".to_owned(), json!("image_payload"));
+                            if !omitted.contains(&"image_payload") {
+                                omitted.push("image_payload");
+                            }
+                        }
+                    }
+                }
+            }
+            let _ = stream.send(Event::ModelRequest {
+                role: self.role,
+                request_id: self.request_id,
+                phase: "prepared_for_send",
+                model: value["model"]
+                    .as_str()
+                    .expect("encoded request has a model"),
+                delivery: if value.get("previous_response_id").is_some() {
+                    "incremental"
+                } else {
+                    "full"
+                },
+                content: json!({
+                    "instructions": value["instructions"],
+                    "input": &input,
+                    "text": value.get("text"),
+                    "previous_response_id": value.get("previous_response_id"),
+                }),
+                omitted: &omitted,
+                truncated: false,
+            });
+            visible_input = Some(input);
+        }
         let mut stderr = self.log();
         let _ = writeln!(
             stderr,
@@ -93,7 +135,12 @@ impl RequestOutput {
             ("input", "Input"),
             ("text", "Response format"),
         ] {
-            if let Some(content) = value.get(key) {
+            let content = if key == "input" {
+                visible_input.as_ref().or(value.get(key))
+            } else {
+                value.get(key)
+            };
+            if let Some(content) = content {
                 let _ = writeln!(stderr, "── {label} ──\n{}", ContentView::full(content));
             }
         }
@@ -109,6 +156,19 @@ impl RequestOutput {
     }
 
     pub(crate) fn model_event(&mut self, event: &ModelEvent, reasoning_item_matches_deltas: bool) {
+        let response = match event {
+            ModelEvent::TextDelta { text } => Some(ModelResponse::TextDelta { text }),
+            ModelEvent::ReasoningDelta { text } => Some(ModelResponse::ReasoningDelta { text }),
+            ModelEvent::ReasoningItem { text } => Some(ModelResponse::ReasoningItem {
+                text,
+                matches_deltas: reasoning_item_matches_deltas,
+            }),
+            ModelEvent::ToolCall { call } => Some(ModelResponse::ToolCall { call }),
+            _ => None,
+        };
+        if let Some(response) = response {
+            self.response(response);
+        }
         if self.selection && !self.full {
             return;
         }
@@ -157,6 +217,7 @@ impl RequestOutput {
     }
 
     pub(crate) fn reasoning_summary(&mut self, text: &str, starts_part: bool) {
+        self.response(ModelResponse::ReasoningSummary { text, starts_part });
         if self.selection && !self.full {
             return;
         }
@@ -200,6 +261,14 @@ impl RequestOutput {
 
     fn rejected(&mut self, protocol_error: bool, response: &str) {
         self.rejected = true;
+        self.response(ModelResponse::ResponseError {
+            category: if protocol_error {
+                "protocol_rejected"
+            } else {
+                "provider_rejected"
+            },
+            text: response,
+        });
         self.sample("rejected");
         self.end_reasoning_line();
         self.end_reasoning_summary_line();
@@ -278,6 +347,18 @@ impl RequestOutput {
 
     fn full_debug(&self) -> bool {
         self.full
+    }
+
+    fn response(&self, response: ModelResponse<'_>) {
+        if self.full
+            && let Some(stream) = &self.stream
+        {
+            let _ = stream.send(Event::ModelResponse {
+                role: self.role,
+                request_id: self.request_id,
+                response,
+            });
+        }
     }
 
     fn emit(&self, kind: &str, payload: Value) {
@@ -394,9 +475,10 @@ impl ResponsesObserver for CliModelOutput {
 impl RequestObserver for RequestOutput {
     fn observe(&mut self, event: ResponsePresentation) {
         match event {
-            ResponsePresentation::Request(value) => self.request(&value),
+            ResponsePresentation::Request { value, omitted } => self.request(&value, &omitted),
 
             ResponsePresentation::Status(status) => {
+                self.response(ModelResponse::ResponseStatus { status });
                 if self.full && status >= 400 {
                     self.emit("HTTP error", json!(status));
                 }
@@ -404,12 +486,24 @@ impl RequestObserver for RequestOutput {
 
             ResponsePresentation::ErrorBody(value) => {
                 if self.full {
+                    let text = match &value {
+                        Value::String(text) => text.clone(),
+                        _ => value.to_string(),
+                    };
+                    self.response(ModelResponse::ResponseError {
+                        category: "http_error",
+                        text: &text,
+                    });
                     self.emit("Provider error", value);
                 }
             }
 
             ResponsePresentation::Omitted(reason) => {
                 if self.full {
+                    self.response(ModelResponse::ResponseError {
+                        category: "omitted",
+                        text: reason,
+                    });
                     self.emit("response omitted", json!(reason));
                 }
             }

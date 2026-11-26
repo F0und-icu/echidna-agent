@@ -576,7 +576,7 @@ impl PreparedModelRequest for PreparedResponsesRequest {
                     continuation_requested,
                 ).inspect_err(|error| {
                     if let Some(diagnostics) = &mut diagnostics {
-                        diagnostics.rejected(error, &event.data);
+                        diagnostics.rejected_event(error, &event.data, profile.is_subscription());
                     }
                 })?;
                 let response::DecodedResponsesEvent {
@@ -594,7 +594,9 @@ impl PreparedModelRequest for PreparedResponsesRequest {
                     )?;
                 }
                 for summary in reasoning_summaries {
-                    if let Some(diagnostics) = &mut diagnostics {
+                    if (full_debug || profile == ResponsesWireProfile::CodexSubscription)
+                        && let Some(diagnostics) = &mut diagnostics
+                    {
                         diagnostics.reasoning_summary(&summary.text, summary.starts_part);
                     }
                 }

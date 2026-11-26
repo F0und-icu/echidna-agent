@@ -153,9 +153,7 @@ impl ResponseDecoder {
                     .ok_or_else(|| protocol_error("reasoning text delta event omitted `delta`"))?;
                 Ok(decoded(vec![ModelEvent::ReasoningDelta { text }]))
             }
-            "response.reasoning_summary_text.delta"
-                if self.profile == ResponsesWireProfile::CodexSubscription =>
-            {
+            "response.reasoning_summary_text.delta" => {
                 let output_index = summary_output_index(&event)?;
                 let summary_index = summary_index(&event)?;
                 let item_id = summary_item_id(&event)?;
@@ -170,9 +168,7 @@ impl ResponseDecoder {
                     false,
                 )?))
             }
-            "response.reasoning_summary_text.done"
-                if self.profile == ResponsesWireProfile::CodexSubscription =>
-            {
+            "response.reasoning_summary_text.done" => {
                 let output_index = summary_output_index(&event)?;
                 let summary_index = summary_index(&event)?;
                 let item_id = summary_item_id(&event)?;
@@ -300,8 +296,6 @@ impl ResponseDecoder {
             | "response.function_call_arguments.done"
             | "response.reasoning_summary_part.added"
             | "response.reasoning_summary_part.done"
-            | "response.reasoning_summary_text.delta"
-            | "response.reasoning_summary_text.done"
             | "response.reasoning_text.done" => Ok(decoded(Vec::new())),
             unknown => Err(protocol_error(format!(
                 "unsupported Responses event `{unknown}`"
@@ -314,9 +308,7 @@ impl ResponseDecoder {
         output_index: Option<usize>,
         item: &Value,
     ) -> Result<Vec<ReasoningSummary>, ModelProviderError> {
-        if self.profile != ResponsesWireProfile::CodexSubscription
-            || item.get("type").and_then(Value::as_str) != Some("reasoning")
-        {
+        if item.get("type").and_then(Value::as_str) != Some("reasoning") {
             return Ok(Vec::new());
         }
         let Some(summary) = item.get("summary") else {

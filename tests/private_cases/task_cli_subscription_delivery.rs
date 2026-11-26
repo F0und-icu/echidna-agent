@@ -5,6 +5,7 @@ use std::fs;
 use std::io::Write;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
@@ -12,6 +13,9 @@ use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 
 use crate::adapters::project_event_store::{Project, read_existing_session_events};
+use crate::adapters::responses::presentation::{
+    RequestObserver, ResponseNotice, ResponsePresentation, ResponsesObserver,
+};
 use crate::adapters::responses::{ResponsesHttpAdapter, ResponsesHttpConfig};
 use crate::app::session::SessionProjection;
 use crate::domain::model::{ContentItem, ModelEvent, OpaqueContinuationScope};
@@ -72,6 +76,33 @@ fn chat(root: &std::path::Path, config: &std::path::Path, input: &str, args: &[&
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_selected_sources_and_epochs_bind_real_subscription_opaque_delivery() {
+    struct Observation {
+        value: Value,
+        omitted: Vec<&'static str>,
+    }
+    struct Recorder(Arc<Mutex<Vec<Observation>>>);
+    impl ResponsesObserver for Recorder {
+        fn role(&self) -> &'static str {
+            "primary"
+        }
+        fn begin(
+            &self,
+            _: crate::ports::model::ModelRequestPresentation,
+        ) -> Box<dyn RequestObserver> {
+            Box::new(Recorder(self.0.clone()))
+        }
+        fn notify(&self, _: ResponseNotice) {}
+        fn full_debug(&self) -> bool {
+            true
+        }
+    }
+    impl RequestObserver for Recorder {
+        fn observe(&mut self, event: ResponsePresentation) {
+            if let ResponsePresentation::Request { value, omitted } = event {
+                self.0.lock().unwrap().push(Observation { value, omitted });
+            }
+        }
+    }
     let root = TemporaryDirectory::new("task-cli-subscription-boundaries");
     let init = Command::new(env!("CARGO_BIN_EXE_echidna"))
         .current_dir(root.path())
@@ -196,6 +227,7 @@ async fn cli_selected_sources_and_epochs_bind_real_subscription_opaque_delivery(
     .await;
     let mut mapping = capabilities();
     mapping.context_window = 272_000;
+    let observed = Arc::new(Mutex::new(Vec::new()));
     let provider = ResponsesHttpAdapter::new(
         ResponsesHttpConfig::new(
             url,
@@ -205,7 +237,8 @@ async fn cli_selected_sources_and_epochs_bind_real_subscription_opaque_delivery(
         )
         .with_codex_subscription_profile(),
         Arc::new(FixtureCredential),
-    );
+    )
+    .with_observer(Some(Arc::new(Recorder(observed.clone()))));
     let mut stream = provider
         .stream(ModelRequest::full(first.clone()).with_opaque_continuation_scope(scope_a.clone()))
         .unwrap();
@@ -250,6 +283,22 @@ async fn cli_selected_sources_and_epochs_bind_real_subscription_opaque_delivery(
     }
     assert_eq!(wires.len(), 3);
     assert!(wires[1].to_string().contains("ciphertext-cli-parent"));
+    let observed = observed.lock().unwrap();
+    assert_eq!(observed.len(), 3);
+    assert!(
+        !observed[1]
+            .value
+            .to_string()
+            .contains("ciphertext-cli-parent")
+    );
+    assert!(observed[1].omitted.contains(&"opaque_continuation"));
+    assert!(
+        observed[1].value["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["type"] == "reasoning" && item["omitted"] == "opaque_continuation")
+    );
     assert!(!wires[2].to_string().contains("ciphertext-cli-parent"));
     assert!(!wires[2].to_string().contains("A_ONLY"));
     assert!(wires[2].to_string().contains("B_ONLY_UNRELATED_TASK"));

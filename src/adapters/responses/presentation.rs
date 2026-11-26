@@ -36,7 +36,10 @@ pub(crate) enum ResponseNotice {
 
 #[derive(Debug)]
 pub(crate) enum ResponsePresentation {
-    Request(Value),
+    Request {
+        value: Value,
+        omitted: Vec<&'static str>,
+    },
 
     Status(u16),
 
@@ -87,13 +90,42 @@ impl RequestOutput {
         }
         match serde_json::from_slice::<Value>(request_body) {
             Ok(mut value) => {
-                // Only content consumed by the CLI crosses the Adapter boundary.
-                let fields = ["instructions", "input", "text", "previous_response_id"];
-                value
-                    .as_object_mut()
-                    .expect("encoded request is an object")
-                    .retain(|key, _| fields.contains(&key.as_str()));
-                self.observer.observe(ResponsePresentation::Request(value));
+                let fields = [
+                    "model",
+                    "instructions",
+                    "input",
+                    "text",
+                    "previous_response_id",
+                ];
+                let object = value.as_object_mut().expect("encoded request is an object");
+                let mut omitted = Vec::new();
+                if object.contains_key("tools") {
+                    omitted.push("tool_definitions");
+                }
+                if object
+                    .keys()
+                    .any(|key| key != "tools" && !fields.contains(&key.as_str()))
+                {
+                    omitted.push("other_request_fields");
+                }
+                object.retain(|key, _| fields.contains(&key.as_str()));
+                if let Some(items) = object.get_mut("input").and_then(Value::as_array_mut) {
+                    for item in items {
+                        if let Some(fields) = item.as_object_mut()
+                            && fields.remove("encrypted_content").is_some()
+                        {
+                            fields.insert(
+                                "omitted".to_owned(),
+                                Value::String("opaque_continuation".to_owned()),
+                            );
+                            if !omitted.contains(&"opaque_continuation") {
+                                omitted.push("opaque_continuation");
+                            }
+                        }
+                    }
+                }
+                self.observer
+                    .observe(ResponsePresentation::Request { value, omitted });
             }
             Err(_) => self.response_omitted("request content view unavailable"),
         }
@@ -164,6 +196,57 @@ impl RequestOutput {
             ),
             response: data.to_owned(),
         });
+    }
+
+    pub(super) fn rejected_event(
+        &mut self,
+        error: &ModelProviderError,
+        data: &str,
+        subscription: bool,
+    ) {
+        match sse_error_content(data) {
+            Some(content) => self.rejected(error, &content),
+            None if subscription => self.rejected(
+                error,
+                "[unparseable subscription event omitted; it may contain opaque continuation]",
+            ),
+            None => self.rejected(error, data),
+        }
+    }
+}
+
+fn sse_error_content(data: &str) -> Option<String> {
+    let mut value = serde_json::from_str::<Value>(data).ok()?;
+    if omit_opaque(&mut value) {
+        Some(value.to_string())
+    } else {
+        Some(data.to_owned())
+    }
+}
+
+fn omit_opaque(value: &mut Value) -> bool {
+    match value {
+        Value::Object(fields) => {
+            let mut omitted = fields.remove("encrypted_content").is_some();
+            if omitted {
+                fields.insert(
+                    "encrypted_content".to_owned(),
+                    Value::String("[opaque continuation omitted]".to_owned()),
+                );
+            }
+            for child in fields.values_mut() {
+                omitted |= omit_opaque(child);
+            }
+            omitted
+        }
+        Value::Array(items) => {
+            let mut omitted = false;
+            for item in items {
+                omitted |= omit_opaque(item);
+            }
+            omitted
+        }
+        _ => false,
     }
 }
 
