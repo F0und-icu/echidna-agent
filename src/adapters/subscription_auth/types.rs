@@ -47,6 +47,9 @@ pub(crate) struct CodexSubscriptionAuthStatus {
     pub(crate) verified_identity: bool,
     pub(crate) account_header_ready: bool,
     pub(crate) access_token_expires_at_unix: Option<u64>,
+    pub(crate) email: Option<String>,
+    pub(crate) name: Option<String>,
+    pub(crate) plan: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

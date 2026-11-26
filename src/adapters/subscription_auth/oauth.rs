@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -569,14 +570,21 @@ impl SubscriptionAuthService {
             Some(_) => SubscriptionConnectionState::LoginRequired,
             None => SubscriptionConnectionState::Disconnected,
         };
+        let tokens = connection
+            .as_ref()
+            .and_then(|connection| connection.tokens.as_ref());
+        let claims = tokens
+            .map(|tokens| access_token_claims(&tokens.access_token))
+            .transpose()?;
         Ok(CodexSubscriptionAuthStatus {
             account: self.store.account_label(),
             state,
             verified_identity: connection.is_some(),
             account_header_ready: connection.is_some(),
-            access_token_expires_at_unix: connection
-                .and_then(|connection| connection.tokens)
-                .map(|tokens| tokens.access_token_expires_at_unix),
+            access_token_expires_at_unix: tokens.map(|tokens| tokens.access_token_expires_at_unix),
+            email: claims.as_ref().and_then(|claims| claims.email.clone()),
+            name: claims.as_ref().and_then(|claims| claims.name.clone()),
+            plan: claims.and_then(|claims| claims.plan),
         })
     }
 
@@ -1546,9 +1554,16 @@ fn random_url_safe(bytes: usize) -> Result<String, SubscriptionAuthError> {
     Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value))
 }
 
-fn access_token_expiry(token: &str) -> Result<u64, SubscriptionAuthError> {
+struct AccessTokenClaims {
+    exp: u64,
+    email: Option<String>,
+    name: Option<String>,
+    plan: Option<String>,
+}
+
+fn access_token_claims(token: &str) -> Result<AccessTokenClaims, SubscriptionAuthError> {
     #[derive(Deserialize)]
-    struct AccessTokenClaims {
+    struct Expiry {
         exp: u64,
     }
 
@@ -1572,12 +1587,31 @@ fn access_token_expiry(token: &str) -> Result<u64, SubscriptionAuthError> {
         .decode(payload)
         .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(payload))
         .map_err(|_| SubscriptionAuthError::InvalidResponse)?;
-    let claims: AccessTokenClaims =
+    let expiry: Expiry =
         serde_json::from_slice(&payload).map_err(|_| SubscriptionAuthError::InvalidResponse)?;
-    if claims.exp == 0 {
+    if expiry.exp == 0 {
         return Err(SubscriptionAuthError::InvalidResponse);
     }
-    Ok(claims.exp)
+    // Raw values let unrelated large JSON numbers remain opaque while the
+    // optional display claims are read independently of expiry validation.
+    let display: Option<BTreeMap<String, &serde_json::value::RawValue>> =
+        serde_json::from_slice(&payload).ok();
+    let claim = |namespace: &str, field: &str| {
+        let object = display.as_ref()?.get(namespace)?;
+        let fields: BTreeMap<String, &serde_json::value::RawValue> =
+            serde_json::from_str(object.get()).ok()?;
+        serde_json::from_str(fields.get(field)?.get()).ok()
+    };
+    Ok(AccessTokenClaims {
+        exp: expiry.exp,
+        email: claim("https://api.openai.com/profile", "email"),
+        name: claim("https://api.openai.com/profile", "name"),
+        plan: claim("https://api.openai.com/auth", "chatgpt_plan_type"),
+    })
+}
+
+fn access_token_expiry(token: &str) -> Result<u64, SubscriptionAuthError> {
+    Ok(access_token_claims(token)?.exp)
 }
 
 fn codex_credential(connection: &CodexConnectionRecord) -> CodexSubscriptionCredential {

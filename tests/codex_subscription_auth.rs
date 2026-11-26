@@ -82,7 +82,7 @@ async fn codex_login_uses_fixed_oauth_requests_and_account_bound_model_discovery
             token_stream,
             &json!({
                 "id_token": signed_identity(&server_base, "subject-a", "workspace-a"),
-                "access_token": access_token(now_unix() + 3600),
+                "access_token": display_access_token(now_unix() + 3600, "login@example.test", "Login Name", "plus"),
                 "refresh_token": "synthetic-refresh"
             })
             .to_string(),
@@ -188,6 +188,11 @@ async fn codex_login_uses_fixed_oauth_requests_and_account_bound_model_discovery
     assert_eq!(status["verified_identity"], true);
     assert_eq!(status["account_header_ready"], true);
     assert!(status["access_token_expires_at_unix"].as_u64() > Some(now_unix()));
+    assert_eq!(status["email"], "login@example.test");
+    assert_eq!(status["name"], "Login Name");
+    assert_eq!(status["plan"], "plus");
+    assert!(!status.to_string().contains("synthetic-refresh"));
+    assert!(!status.to_string().contains("signature"));
     assert!(status.get("direct_access_granted").is_none());
     let models = auth.catalog().models().await.unwrap();
     assert_eq!(
@@ -493,11 +498,21 @@ async fn explicit_codex_refresh_rotates_a_future_token_and_returns_sanitized_sta
     let store = canonical_temp_path(directory.path().join("auth-store"));
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
-    let rotated_access = access_token(now_unix() + 3600);
+    let rotated_access = display_access_token(
+        now_unix() + 3600,
+        "refresh@example.test",
+        "Refresh Name",
+        "pro",
+    );
     let server_rotated_access = rotated_access.clone();
     let previous_access = access_token(now_unix() + 600);
     let server_base = base.clone();
     seed_codex_connection(&store, &base, previous_access.clone(), now_unix() + 600);
+    let before =
+        serde_json::to_value(service(&store, &base).codex_status().await.unwrap()).unwrap();
+    assert_eq!(before["email"], Value::Null);
+    assert_eq!(before["name"], Value::Null);
+    assert_eq!(before["plan"], Value::Null);
     let server = thread::spawn(move || {
         let (request, stream) = receive_request(&listener);
         assert_refresh_request(&request);
@@ -529,6 +544,11 @@ async fn explicit_codex_refresh_rotates_a_future_token_and_returns_sanitized_sta
     assert_eq!(status["verified_identity"], true);
     assert_eq!(status["account_header_ready"], true);
     assert!(status["access_token_expires_at_unix"].as_u64() > Some(now_unix()));
+    assert_eq!(status["email"], "refresh@example.test");
+    assert_eq!(status["name"], "Refresh Name");
+    assert_eq!(status["plan"], "pro");
+    assert!(!status.to_string().contains(&rotated_access));
+    assert!(!status.to_string().contains("synthetic-next-refresh"));
     assert!(status.get("access_token").is_none());
     assert!(status.get("refresh_token").is_none());
     server.join().unwrap();
@@ -866,7 +886,12 @@ async fn codex_logout_uses_json_and_clears_local_tokens_when_remote_revoke_fails
     seed_codex_connection(
         &store,
         &base,
-        access_token(now_unix() + 3600),
+        display_access_token(
+            now_unix() + 3600,
+            "logout@example.test",
+            "Logout Name",
+            "plus",
+        ),
         now_unix() + 3600,
     );
     let server = thread::spawn(move || {
@@ -884,16 +909,66 @@ async fn codex_logout_uses_json_and_clears_local_tokens_when_remote_revoke_fails
         respond_with_status(stream, 500, "{}");
     });
 
+    let auth = service(&store, &base);
+    let before = serde_json::to_value(auth.codex_status().await.unwrap()).unwrap();
+    assert_eq!(before["email"], "logout@example.test");
     assert_eq!(
-        serde_json::to_value(service(&store, &base).logout().await.unwrap()).unwrap(),
+        serde_json::to_value(auth.logout().await.unwrap()).unwrap(),
         json!("remote_unconfirmed_cleared")
     );
     server.join().unwrap();
+    let after = serde_json::to_value(auth.codex_status().await.unwrap()).unwrap();
+    assert_eq!(after["state"], "login_required");
+    assert_eq!(after["email"], Value::Null);
+    assert_eq!(after["name"], Value::Null);
+    assert_eq!(after["plan"], Value::Null);
     assert!(
         std::fs::read_to_string(store.join("personal.connection"))
             .unwrap()
             .contains("\"tokens\":null")
     );
+}
+
+#[tokio::test]
+async fn codex_status_keeps_absent_or_nonstring_display_claims_optional() {
+    let directory = TemporaryDirectory::new("codex-display-optional");
+    let store = canonical_temp_path(directory.path().join("auth-store"));
+    let base = "http://127.0.0.1:1";
+    let token = format!(
+        "e30.{}.signature",
+        encode(&json!({
+            "exp": now_unix() + 3600,
+            "https://api.openai.com/profile": {"email": 123, "name": null},
+            "https://api.openai.com/auth": {"chatgpt_plan_type": false}
+        }))
+    );
+    seed_codex_connection(&store, base, token, now_unix() + 3600);
+    let status = serde_json::to_value(service(&store, base).codex_status().await.unwrap()).unwrap();
+    assert_eq!(status["state"], "connected");
+    assert_eq!(status["email"], Value::Null);
+    assert_eq!(status["name"], Value::Null);
+    assert_eq!(status["plan"], Value::Null);
+}
+
+#[tokio::test]
+async fn codex_status_ignores_unrelated_numbers_outside_json_value_range() {
+    let directory = TemporaryDirectory::new("codex-display-unrepresentable");
+    let store = canonical_temp_path(directory.path().join("auth-store"));
+    let base = "http://127.0.0.1:1";
+    let payload = format!(
+        "{{\"exp\":{},\"unrelated\":1e999,\"https://api.openai.com/profile\":{{\"email\":\"valid@example.test\",\"name\":\"Valid Name\",\"unrelated\":1e999}},\"https://api.openai.com/auth\":{{\"chatgpt_plan_type\":\"plus\"}}}}",
+        now_unix() + 3600
+    );
+    let token = format!(
+        "e30.{}.signature",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload)
+    );
+    seed_codex_connection(&store, base, token, now_unix() + 3600);
+    let status = serde_json::to_value(service(&store, base).codex_status().await.unwrap()).unwrap();
+    assert_eq!(status["state"], "connected");
+    assert_eq!(status["email"], "valid@example.test");
+    assert_eq!(status["name"], "Valid Name");
+    assert_eq!(status["plan"], "plus");
 }
 
 #[tokio::test]
@@ -1156,6 +1231,18 @@ fn signed_identity(base: &str, subject: &str, account: &str) -> String {
 
 fn access_token(exp: u64) -> String {
     format!("e30.{}.signature", encode(&json!({"exp": exp})))
+}
+
+fn display_access_token(exp: u64, email: &str, name: &str, plan: &str) -> String {
+    let payload = format!(
+        "{{\"exp\":{exp},\"https://api.openai.com/profile\":{{}},\"https://api.openai.com/profile\":{},\"https://api.openai.com/auth\":{{}},\"https://api.openai.com/auth\":{}}}",
+        json!({"email": email, "name": name}),
+        json!({"chatgpt_plan_type": plan})
+    );
+    format!(
+        "e30.{}.signature",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload)
+    )
 }
 
 fn encode(value: &Value) -> String {
